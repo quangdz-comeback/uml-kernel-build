@@ -12,12 +12,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------------------------
+      # ------------------------------------------------------------
       # Dependencies
-      # --------------------------------------------------------------------
+      # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
           sudo apt update
@@ -35,14 +38,14 @@ jobs:
             wget \
             curl
 
-      # --------------------------------------------------------------------
+      # ------------------------------------------------------------
       # Build libvdeslirp (STATIC)
-      # --------------------------------------------------------------------
+      # ------------------------------------------------------------
       - name: Clone libvdeslirp
         run: |
           git clone https://github.com/virtualsquare/libvdeslirp.git
 
-      - name: Replace CMakeLists.txt (fixed include paths)
+      - name: Replace CMakeLists.txt (FULL FIX: config.h + includes)
         working-directory: libvdeslirp
         run: |
           rm -f CMakeLists.txt
@@ -57,10 +60,19 @@ jobs:
 
           include(GNUInstallDirs)
 
+          # --------------------------------------------------
+          # config.h
+          # --------------------------------------------------
+          configure_file(config.h.in config.h)
+
+          # --------------------------------------------------
+          # Library
+          # --------------------------------------------------
           add_library(vdeslirp STATIC libvdeslirp.c)
 
-          target_include_directories(vdeslirp PUBLIC
-              $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+          target_include_directories(vdeslirp PRIVATE
+              ${CMAKE_CURRENT_SOURCE_DIR}
+              ${CMAKE_CURRENT_BINARY_DIR}
           )
 
           target_link_libraries(vdeslirp PRIVATE
@@ -71,6 +83,9 @@ jobs:
 
           set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME "vdeslirp")
 
+          # --------------------------------------------------
+          # Install
+          # --------------------------------------------------
           install(TARGETS vdeslirp DESTINATION ${CMAKE_INSTALL_LIBDIR})
           install(FILES libvdeslirp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
           EOF
@@ -83,9 +98,9 @@ jobs:
           cmake ..
           make -j$(nproc)
 
-      # --------------------------------------------------------------------
+      # ------------------------------------------------------------
       # Build static SLIRP binary
-      # --------------------------------------------------------------------
+      # ------------------------------------------------------------
       - name: Download slirp.c
         run: |
           wget -O slirp.c \
@@ -96,15 +111,16 @@ jobs:
           gcc -O2 -static -o slirp \
             slirp.c \
             -Ilibvdeslirp \
+            -Ilibvdeslirp/build \
             -I/usr/include/slirp \
             libvdeslirp/build/libvdeslirp.a \
             /usr/lib/x86_64-linux-gnu/libslirp.a \
             -pthread -lm \
             -lglib-2.0 -lpcre
 
-      # --------------------------------------------------------------------
+      # ------------------------------------------------------------
       # Artifact
-      # --------------------------------------------------------------------
+      # ------------------------------------------------------------
       - name: Upload slirp artifact
         uses: actions/upload-artifact@v6.0.0
         with:
