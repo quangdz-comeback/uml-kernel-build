@@ -12,9 +12,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------
+      # Checkout repository
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # Install build dependencies
+      # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
           sudo apt update
@@ -32,14 +38,19 @@ jobs:
             wget \
             curl
 
+      # ------------------------------------------------------------
+      # Clone libvdeslirp
+      # ------------------------------------------------------------
       - name: Clone libvdeslirp
         run: git clone https://github.com/virtualsquare/libvdeslirp.git
 
+      # ------------------------------------------------------------
+      # Replace CMakeLists.txt
+      # ------------------------------------------------------------
       - name: Replace CMakeLists.txt
         working-directory: libvdeslirp
         run: |
-          rm -f CMakeLists.txt
-          cat > CMakeLists.txt <<'EOF'
+cat > CMakeLists.txt <<'EOF'
 cmake_minimum_required(VERSION 3.16)
 
 project(vdeslirp LANGUAGES C)
@@ -72,6 +83,9 @@ install(TARGETS vdeslirp DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES libvdeslirp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 EOF
 
+      # ------------------------------------------------------------
+      # Build libvdeslirp
+      # ------------------------------------------------------------
       - name: Build libvdeslirp
         working-directory: libvdeslirp
         run: |
@@ -80,11 +94,16 @@ EOF
           cmake ..
           make -j$(nproc)
 
+      # ------------------------------------------------------------
+      # Download slirp.c
+      # ------------------------------------------------------------
       - name: Download slirp.c
         run: |
-          wget -O slirp.c \
-            https://gist.githubusercontent.com/quangdz-comeback/9faeedd28ce532a4a575695bd0d1ced9/raw/b1cb707fc0dd1e1b532bcbc6ff27ed153afbcf24/slirp.c
+          wget -O slirp.c https://gist.githubusercontent.com/quangdz-comeback/9faeedd28ce532a4a575695bd0d1ced9/raw/b1cb707fc0dd1e1b532bcbc6ff27ed153afbcf24/slirp.c
 
+      # ------------------------------------------------------------
+      # Build STATIC slirp binary
+      # ------------------------------------------------------------
       - name: Build STATIC slirp binary
         run: |
           gcc -O2 -static -o slirp \
@@ -97,8 +116,12 @@ EOF
             -pthread -lm \
             -lglib-2.0 -lpcre
 
+      # ------------------------------------------------------------
+      # Upload artifact
+      # ------------------------------------------------------------
       - name: Upload slirp artifact
         uses: actions/upload-artifact@v6.0.0
         with:
           name: slirp-static
           path: slirp
+          retention-days: 7
