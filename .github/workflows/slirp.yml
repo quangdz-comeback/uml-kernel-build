@@ -50,38 +50,23 @@ jobs:
       - name: Replace CMakeLists.txt
         working-directory: libvdeslirp
         run: |
-cat > CMakeLists.txt <<'EOF'
-cmake_minimum_required(VERSION 3.16)
+          echo "cmake_minimum_required(VERSION 3.16)" > CMakeLists.txt
+          echo "" >> CMakeLists.txt
+          echo "project(vdeslirp LANGUAGES C)" >> CMakeLists.txt
+          echo "" >> CMakeLists.txt
+          echo "set(CMAKE_C_STANDARD 11)" >> CMakeLists.txt
+          echo "set(CMAKE_C_FLAGS \"-O2 -Wall -Wextra -pedantic\")" >> CMakeLists.txt
+          echo "set(CMAKE_POSITION_INDEPENDENT_CODE ON)" >> CMakeLists.txt
+          echo "" >> CMakeLists.txt
+          echo "include(GNUInstallDirs)" >> CMakeLists.txt
+          echo "configure_file(config.h.in config.h)" >> CMakeLists.txt
+          echo "add_library(vdeslirp STATIC libvdeslirp.c)" >> CMakeLists.txt
+          echo "target_include_directories(vdeslirp PRIVATE \${CMAKE_CURRENT_SOURCE_DIR} \${CMAKE_CURRENT_BINARY_DIR})" >> CMakeLists.txt
+          echo "target_link_libraries(vdeslirp PRIVATE slirp pthread glib-2.0)" >> CMakeLists.txt
+          echo "set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME \"vdeslirp\")" >> CMakeLists.txt
+          echo "install(TARGETS vdeslirp DESTINATION \${CMAKE_INSTALL_LIBDIR})" >> CMakeLists.txt
+          echo "install(FILES libvdeslirp.h DESTINATION \${CMAKE_INSTALL_INCLUDEDIR})" >> CMakeLists.txt
 
-project(vdeslirp LANGUAGES C)
-
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_FLAGS "-O2 -Wall -Wextra -pedantic")
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-include(GNUInstallDirs)
-
-# generate config.h
-configure_file(config.h.in config.h)
-
-add_library(vdeslirp STATIC libvdeslirp.c)
-
-target_include_directories(vdeslirp PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-target_link_libraries(vdeslirp PRIVATE
-    slirp
-    pthread
-    glib-2.0
-)
-
-set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME "vdeslirp")
-
-install(TARGETS vdeslirp DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES libvdeslirp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-EOF
 
       # ------------------------------------------------------------
       # Build libvdeslirp
