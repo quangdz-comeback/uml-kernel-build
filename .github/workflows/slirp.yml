@@ -12,15 +12,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # Dependencies
-      # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
           sudo apt update
@@ -38,59 +32,47 @@ jobs:
             wget \
             curl
 
-      # ------------------------------------------------------------
-      # Build libvdeslirp (STATIC)
-      # ------------------------------------------------------------
       - name: Clone libvdeslirp
-        run: |
-          git clone https://github.com/virtualsquare/libvdeslirp.git
+        run: git clone https://github.com/virtualsquare/libvdeslirp.git
 
-      - name: Replace CMakeLists.txt (FULL FIX: config.h + includes)
+      - name: Replace CMakeLists.txt
         working-directory: libvdeslirp
         run: |
           rm -f CMakeLists.txt
           cat > CMakeLists.txt <<'EOF'
-          cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.16)
 
-          project(vdeslirp LANGUAGES C)
+project(vdeslirp LANGUAGES C)
 
-          set(CMAKE_C_STANDARD 11)
-          set(CMAKE_C_FLAGS "-O2 -Wall -Wextra -pedantic")
-          set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_FLAGS "-O2 -Wall -Wextra -pedantic")
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-          include(GNUInstallDirs)
+include(GNUInstallDirs)
 
-          # --------------------------------------------------
-          # config.h
-          # --------------------------------------------------
-          configure_file(config.h.in config.h)
+# generate config.h
+configure_file(config.h.in config.h)
 
-          # --------------------------------------------------
-          # Library
-          # --------------------------------------------------
-          add_library(vdeslirp STATIC libvdeslirp.c)
+add_library(vdeslirp STATIC libvdeslirp.c)
 
-          target_include_directories(vdeslirp PRIVATE
-              ${CMAKE_CURRENT_SOURCE_DIR}
-              ${CMAKE_CURRENT_BINARY_DIR}
-          )
+target_include_directories(vdeslirp PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
 
-          target_link_libraries(vdeslirp PRIVATE
-              slirp
-              pthread
-              glib-2.0
-          )
+target_link_libraries(vdeslirp PRIVATE
+    slirp
+    pthread
+    glib-2.0
+)
 
-          set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME "vdeslirp")
+set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME "vdeslirp")
 
-          # --------------------------------------------------
-          # Install
-          # --------------------------------------------------
-          install(TARGETS vdeslirp DESTINATION ${CMAKE_INSTALL_LIBDIR})
-          install(FILES libvdeslirp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-          EOF
+install(TARGETS vdeslirp DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES libvdeslirp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+EOF
 
-      - name: Build static libvdeslirp
+      - name: Build libvdeslirp
         working-directory: libvdeslirp
         run: |
           mkdir -p build
@@ -98,9 +80,6 @@ jobs:
           cmake ..
           make -j$(nproc)
 
-      # ------------------------------------------------------------
-      # Build static SLIRP binary
-      # ------------------------------------------------------------
       - name: Download slirp.c
         run: |
           wget -O slirp.c \
@@ -118,9 +97,6 @@ jobs:
             -pthread -lm \
             -lglib-2.0 -lpcre
 
-      # ------------------------------------------------------------
-      # Artifact
-      # ------------------------------------------------------------
       - name: Upload slirp artifact
         uses: actions/upload-artifact@v6.0.0
         with:
