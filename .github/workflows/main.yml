@@ -120,5 +120,5 @@ jobs:
       - name: Upload Kernel artifact
         uses: actions/upload-artifact@v6.0.0
         with:
-          name: kernel-linux-${KVER}
+          name: linux-uml
           path: ./linux
