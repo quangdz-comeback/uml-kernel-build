@@ -34,6 +34,8 @@ jobs:
 
       - name: Build UML kernel
         run: |
+          KVER="6.1.159"
+          cd linux-${KVER}
           echo "[+] Configuring UML kernel..."
           make ARCH=um defconfig
           scripts/config --file .config \
@@ -111,7 +113,7 @@ jobs:
 
       - name: Strip the kernel
         run: |
-          cd ..
+          KVER="6.1.159"
           cp linux-${KVER}/linux ./linux
           strip ./linux
 
