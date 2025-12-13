@@ -1,55 +1,6 @@
-name: Build Static SLIRP
-
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:
-
-jobs:
-  build-slirp:
-    runs-on: ubuntu-latest
-
-    steps:
-      # ------------------------------------------------------------
-      # Checkout repository
-      # ------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ------------------------------------------------------------
-      # Install build dependencies
-      # ------------------------------------------------------------
-      - name: Install build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            build-essential \
-            automake autoconf autotools-dev \
-            cmake \
-            libtool \
-            pkg-config \
-            libslirp-dev \
-            libglib2.0-dev \
-            libpcre3-dev \
-            libvdeplug-dev \
-            git \
-            wget \
-            curl
-
-      # ------------------------------------------------------------
-      # Clone libvdeslirp
-      # ------------------------------------------------------------
-      - name: Clone libvdeslirp
-        run: git clone https://github.com/virtualsquare/libvdeslirp.git
-
-      # ------------------------------------------------------------
-      # Replace CMakeLists.txt
-      # ------------------------------------------------------------
-      - name: Replace CMakeLists.txt
-        working-directory: libvdeslirp
-        run: |
+- name: Replace CMakeLists.txt
+  working-directory: libvdeslirp
+  run: |
 cat > CMakeLists.txt <<'EOF'
 cmake_minimum_required(VERSION 3.16)
 
@@ -82,46 +33,3 @@ set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME "vdeslirp")
 install(TARGETS vdeslirp DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES libvdeslirp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 EOF
-
-      # ------------------------------------------------------------
-      # Build libvdeslirp
-      # ------------------------------------------------------------
-      - name: Build libvdeslirp
-        working-directory: libvdeslirp
-        run: |
-          mkdir -p build
-          cd build
-          cmake ..
-          make -j$(nproc)
-
-      # ------------------------------------------------------------
-      # Download slirp.c
-      # ------------------------------------------------------------
-      - name: Download slirp.c
-        run: |
-          wget -O slirp.c https://gist.githubusercontent.com/quangdz-comeback/9faeedd28ce532a4a575695bd0d1ced9/raw/b1cb707fc0dd1e1b532bcbc6ff27ed153afbcf24/slirp.c
-
-      # ------------------------------------------------------------
-      # Build STATIC slirp binary
-      # ------------------------------------------------------------
-      - name: Build STATIC slirp binary
-        run: |
-          gcc -O2 -static -o slirp \
-            slirp.c \
-            -Ilibvdeslirp \
-            -Ilibvdeslirp/build \
-            -I/usr/include/slirp \
-            libvdeslirp/build/libvdeslirp.a \
-            /usr/lib/x86_64-linux-gnu/libslirp.a \
-            -pthread -lm \
-            -lglib-2.0 -lpcre
-
-      # ------------------------------------------------------------
-      # Upload artifact
-      # ------------------------------------------------------------
-      - name: Upload slirp artifact
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: slirp-static
-          path: slirp
-          retention-days: 7
