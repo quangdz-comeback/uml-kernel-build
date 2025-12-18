@@ -26,10 +26,10 @@ jobs:
       - name: Download Kernel Source
         run: |
           KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="mainline") | .version' | sort -V | tail -n 1)
-          KURL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KVER}.tar.xz"
+          KURL="https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz"
           echo "[+] Downloading kernel ${KVER}"
-          wget -O linux.tar.xz "$KURL"
-          tar -xf linux.tar.xz
+          wget -O linux.tar.gz "$KURL"
+          tar -xf linux.tar.gz
           cd linux-${KVER}
 
       - name: Build UML kernel
