@@ -25,7 +25,7 @@ jobs:
 
       - name: Download Kernel Source
         run: |
-          KVER="6.1.159"
+          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="longterm") | .version' | sort -V | tail -n 1)
           KURL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KVER}.tar.xz"
           echo "[+] Downloading kernel ${KVER}"
           wget -O linux.tar.xz "$KURL"
@@ -34,7 +34,7 @@ jobs:
 
       - name: Build UML kernel
         run: |
-          KVER="6.1.159"
+          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="longterm") | .version' | sort -V | tail -n 1)
           cd linux-${KVER}
           echo "[+] Configuring UML kernel..."
           make ARCH=um defconfig
@@ -113,7 +113,7 @@ jobs:
 
       - name: Strip the kernel
         run: |
-          KVER="6.1.159"
+          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="longterm") | .version' | sort -V | tail -n 1)
           cp linux-${KVER}/linux ./linux
           strip ./linux
 
