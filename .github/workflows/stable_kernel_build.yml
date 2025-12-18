@@ -21,7 +21,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y build-essential libncurses-dev flex bison \
               libssl-dev libelf-dev bc dwarves wget curl tar xz-utils qemu-utils \
-              systemd-container
+              systemd-container libglib2.0-dev libpcre2-dev pkg-config
 
       - name: Download Kernel Source
         run: |
