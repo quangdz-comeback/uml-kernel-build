@@ -1,4 +1,4 @@
-name: Build UML Kernel
+name: Build UML Kernel (LTS kernel)
 
 on:
   push:
