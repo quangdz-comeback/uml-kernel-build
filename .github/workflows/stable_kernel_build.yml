@@ -1,0 +1,124 @@
+name: Build UML Kernel (Newest stable kernel)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up the environment
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential libncurses-dev flex bison \
+              libssl-dev libelf-dev bc dwarves wget curl tar xz-utils qemu-utils \
+              systemd-container
+
+      - name: Download Kernel Source
+        run: |
+          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="stable") | .version' | sort -V | tail -n 1)
+          KURL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KVER}.tar.xz"
+          echo "[+] Downloading kernel ${KVER}"
+          wget -O linux.tar.xz "$KURL"
+          tar -xf linux.tar.xz
+          cd linux-${KVER}
+
+      - name: Build UML kernel
+        run: |
+          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="stable") | .version' | sort -V | tail -n 1)
+          cd linux-${KVER}
+          echo "[+] Configuring UML kernel..."
+          make ARCH=um defconfig
+          scripts/config --file .config \
+              -e CONFIG_BLK_DEV \
+              -e CONFIG_BLK_DEV_LOOP \
+              -e CONFIG_BLK_DEV_UBD \
+              -e CONFIG_EXT4_FS \
+              -e CONFIG_EXT2_FS \
+              -e CONFIG_EXT3_FS \
+              -e CONFIG_FS_MBCACHE \
+              -e CONFIG_NET \
+              -e CONFIG_INET \
+              -e CONFIG_PACKET \
+              -e CONFIG_NETDEVICES \
+              -e CONFIG_NET_CORE \
+              -e CONFIG_TUN \
+              -e CONFIG_SLHC \
+              -e CONFIG_SLIP \
+              -e CONFIG_SLIP_COMPRESSED \
+              -e CONFIG_SLIP_SMART \
+              -e CONFIG_SLIP_MODE_SLIP6 \
+              -e CONFIG_UML_NET \
+              -e CONFIG_UML_NET_SLIRP \
+              -d CONFIG_UML_NET_DAEMON \
+              -e CONFIG_TTY \
+              -e CONFIG_UNIX98_PTYS \
+              -e CONFIG_DEVPTS_MULTIPLE_INSTANCES \
+              -e CONFIG_DEVTMPFS \
+              -e CONFIG_DEVTMPFS_MOUNT \
+              -e CONFIG_TMPFS \
+              -e CONFIG_TMPFS_POSIX_ACL \
+              -e CONFIG_TMPFS_XATTR \
+              -e CONFIG_PROC_FS \
+              -e CONFIG_SYSFS \
+              -e CONFIG_FHANDLE \
+              -e CONFIG_SIGNALFD \
+              -e CONFIG_TIMERFD \
+              -e CONFIG_EPOLL \
+              -e CONFIG_EVENTFD \
+              -e CONFIG_BLK_DEV_INITRD \
+              -e CONFIG_OVERLAY_FS \
+              -e CONFIG_CGROUPS \
+              -e CONFIG_CGROUP_SCHED \
+              -e CONFIG_NAMESPACES \
+              -e CONFIG_UTS_NS \
+              -e CONFIG_IPC_NS \
+              -e CONFIG_PID_NS \
+              -e CONFIG_NET_NS \
+              -e CONFIG_DEVPTS_FS \
+              -e CONFIG_PTY \
+              -d CONFIG_AUDIT \
+              -d CONFIG_AUTOFS_FS \
+              -d CONFIG_AUTOFS4_FS \
+              -e CONFIG_COMPAT \
+              -e CONFIG_NETFILTER \
+              -e CONFIG_NF_CONNTRACK \
+              -e CONFIG_NF_CONNTRACK_IPV4 \
+              -e CONFIG_NF_NAT \
+              -e CONFIG_NF_NAT_IPV4 \
+              -e CONFIG_IP_FORWARD \
+              -e CONFIG_IP_MULTICAST \
+              -e CONFIG_IP_ADVANCED_ROUTER \
+              -e CONFIG_UML_SMP \
+              -e CONFIG_IKCONFIG \
+              -e CONFIG_IKCONFIG_PROC
+          make ARCH=um olddefconfig
+
+          echo "[+] Building UML kernel (this may take ~5–15 min)"
+          make ARCH=um \
+              HOSTCC=gcc \
+              CC=gcc \
+              KCFLAGS="-static  -lglib-2.0 -lpcre -lm -fno-pie" \
+              LDFLAGS="-static -lglib-2.0 -lpcre -lm -Wl,--no-dynamic-linker" \
+              -j"$(nproc)"
+
+      - name: Strip the kernel
+        run: |
+          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="stable") | .version' | sort -V | tail -n 1)
+          cp linux-${KVER}/linux ./linux
+          strip ./linux
+
+      - name: Upload Kernel artifact
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: linux-uml
+          path: ./linux
