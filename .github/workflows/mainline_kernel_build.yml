@@ -1,12 +1,8 @@
 name: Build UML Kernel (Newest mainline kernel, NOT RECOMMENDED FOR PRODUCTION USES)
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+  schedule:
+      - cron: '0 12 * * *'
 
 jobs:
   build:
