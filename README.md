@@ -1,4 +1,4 @@
-# UML Kernel + SLIRP + Ubuntu Cloud Image
+# UML Kernel + SLIRP + Linux cloud images
 
 This guide shows how to boot an **User-Mode Linux (UML)** kernel with a Linux cloudimg using **SLIRP** for network connectivity.
 
