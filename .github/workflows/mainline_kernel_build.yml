@@ -3,6 +3,21 @@ name: Build UML Kernel (Newest mainline kernel, NOT RECOMMENDED FOR PRODUCTION U
 on:
   schedule:
       - cron: '0 12 * * *'
+  workflow_dispatch:
+      inputs:
+          logLevel:
+            description: 'Log level'
+            required: true
+            default: 'warning'
+            type: choice
+            options:
+            - info
+            - warning
+            - debug
+          tags:
+            description: 'Test scenario tags'
+            required: false
+            type: string
 
 jobs:
   build:
