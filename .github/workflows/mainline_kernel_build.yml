@@ -94,9 +94,38 @@ jobs:
               -e CONFIG_IP_FORWARD \
               -e CONFIG_IP_MULTICAST \
               -e CONFIG_IP_ADVANCED_ROUTER \
-              -e CONFIG_UML_SMP \
               -e CONFIG_IKCONFIG \
-              -e CONFIG_IKCONFIG_PROC
+              -e CONFIG_IKCONFIG_PROC \
+              -e CONFIG_SMP \
+              -e CONFIG_UML_SMP \
+              --set-val CONFIG_NR_CPUS 16 \
+              -e CONFIG_SCHED_SMT \
+              -e CONFIG_SCHED_MC \
+              -e CONFIG_SCHED_CORE \
+              -e CONFIG_GENERIC_CLOCKEVENTS \
+              -e CONFIG_GENERIC_CLOCKEVENTS_BROADCAST \
+              -e CONFIG_GENERIC_TIME \
+              -e CONFIG_GENERIC_TIME_VSYSCALL \
+              -e CONFIG_HIGH_RES_TIMERS \
+              -e CONFIG_PREEMPT \
+              -e CONFIG_PREEMPT_COUNT \
+              -e CONFIG_MUTEX_SPIN_ON_OWNER \
+              -e CONFIG_RWSEM_SPIN_ON_OWNER \
+              -e CONFIG_USE_GENERIC_SMP_HELPERS \
+              -e CONFIG_GENERIC_IRQ_SHOW \
+              -e CONFIG_IRQ_DOMAIN \
+              -e CONFIG_SPARSE_IRQ \
+              -e CONFIG_TREE_RCU \
+              -e CONFIG_PREEMPT_RCU \
+              -e CONFIG_RCU_EXPERT \
+              -e CONFIG_FLATMEM \
+              -e CONFIG_FLATMEM_MANUAL \
+              -e CONFIG_HAVE_MEMBLOCK \
+              -e CONFIG_ARCH_KEEP_MEMBLOCK \
+              -e CONFIG_MODE_SKAS \
+              -e CONFIG_UML \
+              -e CONFIG_MODE_TT
+              
           make ARCH=um olddefconfig
 
           echo "[+] Building UML kernel (this may take ~5–15 min)"
