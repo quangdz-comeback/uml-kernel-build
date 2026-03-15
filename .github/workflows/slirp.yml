@@ -1,8 +1,15 @@
 name: Build Static SLIRP
 
 on:
+  push:
+    paths:
+      - 'slirp.c'
+      - 'Makefile'
+      - 'slirp.yaml'
+      - '.github/workflows/slirp.yml'
   schedule:
-      - cron: '0 12 * * *'
+    - cron: '0 12 * * *'
+  workflow_dispatch:
 
 jobs:
   build-slirp:
@@ -23,86 +30,64 @@ jobs:
           sudo apt update
           sudo apt install -y \
             build-essential \
-            automake autoconf autotools-dev \
             cmake \
-            libtool \
             pkg-config \
             libslirp-dev \
             libglib2.0-dev \
             libpcre3-dev \
             libvdeplug-dev \
-            git \
-            wget \
-            curl
+            libyaml-dev \
+            git
 
       # ------------------------------------------------------------
-      # Clone libvdeslirp
+      # Clone and build libvdeslirp (static .a)
       # ------------------------------------------------------------
-      - name: Clone libvdeslirp
-        run: git clone https://github.com/virtualsquare/libvdeslirp.git
-
-      # ------------------------------------------------------------
-      # Replace CMakeLists.txt (indent fix)
-      # ------------------------------------------------------------
-      - name: Replace CMakeLists.txt
-        working-directory: libvdeslirp
+      - name: Build libvdeslirp static
         run: |
-          echo "cmake_minimum_required(VERSION 3.16)" > CMakeLists.txt
-          echo "" >> CMakeLists.txt
-          echo "project(vdeslirp LANGUAGES C)" >> CMakeLists.txt
-          echo "" >> CMakeLists.txt
-          echo "set(CMAKE_C_STANDARD 11)" >> CMakeLists.txt
-          echo "set(CMAKE_C_FLAGS \"-O2 -Wall -Wextra -pedantic\")" >> CMakeLists.txt
-          echo "set(CMAKE_POSITION_INDEPENDENT_CODE ON)" >> CMakeLists.txt
-          echo "" >> CMakeLists.txt
-          echo "include(GNUInstallDirs)" >> CMakeLists.txt
-          echo "configure_file(config.h.in config.h)" >> CMakeLists.txt
-          echo "add_library(vdeslirp STATIC libvdeslirp.c)" >> CMakeLists.txt
-          echo "target_include_directories(vdeslirp PRIVATE \${CMAKE_CURRENT_SOURCE_DIR} \${CMAKE_CURRENT_BINARY_DIR})" >> CMakeLists.txt
-          echo "target_link_libraries(vdeslirp PRIVATE slirp pthread glib-2.0)" >> CMakeLists.txt
-          echo "set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME \"vdeslirp\")" >> CMakeLists.txt
-          echo "install(TARGETS vdeslirp DESTINATION \${CMAKE_INSTALL_LIBDIR})" >> CMakeLists.txt
-          echo "install(FILES libvdeslirp.h DESTINATION \${CMAKE_INSTALL_INCLUDEDIR})" >> CMakeLists.txt
+          git clone --depth 1 https://github.com/virtualsquare/libvdeslirp.git
 
+          cat > libvdeslirp/CMakeLists.txt << 'CMAKEOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(vdeslirp LANGUAGES C)
+          set(CMAKE_C_STANDARD 11)
+          set(CMAKE_C_FLAGS "-O2 -Wall -Wextra -pedantic")
+          set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+          include(GNUInstallDirs)
+          configure_file(config.h.in config.h)
+          add_library(vdeslirp STATIC libvdeslirp.c)
+          target_include_directories(vdeslirp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
+          target_link_libraries(vdeslirp PRIVATE slirp pthread glib-2.0)
+          set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME "vdeslirp")
+          install(TARGETS vdeslirp DESTINATION ${CMAKE_INSTALL_LIBDIR})
+          install(FILES libvdeslirp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+          CMAKEOF
 
-      # ------------------------------------------------------------
-      # Build libvdeslirp
-      # ------------------------------------------------------------
-      - name: Build libvdeslirp
-        working-directory: libvdeslirp
-        run: |
-          mkdir -p build
-          cd build
+          mkdir -p libvdeslirp/build && cd libvdeslirp/build
           cmake ..
           make -j$(nproc)
 
       # ------------------------------------------------------------
-      # Download slirp.c
-      # ------------------------------------------------------------
-      - name: Download slirp.c
-        run: |
-          wget -O slirp.c https://gist.githubusercontent.com/quangdz-comeback/9faeedd28ce532a4a575695bd0d1ced9/raw/b1cb707fc0dd1e1b532bcbc6ff27ed153afbcf24/slirp.c
-
-      # ------------------------------------------------------------
-      # Build STATIC slirp binary
+      # Build STATIC slirp binary (from repo sources)
       # ------------------------------------------------------------
       - name: Build STATIC slirp binary
         run: |
-          gcc -O2 -static -o slirp \
-            slirp.c \
-            -Ilibvdeslirp \
-            -Ilibvdeslirp/build \
-            -I/usr/include/slirp \
-            libvdeslirp/build/libvdeslirp.a \
-            /usr/lib/x86_64-linux-gnu/libslirp.a \
-            -pthread -lm \
-            -lglib-2.0 -lpcre
+          make static \
+            VDESLIRP_SRC=libvdeslirp \
+            VDESLIRP_BUILD=libvdeslirp/build \
+            SYSLIB=/usr/lib/x86_64-linux-gnu
+
+          echo "=== Verify ==="
+          file slirp
+          ldd slirp 2>&1 || true
+          ls -lh slirp
 
       # ------------------------------------------------------------
       # Upload artifact
       # ------------------------------------------------------------
       - name: Upload slirp artifact
-        uses: actions/upload-artifact@v6.0.0
+        uses: actions/upload-artifact@v4
         with:
           name: slirp-static
-          path: slirp
+          path: |
+            slirp
+            slirp.yaml

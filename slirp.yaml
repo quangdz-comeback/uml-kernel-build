@@ -1,0 +1,20 @@
+# slirp.yaml — Network configuration for slirp bridge
+#
+# Protocol toggles:
+#   tcp: true/false   — allow TCP port forwards (default: true)
+#   udp: true/false   — allow UDP port forwards (default: false)
+#
+# Port forwarding:
+#   portfwd: true     — enable port forward rules below
+#   ports:            — list of host_port:guest_port mappings
+#     - 2222:22         (TCP by default)
+#     - udp 5353:53     (explicit UDP)
+#     - tcp 8080:80     (explicit TCP)
+
+tcp: true
+udp: true
+portfwd: true
+ports:
+  - 2222:22
+  - 8080:80
+  - udp 5353:53
