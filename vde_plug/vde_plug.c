@@ -8,8 +8,10 @@
  * then sends/receives Ethernet frames as length-prefixed messages.
  * This binary bridges those frames to libslirp for NAT.
  *
+ * Config: reads config.yaml from same directory as binary for port forwards,
+ * IPv6 settings, etc. VNL params override config file.
+ *
  * Based on vdeplug4 (Renzo Davoli, GPLv2+) and libvdeplug_slirp (LGPLv2.1+).
- * Monolithic integration by slirp-rewrite project.
  */
 
 #define _GNU_SOURCE
@@ -22,9 +24,9 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/uio.h>
 #include <arpa/inet.h>
 #include <getopt.h>
+#include <libgen.h>
 
 #ifdef STATIC_BUILD
 #include <libvdeslirp.h>
@@ -32,152 +34,142 @@
 #include <slirp/libvdeslirp.h>
 #endif
 
-/* ── Constants ── */
-#define VDE_MAXMTU     9216
-#define VDE_ETHBUFSIZE (VDE_MAXMTU + 14 + 4)
-#define MAXPACKET      (VDE_ETHBUFSIZE + 2)
+#define VDE_ETHBUFSIZE (9216 + 14 + 4)
 #define ETH_HDRLEN     14
+#define MAX_LINE       512
+#define MAX_PORTS      64
 
-/* ── Forward declarations ── */
-struct vdeparms { char *tag; char **value; };
-static int vde_parseparms(char *str, struct vdeparms *parms);
-
-/* ── vdestream: length-prefixed framing over a pipe/fd ── */
-typedef struct vdestream {
-	int fdout;
-	void *opaque;
-	ssize_t (*frecv)(void *opaque, void *buf, size_t count);
-	char fragment[MAXPACKET];
-	char *fragp;
-	unsigned int rnx, remaining;
-} VDESTREAM;
-
-static VDESTREAM *vdestream_open(void *opaque, int fdout,
-		ssize_t (*frecv)(void *opaque, void *buf, size_t count))
-{
-	VDESTREAM *vs = calloc(1, sizeof(*vs));
-	if (!vs) return NULL;
-	vs->opaque = opaque;
-	vs->fdout = fdout;
-	vs->frecv = frecv;
-	return vs;
-}
-
-static ssize_t vdestream_send(VDESTREAM *vs, const void *buf, size_t len)
-{
-	if (len > MAXPACKET) return 0;
-	unsigned char hdr[2] = { len >> 8, len & 0xff };
-	struct iovec iov[2] = { {hdr, 2}, {(void*)buf, len} };
-	return writev(vs->fdout, iov, 2);
-}
-
-static void vdestream_recv(VDESTREAM *vs, unsigned char *buf, size_t len)
-{
-	if (len == 0) return;
-	if (vs->rnx > 0) {
-		size_t amt = (vs->remaining < len) ? vs->remaining : len;
-		memcpy(vs->fragp, buf, amt);
-		vs->remaining -= amt;
-		vs->fragp += amt;
-		buf += amt; len -= amt;
-		if (vs->remaining == 0) {
-			vs->frecv(vs->opaque, vs->fragment, vs->rnx);
-			vs->rnx = 0;
-		}
-	}
-	while (len > 1) {
-		vs->rnx = (buf[0] << 8) | buf[1];
-		len -= 2; buf += 2;
-		if (vs->rnx == 0) continue;
-		if (vs->rnx > MAXPACKET) { vs->rnx = 0; return; }
-		if (vs->rnx > len) {
-			vs->fragp = vs->fragment;
-			memcpy(vs->fragp, buf, len);
-			vs->remaining = vs->rnx - len;
-			vs->fragp += len;
-			len = 0;
-		} else {
-			vs->frecv(vs->opaque, buf, vs->rnx);
-			buf += vs->rnx; len -= vs->rnx;
-			vs->rnx = 0;
-		}
-	}
-}
+/* ── Port forward entry ── */
+struct portfwd {
+	int is_udp;
+	struct in_addr host_addr;
+	int host_port;
+	struct in_addr guest_addr;
+	int guest_port;
+};
 
 /* ── Globals ── */
 static struct vdeslirp *slirp;
-static VDESTREAM *stream;
 static volatile sig_atomic_t running = 1;
-
-/* ── Signal handler ── */
 static void sig_handler(int sig) { (void)sig; running = 0; }
 
-/* ── Callback: frame from slirp → send to UML kernel via stream ── */
-static ssize_t stream_to_kernel(void *opaque, void *buf, size_t count)
-{
-	(void)opaque;
-	return vdestream_send(stream, buf, count);
+/* ── Config ── */
+struct config {
+	int ipv6;
+	int portfwd;
+	struct portfwd ports[MAX_PORTS];
+	int nports;
+};
+
+/* Trim leading/trailing whitespace */
+static char *trim(char *s) {
+	while (*s == ' ' || *s == '\t') s++;
+	char *e = s + strlen(s) - 1;
+	while (e > s && (*e == ' ' || *e == '\t' || *e == '\n' || *e == '\r')) *e-- = '\0';
+	return s;
 }
 
-/* ── parseparms (simplified from vdeplug4) ── */
-static int vde_parseparms(char *str, struct vdeparms *parms)
-{
-	if (!str || !*str) return 0;
-	char *saveptr, *token;
-	for (token = strtok_r(str, "/", &saveptr); token;
-			token = strtok_r(NULL, "/", &saveptr)) {
-		char *eq = strchr(token, '=');
+/* Strip quotes */
+static char *unquote(char *s) {
+	size_t len = strlen(s);
+	if (len >= 2 && ((s[0] == '"' && s[len-1] == '"') || (s[0] == '\'' && s[len-1] == '\''))) {
+		s[len-1] = '\0';
+		return s + 1;
+	}
+	return s;
+}
+
+/* Parse config.yaml - lightweight, no libyaml needed */
+static void parse_config(const char *path, struct config *cfg) {
+	memset(cfg, 0, sizeof(*cfg));
+
+	FILE *f = fopen(path, "r");
+	if (!f) return;
+
+	char line[MAX_LINE];
+	int in_ports = 0;
+
+	while (fgets(line, sizeof(line), f)) {
+		/* Check indentation before trimming */
+		int indented = (line[0] == ' ' || line[0] == '\t');
+		char *p = trim(line);
+		if (*p == '#' || *p == '\0') continue;
+
+		/* port list items (indented lines starting with -) */
+		if (in_ports && indented && p[0] == '-') {
+			if (cfg->nports >= MAX_PORTS) continue;
+			p = trim(p + 1);
+			/* strip inline comment first */
+			char *hash = strchr(p, '#');
+			if (hash) *hash = '\0';
+			p = trim(p);
+			p = unquote(p);
+
+			struct portfwd *pf = &cfg->ports[cfg->nports];
+			pf->is_udp = 0;
+			if (strncmp(p, "udp ", 4) == 0) { pf->is_udp = 1; p += 4; }
+			else if (strncmp(p, "tcp ", 4) == 0) { p += 4; }
+
+			char *colon = strchr(p, ':');
+			if (!colon) continue;
+			*colon = '\0';
+			pf->host_port = atoi(trim(p));
+			pf->guest_port = atoi(trim(colon + 1));
+			if (pf->host_port <= 0 || pf->guest_port <= 0) continue;
+			inet_pton(AF_INET, "0.0.0.0", &pf->host_addr);
+			inet_pton(AF_INET, "10.0.2.15", &pf->guest_addr);
+			cfg->nports++;
+			continue;
+		}
+
+		/* End of port list on non-indented line */
+		if (!indented) in_ports = 0;
+
+		char *colon = strchr(p, ':');
+		if (!colon) continue;
+		*colon = '\0';
+		char *key = trim(p);
+		char *val = trim(colon + 1);
+
+		if (strcmp(key, "ipv6") == 0)
+			cfg->ipv6 = (strcmp(val, "true") == 0);
+		else if (strcmp(key, "portfwd") == 0)
+			cfg->portfwd = (strcmp(val, "true") == 0);
+		else if (strcmp(key, "ports") == 0)
+			in_ports = 1;
+	}
+	fclose(f);
+}
+
+/* ── VNL parameter parsing (simple key=val/key=val) ── */
+static void parse_vnl_params(char *params, SlirpConfig *cfg, int *has_v6) {
+	if (!params || !*params) return;
+	char *save, *tok;
+	for (tok = strtok_r(params, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
+		char *eq = strchr(tok, '=');
 		if (!eq) continue;
 		*eq = '\0';
-		char *key = token, *val = eq + 1;
-		for (struct vdeparms *p = parms; p->tag; p++) {
-			if (strcmp(p->tag, key) == 0) {
-				*(p->value) = val;
-				break;
-			}
+		char *k = tok, *v = eq + 1;
+		if (strcmp(k, "v6") == 0 && strcmp(v, "1") == 0) *has_v6 = 1;
+		else if (strcmp(k, "host") == 0 || strcmp(k, "addr") == 0) {
+			char *slash = strchr(v, '/'); int prefix = 24;
+			if (slash) { prefix = atoi(slash+1); *slash = 0; }
+			inet_pton(AF_INET, v, &cfg->vhost);
+			vdeslirp_setvprefix(cfg, prefix);
 		}
-	}
-	return 0;
-}
-
-/* ── Port forwarding helper ── */
-static void do_fwd(struct vdeslirp *s, int is_udp, char *arg)
-{
-	if (!arg) return;
-	char *save, *item;
-	for (item = strtok_r(arg, ",", &save); item;
-			item = strtok_r(NULL, ",", &save)) {
-		char *f, *ha, *hp, *ga, *gp;
-		ha = strtok_r(item, ":", &f);
-		hp = strtok_r(NULL, ":", &f);
-		ga = strtok_r(NULL, ":", &f);
-		gp = strtok_r(NULL, "", &f);
-		if (!gp) { gp = ga; ga = hp; hp = ha; ha = "0.0.0.0"; }
-		if (!ha[0]) ha = "0.0.0.0";
-		struct in_addr host_addr, guest_addr;
-		if (inet_pton(AF_INET, ha, &host_addr) == 1 &&
-				inet_pton(AF_INET, ga, &guest_addr) == 1) {
-			int r = vdeslirp_add_fwd(s, is_udp, host_addr, atoi(hp),
-					guest_addr, atoi(gp));
-			fprintf(stderr, "[vde_plug] %sfwd %s:%s -> %s:%s: %s\n",
-					is_udp ? "udp" : "tcp", ha, hp, ga, gp,
-					r == 0 ? "ok" : strerror(errno));
-		}
+		else if (strcmp(k, "mtu") == 0) cfg->if_mtu = atoi(v);
+		else if (strcmp(k, "mru") == 0) cfg->if_mru = atoi(v);
 	}
 }
 
 /* ── Main ── */
 int main(int argc, char *argv[])
 {
-	/* UML kernel passes: vde_plug --descr UML seqpacket://FD vnl
-	 * We need to parse VNL (e.g. "slirp://") to get slirp options,
-	 * and use the seqpacket FD for Ethernet frame exchange. */
-
 	char *vnl = NULL;
 	char *descr = NULL;
 	int seqpacket_fd = -1;
 
-	/* Parse args the same way UML sends them */
+	/* Parse args (UML passes: vde_plug --descr UML seqpacket://FD vnl) */
 	static struct option long_options[] = {
 		{"descr",  required_argument, 0, 'D'},
 		{"port2",  required_argument, 0, 'P'},
@@ -185,80 +177,79 @@ int main(int argc, char *argv[])
 		{"group2", required_argument, 0, 'G'},
 		{0, 0, 0, 0}
 	};
-
 	int c;
 	while ((c = getopt_long(argc, argv, "D:P:M:G:", long_options, NULL)) != -1) {
-		switch (c) {
-			case 'D': descr = optarg; break;
-			default: break;
-		}
+		if (c == 'D') descr = optarg;
 	}
-
-	/* Remaining args: seqpacket://FD vnl */
 	for (int i = optind; i < argc; i++) {
-		if (strncmp(argv[i], "seqpacket://", 12) == 0) {
+		if (strncmp(argv[i], "seqpacket://", 12) == 0)
 			seqpacket_fd = atoi(argv[i] + 12);
-		} else if (!vnl) {
+		else if (!vnl)
 			vnl = argv[i];
+	}
+
+	/* Find config.yaml next to binary */
+	char config_path[4096];
+	{
+		char self[4096];
+		ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+		if (n > 0) {
+			self[n] = '\0';
+			char *dir = dirname(self);
+			snprintf(config_path, sizeof(config_path), "%s/config.yaml", dir);
+		} else {
+			strcpy(config_path, "config.yaml");
 		}
 	}
 
-	if (seqpacket_fd < 0) {
-		/* Fallback: stream mode on stdin/stdout (for testing) */
-		seqpacket_fd = -1;
-	}
+	/* Parse config file */
+	struct config cfg_file;
+	parse_config(config_path, &cfg_file);
 
-	/* Parse VNL: strip "slirp://" prefix, rest is params */
+	/* Parse VNL: strip "slirp://" prefix */
 	char *params = NULL;
-	if (vnl) {
-		if (strncmp(vnl, "slirp://", 8) == 0)
-			params = vnl + 8;
-		else
-			params = vnl;
+	if (vnl && strncmp(vnl, "slirp://", 8) == 0)
+		params = vnl + 8;
+
+	/* Init slirp config */
+	SlirpConfig scfg;
+	vdeslirp_init(&scfg, VDE_INIT_DEFAULT);
+
+	/* Apply IPv6 from config file */
+	int has_v6 = cfg_file.ipv6;
+
+	/* Apply VNL params (override config) */
+	if (params && *params) {
+		char *pcopy = strdup(params);
+		parse_vnl_params(pcopy, &scfg, &has_v6);
+		free(pcopy);
 	}
 
-	/* Parse slirp parameters from VNL */
-	char *host4 = NULL, *tcpfwd = NULL, *udpfwd = NULL;
-	char *mtu = NULL, *mru = NULL, *dhcp = NULL;
-	char *vnameserver = NULL, *vhostname = NULL;
-	char *verbose = NULL;
-	struct vdeparms vparms[] = {
-		{"host", &host4}, {"addr", &host4},
-		{"dhcp", &dhcp},
-		{"vnameserver", &vnameserver},
-		{"hostname", &vhostname},
-		{"mtu", &mtu}, {"mru", &mru},
-		{"tcpfwd", &tcpfwd}, {"udpfwd", &udpfwd},
-		{"verbose", &verbose},
-		{NULL, NULL}
-	};
-	if (params && *params)
-		vde_parseparms(params, vparms);
-
-	/* Init slirp */
-	SlirpConfig cfg;
-	vdeslirp_init(&cfg, VDE_INIT_DEFAULT);
-	if (host4) {
-		int prefix = 24;
-		char *slash = strchr(host4, '/');
-		if (slash) { prefix = atoi(slash+1); *slash = 0; }
-		inet_pton(AF_INET, host4, &cfg.vhost);
-		vdeslirp_setvprefix(&cfg, prefix);
+	if (has_v6) {
+		scfg.in6_enabled = 1;
+	} else {
+		scfg.in6_enabled = 0;
 	}
-	if (dhcp) inet_pton(AF_INET, dhcp, &cfg.vdhcp_start);
-	if (vnameserver) inet_pton(AF_INET, vnameserver, &cfg.vnameserver);
-	if (vhostname) cfg.vhostname = vhostname;
-	if (mtu) cfg.if_mtu = atoi(mtu);
-	if (mru) cfg.if_mru = atoi(mru);
 
-	slirp = vdeslirp_open(&cfg);
+	slirp = vdeslirp_open(&scfg);
 	if (!slirp) {
-		fprintf(stderr, "[vde_plug] vdeslirp_open failed: %s\n", strerror(errno));
+		fprintf(stderr, "[vde_plug] vdeslirp_open: %s\n", strerror(errno));
 		return 1;
 	}
 
-	do_fwd(slirp, 0, tcpfwd);
-	do_fwd(slirp, 1, udpfwd);
+	/* Apply port forwards from config */
+	if (cfg_file.portfwd) {
+		for (int i = 0; i < cfg_file.nports; i++) {
+			struct portfwd *pf = &cfg_file.ports[i];
+			int r = vdeslirp_add_fwd(slirp, pf->is_udp,
+					pf->host_addr, pf->host_port,
+					pf->guest_addr, pf->guest_port);
+			fprintf(stderr, "[vde_plug] %sfwd :%d -> 10.0.2.15:%d %s\n",
+					pf->is_udp ? "udp" : "tcp",
+					pf->host_port, pf->guest_port,
+					r == 0 ? "ok" : strerror(errno));
+		}
+	}
 
 	int slirp_fd = vdeslirp_fd(slirp);
 
@@ -266,34 +257,27 @@ int main(int argc, char *argv[])
 	signal(SIGTERM, sig_handler);
 	signal(SIGINT, sig_handler);
 
-	fprintf(stderr, "[vde_plug] started (descr=%s, vnl=%s, fd=%d, slirp_fd=%d)\n",
-			descr ? descr : "none", vnl ? vnl : "none",
-			seqpacket_fd, slirp_fd);
+	fprintf(stderr, "[vde_plug] started (descr=%s vnl=%s fd=%d slirp_fd=%d ipv6=%d ports=%d)\n",
+			descr ? descr : "-", vnl ? vnl : "-",
+			seqpacket_fd, slirp_fd, has_v6, cfg_file.nports);
 
+	/* === SEQPACKET MODE (normal UML operation) === */
 	if (seqpacket_fd >= 0) {
-		/* === SEQPACKET MODE (normal UML operation) === */
-		/* Each recv/send on the seqpacket socket is one Ethernet frame */
 		unsigned char buf[VDE_ETHBUFSIZE];
 		struct pollfd pfd[2] = {
 			{ .fd = seqpacket_fd, .events = POLLIN },
 			{ .fd = slirp_fd,     .events = POLLIN },
 		};
-
 		while (running) {
 			int n = poll(pfd, 2, 1000);
 			if (n < 0) { if (errno == EINTR) continue; break; }
-
 			if (pfd[0].revents & (POLLHUP | POLLERR)) break;
 			if (pfd[1].revents & (POLLHUP | POLLERR)) break;
-
-			/* Frames from UML kernel → slirp */
 			if (pfd[0].revents & POLLIN) {
 				ssize_t rx = recv(seqpacket_fd, buf, sizeof(buf), 0);
 				if (rx <= 0) break;
 				vdeslirp_send(slirp, buf, rx);
 			}
-
-			/* Frames from slirp → UML kernel */
 			if (pfd[1].revents & POLLIN) {
 				ssize_t rx = vdeslirp_recv(slirp, buf, sizeof(buf));
 				if (rx > 0)
@@ -301,35 +285,9 @@ int main(int argc, char *argv[])
 			}
 		}
 	} else {
-		/* === STREAM MODE (stdin/stdout, for testing or pipe) === */
-		stream = vdestream_open(NULL, STDOUT_FILENO, stream_to_kernel);
-		if (!stream) { fprintf(stderr, "[vde_plug] vdestream_open failed\n"); return 1; }
-
-		unsigned char buf[VDE_ETHBUFSIZE];
-		struct pollfd pfd[2] = {
-			{ .fd = STDIN_FILENO, .events = POLLIN },
-			{ .fd = slirp_fd,     .events = POLLIN },
-		};
-
-		while (running) {
-			int n = poll(pfd, 2, 1000);
-			if (n < 0) { if (errno == EINTR) continue; break; }
-
-			if (pfd[0].revents & POLLHUP) break;
-
-			if (pfd[0].revents & POLLIN) {
-				ssize_t rx = read(STDIN_FILENO, buf, sizeof(buf));
-				if (rx <= 0) break;
-				vdestream_recv(stream, buf, rx);
-			}
-
-			if (pfd[1].revents & POLLIN) {
-				ssize_t rx = vdeslirp_recv(slirp, buf, sizeof(buf));
-				if (rx >= ETH_HDRLEN)
-					vdestream_send(stream, buf, rx);
-			}
-		}
-		free(stream);
+		fprintf(stderr, "[vde_plug] no seqpacket fd, nothing to do\n");
+		vdeslirp_close(slirp);
+		return 1;
 	}
 
 	vdeslirp_close(slirp);
