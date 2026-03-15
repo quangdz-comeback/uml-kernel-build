@@ -1,48 +1,32 @@
-name: Build Static SLIRP
+name: Build Static Binaries (slirp + vde_plug)
 
 on:
   push:
     paths:
       - 'slirp.c'
+      - 'vde_plug/**'
       - 'Makefile'
       - 'slirp.yaml'
       - '.github/workflows/slirp.yml'
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '0 12 * * 1'
   workflow_dispatch:
 
 jobs:
-  build-slirp:
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      # ------------------------------------------------------------
-      # Checkout repository
-      # ------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # Install build dependencies
-      # ------------------------------------------------------------
-      - name: Install build dependencies
+      - name: Install build deps
         run: |
-          sudo apt update
-          sudo apt install -y \
-            build-essential \
-            cmake \
-            pkg-config \
-            libslirp-dev \
-            libglib2.0-dev \
-            libpcre3-dev \
-            libvdeplug-dev \
-            libyaml-dev \
-            git
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config git \
+            libslirp-dev libglib2.0-dev libpcre3-dev \
+            libvdeplug-dev libyaml-dev
 
-      # ------------------------------------------------------------
-      # Clone and build libvdeslirp (static .a)
-      # ------------------------------------------------------------
-      - name: Build libvdeslirp static
+      - name: Build libvdeslirp (static .a)
         run: |
           git clone --depth 1 https://github.com/virtualsquare/libvdeslirp.git
 
@@ -66,24 +50,26 @@ jobs:
           cmake ..
           make -j$(nproc)
 
-      # ------------------------------------------------------------
-      # Build STATIC slirp binary (from repo sources)
-      # ------------------------------------------------------------
-      - name: Build STATIC slirp binary
+      - name: Build static slirp (legacy SLIP transport)
         run: |
           make static \
             VDESLIRP_SRC=libvdeslirp \
             VDESLIRP_BUILD=libvdeslirp/build \
             SYSLIB=/usr/lib/x86_64-linux-gnu
+          strip slirp
+          echo "=== slirp ==="
+          file slirp && ls -lh slirp
 
-          echo "=== Verify ==="
-          file slirp
-          ldd slirp 2>&1 || true
-          ls -lh slirp
+      - name: Build static vde_plug (VECTOR transport)
+        run: |
+          cd vde_plug
+          make static \
+            VDESLIRP_SRC=../libvdeslirp \
+            VDESLIRP_BUILD=../libvdeslirp/build
+          strip vde_plug
+          echo "=== vde_plug ==="
+          file vde_plug && ls -lh vde_plug
 
-      # ------------------------------------------------------------
-      # Upload artifact
-      # ------------------------------------------------------------
       - name: Upload slirp artifact
         uses: actions/upload-artifact@v4
         with:
@@ -91,3 +77,9 @@ jobs:
           path: |
             slirp
             slirp.yaml
+
+      - name: Upload vde_plug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vde_plug-static
+          path: vde_plug/vde_plug
