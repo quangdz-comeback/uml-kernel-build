@@ -1,0 +1,84 @@
+name: "UML Kernel — LTS 6.12 (SLIRP)"
+
+# Builds the 6.12.x LTS kernel — last branch with UML_NET_SLIRP.
+# Use with: eth0=slirp,,./slirp
+
+on:
+  schedule:
+    - cron: '0 12 * * 1'          # every Monday
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential libncurses-dev flex bison \
+            libssl-dev libelf-dev bc dwarves wget curl jq tar xz-utils \
+            libglib2.0-dev libpcre3-dev pkg-config
+
+      - name: Pick latest 6.12.x LTS
+        run: |
+          KVER=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
+            grep '^6\.12\.' | sort -V | tail -1)
+          [ -z "$KVER" ] && { echo "::error::No 6.12 LTS found"; exit 1; }
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          echo "[+] Selected $KVER"
+
+      - name: Download & extract
+        run: |
+          wget -q -O linux.tar.xz \
+            "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${{ env.KVER }}.tar.xz"
+          tar xf linux.tar.xz
+
+      - name: Patch UML (unwind_user.h)
+        run: |
+          cd linux-${{ env.KVER }}
+          if [ -f arch/x86/include/asm/unwind_user.h ] && \
+             ! grep -q unwind_user arch/um/include/asm/Kbuild 2>/dev/null; then
+            echo 'generic-y += unwind_user.h' >> arch/um/include/asm/Kbuild
+            echo "[+] Patched unwind_user.h"
+          fi
+
+      - name: Configure & build
+        run: |
+          cd linux-${{ env.KVER }}
+          make ARCH=um defconfig
+          scripts/config --file .config \
+            -e BLK_DEV -e BLK_DEV_LOOP -e BLK_DEV_UBD \
+            -e EXT4_FS -e EXT2_FS -e EXT3_FS -e FS_MBCACHE \
+            -e NET -e INET -e PACKET -e NETDEVICES -e NET_CORE -e TUN \
+            -e SLHC -e SLIP -e SLIP_COMPRESSED -e SLIP_SMART -e SLIP_MODE_SLIP6 \
+            -e UML_NET -e UML_NET_SLIRP -d UML_NET_DAEMON \
+            -e TTY -e UNIX98_PTYS -e DEVTMPFS -e DEVTMPFS_MOUNT \
+            -e TMPFS -e TMPFS_POSIX_ACL -e TMPFS_XATTR \
+            -e PROC_FS -e SYSFS -e FHANDLE \
+            -e SIGNALFD -e TIMERFD -e EPOLL -e EVENTFD \
+            -e BLK_DEV_INITRD -e OVERLAY_FS \
+            -e CGROUPS -e CGROUP_SCHED \
+            -e NAMESPACES -e UTS_NS -e IPC_NS -e PID_NS -e NET_NS \
+            -e DEVPTS_FS -e PTY \
+            -d AUDIT -d AUTOFS_FS -d AUTOFS4_FS \
+            -e NETFILTER -e NF_CONNTRACK -e NF_NAT \
+            -e IP_FORWARD -e IP_MULTICAST -e IP_ADVANCED_ROUTER \
+            -e UML_SMP -e IKCONFIG -e IKCONFIG_PROC
+          make ARCH=um olddefconfig
+          make ARCH=um -j"$(nproc)"
+
+      - name: Strip & upload
+        run: |
+          cp linux-${{ env.KVER }}/linux ./linux-uml
+          strip ./linux-uml
+          echo "${{ env.KVER }} (SLIRP)" > VERSION
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-uml-6.12-slirp
+          path: |
+            linux-uml
+            VERSION

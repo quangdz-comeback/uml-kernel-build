@@ -1,11 +1,12 @@
-name: "UML Kernel — Mainline (RC, not for production)"
+name: "UML Kernel — LTS latest (VECTOR/VDE)"
 
-# Builds the latest mainline/RC kernel. May break at any time.
-# Useful for testing upcoming kernel features.
+# Builds the newest LTS kernel (currently 6.18.x) with UML_NET_VECTOR.
+# Use with: vec0:transport=vde,vnl=slirp://
+# Requires vde2 + libvdeplug-slirp on the host.
 
 on:
   schedule:
-    - cron: '0 12 * * 3'          # every Wednesday
+    - cron: '0 12 * * 1'          # every Monday
   workflow_dispatch:
 
 jobs:
@@ -21,29 +22,23 @@ jobs:
             libssl-dev libelf-dev bc dwarves wget curl jq tar xz-utils \
             libglib2.0-dev libpcre3-dev pkg-config
 
-      - name: Pick mainline version
+      - name: Pick newest LTS (excluding 6.12 — that’s the oldstable workflow)
         run: |
           KVER=$(curl -s https://www.kernel.org/releases.json | \
-            jq -r '.releases[] | select(.moniker=="mainline") | .version' | \
+            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
             sort -V | tail -1)
-          [ -z "$KVER" ] && { echo "::error::No mainline kernel found"; exit 1; }
-          # Parse major.minor from e.g. "7.0-rc3" or "7.1"
           MAJOR=$(echo "$KVER" | cut -d. -f1)
-          MINOR=$(echo "$KVER" | cut -d. -f2 | cut -d- -f1)
+          MINOR=$(echo "$KVER" | cut -d. -f2)
           echo "KVER=$KVER" >> "$GITHUB_ENV"
           echo "KMAJOR=$MAJOR" >> "$GITHUB_ENV"
           echo "KMINOR=$MINOR" >> "$GITHUB_ENV"
-          echo "[+] Selected mainline $KVER"
+          echo "[+] Selected $KVER"
 
       - name: Download & extract
         run: |
-          # mainline RCs use .tar.gz from torvalds/t
-          KVER="${{ env.KVER }}"
-          wget -q -O linux.tar.gz \
-            "https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz" || \
-          wget -q -O linux.tar.gz \
-            "https://cdn.kernel.org/pub/linux/kernel/v${{ env.KMAJOR }}.x/linux-${KVER}.tar.xz"
-          tar xf linux.tar.gz 2>/dev/null || tar xf linux.tar.xz 2>/dev/null
+          wget -q -O linux.tar.xz \
+            "https://cdn.kernel.org/pub/linux/kernel/v${{ env.KMAJOR }}.x/linux-${{ env.KVER }}.tar.xz"
+          tar xf linux.tar.xz
 
       - name: Patch UML (unwind_user.h)
         run: |
@@ -75,11 +70,7 @@ jobs:
             -d AUDIT -d AUTOFS_FS -d AUTOFS4_FS \
             -e NETFILTER -e NF_CONNTRACK -e NF_NAT \
             -e IP_FORWARD -e IP_MULTICAST -e IP_ADVANCED_ROUTER \
-            -e UML_SMP -e IKCONFIG -e IKCONFIG_PROC \
-            -e SMP --set-val NR_CPUS 16 \
-            -e SCHED_SMT -e SCHED_MC \
-            -e HIGH_RES_TIMERS -e PREEMPT \
-            -e SPARSE_IRQ -e TREE_RCU -e PREEMPT_RCU
+            -e UML_SMP -e IKCONFIG -e IKCONFIG_PROC
 
           # --- network transport ---
           MAJOR=${{ env.KMAJOR }}; MINOR=${{ env.KMINOR }}
@@ -109,7 +100,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-uml-mainline
+          name: linux-uml-lts-latest
           path: |
             linux-uml
             VERSION
