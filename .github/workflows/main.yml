@@ -43,6 +43,25 @@ jobs:
           tar -xf linux.tar.xz
           cd linux-${KVER}
 
+      - name: Patch UML for unwind_user.h (6.18.17+ fix)
+        run: |
+          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="longterm") | .version' | sort -V | tail -n 1)
+          cd linux-${KVER}
+
+          # Kernel 6.18.17+ added arch/x86/include/asm/unwind_user.h which
+          # references x86-native pt_regs members (flags, X86_VM_MASK, user_64bit_mode)
+          # that don't exist in UML's pt_regs. UML's Kbuild is missing the
+          # generic-y fallback, so it picks up the x86 version and fails to compile.
+          # Fix: add unwind_user.h to UML's generic header list so it uses the
+          # empty asm-generic stub instead.
+          if [ -f arch/x86/include/asm/unwind_user.h ] && \
+             ! grep -q 'unwind_user' arch/um/include/asm/Kbuild 2>/dev/null; then
+            echo 'generic-y += unwind_user.h' >> arch/um/include/asm/Kbuild
+            echo "[+] Patched: added unwind_user.h to UML generic-y"
+          else
+            echo "[+] No patch needed (header missing or already patched)"
+          fi
+
       - name: Build UML kernel
         run: |
           KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="longterm") | .version' | sort -V | tail -n 1)
