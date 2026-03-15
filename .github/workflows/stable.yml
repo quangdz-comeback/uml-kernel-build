@@ -1,0 +1,111 @@
+name: "UML Kernel — Stable (latest non-LTS release)"
+
+# Builds the newest stable release (currently 6.19.x).
+# Good for testing new features before they land in LTS.
+# Uses VECTOR transport (>= 6.16) or SLIRP (< 6.16) automatically.
+
+on:
+  schedule:
+    - cron: '0 12 * * 5'          # every Friday
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential libncurses-dev flex bison \
+            libssl-dev libelf-dev bc dwarves wget curl jq tar xz-utils \
+            libglib2.0-dev libpcre3-dev pkg-config
+
+      - name: Pick latest stable version
+        run: |
+          KVER=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.moniker=="stable") | .version' | \
+            sort -V | tail -1)
+          [ -z "$KVER" ] && { echo "::error::No stable kernel found"; exit 1; }
+          MAJOR=$(echo "$KVER" | cut -d. -f1)
+          MINOR=$(echo "$KVER" | cut -d. -f2)
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          echo "KMAJOR=$MAJOR" >> "$GITHUB_ENV"
+          echo "KMINOR=$MINOR" >> "$GITHUB_ENV"
+          echo "[+] Selected stable $KVER"
+
+      - name: Download & extract
+        run: |
+          wget -q -O linux.tar.xz \
+            "https://cdn.kernel.org/pub/linux/kernel/v${{ env.KMAJOR }}.x/linux-${{ env.KVER }}.tar.xz"
+          tar xf linux.tar.xz
+
+      - name: Patch UML (unwind_user.h)
+        run: |
+          cd linux-${{ env.KVER }}
+          if [ -f arch/x86/include/asm/unwind_user.h ] && \
+             ! grep -q unwind_user arch/um/include/asm/Kbuild 2>/dev/null; then
+            echo 'generic-y += unwind_user.h' >> arch/um/include/asm/Kbuild
+            echo "[+] Patched unwind_user.h"
+          fi
+
+      - name: Configure & build
+        run: |
+          cd linux-${{ env.KVER }}
+          make ARCH=um defconfig
+
+          # --- common options ---
+          scripts/config --file .config \
+            -e BLK_DEV -e BLK_DEV_LOOP -e BLK_DEV_UBD \
+            -e EXT4_FS -e EXT2_FS -e EXT3_FS -e FS_MBCACHE \
+            -e NET -e INET -e PACKET -e NETDEVICES -e NET_CORE -e TUN \
+            -e TTY -e UNIX98_PTYS -e DEVTMPFS -e DEVTMPFS_MOUNT \
+            -e TMPFS -e TMPFS_POSIX_ACL -e TMPFS_XATTR \
+            -e PROC_FS -e SYSFS -e FHANDLE \
+            -e SIGNALFD -e TIMERFD -e EPOLL -e EVENTFD \
+            -e BLK_DEV_INITRD -e OVERLAY_FS \
+            -e CGROUPS -e CGROUP_SCHED \
+            -e NAMESPACES -e UTS_NS -e IPC_NS -e PID_NS -e NET_NS \
+            -e DEVPTS_FS -e PTY \
+            -d AUDIT -d AUTOFS_FS -d AUTOFS4_FS \
+            -e NETFILTER -e NF_CONNTRACK -e NF_NAT \
+            -e IP_FORWARD -e IP_MULTICAST -e IP_ADVANCED_ROUTER \
+            -e UML_SMP -e IKCONFIG -e IKCONFIG_PROC \
+            -e SMP --set-val NR_CPUS 16 \
+            -e SCHED_SMT -e SCHED_MC \
+            -e HIGH_RES_TIMERS -e PREEMPT \
+            -e SPARSE_IRQ
+
+          # --- network transport ---
+          MAJOR=${{ env.KMAJOR }}; MINOR=${{ env.KMINOR }}
+          if [ "$MAJOR" -gt 6 ] || { [ "$MAJOR" -eq 6 ] && [ "$MINOR" -ge 16 ]; }; then
+            echo "[+] >= 6.16 → VECTOR transport"
+            scripts/config --file .config -e UML_NET_VECTOR
+          else
+            echo "[+] < 6.16 → SLIRP transport (fallback)"
+            scripts/config --file .config \
+              -e SLHC -e SLIP -e SLIP_COMPRESSED -e SLIP_SMART -e SLIP_MODE_SLIP6 \
+              -e UML_NET -e UML_NET_SLIRP -d UML_NET_DAEMON
+          fi
+
+          make ARCH=um olddefconfig
+          make ARCH=um -j"$(nproc)"
+
+      - name: Strip & upload
+        run: |
+          cp linux-${{ env.KVER }}/linux ./linux-uml
+          strip ./linux-uml
+          TRANSPORT="VECTOR"
+          MAJOR=${{ env.KMAJOR }}; MINOR=${{ env.KMINOR }}
+          if [ "$MAJOR" -lt 6 ] || { [ "$MAJOR" -eq 6 ] && [ "$MINOR" -lt 16 ]; }; then
+            TRANSPORT="SLIRP"
+          fi
+          echo "${{ env.KVER }} ($TRANSPORT)" > VERSION
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-uml-stable
+          path: |
+            linux-uml
+            VERSION
