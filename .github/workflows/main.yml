@@ -36,35 +36,47 @@ jobs:
 
       - name: Download Kernel Source
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="longterm") | .version' | sort -V | tail -n 1)
-          KURL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KVER}.tar.xz"
-          echo "[+] Downloading kernel ${KVER}"
+          # UML_NET_SLIRP (eth0=slirp transport) was removed in kernel 6.16.
+          # We must stay on the 6.12.x LTS branch (or earlier) for SLIRP support.
+          # Filter: pick the highest LTS version below 6.16.
+          KVER=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
+            awk -F. '($1 < 6) || ($1 == 6 && $2 < 16)' | \
+            sort -V | tail -n 1)
+
+          if [ -z "$KVER" ]; then
+            echo "[ERROR] No suitable LTS kernel found (need < 6.16 for SLIRP support)"
+            exit 1
+          fi
+
+          KURL="https://cdn.kernel.org/pub/linux/kernel/v${KVER%%.*}.x/linux-${KVER}.tar.xz"
+          echo "[+] Downloading kernel ${KVER} (last LTS with UML_NET_SLIRP)"
           wget -O linux.tar.xz "$KURL"
           tar -xf linux.tar.xz
-          cd linux-${KVER}
 
-      - name: Patch UML for unwind_user.h (6.18.17+ fix)
+      - name: Patch UML source (if needed)
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="longterm") | .version' | sort -V | tail -n 1)
+          KVER=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
+            awk -F. '($1 < 6) || ($1 == 6 && $2 < 16)' | \
+            sort -V | tail -n 1)
           cd linux-${KVER}
 
-          # Kernel 6.18.17+ added arch/x86/include/asm/unwind_user.h which
-          # references x86-native pt_regs members (flags, X86_VM_MASK, user_64bit_mode)
-          # that don't exist in UML's pt_regs. UML's Kbuild is missing the
-          # generic-y fallback, so it picks up the x86 version and fails to compile.
-          # Fix: add unwind_user.h to UML's generic header list so it uses the
-          # empty asm-generic stub instead.
+          # Fix unwind_user.h for UML if needed (backported in some stable releases)
           if [ -f arch/x86/include/asm/unwind_user.h ] && \
              ! grep -q 'unwind_user' arch/um/include/asm/Kbuild 2>/dev/null; then
             echo 'generic-y += unwind_user.h' >> arch/um/include/asm/Kbuild
             echo "[+] Patched: added unwind_user.h to UML generic-y"
           else
-            echo "[+] No patch needed (header missing or already patched)"
+            echo "[+] No unwind_user.h patch needed"
           fi
 
       - name: Build UML kernel
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="longterm") | .version' | sort -V | tail -n 1)
+          KVER=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
+            awk -F. '($1 < 6) || ($1 == 6 && $2 < 16)' | \
+            sort -V | tail -n 1)
           cd linux-${KVER}
           echo "[+] Configuring UML kernel..."
           make ARCH=um defconfig
@@ -143,7 +155,10 @@ jobs:
 
       - name: Strip the kernel
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="longterm") | .version' | sort -V | tail -n 1)
+          KVER=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
+            awk -F. '($1 < 6) || ($1 == 6 && $2 < 16)' | \
+            sort -V | tail -n 1)
           cp linux-${KVER}/linux ./linux
           strip ./linux
 
