@@ -32,13 +32,12 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y build-essential libncurses-dev flex bison \
               libssl-dev libelf-dev bc dwarves wget curl tar xz-utils qemu-utils \
-              systemd-container libglib2.0-dev libpcre2-dev pkg-config libpcre3-dev
+              systemd-container libglib2.0-dev libpcre2-dev pkg-config libpcre3-dev jq
 
       - name: Download Kernel Source
         run: |
           # UML_NET_SLIRP (eth0=slirp transport) was removed in kernel 6.16.
           # We must stay on the 6.12.x LTS branch (or earlier) for SLIRP support.
-          # Filter: pick the highest LTS version below 6.16.
           KVER=$(curl -s https://www.kernel.org/releases.json | \
             jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
             awk -F. '($1 < 6) || ($1 == 6 && $2 < 16)' | \
@@ -49,6 +48,7 @@ jobs:
             exit 1
           fi
 
+          echo "KVER=${KVER}" >> $GITHUB_ENV
           KURL="https://cdn.kernel.org/pub/linux/kernel/v${KVER%%.*}.x/linux-${KVER}.tar.xz"
           echo "[+] Downloading kernel ${KVER} (last LTS with UML_NET_SLIRP)"
           wget -O linux.tar.xz "$KURL"
@@ -56,12 +56,7 @@ jobs:
 
       - name: Patch UML source (if needed)
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | \
-            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
-            awk -F. '($1 < 6) || ($1 == 6 && $2 < 16)' | \
-            sort -V | tail -n 1)
-          cd linux-${KVER}
-
+          cd linux-${{ env.KVER }}
           # Fix unwind_user.h for UML if needed (backported in some stable releases)
           if [ -f arch/x86/include/asm/unwind_user.h ] && \
              ! grep -q 'unwind_user' arch/um/include/asm/Kbuild 2>/dev/null; then
@@ -73,11 +68,7 @@ jobs:
 
       - name: Build UML kernel
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | \
-            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
-            awk -F. '($1 < 6) || ($1 == 6 && $2 < 16)' | \
-            sort -V | tail -n 1)
-          cd linux-${KVER}
+          cd linux-${{ env.KVER }}
           echo "[+] Configuring UML kernel..."
           make ARCH=um defconfig
           scripts/config --file .config \
@@ -134,9 +125,7 @@ jobs:
               -e CONFIG_COMPAT \
               -e CONFIG_NETFILTER \
               -e CONFIG_NF_CONNTRACK \
-              -e CONFIG_NF_CONNTRACK_IPV4 \
               -e CONFIG_NF_NAT \
-              -e CONFIG_NF_NAT_IPV4 \
               -e CONFIG_IP_FORWARD \
               -e CONFIG_IP_MULTICAST \
               -e CONFIG_IP_ADVANCED_ROUTER \
@@ -145,7 +134,7 @@ jobs:
               -e CONFIG_IKCONFIG_PROC
           make ARCH=um olddefconfig
 
-          echo "[+] Building UML kernel (this may take ~5–15 min)"
+          echo "[+] Building UML kernel (this may take ~5-15 min)"
           make ARCH=um \
               HOSTCC=gcc \
               CC=gcc \
@@ -155,15 +144,11 @@ jobs:
 
       - name: Strip the kernel
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | \
-            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
-            awk -F. '($1 < 6) || ($1 == 6 && $2 < 16)' | \
-            sort -V | tail -n 1)
-          cp linux-${KVER}/linux ./linux
+          cp linux-${{ env.KVER }}/linux ./linux
           strip ./linux
 
       - name: Upload Kernel artifact
         uses: actions/upload-artifact@v6.0.0
         with:
-          name: linux-uml
+          name: linux-uml-lts
           path: ./linux

@@ -3,6 +3,7 @@ name: Build UML Kernel (Newest stable kernel)
 on:
   schedule:
       - cron: '0 12 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,35 +18,43 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y build-essential libncurses-dev flex bison \
               libssl-dev libelf-dev bc dwarves wget curl tar xz-utils qemu-utils \
-              systemd-container libglib2.0-dev libpcre2-dev pkg-config libpcre3-dev
+              systemd-container libglib2.0-dev libpcre2-dev pkg-config libpcre3-dev jq
 
       - name: Download Kernel Source
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="stable") | .version' | sort -V | tail -n 1)
-          KURL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KVER}.tar.xz"
-          echo "[+] Downloading kernel ${KVER}"
+          KVER=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.moniker=="stable") | .version' | \
+            sort -V | tail -n 1)
+          MAJOR=$(echo "$KVER" | cut -d. -f1)
+          MINOR=$(echo "$KVER" | cut -d. -f2)
+          echo "KVER=${KVER}" >> $GITHUB_ENV
+          echo "KMAJOR=${MAJOR}" >> $GITHUB_ENV
+          echo "KMINOR=${MINOR}" >> $GITHUB_ENV
+
+          KURL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER}.tar.xz"
+          echo "[+] Downloading stable kernel ${KVER}"
           wget -O linux.tar.xz "$KURL"
           tar -xf linux.tar.xz
-          cd linux-${KVER}
 
-      - name: Patch UML for unwind_user.h (6.18.17+ fix)
+      - name: Patch UML source (if needed)
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="stable") | .version' | sort -V | tail -n 1)
-          cd linux-${KVER}
+          cd linux-${{ env.KVER }}
+          # Fix unwind_user.h for UML (backported in some stable releases)
           if [ -f arch/x86/include/asm/unwind_user.h ] && \
              ! grep -q 'unwind_user' arch/um/include/asm/Kbuild 2>/dev/null; then
             echo 'generic-y += unwind_user.h' >> arch/um/include/asm/Kbuild
             echo "[+] Patched: added unwind_user.h to UML generic-y"
           else
-            echo "[+] No patch needed"
+            echo "[+] No unwind_user.h patch needed"
           fi
 
       - name: Build UML kernel
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="stable") | .version' | sort -V | tail -n 1)
-          cd linux-${KVER}
-          echo "[+] Configuring UML kernel..."
+          cd linux-${{ env.KVER }}
+          echo "[+] Configuring UML kernel ${KVER}..."
           make ARCH=um defconfig
+
+          # ----- Common config (all versions) -----
           scripts/config --file .config \
               -e CONFIG_BLK_DEV \
               -e CONFIG_BLK_DEV_LOOP \
@@ -60,17 +69,8 @@ jobs:
               -e CONFIG_NETDEVICES \
               -e CONFIG_NET_CORE \
               -e CONFIG_TUN \
-              -e CONFIG_SLHC \
-              -e CONFIG_SLIP \
-              -e CONFIG_SLIP_COMPRESSED \
-              -e CONFIG_SLIP_SMART \
-              -e CONFIG_SLIP_MODE_SLIP6 \
-              -e CONFIG_UML_NET \
-              -e CONFIG_UML_NET_SLIRP \
-              -d CONFIG_UML_NET_DAEMON \
               -e CONFIG_TTY \
               -e CONFIG_UNIX98_PTYS \
-              -e CONFIG_DEVPTS_MULTIPLE_INSTANCES \
               -e CONFIG_DEVTMPFS \
               -e CONFIG_DEVTMPFS_MOUNT \
               -e CONFIG_TMPFS \
@@ -100,18 +100,37 @@ jobs:
               -e CONFIG_COMPAT \
               -e CONFIG_NETFILTER \
               -e CONFIG_NF_CONNTRACK \
-              -e CONFIG_NF_CONNTRACK_IPV4 \
               -e CONFIG_NF_NAT \
-              -e CONFIG_NF_NAT_IPV4 \
               -e CONFIG_IP_FORWARD \
               -e CONFIG_IP_MULTICAST \
               -e CONFIG_IP_ADVANCED_ROUTER \
               -e CONFIG_UML_SMP \
               -e CONFIG_IKCONFIG \
               -e CONFIG_IKCONFIG_PROC
+
+          # ----- Version-specific network config -----
+          MAJOR=${{ env.KMAJOR }}
+          MINOR=${{ env.KMINOR }}
+          if [ "$MAJOR" -gt 6 ] || { [ "$MAJOR" -eq 6 ] && [ "$MINOR" -ge 16 ]; }; then
+            echo "[+] Kernel >= 6.16: using VECTOR transport (VDE)"
+            scripts/config --file .config \
+                -e CONFIG_UML_NET_VECTOR
+          else
+            echo "[+] Kernel < 6.16: using legacy SLIRP transport"
+            scripts/config --file .config \
+                -e CONFIG_SLHC \
+                -e CONFIG_SLIP \
+                -e CONFIG_SLIP_COMPRESSED \
+                -e CONFIG_SLIP_SMART \
+                -e CONFIG_SLIP_MODE_SLIP6 \
+                -e CONFIG_UML_NET \
+                -e CONFIG_UML_NET_SLIRP \
+                -d CONFIG_UML_NET_DAEMON
+          fi
+
           make ARCH=um olddefconfig
 
-          echo "[+] Building UML kernel (this may take ~5–15 min)"
+          echo "[+] Building UML kernel (this may take ~5-15 min)"
           make ARCH=um \
               HOSTCC=gcc \
               CC=gcc \
@@ -121,12 +140,11 @@ jobs:
 
       - name: Strip the kernel
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker=="stable") | .version' | sort -V | tail -n 1)
-          cp linux-${KVER}/linux ./linux
+          cp linux-${{ env.KVER }}/linux ./linux
           strip ./linux
 
       - name: Upload Kernel artifact
         uses: actions/upload-artifact@v6.0.0
         with:
-          name: linux-uml
+          name: linux-uml-stable
           path: ./linux
