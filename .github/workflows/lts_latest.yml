@@ -70,7 +70,7 @@ jobs:
             -d AUDIT -d AUTOFS_FS -d AUTOFS4_FS \
             -e NETFILTER -e NF_CONNTRACK -e NF_NAT \
             -e IP_FORWARD -e IP_MULTICAST -e IP_ADVANCED_ROUTER \
-            -e UML_SMP -e IKCONFIG -e IKCONFIG_PROC -e CONFIG_IPV6
+            -e UML_SMP -e IKCONFIG -e IKCONFIG_PROC -e CONFIG_IPV6 -e SMP
 
           # --- network transport ---
           MAJOR=${{ env.KMAJOR }}; MINOR=${{ env.KMINOR }}
