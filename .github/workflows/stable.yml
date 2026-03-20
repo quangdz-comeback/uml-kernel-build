@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install deps
         run: |
@@ -75,7 +75,7 @@ jobs:
             -e SMP --set-val NR_CPUS 16 \
             -e SCHED_SMT -e SCHED_MC \
             -e HIGH_RES_TIMERS -e PREEMPT \
-            -e SPARSE_IRQ
+            -e SPARSE_IRQ -e CONFIG_IPV6
 
           # --- network transport ---
           MAJOR=${{ env.KMAJOR }}; MINOR=${{ env.KMINOR }}
@@ -103,7 +103,7 @@ jobs:
           fi
           echo "${{ env.KVER }} ($TRANSPORT)" > VERSION
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-uml-stable
           path: |
