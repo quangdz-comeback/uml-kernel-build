@@ -1,0 +1,62 @@
+diff --git a/arch/um/os-Linux/mem.c b/arch/um/os-Linux/mem.c
+index 72f302f4d..5a75ca987 100644
+--- a/arch/um/os-Linux/mem.c
++++ b/arch/um/os-Linux/mem.c
+@@ -14,6 +14,14 @@
+ #include <sys/mman.h>
+ #include <sys/vfs.h>
+ #include <linux/magic.h>
++
++#ifndef MFD_CLOEXEC
++#define MFD_CLOEXEC 1U
++#endif
++#ifndef MFD_EXEC
++#define MFD_EXEC 0x0010U
++#endif
++
+ #include <init.h>
+ #include <kern_util.h>
+ #include <os.h>
+@@ -180,6 +188,28 @@ static int __init make_tempfile(const char *template)
+ 
+ #define TEMPNAME_TEMPLATE "/vm_file-XXXXXX"
+ 
++/*
++ * Try to allocate the guest "physical" memory as an anonymous memfd so that
++ * its pages are backed by tmpfs/shmem (never written back to a real backing
++ * device) even on hosts without a tmpfs-backed tempdir. Falls back to the
++ * classic on-disk tempfile when the running kernel lacks memfd_create().
++ */
++static int __init create_mem_fd_memfd(unsigned long long len)
++{
++	int fd;
++
++	fd = memfd_create("uml-physmem", MFD_CLOEXEC | MFD_EXEC);
++	if (fd < 0)
++		return -1;
++
++	if (ftruncate64(fd, len) < 0) {
++		close(fd);
++		return -1;
++	}
++
++	return fd;
++}
++
+ static int __init create_tmp_file(unsigned long long len)
+ {
+ 	int fd, err;
+@@ -213,7 +243,12 @@ int __init create_mem_file(unsigned long long len)
+ {
+ 	int err, fd;
+ 
+-	fd = create_tmp_file(len);
++	fd = create_mem_fd_memfd(len);
++	if (fd < 0) {
++		os_info("memfd_create not available or failed, "
++			"using backing tempfile\n");
++		fd = create_tmp_file(len);
++	}
+ 
+ 	err = os_set_exec_close(fd);
+ 	if (err < 0) {

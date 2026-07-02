@@ -45,6 +45,16 @@ jobs:
             "https://cdn.kernel.org/pub/linux/kernel/v${{ env.KMAJOR }}.x/linux-${KVER}.tar.xz"
           tar xf linux.tar.gz 2>/dev/null || tar xf linux.tar.xz 2>/dev/null
 
+      - name: Apply bundled UML patches
+        run: |
+          cd linux-${{ env.KVER }}
+          git init -q && git add -A && git -c user.email=ci@local -c user.name=ci commit -qm baseline
+          shopt -s nullglob
+          for p in ../patches/*.patch; do
+            echo "[+] Applying $(basename "$p")"
+            git apply --index --verbose "$p"
+          done
+
       - name: Patch UML (unwind_user.h)
         run: |
           cd linux-${{ env.KVER }}

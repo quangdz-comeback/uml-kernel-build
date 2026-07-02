@@ -1,0 +1,12 @@
+# Local kernel source tree (downloaded by workflows)
+linux-src/
+linux-*/
+
+# Local build logs
+build.log
+*.log
+
+# Build artifacts
+linux-uml
+slirp
+VERSION

@@ -77,3 +77,31 @@ For port forwarding, create a file named `slirp_config` in same folder and add f
 * Adjust `mem` parameter according to your host's available RAM.
 * SLIRP allows network access without needing root privileges.
 
+
+---
+
+## 5. Bundled kernel patches (`patches/`)
+
+Every kernel-build workflow applies all `patches/*.patch` on top of the
+released tarball before configuring. Patches are authored against the latest
+LTS but use minimal context so they forward/back-port cleanly.
+
+### `uml-physmem-memfd.patch`
+
+By default UML backs the entire guest "physical" memory with an unlinked
+tempfile created in `$TMPDIR` (falling back to `/dev/shm`, then `/tmp`). On a
+host where the tempdir is **not** tmpfs-backed, those pages become regular
+file-backed dirty pages and are throttled by the host's `vm.dirty_ratio`,
+which noticeably degrades guest performance.
+
+This patch makes `create_mem_file()` prefer an anonymous **`memfd_create()`**
+file descriptor for physmem. The memfd is backed by the kernel's internal
+shmem/tmpfs, so guest RAM pages are never written back to a real device,
+regardless of whether the host has a usable tmpfs tempdir. If `memfd_create`
+is unavailable (very old host kernels) it falls back to the original
+on-disk tempfile. This mirrors the exact pattern already used by UML's own
+stub-executable allocator (`init_stub_exe_fd` in `arch/um/os-Linux/skas/process.c`).
+
+**Result:** the guest boots and runs at full speed even when `TMPDIR` points
+at a plain on-disk directory (verified: guest memory shows as
+`/memfd:uml-physmem (deleted)` and the tempdir stays empty).
