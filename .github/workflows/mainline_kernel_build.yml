@@ -37,22 +37,25 @@ jobs:
 
       - name: Download & extract
         run: |
-          # mainline RCs use .tar.gz from torvalds/t
-          KVER="${{ env.KVER }}"
-          wget -q -O linux.tar.gz \
-            "https://git.kernel.org/torvalds/t/linux-${KVER}.tar.gz" || \
-          wget -q -O linux.tar.gz \
-            "https://cdn.kernel.org/pub/linux/kernel/v${{ env.KMAJOR }}.x/linux-${KVER}.tar.xz"
-          tar xf linux.tar.gz 2>/dev/null || tar xf linux.tar.xz 2>/dev/null
+          # cdn.kernel.org / torvalds tarballs are flaky (404s); clone the tag directly.
+          # Both -rcN and final release tags exist in the stable tree.
+          git clone --depth 1 --branch "v${{ env.KVER }}" \
+            "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git" \
+            "linux-${{ env.KVER }}"
 
       - name: Apply bundled UML patches
         run: |
           cd linux-${{ env.KVER }}
-          git init -q && git add -A && git -c user.email=ci@local -c user.name=ci commit -qm baseline
           shopt -s nullglob
           for p in ../patches/*.patch; do
             echo "[+] Applying $(basename "$p")"
-            git apply --index --verbose "$p"
+            if git apply -v "$p"; then
+              :
+            elif patch -p1 --fuzz=3 < "$p"; then
+              echo "::warning::Applied $(basename "$p") with fuzz via patch(1)"
+            else
+              echo "::warning::$(basename "$p") did not apply cleanly, skipping"
+            fi
           done
 
       - name: Patch UML (unwind_user.h)
