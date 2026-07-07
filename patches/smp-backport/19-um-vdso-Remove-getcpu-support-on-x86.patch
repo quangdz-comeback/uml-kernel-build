@@ -1,0 +1,73 @@
+From 37f847b7949605e7803d72d6275beeaaf60099e6 Mon Sep 17 00:00:00 2001
+From: Tiwei Bie <tiwei.btw@antgroup.com>
+Date: Mon, 27 Oct 2025 08:18:13 +0800
+Subject: [PATCH] um: vdso: Remove getcpu support on x86
+
+We are going to support SMP on UML/x86, so we can't hard code
+the CPU and NUMA node in __vdso_getcpu() anymore. Let's just
+remove it and let applications fall back to the syscall.
+
+Suggested-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: Tiwei Bie <tiwei.btw@antgroup.com>
+Link: https://patch.msgid.link/20251027001815.1666872-7-tiwei.bie@linux.dev
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/x86/um/vdso/um_vdso.c  | 22 ----------------------
+ arch/x86/um/vdso/vdso.lds.S |  2 --
+ 2 files changed, 24 deletions(-)
+
+diff --git a/arch/x86/um/vdso/um_vdso.c b/arch/x86/um/vdso/um_vdso.c
+index 02d41fdb5655..ca1468865b14 100644
+--- a/arch/x86/um/vdso/um_vdso.c
++++ b/arch/x86/um/vdso/um_vdso.c
+@@ -11,12 +11,8 @@
+ 
+ #include <vdso/gettime.h>
+ #include <linux/time.h>
+-#include <linux/getcpu.h>
+ #include <asm/unistd.h>
+ 
+-/* workaround for -Wmissing-prototypes warnings */
+-long __vdso_getcpu(unsigned int *cpu, unsigned int *node, struct getcpu_cache *unused);
+-
+ int __vdso_clock_gettime(clockid_t clock, struct __kernel_timespec *ts)
+ {
+ 	long ret;
+@@ -56,21 +52,3 @@ __kernel_old_time_t __vdso_time(__kernel_old_time_t *t)
+ 	return secs;
+ }
+ __kernel_old_time_t time(__kernel_old_time_t *t) __attribute__((weak, alias("__vdso_time")));
+-
+-long
+-__vdso_getcpu(unsigned int *cpu, unsigned int *node, struct getcpu_cache *unused)
+-{
+-	/*
+-	 * UML does not support SMP, we can cheat here. :)
+-	 */
+-
+-	if (cpu)
+-		*cpu = 0;
+-	if (node)
+-		*node = 0;
+-
+-	return 0;
+-}
+-
+-long getcpu(unsigned int *cpu, unsigned int *node, struct getcpu_cache *tcache)
+-	__attribute__((weak, alias("__vdso_getcpu")));
+diff --git a/arch/x86/um/vdso/vdso.lds.S b/arch/x86/um/vdso/vdso.lds.S
+index 73c508587a98..401600effc0a 100644
+--- a/arch/x86/um/vdso/vdso.lds.S
++++ b/arch/x86/um/vdso/vdso.lds.S
+@@ -22,8 +22,6 @@ VERSION {
+ 		__vdso_clock_gettime;
+ 		gettimeofday;
+ 		__vdso_gettimeofday;
+-		getcpu;
+-		__vdso_getcpu;
+ 		time;
+ 		__vdso_time;
+ 	local: *;
+-- 
+2.43.0
+

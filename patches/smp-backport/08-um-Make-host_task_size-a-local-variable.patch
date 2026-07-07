@@ -1,0 +1,53 @@
+From 691ff5914835a65151f3793e8b4dea0b230d0b6b Mon Sep 17 00:00:00 2001
+From: Tiwei Bie <tiwei.btw@antgroup.com>
+Date: Mon, 27 Oct 2025 13:45:16 +0800
+Subject: [PATCH] um: Make host_task_size a local variable
+
+Currently, host_task_size is a global variable, but it is only used
+in linux_main() to compute stub_start and task_size. Make it a local
+variable to limit its scope to where it is actually needed.
+
+Signed-off-by: Tiwei Bie <tiwei.btw@antgroup.com>
+Link: https://patch.msgid.link/20251027054519.1996090-2-tiwei.bie@linux.dev
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/um/include/shared/as-layout.h | 1 -
+ arch/um/kernel/um_arch.c           | 3 +--
+ 2 files changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/arch/um/include/shared/as-layout.h b/arch/um/include/shared/as-layout.h
+index 7c7e17bce403..02ef258e3395 100644
+--- a/arch/um/include/shared/as-layout.h
++++ b/arch/um/include/shared/as-layout.h
+@@ -44,7 +44,6 @@ extern unsigned long start_vm;
+ 
+ extern unsigned long brk_start;
+ 
+-extern unsigned long host_task_size;
+ extern unsigned long stub_start;
+ 
+ extern int linux_main(int argc, char **argv, char **envp);
+diff --git a/arch/um/kernel/um_arch.c b/arch/um/kernel/um_arch.c
+index ed2f67848a50..4b14f1ea2690 100644
+--- a/arch/um/kernel/um_arch.c
++++ b/arch/um/kernel/um_arch.c
+@@ -252,8 +252,6 @@ unsigned long stub_start;
+ unsigned long task_size;
+ EXPORT_SYMBOL(task_size);
+ 
+-unsigned long host_task_size;
+-
+ unsigned long brk_start;
+ unsigned long end_iomem;
+ EXPORT_SYMBOL(end_iomem);
+@@ -306,6 +304,7 @@ int __init linux_main(int argc, char **argv, char **envp)
+ {
+ 	unsigned long avail, diff;
+ 	unsigned long virtmem_size, max_physmem;
++	unsigned long host_task_size;
+ 	unsigned long stack;
+ 	unsigned int i;
+ 	int add;
+-- 
+2.43.0
+

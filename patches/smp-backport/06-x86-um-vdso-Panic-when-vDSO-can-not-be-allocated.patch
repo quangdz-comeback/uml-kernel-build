@@ -1,0 +1,65 @@
+From 12fe820fae37b95dd55c226346b7ed3fbebac79c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Thomas=20Wei=C3=9Fschuh?= <linux@weissschuh.net>
+Date: Mon, 13 Oct 2025 12:40:20 +0200
+Subject: [PATCH] x86/um/vdso: Panic when vDSO can not be allocated
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The vDSO address is added to the userspace auxiliary vectors even if the
+vDSO was not allocated. When accessing the page, userspace processes
+will crash.
+
+Enforce that the allocation works.
+
+Signed-off-by: Thomas Weißschuh <linux@weissschuh.net>
+Link: https://patch.msgid.link/20251013-uml-vdso-cleanup-v1-3-a079c7adcc69@weissschuh.net
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/x86/um/vdso/vma.c | 12 +-----------
+ 1 file changed, 1 insertion(+), 11 deletions(-)
+
+diff --git a/arch/x86/um/vdso/vma.c b/arch/x86/um/vdso/vma.c
+index dc8dfb2abd80..51a2b9f2eca9 100644
+--- a/arch/x86/um/vdso/vma.c
++++ b/arch/x86/um/vdso/vma.c
+@@ -10,7 +10,6 @@
+ #include <asm/elf.h>
+ #include <linux/init.h>
+ 
+-static unsigned int __read_mostly vdso_enabled = 1;
+ unsigned long um_vdso_addr;
+ static struct page *um_vdso;
+ 
+@@ -25,17 +24,11 @@ static int __init init_vdso(void)
+ 
+ 	um_vdso = alloc_page(GFP_KERNEL);
+ 	if (!um_vdso)
+-		goto oom;
++		panic("Cannot allocate vdso\n");
+ 
+ 	copy_page(page_address(um_vdso), vdso_start);
+ 
+ 	return 0;
+-
+-oom:
+-	printk(KERN_ERR "Cannot allocate vdso\n");
+-	vdso_enabled = 0;
+-
+-	return -ENOMEM;
+ }
+ subsys_initcall(init_vdso);
+ 
+@@ -48,9 +41,6 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+ 		.pages = &um_vdso,
+ 	};
+ 
+-	if (!vdso_enabled)
+-		return 0;
+-
+ 	if (mmap_write_lock_killable(mm))
+ 		return -EINTR;
+ 
+-- 
+2.43.0
+

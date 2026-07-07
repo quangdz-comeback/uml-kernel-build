@@ -1,0 +1,132 @@
+From 2670917c2fc8902558f3aba4f41e5cc5bf6e18fa Mon Sep 17 00:00:00 2001
+From: Tiwei Bie <tiwei.btw@antgroup.com>
+Date: Mon, 27 Oct 2025 08:18:10 +0800
+Subject: [PATCH] um: Determine sleep based on need_resched()
+
+With SMP and NO_HZ enabled, the CPU may still need to sleep even
+if the timer is disarmed. Switch to deciding whether to sleep based
+on pending resched. Additionally, because disabling IRQs does not
+block SIGALRM, it is also necessary to check for any pending timer
+alarms. This is a preparation for adding SMP support.
+
+Signed-off-by: Tiwei Bie <tiwei.btw@antgroup.com>
+Link: https://patch.msgid.link/20251027001815.1666872-4-tiwei.bie@linux.dev
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/um/include/shared/kern_util.h |  1 +
+ arch/um/kernel/process.c           |  5 +++++
+ arch/um/os-Linux/internal.h        |  5 +++++
+ arch/um/os-Linux/signal.c          |  6 ++++++
+ arch/um/os-Linux/time.c            | 15 +++++++++------
+ 5 files changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/arch/um/include/shared/kern_util.h b/arch/um/include/shared/kern_util.h
+index 3ca589f3cd97..38321188c04c 100644
+--- a/arch/um/include/shared/kern_util.h
++++ b/arch/um/include/shared/kern_util.h
+@@ -51,6 +51,7 @@ extern int __uml_cant_sleep(void);
+ extern int get_current_pid(void);
+ extern int copy_from_user_proc(void *to, void *from, int size);
+ extern char *uml_strdup(const char *string);
++int uml_need_resched(void);
+ 
+ extern unsigned long to_irq_stack(unsigned long *mask_out);
+ extern unsigned long from_irq_stack(int nested);
+diff --git a/arch/um/kernel/process.c b/arch/um/kernel/process.c
+index 0a9249b2b86b..3b28048f269c 100644
+--- a/arch/um/kernel/process.c
++++ b/arch/um/kernel/process.c
+@@ -223,6 +223,11 @@ int __uml_cant_sleep(void) {
+ 	/* Is in_interrupt() really needed? */
+ }
+ 
++int uml_need_resched(void)
++{
++	return need_resched();
++}
++
+ extern exitcall_t __uml_exitcall_begin, __uml_exitcall_end;
+ 
+ void do_uml_exitcalls(void)
+diff --git a/arch/um/os-Linux/internal.h b/arch/um/os-Linux/internal.h
+index 5d8d3b0817a9..c2c7a0dc673c 100644
+--- a/arch/um/os-Linux/internal.h
++++ b/arch/um/os-Linux/internal.h
+@@ -15,6 +15,11 @@ void scan_elf_aux(char **envp);
+  */
+ void check_tmpexec(void);
+ 
++/*
++ * signal.c
++ */
++int timer_alarm_pending(void);
++
+ /*
+  * skas/process.c
+  */
+diff --git a/arch/um/os-Linux/signal.c b/arch/um/os-Linux/signal.c
+index 58da8c6ece98..554a87dd32cc 100644
+--- a/arch/um/os-Linux/signal.c
++++ b/arch/um/os-Linux/signal.c
+@@ -20,6 +20,7 @@
+ #include <um_malloc.h>
+ #include <sys/ucontext.h>
+ #include <timetravel.h>
++#include "internal.h"
+ 
+ void (*sig_info[NSIG])(int, struct siginfo *, struct uml_pt_regs *, void *mc) = {
+ 	[SIGTRAP]	= relay_signal,
+@@ -159,6 +160,11 @@ void timer_set_signal_handler(void)
+ 	set_handler(SIGALRM);
+ }
+ 
++int timer_alarm_pending(void)
++{
++	return !!(signals_pending & SIGALRM_MASK);
++}
++
+ void set_sigstack(void *sig_stack, int size)
+ {
+ 	stack_t stack = {
+diff --git a/arch/um/os-Linux/time.c b/arch/um/os-Linux/time.c
+index 4d5591d96d8c..f3d4547e5227 100644
+--- a/arch/um/os-Linux/time.c
++++ b/arch/um/os-Linux/time.c
+@@ -15,6 +15,7 @@
+ #include <kern_util.h>
+ #include <os.h>
+ #include <string.h>
++#include "internal.h"
+ 
+ static timer_t event_high_res_timer = 0;
+ 
+@@ -98,18 +99,20 @@ long long os_nsecs(void)
+  */
+ void os_idle_sleep(void)
+ {
+-	struct itimerspec its;
+ 	sigset_t set, old;
+ 
+-	/* block SIGALRM while we analyze the timer state */
++	/* Block SIGALRM while performing the need_resched check. */
+ 	sigemptyset(&set);
+ 	sigaddset(&set, SIGALRM);
+ 	sigprocmask(SIG_BLOCK, &set, &old);
+ 
+-	/* check the timer, and if it'll fire then wait for it */
+-	timer_gettime(event_high_res_timer, &its);
+-	if (its.it_value.tv_sec || its.it_value.tv_nsec)
++	/*
++	 * Because disabling IRQs does not block SIGALRM, it is also
++	 * necessary to check for any pending timer alarms.
++	 */
++	if (!uml_need_resched() && !timer_alarm_pending())
+ 		sigsuspend(&old);
+-	/* either way, restore the signal mask */
++
++	/* Restore the signal mask. */
+ 	sigprocmask(SIG_UNBLOCK, &set, NULL);
+ }
+-- 
+2.43.0
+

@@ -105,3 +105,36 @@ stub-executable allocator (`init_stub_exe_fd` in `arch/um/os-Linux/skas/process.
 **Result:** the guest boots and runs at full speed even when `TMPDIR` points
 at a plain on-disk directory (verified: guest memory shows as
 `/memfd:uml-physmem (deleted)` and the tempdir stays empty).
+
+### UML SMP support (`patches/apply-smp.sh`, `patches/smp-backport/`)
+
+Upstream UML was single-CPU for its entire history until **v6.19** (Oct 2025),
+which landed the initial SMP support (commit `1e4ee5135d81` by Tiwei Bie).
+6.18 LTS — the current LTS — predates that and will never get SMP natively.
+
+This repo bridges that gap:
+
+* **Kernel ≥ 6.19** — native SMP; `apply-smp.sh` is a no-op, only
+  `CONFIG_SMP=y NR_CPUS=64` is enabled in the build config.
+* **Kernel 6.18.x** — the full upstream SMP series (20 commits, base
+  6.18-rc3) is backported. `apply-smp.sh` applies the cumulative patch via
+  `git apply --3way` (falls back to `patch --fuzz=3`), which survives minor
+  context drift as 6.18.x stable backports accumulate. Series applies
+  cleanly to 6.18.37/6.18.38 and builds/boots verified.
+* **Kernel ≤ 6.17 (incl. 6.12 LTS)** — the series base is too far away to
+  port safely; SMP stays off and the kernel boots single-CPU as upstream.
+
+To actually use multiple vCPUs, boot with:
+
+```bash
+./linux mem=2G ncpus=8 seccomp=on ...   # up to NR_CPUS (64) vCPUs
+```
+
+`ncpus=N` sets how many vCPUs to start; `seccomp=on` is **required**
+(SMP is incompatible with the default PTRACE userspace mode and will refuse
+to boot without it). Each vCPU is a host thread.
+
+Note: with SMP enabled, UML userspace stubs remain single-threaded per
+process — kernel-mode execution and kthreads are parallel, but userspace
+threads of a single process still serialize within that process's stub.
+This is an upstream limitation of the initial SMP support.

@@ -1,0 +1,44 @@
+From de203267483de10bdfc3ec74fac246e879361819 Mon Sep 17 00:00:00 2001
+From: Tiwei Bie <tiwei.btw@antgroup.com>
+Date: Mon, 27 Oct 2025 13:45:17 +0800
+Subject: [PATCH] um: Use PAGE_ALIGN() for address alignment
+
+Use PAGE_ALIGN() instead of open-coded calculations.
+
+Signed-off-by: Tiwei Bie <tiwei.btw@antgroup.com>
+Link: https://patch.msgid.link/20251027054519.1996090-3-tiwei.bie@linux.dev
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/um/kernel/um_arch.c | 9 +++------
+ 1 file changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/arch/um/kernel/um_arch.c b/arch/um/kernel/um_arch.c
+index 4b14f1ea2690..fcabef8c7224 100644
+--- a/arch/um/kernel/um_arch.c
++++ b/arch/um/kernel/um_arch.c
+@@ -294,10 +294,7 @@ static unsigned long __init get_top_address(char **envp)
+ 			top_addr = (unsigned long) envp[i];
+ 	}
+ 
+-	top_addr &= ~(UM_KERN_PAGE_SIZE - 1);
+-	top_addr += UM_KERN_PAGE_SIZE;
+-
+-	return top_addr;
++	return PAGE_ALIGN(top_addr + 1);
+ }
+ 
+ int __init linux_main(int argc, char **argv, char **envp)
+@@ -366,8 +363,8 @@ int __init linux_main(int argc, char **argv, char **envp)
+ 
+ 	setup_machinename(init_utsname()->machine);
+ 
+-	physmem_size = (physmem_size + PAGE_SIZE - 1) & PAGE_MASK;
+-	iomem_size = (iomem_size + PAGE_SIZE - 1) & PAGE_MASK;
++	physmem_size = PAGE_ALIGN(physmem_size);
++	iomem_size = PAGE_ALIGN(iomem_size);
+ 
+ 	max_physmem = TASK_SIZE - uml_physmem - iomem_size - MIN_VMALLOC;
+ 	if (physmem_size > max_physmem) {
+-- 
+2.43.0
+

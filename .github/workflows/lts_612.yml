@@ -52,6 +52,11 @@ jobs:
             fi
           done
 
+      - name: Apply UML SMP support
+        run: |
+          cd linux-${{ env.KVER }}
+          bash ../patches/apply-smp.sh ../patches
+
       - name: Patch UML (unwind_user.h)
         run: |
           cd linux-${{ env.KVER }}
@@ -82,7 +87,8 @@ jobs:
             -d AUDIT -d AUTOFS_FS -d AUTOFS4_FS \
             -e NETFILTER -e NF_CONNTRACK -e NF_NAT \
             -e IP_FORWARD -e IP_MULTICAST -e IP_ADVANCED_ROUTER \
-            -e UML_SMP -e IKCONFIG -e IKCONFIG_PROC -e SMP -e CONFIG_IPV6
+            -e IKCONFIG -e IKCONFIG_PROC -e CONFIG_IPV6 \
+            -e SMP --set-val NR_CPUS 64
           make ARCH=um olddefconfig
           make ARCH=um -j"$(nproc)"
 

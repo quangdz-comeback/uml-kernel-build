@@ -1,0 +1,58 @@
+From 8e03c195cc4d82100291500f772f85c686653748 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Thomas=20Wei=C3=9Fschuh?= <linux@weissschuh.net>
+Date: Tue, 28 Oct 2025 10:02:55 +0100
+Subject: [PATCH] um: Avoid circular dependency on asm-offsets in pgtable.h
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Recent changes have added an include of as-layout.h to pgtable.h.
+However this introduces a circular dependency during asm-offsets
+generation as as-layout.h depends on asm-offsets and pgtable.h is an
+input for asm-offsets.
+
+Building from a clean state results in the following error:
+
+  CC      arch/um/kernel/asm-offsets.s
+In file included from arch/um/include/asm/pgtable.h:48,
+                 from include/linux/pgtable.h:6,
+                 from include/linux/mm.h:31,
+                 from include/linux/pid_namespace.h:7,
+                 from include/linux/ptrace.h:10,
+                 from include/linux/audit.h:13,
+                 from arch/um/kernel/asm-offsets.c:8:
+arch/um/include/shared/as-layout.h:9:10: fatal error: generated/asm-offsets.h: No such file or directory
+    9 | #include <generated/asm-offsets.h>
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+make[4]: *** [scripts/Makefile.build:182: arch/um/kernel/asm-offsets.s] Error 1
+
+As the inclusion of as-layout.h in pgtable.h is not yet needed while
+asm-offsets are generated, break the dependency here.
+
+Fixes: a7f7dbae94a5 ("um: Remove file-based iomem emulation support")
+Signed-off-by: Thomas Weißschuh <linux@weissschuh.net>
+Reviewed-by: Tiwei Bie <tiwei.btw@antgroup.com>
+Link: https://patch.msgid.link/20251028-uml-offsets-circular-v1-1-601c363cfaaa@weissschuh.net
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/um/include/asm/pgtable.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/arch/um/include/asm/pgtable.h b/arch/um/include/asm/pgtable.h
+index 1a0d7405e97c..3b42b0f45bf6 100644
+--- a/arch/um/include/asm/pgtable.h
++++ b/arch/um/include/asm/pgtable.h
+@@ -45,7 +45,9 @@ extern unsigned long *empty_zero_page;
+  * area for the same reason. ;)
+  */
+ 
++#ifndef COMPILE_OFFSETS
+ #include <as-layout.h> /* for high_physmem */
++#endif
+ 
+ #define VMALLOC_OFFSET	(__va_space)
+ #define VMALLOC_START	((high_physmem + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
+-- 
+2.43.0
+

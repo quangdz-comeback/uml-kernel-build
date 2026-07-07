@@ -1,0 +1,38 @@
+From 6aaf00d14e6c80f4664932d261be7a03834f558b Mon Sep 17 00:00:00 2001
+From: Tiwei Bie <tiwei.btw@antgroup.com>
+Date: Mon, 27 Oct 2025 08:18:08 +0800
+Subject: [PATCH] um: Do not disable kmalloc in initial_thread_cb()
+
+Currently, initial_thread_cb() temporarily disables kmalloc when
+it invokes the callback, allowing the callback to bypass kmalloc.
+This is unnecessary for the current users of initial_thread_cb(),
+and we should avoid memory allocations that are not under the
+control of the UML kernel. Therefore, let's stop temporarily
+disabling kmalloc in initial_thread_cb().
+
+Signed-off-by: Tiwei Bie <tiwei.btw@antgroup.com>
+Link: https://patch.msgid.link/20251027001815.1666872-2-tiwei.bie@linux.dev
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/um/kernel/process.c | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/arch/um/kernel/process.c b/arch/um/kernel/process.c
+index 13d461712c99..0a9249b2b86b 100644
+--- a/arch/um/kernel/process.c
++++ b/arch/um/kernel/process.c
+@@ -187,11 +187,7 @@ int copy_thread(struct task_struct * p, const struct kernel_clone_args *args)
+ 
+ void initial_thread_cb(void (*proc)(void *), void *arg)
+ {
+-	int save_kmalloc_ok = kmalloc_ok;
+-
+-	kmalloc_ok = 0;
+ 	initial_thread_cb_skas(proc, arg);
+-	kmalloc_ok = save_kmalloc_ok;
+ }
+ 
+ int arch_dup_task_struct(struct task_struct *dst,
+-- 
+2.43.0
+

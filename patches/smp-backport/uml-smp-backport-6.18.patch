@@ -1,0 +1,2576 @@
+diff --git a/arch/um/Kconfig b/arch/um/Kconfig
+index 93ed850d508e..8415d39b0d43 100644
+--- a/arch/um/Kconfig
++++ b/arch/um/Kconfig
+@@ -29,6 +29,7 @@ config UML
+ 	select OF_EARLY_FLATTREE if OF
+ 	select GENERIC_IRQ_SHOW
+ 	select GENERIC_CPU_DEVICES
++	select GENERIC_SMP_IDLE_THREAD
+ 	select HAVE_GCC_PLUGINS
+ 	select ARCH_SUPPORTS_LTO_CLANG
+ 	select ARCH_SUPPORTS_LTO_CLANG_THIN
+@@ -82,10 +83,48 @@ config HZ
+ 	int
+ 	default 100
+ 
+-config NR_CPUS
++config UML_SUBARCH_SUPPORTS_SMP
++	bool
++
++config SMP
++	bool "Symmetric multi-processing support"
++	default n
++	depends on UML_SUBARCH_SUPPORTS_SMP
++	help
++	  This option enables UML SMP support.
++
++	  With this enabled, users can tell UML to start multiple virtual
++	  processors. Each virtual processor is represented as a separate
++	  host thread.
++
++	  In UML, kthreads and normal threads (when running in kernel mode)
++	  can be scheduled and executed simultaneously on different virtual
++	  processors. However, the userspace code of normal threads still
++	  runs within their respective single-threaded stubs.
++
++	  That is, SMP support is available both within the kernel and
++	  across different processes, but remains limited within threads
++	  of the same process in userspace.
++
++config NR_CPUS_RANGE_BEGIN
+ 	int
+-	range 1 1
+-	default 1
++	default 1 if !SMP
++	default 2
++
++config NR_CPUS_RANGE_END
++	int
++	default 1 if !SMP
++	default 64
++
++config NR_CPUS_DEFAULT
++	int
++	default 1 if !SMP
++	default 2
++
++config NR_CPUS
++	int "Maximum number of CPUs" if SMP
++	range NR_CPUS_RANGE_BEGIN NR_CPUS_RANGE_END
++	default NR_CPUS_DEFAULT
+ 
+ source "arch/$(HEADER_ARCH)/um/Kconfig"
+ 
+@@ -201,12 +240,6 @@ config KERNEL_STACK_ORDER
+ 	  increase in the size of the state which needs to be saved when handling
+ 	  signals.
+ 
+-config MMAPPER
+-	tristate "iomem emulation driver"
+-	help
+-	  This driver allows a host file to be used as emulated IO memory inside
+-	  UML.
+-
+ config PGTABLE_LEVELS
+ 	int
+ 	default 4 if 64BIT
+@@ -261,6 +294,7 @@ source "arch/um/drivers/Kconfig"
+ 
+ config ARCH_SUSPEND_POSSIBLE
+ 	def_bool y
++	depends on !SMP
+ 
+ menu "Power management options"
+ 
+diff --git a/arch/um/drivers/Makefile b/arch/um/drivers/Makefile
+index 6bf8cbf71d3c..36dc57840084 100644
+--- a/arch/um/drivers/Makefile
++++ b/arch/um/drivers/Makefile
+@@ -29,7 +29,6 @@ obj-$(CONFIG_STDERR_CONSOLE) += stderr_console.o
+ 
+ obj-$(CONFIG_UML_NET_VECTOR) += vector.o
+ obj-$(CONFIG_MCONSOLE) += mconsole.o
+-obj-$(CONFIG_MMAPPER) += mmapper_kern.o 
+ obj-$(CONFIG_BLK_DEV_UBD) += ubd.o 
+ obj-$(CONFIG_UML_SOUND) += hostaudio.o
+ obj-$(CONFIG_NULL_CHAN) += null.o 
+diff --git a/arch/um/drivers/mmapper_kern.c b/arch/um/drivers/mmapper_kern.c
+deleted file mode 100644
+index 807cd3358740..000000000000
+--- a/arch/um/drivers/mmapper_kern.c
++++ /dev/null
+@@ -1,135 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0-only
+-/*
+- * arch/um/drivers/mmapper_kern.c
+- *
+- * BRIEF MODULE DESCRIPTION
+- *
+- * Copyright (C) 2000 RidgeRun, Inc.
+- * Author: RidgeRun, Inc.
+- *         Greg Lonnon glonnon@ridgerun.com or info@ridgerun.com
+- *
+- */
+-
+-#include <linux/stddef.h>
+-#include <linux/types.h>
+-#include <linux/fs.h>
+-#include <linux/init.h>
+-#include <linux/miscdevice.h>
+-#include <linux/module.h>
+-#include <linux/mm.h>
+-
+-#include <linux/uaccess.h>
+-#include <mem_user.h>
+-
+-/* These are set in mmapper_init, which is called at boot time */
+-static unsigned long mmapper_size;
+-static unsigned long p_buf;
+-static char *v_buf;
+-
+-static ssize_t mmapper_read(struct file *file, char __user *buf, size_t count,
+-			    loff_t *ppos)
+-{
+-	return simple_read_from_buffer(buf, count, ppos, v_buf, mmapper_size);
+-}
+-
+-static ssize_t mmapper_write(struct file *file, const char __user *buf,
+-			     size_t count, loff_t *ppos)
+-{
+-	if (*ppos > mmapper_size)
+-		return -EINVAL;
+-
+-	return simple_write_to_buffer(v_buf, mmapper_size, ppos, buf, count);
+-}
+-
+-static long mmapper_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+-{
+-	return -ENOIOCTLCMD;
+-}
+-
+-static int mmapper_mmap(struct file *file, struct vm_area_struct *vma)
+-{
+-	int ret = -EINVAL;
+-	int size;
+-
+-	if (vma->vm_pgoff != 0)
+-		goto out;
+-
+-	size = vma->vm_end - vma->vm_start;
+-	if (size > mmapper_size)
+-		return -EFAULT;
+-
+-	/*
+-	 * XXX A comment above remap_pfn_range says it should only be
+-	 * called when the mm semaphore is held
+-	 */
+-	if (remap_pfn_range(vma, vma->vm_start, p_buf >> PAGE_SHIFT, size,
+-			    vma->vm_page_prot))
+-		goto out;
+-	ret = 0;
+-out:
+-	return ret;
+-}
+-
+-static int mmapper_open(struct inode *inode, struct file *file)
+-{
+-	return 0;
+-}
+-
+-static int mmapper_release(struct inode *inode, struct file *file)
+-{
+-	return 0;
+-}
+-
+-static const struct file_operations mmapper_fops = {
+-	.owner		= THIS_MODULE,
+-	.read		= mmapper_read,
+-	.write		= mmapper_write,
+-	.unlocked_ioctl	= mmapper_ioctl,
+-	.mmap		= mmapper_mmap,
+-	.open		= mmapper_open,
+-	.release	= mmapper_release,
+-	.llseek		= default_llseek,
+-};
+-
+-/*
+- * No locking needed - only used (and modified) by below initcall and exitcall.
+- */
+-static struct miscdevice mmapper_dev = {
+-	.minor		= MISC_DYNAMIC_MINOR,
+-	.name		= "mmapper",
+-	.fops		= &mmapper_fops
+-};
+-
+-static int __init mmapper_init(void)
+-{
+-	int err;
+-
+-	printk(KERN_INFO "Mapper v0.1\n");
+-
+-	v_buf = (char *) find_iomem("mmapper", &mmapper_size);
+-	if (mmapper_size == 0) {
+-		printk(KERN_ERR "mmapper_init - find_iomem failed\n");
+-		return -ENODEV;
+-	}
+-	p_buf = __pa(v_buf);
+-
+-	err = misc_register(&mmapper_dev);
+-	if (err) {
+-		printk(KERN_ERR "mmapper - misc_register failed, err = %d\n",
+-		       err);
+-		return err;
+-	}
+-	return 0;
+-}
+-
+-static void __exit mmapper_exit(void)
+-{
+-	misc_deregister(&mmapper_dev);
+-}
+-
+-module_init(mmapper_init);
+-module_exit(mmapper_exit);
+-
+-MODULE_AUTHOR("Greg Lonnon <glonnon@ridgerun.com>");
+-MODULE_DESCRIPTION("DSPLinux simulator mmapper driver");
+-MODULE_LICENSE("GPL");
+diff --git a/arch/um/include/asm/current.h b/arch/um/include/asm/current.h
+index 8accc6d6f502..159a29b3d4cc 100644
+--- a/arch/um/include/asm/current.h
++++ b/arch/um/include/asm/current.h
+@@ -7,15 +7,16 @@
+ 
+ #ifndef __ASSEMBLER__
+ 
++#include <shared/smp.h>
++
+ struct task_struct;
+ extern struct task_struct *cpu_tasks[NR_CPUS];
+ 
+ static __always_inline struct task_struct *get_current(void)
+ {
+-	return cpu_tasks[0];
++	return cpu_tasks[uml_curr_cpu()];
+ }
+ 
+-
+ #define current get_current()
+ 
+ #endif /* __ASSEMBLER__ */
+diff --git a/arch/um/include/asm/hardirq.h b/arch/um/include/asm/hardirq.h
+index 52e2c36267a9..8de71752a9b8 100644
+--- a/arch/um/include/asm/hardirq.h
++++ b/arch/um/include/asm/hardirq.h
+@@ -2,8 +2,30 @@
+ #ifndef __ASM_UM_HARDIRQ_H
+ #define __ASM_UM_HARDIRQ_H
+ 
+-#include <asm-generic/hardirq.h>
++#include <linux/cache.h>
++#include <linux/threads.h>
+ 
+ #define __ARCH_IRQ_EXIT_IRQS_DISABLED 1
+ 
++typedef struct {
++	unsigned int __softirq_pending;
++#if IS_ENABLED(CONFIG_SMP)
++	unsigned int irq_resched_count;
++	unsigned int irq_call_count;
++#endif
++} ____cacheline_aligned irq_cpustat_t;
++
++DECLARE_PER_CPU_SHARED_ALIGNED(irq_cpustat_t, irq_stat);
++
++#define __ARCH_IRQ_STAT
++
++#define inc_irq_stat(member)	this_cpu_inc(irq_stat.member)
++
++#include <linux/irq.h>
++
++static inline void ack_bad_irq(unsigned int irq)
++{
++	pr_crit("unexpected IRQ trap at vector %02x\n", irq);
++}
++
+ #endif /* __ASM_UM_HARDIRQ_H */
+diff --git a/arch/um/include/asm/irqflags.h b/arch/um/include/asm/irqflags.h
+index 1e69ef5bc35e..31e49e0894c5 100644
+--- a/arch/um/include/asm/irqflags.h
++++ b/arch/um/include/asm/irqflags.h
+@@ -2,7 +2,7 @@
+ #ifndef __UM_IRQFLAGS_H
+ #define __UM_IRQFLAGS_H
+ 
+-extern int signals_enabled;
++int um_get_signals(void);
+ int um_set_signals(int enable);
+ void block_signals(void);
+ void unblock_signals(void);
+@@ -10,7 +10,7 @@ void unblock_signals(void);
+ #define arch_local_save_flags arch_local_save_flags
+ static inline unsigned long arch_local_save_flags(void)
+ {
+-	return signals_enabled;
++	return um_get_signals();
+ }
+ 
+ #define arch_local_irq_restore arch_local_irq_restore
+diff --git a/arch/um/include/asm/mmu.h b/arch/um/include/asm/mmu.h
+index 4d0e4239f3cc..07d48738b402 100644
+--- a/arch/um/include/asm/mmu.h
++++ b/arch/um/include/asm/mmu.h
+@@ -7,16 +7,26 @@
+ #define __ARCH_UM_MMU_H
+ 
+ #include "linux/types.h"
++#include <linux/mutex.h>
++#include <linux/spinlock.h>
+ #include <mm_id.h>
+ 
+ typedef struct mm_context {
+ 	struct mm_id id;
++	struct mutex turnstile;
+ 
+ 	struct list_head list;
+ 
+ 	/* Address range in need of a TLB sync */
++	spinlock_t sync_tlb_lock;
+ 	unsigned long sync_tlb_range_from;
+ 	unsigned long sync_tlb_range_to;
+ } mm_context_t;
+ 
++#define INIT_MM_CONTEXT(mm)						\
++	.context = {							\
++		.turnstile = __MUTEX_INITIALIZER(mm.context.turnstile),	\
++		.sync_tlb_lock = __SPIN_LOCK_INITIALIZER(mm.context.sync_tlb_lock), \
++	}
++
+ #endif
+diff --git a/arch/um/include/asm/pgtable.h b/arch/um/include/asm/pgtable.h
+index 24fdea6f88c3..3b42b0f45bf6 100644
+--- a/arch/um/include/asm/pgtable.h
++++ b/arch/um/include/asm/pgtable.h
+@@ -45,10 +45,12 @@ extern unsigned long *empty_zero_page;
+  * area for the same reason. ;)
+  */
+ 
+-extern unsigned long end_iomem;
++#ifndef COMPILE_OFFSETS
++#include <as-layout.h> /* for high_physmem */
++#endif
+ 
+ #define VMALLOC_OFFSET	(__va_space)
+-#define VMALLOC_START ((end_iomem + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
++#define VMALLOC_START	((high_physmem + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
+ #define VMALLOC_END	(TASK_SIZE-2*PAGE_SIZE)
+ #define MODULES_VADDR	VMALLOC_START
+ #define MODULES_END	VMALLOC_END
+@@ -225,6 +227,8 @@ static inline void set_pte(pte_t *pteptr, pte_t pteval)
+ static inline void um_tlb_mark_sync(struct mm_struct *mm, unsigned long start,
+ 				    unsigned long end)
+ {
++	guard(spinlock_irqsave)(&mm->context.sync_tlb_lock);
++
+ 	if (!mm->context.sync_tlb_range_to) {
+ 		mm->context.sync_tlb_range_from = start;
+ 		mm->context.sync_tlb_range_to = end;
+diff --git a/arch/um/include/asm/smp.h b/arch/um/include/asm/smp.h
+index a8cc1d46ddcb..be1743a6ff3c 100644
+--- a/arch/um/include/asm/smp.h
++++ b/arch/um/include/asm/smp.h
+@@ -2,6 +2,19 @@
+ #ifndef __UM_SMP_H
+ #define __UM_SMP_H
+ 
+-#define hard_smp_processor_id()		0
++#if IS_ENABLED(CONFIG_SMP)
++
++#include <linux/cpumask.h>
++#include <shared/smp.h>
++
++#define raw_smp_processor_id() uml_curr_cpu()
++
++void arch_smp_send_reschedule(int cpu);
++
++void arch_send_call_function_single_ipi(int cpu);
++
++void arch_send_call_function_ipi_mask(const struct cpumask *mask);
++
++#endif /* CONFIG_SMP */
+ 
+ #endif
+diff --git a/arch/um/include/linux/smp-internal.h b/arch/um/include/linux/smp-internal.h
+new file mode 100644
+index 000000000000..1dbcbc23f9c9
+--- /dev/null
++++ b/arch/um/include/linux/smp-internal.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __UM_SMP_INTERNAL_H
++#define __UM_SMP_INTERNAL_H
++
++#if IS_ENABLED(CONFIG_SMP)
++
++void prefill_possible_map(void);
++
++#else /* !CONFIG_SMP */
++
++static inline void prefill_possible_map(void) { }
++
++#endif /* CONFIG_SMP */
++
++extern char cpu_irqstacks[NR_CPUS][THREAD_SIZE] __aligned(THREAD_SIZE);
++
++#endif /* __UM_SMP_INTERNAL_H */
+diff --git a/arch/um/include/linux/time-internal.h b/arch/um/include/linux/time-internal.h
+index 138908b999d7..c274eb5ad55e 100644
+--- a/arch/um/include/linux/time-internal.h
++++ b/arch/um/include/linux/time-internal.h
+@@ -90,4 +90,7 @@ extern unsigned long tt_extra_sched_jiffies;
+  * which is intentional since we really shouldn't link it in that case.
+  */
+ void time_travel_ndelay(unsigned long nsec);
++
++int um_setup_timer(void);
++
+ #endif /* __TIMER_INTERNAL_H__ */
+diff --git a/arch/um/include/shared/as-layout.h b/arch/um/include/shared/as-layout.h
+index 7c7e17bce403..02ef258e3395 100644
+--- a/arch/um/include/shared/as-layout.h
++++ b/arch/um/include/shared/as-layout.h
+@@ -44,7 +44,6 @@ extern unsigned long start_vm;
+ 
+ extern unsigned long brk_start;
+ 
+-extern unsigned long host_task_size;
+ extern unsigned long stub_start;
+ 
+ extern int linux_main(int argc, char **argv, char **envp);
+diff --git a/arch/um/include/shared/common-offsets.h b/arch/um/include/shared/common-offsets.h
+deleted file mode 100644
+index 8ca66a1918c3..000000000000
+--- a/arch/um/include/shared/common-offsets.h
++++ /dev/null
+@@ -1,20 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
+-/* for use by sys-$SUBARCH/kernel-offsets.c */
+-
+-DEFINE(KERNEL_MADV_REMOVE, MADV_REMOVE);
+-
+-DEFINE(UM_KERN_PAGE_SIZE, PAGE_SIZE);
+-DEFINE(UM_KERN_PAGE_MASK, PAGE_MASK);
+-DEFINE(UM_KERN_PAGE_SHIFT, PAGE_SHIFT);
+-
+-DEFINE(UM_GFP_KERNEL, GFP_KERNEL);
+-DEFINE(UM_GFP_ATOMIC, GFP_ATOMIC);
+-
+-DEFINE(UM_THREAD_SIZE, THREAD_SIZE);
+-
+-DEFINE(UM_NSEC_PER_SEC, NSEC_PER_SEC);
+-DEFINE(UM_NSEC_PER_USEC, NSEC_PER_USEC);
+-
+-DEFINE(UM_KERN_GDT_ENTRY_TLS_ENTRIES, GDT_ENTRY_TLS_ENTRIES);
+-
+-DEFINE(UM_SECCOMP_ARCH_NATIVE, SECCOMP_ARCH_NATIVE);
+diff --git a/arch/um/include/shared/kern_util.h b/arch/um/include/shared/kern_util.h
+index 00ca3e12fd9a..38321188c04c 100644
+--- a/arch/um/include/shared/kern_util.h
++++ b/arch/um/include/shared/kern_util.h
+@@ -15,9 +15,6 @@ extern int uml_exitcode;
+ 
+ extern int kmalloc_ok;
+ 
+-#define UML_ROUND_UP(addr) \
+-	((((unsigned long) addr) + PAGE_SIZE - 1) & PAGE_MASK)
+-
+ extern unsigned long alloc_stack(int order, int atomic);
+ extern void free_stack(unsigned long stack, int order);
+ 
+@@ -42,7 +39,6 @@ extern void uml_pm_wake(void);
+ 
+ extern int start_uml(void);
+ extern void paging_init(void);
+-extern int parse_iomem(char *str, int *add);
+ 
+ extern void uml_cleanup(void);
+ extern void do_uml_exitcalls(void);
+@@ -55,6 +51,7 @@ extern int __uml_cant_sleep(void);
+ extern int get_current_pid(void);
+ extern int copy_from_user_proc(void *to, void *from, int size);
+ extern char *uml_strdup(const char *string);
++int uml_need_resched(void);
+ 
+ extern unsigned long to_irq_stack(unsigned long *mask_out);
+ extern unsigned long from_irq_stack(int nested);
+diff --git a/arch/um/include/shared/longjmp.h b/arch/um/include/shared/longjmp.h
+index 8863319039f3..c53e43d980c8 100644
+--- a/arch/um/include/shared/longjmp.h
++++ b/arch/um/include/shared/longjmp.h
+@@ -5,7 +5,6 @@
+ #include <sysdep/archsetjmp.h>
+ #include <os.h>
+ 
+-extern int signals_enabled;
+ extern int setjmp(jmp_buf);
+ extern void longjmp(jmp_buf, int);
+ 
+@@ -15,7 +14,7 @@ extern void longjmp(jmp_buf, int);
+ 
+ #define UML_SETJMP(buf) ({				\
+ 	int n, enable;					\
+-	enable = *(volatile int *)&signals_enabled;	\
++	enable = um_get_signals();			\
+ 	n = setjmp(*buf);				\
+ 	if(n != 0)					\
+ 		um_set_signals_trace(enable);		\
+diff --git a/arch/um/include/shared/mem_user.h b/arch/um/include/shared/mem_user.h
+index d4727efcf23d..8a5b72872ff8 100644
+--- a/arch/um/include/shared/mem_user.h
++++ b/arch/um/include/shared/mem_user.h
+@@ -32,21 +32,8 @@
+ #ifndef _MEM_USER_H
+ #define _MEM_USER_H
+ 
+-struct iomem_region {
+-	struct iomem_region *next;
+-	char *driver;
+-	int fd;
+-	int size;
+-	unsigned long phys;
+-	unsigned long virt;
+-};
+-
+-extern struct iomem_region *iomem_regions;
+-extern int iomem_size;
+-
+ #define ROUND_4M(n) ((((unsigned long) (n)) + (1 << 22)) & ~((1 << 22) - 1))
+ 
+-extern unsigned long find_iomem(char *driver, unsigned long *len_out);
+ extern void setup_physmem(unsigned long start, unsigned long usable,
+ 			  unsigned long len);
+ extern void map_memory(unsigned long virt, unsigned long phys,
+diff --git a/arch/um/include/shared/os.h b/arch/um/include/shared/os.h
+index b35cc8ce333b..b26e94292fc1 100644
+--- a/arch/um/include/shared/os.h
++++ b/arch/um/include/shared/os.h
+@@ -216,6 +216,9 @@ extern int can_drop_memory(void);
+ 
+ void os_set_pdeathsig(void);
+ 
++int os_futex_wait(void *uaddr, unsigned int val);
++int os_futex_wake(void *uaddr);
++
+ /* execvp.c */
+ extern int execvp_noalloc(char *buf, const char *file, char *const argv[]);
+ /* helper.c */
+@@ -243,6 +246,7 @@ extern void send_sigio_to_self(void);
+ extern int change_sig(int signal, int on);
+ extern void block_signals(void);
+ extern void unblock_signals(void);
++extern int um_get_signals(void);
+ extern int um_set_signals(int enable);
+ extern int um_set_signals_trace(int enable);
+ extern void deliver_alarm(void);
+@@ -266,11 +270,12 @@ extern void os_warn(const char *fmt, ...)
+ 	__attribute__ ((format (printf, 1, 2)));
+ 
+ /* time.c */
++void os_idle_prepare(void);
+ extern void os_idle_sleep(void);
+ extern int os_timer_create(void);
+-extern int os_timer_set_interval(unsigned long long nsecs);
+-extern int os_timer_one_shot(unsigned long long nsecs);
+-extern void os_timer_disable(void);
++extern int os_timer_set_interval(int cpu, unsigned long long nsecs);
++extern int os_timer_one_shot(int cpu, unsigned long long nsecs);
++extern void os_timer_disable(int cpu);
+ extern long long os_persistent_clock_emulation(void);
+ extern long long os_nsecs(void);
+ 
+@@ -338,4 +343,17 @@ extern void um_trace_signals_off(void);
+ /* time-travel */
+ extern void deliver_time_travel_irqs(void);
+ 
++/* smp.c */
++#if IS_ENABLED(CONFIG_SMP)
++void os_init_smp(void);
++int os_start_cpu_thread(int cpu);
++void os_start_secondary(void *arg, jmp_buf *switch_buf);
++int os_send_ipi(int cpu, int vector);
++void os_local_ipi_enable(void);
++void os_local_ipi_disable(void);
++#else /* !CONFIG_SMP */
++static inline void os_local_ipi_enable(void) { }
++static inline void os_local_ipi_disable(void) { }
++#endif /* CONFIG_SMP */
++
+ #endif
+diff --git a/arch/um/include/shared/skas/mm_id.h b/arch/um/include/shared/skas/mm_id.h
+index 4f977ef5dda5..fb96c0bd8222 100644
+--- a/arch/um/include/shared/skas/mm_id.h
++++ b/arch/um/include/shared/skas/mm_id.h
+@@ -6,6 +6,8 @@
+ #ifndef __MM_ID_H
+ #define __MM_ID_H
+ 
++#include <linux/compiler_types.h>
++
+ #define STUB_MAX_FDS 4
+ 
+ struct mm_id {
+@@ -19,6 +21,9 @@ struct mm_id {
+ 	int syscall_fd_map[STUB_MAX_FDS];
+ };
+ 
++void enter_turnstile(struct mm_id *mm_id) __acquires(turnstile);
++void exit_turnstile(struct mm_id *mm_id) __releases(turnstile);
++
+ void notify_mm_kill(int pid);
+ 
+ #endif
+diff --git a/arch/um/include/shared/skas/skas.h b/arch/um/include/shared/skas/skas.h
+index 807514e10538..2237ffedec75 100644
+--- a/arch/um/include/shared/skas/skas.h
++++ b/arch/um/include/shared/skas/skas.h
+@@ -15,5 +15,7 @@ extern void handle_syscall(struct uml_pt_regs *regs);
+ extern unsigned long current_stub_stack(void);
+ extern struct mm_id *current_mm_id(void);
+ extern void current_mm_sync(void);
++void initial_jmpbuf_lock(void);
++void initial_jmpbuf_unlock(void);
+ 
+ #endif
+diff --git a/arch/um/include/shared/smp.h b/arch/um/include/shared/smp.h
+new file mode 100644
+index 000000000000..06e3faa95091
+--- /dev/null
++++ b/arch/um/include/shared/smp.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __UM_SHARED_SMP_H
++#define __UM_SHARED_SMP_H
++
++#if IS_ENABLED(CONFIG_SMP)
++
++extern int uml_ncpus;
++
++int uml_curr_cpu(void);
++void uml_start_secondary(void *opaque);
++void uml_ipi_handler(int vector);
++
++#else /* !CONFIG_SMP */
++
++#define uml_ncpus 1
++#define uml_curr_cpu() 0
++
++#endif /* CONFIG_SMP */
++
++#endif /* __UM_SHARED_SMP_H */
+diff --git a/arch/um/kernel/Makefile b/arch/um/kernel/Makefile
+index b8f4e9281599..be60bc451b3f 100644
+--- a/arch/um/kernel/Makefile
++++ b/arch/um/kernel/Makefile
+@@ -25,6 +25,7 @@ obj-$(CONFIG_GPROF)	+= gprof_syms.o
+ obj-$(CONFIG_OF) += dtb.o
+ obj-$(CONFIG_EARLY_PRINTK) += early_printk.o
+ obj-$(CONFIG_STACKTRACE) += stacktrace.o
++obj-$(CONFIG_SMP) += smp.o
+ 
+ USER_OBJS := config.o
+ 
+diff --git a/arch/um/kernel/asm-offsets.c b/arch/um/kernel/asm-offsets.c
+index a69873aa697f..d38447e39d5e 100644
+--- a/arch/um/kernel/asm-offsets.c
++++ b/arch/um/kernel/asm-offsets.c
+@@ -1,3 +1,45 @@
++/* SPDX-License-Identifier: GPL-2.0 */
+ #define COMPILE_OFFSETS
++#include <linux/stddef.h>
++#include <linux/sched.h>
++#include <linux/elf.h>
++#include <linux/crypto.h>
++#include <linux/kbuild.h>
++#include <linux/audit.h>
++#include <linux/fs.h>
++#include <asm/mman.h>
++#include <asm/seccomp.h>
+ 
+-#include <sysdep/kernel-offsets.h>
++/* workaround for a warning with -Wmissing-prototypes */
++void foo(void);
++
++void foo(void)
++{
++	DEFINE(KERNEL_MADV_REMOVE, MADV_REMOVE);
++
++	DEFINE(UM_KERN_PAGE_SIZE, PAGE_SIZE);
++	DEFINE(UM_KERN_PAGE_MASK, PAGE_MASK);
++	DEFINE(UM_KERN_PAGE_SHIFT, PAGE_SHIFT);
++
++	DEFINE(UM_GFP_KERNEL, GFP_KERNEL);
++	DEFINE(UM_GFP_ATOMIC, GFP_ATOMIC);
++
++	DEFINE(UM_THREAD_SIZE, THREAD_SIZE);
++
++	DEFINE(UM_NSEC_PER_SEC, NSEC_PER_SEC);
++	DEFINE(UM_NSEC_PER_USEC, NSEC_PER_USEC);
++
++	DEFINE(UM_KERN_GDT_ENTRY_TLS_ENTRIES, GDT_ENTRY_TLS_ENTRIES);
++
++	DEFINE(UM_SECCOMP_ARCH_NATIVE, SECCOMP_ARCH_NATIVE);
++
++	DEFINE(HOSTFS_ATTR_MODE, ATTR_MODE);
++	DEFINE(HOSTFS_ATTR_UID, ATTR_UID);
++	DEFINE(HOSTFS_ATTR_GID, ATTR_GID);
++	DEFINE(HOSTFS_ATTR_SIZE, ATTR_SIZE);
++	DEFINE(HOSTFS_ATTR_ATIME, ATTR_ATIME);
++	DEFINE(HOSTFS_ATTR_MTIME, ATTR_MTIME);
++	DEFINE(HOSTFS_ATTR_CTIME, ATTR_CTIME);
++	DEFINE(HOSTFS_ATTR_ATIME_SET, ATTR_ATIME_SET);
++	DEFINE(HOSTFS_ATTR_MTIME_SET, ATTR_MTIME_SET);
++}
+diff --git a/arch/um/kernel/irq.c b/arch/um/kernel/irq.c
+index d69d137a0334..f4b13f15a9c1 100644
+--- a/arch/um/kernel/irq.c
++++ b/arch/um/kernel/irq.c
+@@ -22,6 +22,9 @@
+ #include <irq_kern.h>
+ #include <linux/time-internal.h>
+ 
++DEFINE_PER_CPU_SHARED_ALIGNED(irq_cpustat_t, irq_stat);
++
++#define irq_stats(x)		(&per_cpu(irq_stat, x))
+ 
+ /* When epoll triggers we do not know why it did so
+  * we can also have different IRQs for read and write.
+@@ -683,7 +686,7 @@ void __init init_IRQ(void)
+ {
+ 	int i;
+ 
+-	irq_set_chip_and_handler(TIMER_IRQ, &alarm_irq_type, handle_edge_irq);
++	irq_set_chip_and_handler(TIMER_IRQ, &alarm_irq_type, handle_percpu_irq);
+ 
+ 	for (i = 1; i < UM_LAST_SIGNAL_IRQ; i++)
+ 		irq_set_chip_and_handler(i, &normal_irq_type, handle_edge_irq);
+@@ -701,3 +704,25 @@ void sigchld_handler(int sig, struct siginfo *unused_si,
+ {
+ 	do_IRQ(SIGCHLD_IRQ, regs);
+ }
++
++/*
++ * /proc/interrupts printing for arch specific interrupts
++ */
++int arch_show_interrupts(struct seq_file *p, int prec)
++{
++#if IS_ENABLED(CONFIG_SMP)
++	int cpu;
++
++	seq_printf(p, "%*s: ", prec, "RES");
++	for_each_online_cpu(cpu)
++		seq_printf(p, "%10u ", irq_stats(cpu)->irq_resched_count);
++	seq_puts(p, "  Rescheduling interrupts\n");
++
++	seq_printf(p, "%*s: ", prec, "CAL");
++	for_each_online_cpu(cpu)
++		seq_printf(p, "%10u ", irq_stats(cpu)->irq_call_count);
++	seq_puts(p, "  Function call interrupts\n");
++#endif
++
++	return 0;
++}
+diff --git a/arch/um/kernel/ksyms.c b/arch/um/kernel/ksyms.c
+index f2fb77da08cf..96314c31e61c 100644
+--- a/arch/um/kernel/ksyms.c
++++ b/arch/um/kernel/ksyms.c
+@@ -6,8 +6,8 @@
+ #include <linux/module.h>
+ #include <os.h>
+ 
++EXPORT_SYMBOL(um_get_signals);
+ EXPORT_SYMBOL(um_set_signals);
+-EXPORT_SYMBOL(signals_enabled);
+ 
+ EXPORT_SYMBOL(os_stat_fd);
+ EXPORT_SYMBOL(os_stat_file);
+diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
+index 32e3b1972dc1..dc938715ec9d 100644
+--- a/arch/um/kernel/mem.c
++++ b/arch/um/kernel/mem.c
+@@ -71,7 +71,7 @@ void __init arch_mm_preinit(void)
+ 	/* Map in the area just after the brk now that kmalloc is about
+ 	 * to be turned on.
+ 	 */
+-	brk_end = (unsigned long) UML_ROUND_UP(sbrk(0));
++	brk_end = PAGE_ALIGN((unsigned long) sbrk(0));
+ 	map_memory(brk_end, __pa(brk_end), uml_reserved - brk_end, 1, 1, 0);
+ 	memblock_free((void *)brk_end, uml_reserved - brk_end);
+ 	uml_reserved = brk_end;
+@@ -197,7 +197,7 @@ void __init paging_init(void)
+ 		panic("%s: Failed to allocate %lu bytes align=%lx\n",
+ 		      __func__, PAGE_SIZE, PAGE_SIZE);
+ 
+-	max_zone_pfn[ZONE_NORMAL] = end_iomem >> PAGE_SHIFT;
++	max_zone_pfn[ZONE_NORMAL] = high_physmem >> PAGE_SHIFT;
+ 	free_area_init(max_zone_pfn);
+ 
+ #if IS_ENABLED(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA)
+diff --git a/arch/um/kernel/physmem.c b/arch/um/kernel/physmem.c
+index af02b5f9911d..ae6ca373c261 100644
+--- a/arch/um/kernel/physmem.c
++++ b/arch/um/kernel/physmem.c
+@@ -105,19 +105,6 @@ int phys_mapping(unsigned long phys, unsigned long long *offset_out)
+ 		fd = physmem_fd;
+ 		*offset_out = phys;
+ 	}
+-	else if (phys < __pa(end_iomem)) {
+-		struct iomem_region *region = iomem_regions;
+-
+-		while (region != NULL) {
+-			if ((phys >= region->phys) &&
+-			    (phys < region->phys + region->size)) {
+-				fd = region->fd;
+-				*offset_out = phys - region->phys;
+-				break;
+-			}
+-			region = region->next;
+-		}
+-	}
+ 
+ 	return fd;
+ }
+@@ -140,61 +127,3 @@ __uml_setup("mem=", uml_mem_setup,
+ "    be more, and the excess, if it's ever used, will just be swapped out.\n"
+ "	Example: mem=64M\n\n"
+ );
+-
+-__uml_setup("iomem=", parse_iomem,
+-"iomem=<name>,<file>\n"
+-"    Configure <file> as an IO memory region named <name>.\n\n"
+-);
+-
+-/*
+- * This list is constructed in parse_iomem and addresses filled in
+- * setup_iomem, both of which run during early boot.  Afterwards, it's
+- * unchanged.
+- */
+-struct iomem_region *iomem_regions;
+-
+-/* Initialized in parse_iomem and unchanged thereafter */
+-int iomem_size;
+-
+-unsigned long find_iomem(char *driver, unsigned long *len_out)
+-{
+-	struct iomem_region *region = iomem_regions;
+-
+-	while (region != NULL) {
+-		if (!strcmp(region->driver, driver)) {
+-			*len_out = region->size;
+-			return region->virt;
+-		}
+-
+-		region = region->next;
+-	}
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL(find_iomem);
+-
+-static int setup_iomem(void)
+-{
+-	struct iomem_region *region = iomem_regions;
+-	unsigned long iomem_start = high_physmem + PAGE_SIZE;
+-	int err;
+-
+-	while (region != NULL) {
+-		err = os_map_memory((void *) iomem_start, region->fd, 0,
+-				    region->size, 1, 1, 0);
+-		if (err)
+-			printk(KERN_ERR "Mapping iomem region for driver '%s' "
+-			       "failed, errno = %d\n", region->driver, -err);
+-		else {
+-			region->virt = iomem_start;
+-			region->phys = __pa(region->virt);
+-		}
+-
+-		iomem_start += region->size + PAGE_SIZE;
+-		region = region->next;
+-	}
+-
+-	return 0;
+-}
+-
+-__initcall(setup_iomem);
+diff --git a/arch/um/kernel/process.c b/arch/um/kernel/process.c
+index 13d461712c99..63b38a3f73f7 100644
+--- a/arch/um/kernel/process.c
++++ b/arch/um/kernel/process.c
+@@ -187,11 +187,7 @@ int copy_thread(struct task_struct * p, const struct kernel_clone_args *args)
+ 
+ void initial_thread_cb(void (*proc)(void *), void *arg)
+ {
+-	int save_kmalloc_ok = kmalloc_ok;
+-
+-	kmalloc_ok = 0;
+ 	initial_thread_cb_skas(proc, arg);
+-	kmalloc_ok = save_kmalloc_ok;
+ }
+ 
+ int arch_dup_task_struct(struct task_struct *dst,
+@@ -222,11 +218,21 @@ void arch_cpu_idle(void)
+ 	um_idle_sleep();
+ }
+ 
++void arch_cpu_idle_prepare(void)
++{
++	os_idle_prepare();
++}
++
+ int __uml_cant_sleep(void) {
+ 	return in_atomic() || irqs_disabled() || in_interrupt();
+ 	/* Is in_interrupt() really needed? */
+ }
+ 
++int uml_need_resched(void)
++{
++	return need_resched();
++}
++
+ extern exitcall_t __uml_exitcall_begin, __uml_exitcall_end;
+ 
+ void do_uml_exitcalls(void)
+diff --git a/arch/um/kernel/skas/mmu.c b/arch/um/kernel/skas/mmu.c
+index afe9a2f251ef..00957788591b 100644
+--- a/arch/um/kernel/skas/mmu.c
++++ b/arch/um/kernel/skas/mmu.c
+@@ -23,17 +23,36 @@ static_assert(sizeof(struct stub_data) == STUB_DATA_PAGES * UM_KERN_PAGE_SIZE);
+ static spinlock_t mm_list_lock;
+ static struct list_head mm_list;
+ 
++void enter_turnstile(struct mm_id *mm_id) __acquires(turnstile)
++{
++	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
++
++	mutex_lock(&ctx->turnstile);
++}
++
++void exit_turnstile(struct mm_id *mm_id) __releases(turnstile)
++{
++	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
++
++	mutex_unlock(&ctx->turnstile);
++}
++
+ int init_new_context(struct task_struct *task, struct mm_struct *mm)
+ {
+ 	struct mm_id *new_id = &mm->context.id;
+ 	unsigned long stack = 0;
+ 	int ret = -ENOMEM;
+ 
++	mutex_init(&mm->context.turnstile);
++	spin_lock_init(&mm->context.sync_tlb_lock);
++
+ 	stack = __get_free_pages(GFP_KERNEL | __GFP_ZERO, ilog2(STUB_DATA_PAGES));
+ 	if (stack == 0)
+ 		goto out;
+ 
+ 	new_id->stack = stack;
++	new_id->syscall_data_len = 0;
++	new_id->syscall_fd_num = 0;
+ 
+ 	scoped_guard(spinlock_irqsave, &mm_list_lock) {
+ 		/* Insert into list, used for lookups when the child dies */
+@@ -73,6 +92,9 @@ void destroy_context(struct mm_struct *mm)
+ 		return;
+ 	}
+ 
++	scoped_guard(spinlock_irqsave, &mm_list_lock)
++		list_del(&mm->context.list);
++
+ 	if (mmu->id.pid > 0) {
+ 		os_kill_ptraced_process(mmu->id.pid, 1);
+ 		mmu->id.pid = -1;
+@@ -82,10 +104,6 @@ void destroy_context(struct mm_struct *mm)
+ 		os_close_file(mmu->id.sock);
+ 
+ 	free_pages(mmu->id.stack, ilog2(STUB_DATA_PAGES));
+-
+-	guard(spinlock_irqsave)(&mm_list_lock);
+-
+-	list_del(&mm->context.list);
+ }
+ 
+ static irqreturn_t mm_sigchld_irq(int irq, void* dev)
+@@ -110,12 +128,11 @@ static irqreturn_t mm_sigchld_irq(int irq, void* dev)
+ 				/* Marks the MM as dead */
+ 				mm_context->id.pid = -1;
+ 
+-				/*
+-				 * NOTE: If SMP is implemented, a futex_wake
+-				 * needs to be added here.
+-				 */
+ 				stub_data = (void *)mm_context->id.stack;
+ 				stub_data->futex = FUTEX_IN_KERN;
++#if IS_ENABLED(CONFIG_SMP)
++				os_futex_wake(&stub_data->futex);
++#endif
+ 
+ 				/*
+ 				 * NOTE: Currently executing syscalls by
+diff --git a/arch/um/kernel/skas/process.c b/arch/um/kernel/skas/process.c
+index 5881b17eb987..4a7673b0261a 100644
+--- a/arch/um/kernel/skas/process.c
++++ b/arch/um/kernel/skas/process.c
+@@ -7,6 +7,7 @@
+ #include <linux/sched/mm.h>
+ #include <linux/sched/task_stack.h>
+ #include <linux/sched/task.h>
++#include <linux/smp-internal.h>
+ 
+ #include <asm/tlbflush.h>
+ 
+@@ -26,12 +27,12 @@ static int __init start_kernel_proc(void *unused)
+ 	return 0;
+ }
+ 
+-static char cpu0_irqstack[THREAD_SIZE] __aligned(THREAD_SIZE);
++char cpu_irqstacks[NR_CPUS][THREAD_SIZE] __aligned(THREAD_SIZE);
+ 
+ int __init start_uml(void)
+ {
+-	stack_protections((unsigned long) &cpu0_irqstack);
+-	set_sigstack(cpu0_irqstack, THREAD_SIZE);
++	stack_protections((unsigned long) &cpu_irqstacks[0]);
++	set_sigstack(cpu_irqstacks[0], THREAD_SIZE);
+ 
+ 	init_new_thread_signals();
+ 
+@@ -64,3 +65,15 @@ void current_mm_sync(void)
+ 
+ 	um_tlb_sync(current->mm);
+ }
++
++static DEFINE_SPINLOCK(initial_jmpbuf_spinlock);
++
++void initial_jmpbuf_lock(void)
++{
++	spin_lock_irq(&initial_jmpbuf_spinlock);
++}
++
++void initial_jmpbuf_unlock(void)
++{
++	spin_unlock_irq(&initial_jmpbuf_spinlock);
++}
+diff --git a/arch/um/kernel/smp.c b/arch/um/kernel/smp.c
+new file mode 100644
+index 000000000000..f1e52b7348fb
+--- /dev/null
++++ b/arch/um/kernel/smp.c
+@@ -0,0 +1,242 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2025 Ant Group
++ * Author: Tiwei Bie <tiwei.btw@antgroup.com>
++ *
++ * Based on the previous implementation in TT mode
++ * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
++ */
++
++#include <linux/sched.h>
++#include <linux/sched/task.h>
++#include <linux/sched/task_stack.h>
++#include <linux/module.h>
++#include <linux/processor.h>
++#include <linux/threads.h>
++#include <linux/cpu.h>
++#include <linux/hardirq.h>
++#include <linux/smp.h>
++#include <linux/smp-internal.h>
++#include <init.h>
++#include <kern.h>
++#include <os.h>
++#include <smp.h>
++
++enum {
++	UML_IPI_RES = 0,
++	UML_IPI_CALL_SINGLE,
++	UML_IPI_CALL,
++	UML_IPI_STOP,
++};
++
++void arch_smp_send_reschedule(int cpu)
++{
++	os_send_ipi(cpu, UML_IPI_RES);
++}
++
++void arch_send_call_function_single_ipi(int cpu)
++{
++	os_send_ipi(cpu, UML_IPI_CALL_SINGLE);
++}
++
++void arch_send_call_function_ipi_mask(const struct cpumask *mask)
++{
++	int cpu;
++
++	for_each_cpu(cpu, mask)
++		os_send_ipi(cpu, UML_IPI_CALL);
++}
++
++void smp_send_stop(void)
++{
++	int cpu, me = smp_processor_id();
++
++	for_each_online_cpu(cpu) {
++		if (cpu == me)
++			continue;
++		os_send_ipi(cpu, UML_IPI_STOP);
++	}
++}
++
++static void ipi_handler(int vector, struct uml_pt_regs *regs)
++{
++	struct pt_regs *old_regs = set_irq_regs((struct pt_regs *)regs);
++	int cpu = raw_smp_processor_id();
++
++	irq_enter();
++
++	if (current->mm)
++		os_alarm_process(current->mm->context.id.pid);
++
++	switch (vector) {
++	case UML_IPI_RES:
++		inc_irq_stat(irq_resched_count);
++		scheduler_ipi();
++		break;
++
++	case UML_IPI_CALL_SINGLE:
++		inc_irq_stat(irq_call_count);
++		generic_smp_call_function_single_interrupt();
++		break;
++
++	case UML_IPI_CALL:
++		inc_irq_stat(irq_call_count);
++		generic_smp_call_function_interrupt();
++		break;
++
++	case UML_IPI_STOP:
++		set_cpu_online(cpu, false);
++		while (1)
++			pause();
++		break;
++
++	default:
++		pr_err("CPU#%d received unknown IPI (vector=%d)!\n", cpu, vector);
++		break;
++	}
++
++	irq_exit();
++	set_irq_regs(old_regs);
++}
++
++void uml_ipi_handler(int vector)
++{
++	struct uml_pt_regs r = { .is_user = 0 };
++
++	preempt_disable();
++	ipi_handler(vector, &r);
++	preempt_enable();
++}
++
++/* AP states used only during CPU startup */
++enum {
++	UML_CPU_PAUSED = 0,
++	UML_CPU_RUNNING,
++};
++
++static int cpu_states[NR_CPUS];
++
++static int start_secondary(void *unused)
++{
++	int err, cpu = raw_smp_processor_id();
++
++	notify_cpu_starting(cpu);
++	set_cpu_online(cpu, true);
++
++	err = um_setup_timer();
++	if (err)
++		panic("CPU#%d failed to setup timer, err = %d", cpu, err);
++
++	local_irq_enable();
++
++	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
++
++	return 0;
++}
++
++void uml_start_secondary(void *opaque)
++{
++	int cpu = raw_smp_processor_id();
++	struct mm_struct *mm = &init_mm;
++	struct task_struct *idle;
++
++	stack_protections((unsigned long) &cpu_irqstacks[cpu]);
++	set_sigstack(&cpu_irqstacks[cpu], THREAD_SIZE);
++
++	set_cpu_present(cpu, true);
++	os_futex_wait(&cpu_states[cpu], UML_CPU_PAUSED);
++
++	smp_rmb(); /* paired with smp_wmb() in __cpu_up() */
++
++	idle = cpu_tasks[cpu];
++	idle->thread_info.cpu = cpu;
++
++	mmgrab(mm);
++	idle->active_mm = mm;
++
++	idle->thread.request.thread.proc = start_secondary;
++	idle->thread.request.thread.arg = NULL;
++
++	new_thread(task_stack_page(idle), &idle->thread.switch_buf,
++		   new_thread_handler);
++	os_start_secondary(opaque, &idle->thread.switch_buf);
++}
++
++void __init smp_prepare_cpus(unsigned int max_cpus)
++{
++	int err, cpu, me = smp_processor_id();
++	unsigned long deadline;
++
++	os_init_smp();
++
++	for_each_possible_cpu(cpu) {
++		if (cpu == me)
++			continue;
++
++		pr_debug("Booting processor %d...\n", cpu);
++		err = os_start_cpu_thread(cpu);
++		if (err) {
++			pr_crit("CPU#%d failed to start cpu thread, err = %d",
++				cpu, err);
++			continue;
++		}
++
++		deadline = jiffies + msecs_to_jiffies(1000);
++		spin_until_cond(cpu_present(cpu) ||
++				time_is_before_jiffies(deadline));
++
++		if (!cpu_present(cpu))
++			pr_crit("CPU#%d failed to boot\n", cpu);
++	}
++}
++
++int __cpu_up(unsigned int cpu, struct task_struct *tidle)
++{
++	cpu_tasks[cpu] = tidle;
++	smp_wmb(); /* paired with smp_rmb() in uml_start_secondary() */
++	cpu_states[cpu] = UML_CPU_RUNNING;
++	os_futex_wake(&cpu_states[cpu]);
++	spin_until_cond(cpu_online(cpu));
++
++	return 0;
++}
++
++void __init smp_cpus_done(unsigned int max_cpus)
++{
++}
++
++/* Set in uml_ncpus_setup */
++int uml_ncpus = 1;
++
++void __init prefill_possible_map(void)
++{
++	int cpu;
++
++	for (cpu = 0; cpu < uml_ncpus; cpu++)
++		set_cpu_possible(cpu, true);
++	for (; cpu < NR_CPUS; cpu++)
++		set_cpu_possible(cpu, false);
++}
++
++static int __init uml_ncpus_setup(char *line, int *add)
++{
++	*add = 0;
++
++	if (kstrtoint(line, 10, &uml_ncpus)) {
++		os_warn("%s: Couldn't parse '%s'\n", __func__, line);
++		return -1;
++	}
++
++	uml_ncpus = clamp(uml_ncpus, 1, NR_CPUS);
++
++	return 0;
++}
++
++__uml_setup("ncpus=", uml_ncpus_setup,
++"ncpus=<# of desired CPUs>\n"
++"    This tells UML how many virtual processors to start. The maximum\n"
++"    number of supported virtual processors can be obtained by querying\n"
++"    the CONFIG_NR_CPUS option using --showconfig.\n\n"
++);
++
++EXPORT_SYMBOL(uml_curr_cpu);
+diff --git a/arch/um/kernel/time.c b/arch/um/kernel/time.c
+index 17da0a870650..b344a36b44eb 100644
+--- a/arch/um/kernel/time.c
++++ b/arch/um/kernel/time.c
+@@ -625,9 +625,10 @@ void time_travel_sleep(void)
+ 	 * controller application.
+ 	 */
+ 	unsigned long long next = S64_MAX;
++	int cpu = raw_smp_processor_id();
+ 
+ 	if (time_travel_mode == TT_MODE_BASIC)
+-		os_timer_disable();
++		os_timer_disable(cpu);
+ 
+ 	time_travel_update_time(next, true);
+ 
+@@ -638,9 +639,9 @@ void time_travel_sleep(void)
+ 			 * This is somewhat wrong - we should get the first
+ 			 * one sooner like the os_timer_one_shot() below...
+ 			 */
+-			os_timer_set_interval(time_travel_timer_interval);
++			os_timer_set_interval(cpu, time_travel_timer_interval);
+ 		} else {
+-			os_timer_one_shot(time_travel_timer_event.time - next);
++			os_timer_one_shot(cpu, time_travel_timer_event.time - next);
+ 		}
+ 	}
+ }
+@@ -758,6 +759,8 @@ extern u64 time_travel_ext_req(u32 op, u64 time);
+ #define time_travel_del_event(e) do { } while (0)
+ #endif
+ 
++static struct clock_event_device timer_clockevent[NR_CPUS];
++
+ void timer_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs)
+ {
+ 	unsigned long flags;
+@@ -780,12 +783,14 @@ void timer_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs)
+ 
+ static int itimer_shutdown(struct clock_event_device *evt)
+ {
++	int cpu = evt - &timer_clockevent[0];
++
+ 	if (time_travel_mode != TT_MODE_OFF)
+ 		time_travel_del_event(&time_travel_timer_event);
+ 
+ 	if (time_travel_mode != TT_MODE_INFCPU &&
+ 	    time_travel_mode != TT_MODE_EXTERNAL)
+-		os_timer_disable();
++		os_timer_disable(cpu);
+ 
+ 	return 0;
+ }
+@@ -793,6 +798,7 @@ static int itimer_shutdown(struct clock_event_device *evt)
+ static int itimer_set_periodic(struct clock_event_device *evt)
+ {
+ 	unsigned long long interval = NSEC_PER_SEC / HZ;
++	int cpu = evt - &timer_clockevent[0];
+ 
+ 	if (time_travel_mode != TT_MODE_OFF) {
+ 		time_travel_del_event(&time_travel_timer_event);
+@@ -805,7 +811,7 @@ static int itimer_set_periodic(struct clock_event_device *evt)
+ 
+ 	if (time_travel_mode != TT_MODE_INFCPU &&
+ 	    time_travel_mode != TT_MODE_EXTERNAL)
+-		os_timer_set_interval(interval);
++		os_timer_set_interval(cpu, interval);
+ 
+ 	return 0;
+ }
+@@ -825,7 +831,7 @@ static int itimer_next_event(unsigned long delta,
+ 
+ 	if (time_travel_mode != TT_MODE_INFCPU &&
+ 	    time_travel_mode != TT_MODE_EXTERNAL)
+-		return os_timer_one_shot(delta);
++		return os_timer_one_shot(raw_smp_processor_id(), delta);
+ 
+ 	return 0;
+ }
+@@ -835,10 +841,9 @@ static int itimer_one_shot(struct clock_event_device *evt)
+ 	return itimer_next_event(0, evt);
+ }
+ 
+-static struct clock_event_device timer_clockevent = {
++static struct clock_event_device _timer_clockevent = {
+ 	.name			= "posix-timer",
+ 	.rating			= 250,
+-	.cpumask		= cpu_possible_mask,
+ 	.features		= CLOCK_EVT_FEAT_PERIODIC |
+ 				  CLOCK_EVT_FEAT_ONESHOT,
+ 	.set_state_shutdown	= itimer_shutdown,
+@@ -856,6 +861,9 @@ static struct clock_event_device timer_clockevent = {
+ 
+ static irqreturn_t um_timer(int irq, void *dev)
+ {
++	int cpu = raw_smp_processor_id();
++	struct clock_event_device *evt = &timer_clockevent[cpu];
++
+ 	/*
+ 	 * Interrupt the (possibly) running userspace process, technically this
+ 	 * should only happen if userspace is currently executing.
+@@ -867,7 +875,7 @@ static irqreturn_t um_timer(int irq, void *dev)
+ 	    get_current()->mm)
+ 		os_alarm_process(get_current()->mm->context.id.pid);
+ 
+-	(*timer_clockevent.event_handler)(&timer_clockevent);
++	evt->event_handler(evt);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -904,7 +912,24 @@ static struct clocksource timer_clocksource = {
+ 	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
+ };
+ 
+-static void __init um_timer_setup(void)
++int um_setup_timer(void)
++{
++	int cpu = raw_smp_processor_id();
++	struct clock_event_device *evt = &timer_clockevent[cpu];
++	int err;
++
++	err = os_timer_create();
++	if (err)
++		return err;
++
++	memcpy(evt, &_timer_clockevent, sizeof(*evt));
++	evt->cpumask = cpumask_of(cpu);
++	clockevents_register_device(evt);
++
++	return 0;
++}
++
++static void __init um_timer_init(void)
+ {
+ 	int err;
+ 
+@@ -913,8 +938,8 @@ static void __init um_timer_setup(void)
+ 		printk(KERN_ERR "register_timer : request_irq failed - "
+ 		       "errno = %d\n", -err);
+ 
+-	err = os_timer_create();
+-	if (err != 0) {
++	err = um_setup_timer();
++	if (err) {
+ 		printk(KERN_ERR "creation of timer failed - errno = %d\n", -err);
+ 		return;
+ 	}
+@@ -924,7 +949,6 @@ static void __init um_timer_setup(void)
+ 		printk(KERN_ERR "clocksource_register_hz returned %d\n", err);
+ 		return;
+ 	}
+-	clockevents_register_device(&timer_clockevent);
+ }
+ 
+ void read_persistent_clock64(struct timespec64 *ts)
+@@ -945,7 +969,7 @@ void read_persistent_clock64(struct timespec64 *ts)
+ void __init time_init(void)
+ {
+ 	timer_set_signal_handler();
+-	late_time_init = um_timer_setup;
++	late_time_init = um_timer_init;
+ }
+ 
+ #ifdef CONFIG_UML_TIME_TRAVEL_SUPPORT
+@@ -961,21 +985,21 @@ static int setup_time_travel(char *str)
+ {
+ 	if (strcmp(str, "=inf-cpu") == 0) {
+ 		time_travel_mode = TT_MODE_INFCPU;
+-		timer_clockevent.name = "time-travel-timer-infcpu";
++		_timer_clockevent.name = "time-travel-timer-infcpu";
+ 		timer_clocksource.name = "time-travel-clock";
+ 		return 1;
+ 	}
+ 
+ 	if (strncmp(str, "=ext:", 5) == 0) {
+ 		time_travel_mode = TT_MODE_EXTERNAL;
+-		timer_clockevent.name = "time-travel-timer-external";
++		_timer_clockevent.name = "time-travel-timer-external";
+ 		timer_clocksource.name = "time-travel-clock-external";
+ 		return time_travel_connect_external(str + 5);
+ 	}
+ 
+ 	if (!*str) {
+ 		time_travel_mode = TT_MODE_BASIC;
+-		timer_clockevent.name = "time-travel-timer";
++		_timer_clockevent.name = "time-travel-timer";
+ 		timer_clocksource.name = "time-travel-clock";
+ 		return 1;
+ 	}
+diff --git a/arch/um/kernel/tlb.c b/arch/um/kernel/tlb.c
+index cf7e0d4407f2..39608cccf2c6 100644
+--- a/arch/um/kernel/tlb.c
++++ b/arch/um/kernel/tlb.c
+@@ -162,9 +162,11 @@ int um_tlb_sync(struct mm_struct *mm)
+ {
+ 	pgd_t *pgd;
+ 	struct vm_ops ops;
+-	unsigned long addr = mm->context.sync_tlb_range_from, next;
++	unsigned long addr, next;
+ 	int ret = 0;
+ 
++	guard(spinlock_irqsave)(&mm->context.sync_tlb_lock);
++
+ 	if (mm->context.sync_tlb_range_to == 0)
+ 		return 0;
+ 
+@@ -177,6 +179,7 @@ int um_tlb_sync(struct mm_struct *mm)
+ 		ops.unmap = unmap;
+ 	}
+ 
++	addr = mm->context.sync_tlb_range_from;
+ 	pgd = pgd_offset(mm, addr);
+ 	do {
+ 		next = pgd_addr_end(addr, mm->context.sync_tlb_range_to);
+diff --git a/arch/um/kernel/trap.c b/arch/um/kernel/trap.c
+index 5b80a3a89c20..177615820a4c 100644
+--- a/arch/um/kernel/trap.c
++++ b/arch/um/kernel/trap.c
+@@ -316,7 +316,7 @@ unsigned long segv(struct faultinfo fi, unsigned long ip, int is_user,
+ 	if (!is_user && regs)
+ 		current->thread.segv_regs = container_of(regs, struct pt_regs, regs);
+ 
+-	if (!is_user && init_mm.context.sync_tlb_range_to) {
++	if (!is_user && address >= start_vm && address < end_vm) {
+ 		/*
+ 		 * Kernel has pending updates from set_ptes that were not
+ 		 * flushed yet. Syncing them should fix the pagefault (if not
+diff --git a/arch/um/kernel/um_arch.c b/arch/um/kernel/um_arch.c
+index ed2f67848a50..e2b24e1ecfa6 100644
+--- a/arch/um/kernel/um_arch.c
++++ b/arch/um/kernel/um_arch.c
+@@ -19,6 +19,7 @@
+ #include <linux/kmsg_dump.h>
+ #include <linux/suspend.h>
+ #include <linux/random.h>
++#include <linux/smp-internal.h>
+ 
+ #include <asm/processor.h>
+ #include <asm/cpufeature.h>
+@@ -71,6 +72,12 @@ static int show_cpuinfo(struct seq_file *m, void *v)
+ {
+ 	int i = 0;
+ 
++#if IS_ENABLED(CONFIG_SMP)
++	i = (uintptr_t) v - 1;
++	if (!cpu_online(i))
++		return 0;
++#endif
++
+ 	seq_printf(m, "processor\t: %d\n", i);
+ 	seq_printf(m, "vendor_id\t: User Mode Linux\n");
+ 	seq_printf(m, "model name\t: UML\n");
+@@ -87,13 +94,14 @@ static int show_cpuinfo(struct seq_file *m, void *v)
+ 		   loops_per_jiffy/(500000/HZ),
+ 		   (loops_per_jiffy/(5000/HZ)) % 100);
+ 
+-
+ 	return 0;
+ }
+ 
+ static void *c_start(struct seq_file *m, loff_t *pos)
+ {
+-	return *pos < nr_cpu_ids ? &boot_cpu_data + *pos : NULL;
++	if (*pos < nr_cpu_ids)
++		return (void *)(uintptr_t)(*pos + 1);
++	return NULL;
+ }
+ 
+ static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+@@ -252,11 +260,7 @@ unsigned long stub_start;
+ unsigned long task_size;
+ EXPORT_SYMBOL(task_size);
+ 
+-unsigned long host_task_size;
+-
+ unsigned long brk_start;
+-unsigned long end_iomem;
+-EXPORT_SYMBOL(end_iomem);
+ 
+ #define MIN_VMALLOC (32 * 1024 * 1024)
+ 
+@@ -296,16 +300,14 @@ static unsigned long __init get_top_address(char **envp)
+ 			top_addr = (unsigned long) envp[i];
+ 	}
+ 
+-	top_addr &= ~(UM_KERN_PAGE_SIZE - 1);
+-	top_addr += UM_KERN_PAGE_SIZE;
+-
+-	return top_addr;
++	return PAGE_ALIGN(top_addr + 1);
+ }
+ 
+ int __init linux_main(int argc, char **argv, char **envp)
+ {
+ 	unsigned long avail, diff;
+ 	unsigned long virtmem_size, max_physmem;
++	unsigned long host_task_size;
+ 	unsigned long stack;
+ 	unsigned int i;
+ 	int add;
+@@ -352,12 +354,11 @@ int __init linux_main(int argc, char **argv, char **envp)
+ 	 * so they actually get what they asked for. This should
+ 	 * add zero for non-exec shield users
+ 	 */
+-
+-	diff = UML_ROUND_UP(brk_start) - UML_ROUND_UP(&_end);
++	diff = PAGE_ALIGN(brk_start) - PAGE_ALIGN((unsigned long) &_end);
+ 	if (diff > 1024 * 1024) {
+ 		os_info("Adding %ld bytes to physical memory to account for "
+ 			"exec-shield gap\n", diff);
+-		physmem_size += UML_ROUND_UP(brk_start) - UML_ROUND_UP(&_end);
++		physmem_size += diff;
+ 	}
+ 
+ 	uml_physmem = (unsigned long) __binary_start & PAGE_MASK;
+@@ -367,10 +368,8 @@ int __init linux_main(int argc, char **argv, char **envp)
+ 
+ 	setup_machinename(init_utsname()->machine);
+ 
+-	physmem_size = (physmem_size + PAGE_SIZE - 1) & PAGE_MASK;
+-	iomem_size = (iomem_size + PAGE_SIZE - 1) & PAGE_MASK;
+-
+-	max_physmem = TASK_SIZE - uml_physmem - iomem_size - MIN_VMALLOC;
++	physmem_size = PAGE_ALIGN(physmem_size);
++	max_physmem = TASK_SIZE - uml_physmem - MIN_VMALLOC;
+ 	if (physmem_size > max_physmem) {
+ 		physmem_size = max_physmem;
+ 		os_info("Physical memory size shrunk to %llu bytes\n",
+@@ -378,7 +377,6 @@ int __init linux_main(int argc, char **argv, char **envp)
+ 	}
+ 
+ 	high_physmem = uml_physmem + physmem_size;
+-	end_iomem = high_physmem + iomem_size;
+ 
+ 	start_vm = VMALLOC_START;
+ 
+@@ -419,6 +417,7 @@ void __init setup_arch(char **cmdline_p)
+ 	strscpy(boot_command_line, command_line, COMMAND_LINE_SIZE);
+ 	*cmdline_p = command_line;
+ 	setup_hostinfo(host_info, sizeof host_info);
++	prefill_possible_map();
+ 
+ 	if (os_getrandom(rng_seed, sizeof(rng_seed), 0) == sizeof(rng_seed)) {
+ 		add_bootloader_randomness(rng_seed, sizeof(rng_seed));
+@@ -453,6 +452,18 @@ void apply_alternatives(struct alt_instr *start, struct alt_instr *end)
+ {
+ }
+ 
++#if IS_ENABLED(CONFIG_SMP)
++void alternatives_smp_module_add(struct module *mod, char *name,
++				 void *locks, void *locks_end,
++				 void *text,  void *text_end)
++{
++}
++
++void alternatives_smp_module_del(struct module *mod)
++{
++}
++#endif
++
+ void *text_poke(void *addr, const void *opcode, size_t len)
+ {
+ 	/*
+diff --git a/arch/um/os-Linux/Makefile b/arch/um/os-Linux/Makefile
+index fae836713487..70c73c22f715 100644
+--- a/arch/um/os-Linux/Makefile
++++ b/arch/um/os-Linux/Makefile
+@@ -16,8 +16,10 @@ CFLAGS_main.o += -Wno-frame-larger-than
+ 
+ obj-$(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA) += elf_aux.o
+ 
++obj-$(CONFIG_SMP) += smp.o
++
+ USER_OBJS := $(user-objs-y) elf_aux.o execvp.o file.o helper.o irq.o \
+ 	main.o mem.o process.o registers.o sigio.o signal.o start_up.o time.o \
+-	tty.o umid.o util.o
++	tty.o umid.o util.o smp.o
+ 
+ include $(srctree)/arch/um/scripts/Makefile.rules
+diff --git a/arch/um/os-Linux/internal.h b/arch/um/os-Linux/internal.h
+index 5d8d3b0817a9..bac9fcc8c14c 100644
+--- a/arch/um/os-Linux/internal.h
++++ b/arch/um/os-Linux/internal.h
+@@ -4,6 +4,7 @@
+ 
+ #include <mm_id.h>
+ #include <stub-data.h>
++#include <signal.h>
+ 
+ /*
+  * elf_aux.c
+@@ -15,9 +16,21 @@ void scan_elf_aux(char **envp);
+  */
+ void check_tmpexec(void);
+ 
++/*
++ * signal.c
++ */
++extern __thread int signals_enabled;
++int timer_alarm_pending(void);
++
+ /*
+  * skas/process.c
+  */
+ void wait_stub_done(int pid);
+ void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys);
++
++/*
++ * smp.c
++ */
++#define IPI_SIGNAL	SIGRTMIN
++
+ #endif /* __UM_OS_LINUX_INTERNAL_H */
+diff --git a/arch/um/os-Linux/main.c b/arch/um/os-Linux/main.c
+index 3c63ce19e3bf..730723106228 100644
+--- a/arch/um/os-Linux/main.c
++++ b/arch/um/os-Linux/main.c
+@@ -171,7 +171,7 @@ int __init main(int argc, char **argv, char **envp)
+ 	 */
+ 
+ 	/* stop timers and set timer signal to be ignored */
+-	os_timer_disable();
++	os_timer_disable(0);
+ 
+ 	/* disable SIGIO for the fds and set SIGIO to be ignored */
+ 	err = deactivate_all_fds();
+diff --git a/arch/um/os-Linux/process.c b/arch/um/os-Linux/process.c
+index 00b49e90d05f..3a2a84ab9325 100644
+--- a/arch/um/os-Linux/process.c
++++ b/arch/um/os-Linux/process.c
+@@ -10,6 +10,8 @@
+ #include <errno.h>
+ #include <signal.h>
+ #include <fcntl.h>
++#include <limits.h>
++#include <linux/futex.h>
+ #include <sys/mman.h>
+ #include <sys/ptrace.h>
+ #include <sys/prctl.h>
+@@ -189,3 +191,21 @@ void os_set_pdeathsig(void)
+ {
+ 	prctl(PR_SET_PDEATHSIG, SIGKILL);
+ }
++
++int os_futex_wait(void *uaddr, unsigned int val)
++{
++	int r;
++
++	CATCH_EINTR(r = syscall(__NR_futex, uaddr, FUTEX_WAIT, val,
++				NULL, NULL, 0));
++	return r < 0 ? -errno : r;
++}
++
++int os_futex_wake(void *uaddr)
++{
++	int r;
++
++	CATCH_EINTR(r = syscall(__NR_futex, uaddr, FUTEX_WAKE, INT_MAX,
++				NULL, NULL, 0));
++	return r < 0 ? -errno : r;
++}
+diff --git a/arch/um/os-Linux/signal.c b/arch/um/os-Linux/signal.c
+index bebeb6b4bee8..de372b936a80 100644
+--- a/arch/um/os-Linux/signal.c
++++ b/arch/um/os-Linux/signal.c
+@@ -20,6 +20,7 @@
+ #include <um_malloc.h>
+ #include <sys/ucontext.h>
+ #include <timetravel.h>
++#include "internal.h"
+ 
+ void (*sig_info[NSIG])(int, struct siginfo *, struct uml_pt_regs *, void *mc) = {
+ 	[SIGTRAP]	= relay_signal,
+@@ -65,12 +66,12 @@ static void sig_handler_common(int sig, struct siginfo *si, mcontext_t *mc)
+ #define SIGCHLD_BIT 2
+ #define SIGCHLD_MASK (1 << SIGCHLD_BIT)
+ 
+-int signals_enabled;
++__thread int signals_enabled;
+ #if IS_ENABLED(CONFIG_UML_TIME_TRAVEL_SUPPORT)
+ static int signals_blocked, signals_blocked_pending;
+ #endif
+-static unsigned int signals_pending;
+-static unsigned int signals_active = 0;
++static __thread unsigned int signals_pending;
++static __thread unsigned int signals_active;
+ 
+ static void sig_handler(int sig, struct siginfo *si, mcontext_t *mc)
+ {
+@@ -156,6 +157,11 @@ void timer_set_signal_handler(void)
+ 	set_handler(SIGALRM);
+ }
+ 
++int timer_alarm_pending(void)
++{
++	return !!(signals_pending & SIGALRM_MASK);
++}
++
+ void set_sigstack(void *sig_stack, int size)
+ {
+ 	stack_t stack = {
+@@ -253,9 +259,29 @@ int change_sig(int signal, int on)
+ 	return 0;
+ }
+ 
+-void block_signals(void)
++static inline void __block_signals(void)
+ {
++	if (!signals_enabled)
++		return;
++
++	os_local_ipi_disable();
++	barrier();
+ 	signals_enabled = 0;
++}
++
++static inline void __unblock_signals(void)
++{
++	if (signals_enabled)
++		return;
++
++	signals_enabled = 1;
++	barrier();
++	os_local_ipi_enable();
++}
++
++void block_signals(void)
++{
++	__block_signals();
+ 	/*
+ 	 * This must return with signals disabled, so this barrier
+ 	 * ensures that writes are flushed out before the return.
+@@ -272,7 +298,8 @@ void unblock_signals(void)
+ 	if (signals_enabled == 1)
+ 		return;
+ 
+-	signals_enabled = 1;
++	__unblock_signals();
++
+ #if IS_ENABLED(CONFIG_UML_TIME_TRAVEL_SUPPORT)
+ 	deliver_time_travel_irqs();
+ #endif
+@@ -306,7 +333,7 @@ void unblock_signals(void)
+ 		 * tracing that happens inside the handlers we call for the
+ 		 * pending signals will mess up the tracing state.
+ 		 */
+-		signals_enabled = 0;
++		__block_signals();
+ 		um_trace_signals_off();
+ 
+ 		/*
+@@ -338,10 +365,15 @@ void unblock_signals(void)
+ 
+ 		/* Re-enable signals and trace that we're doing so. */
+ 		um_trace_signals_on();
+-		signals_enabled = 1;
++		__unblock_signals();
+ 	}
+ }
+ 
++int um_get_signals(void)
++{
++	return signals_enabled;
++}
++
+ int um_set_signals(int enable)
+ {
+ 	int ret;
+diff --git a/arch/um/os-Linux/skas/process.c b/arch/um/os-Linux/skas/process.c
+index 0bc10cd4cbed..d6c22f8aa06d 100644
+--- a/arch/um/os-Linux/skas/process.c
++++ b/arch/um/os-Linux/skas/process.c
+@@ -298,7 +298,6 @@ static int userspace_tramp(void *data)
+ 		.seccomp = using_seccomp,
+ 		.stub_start = STUB_START,
+ 	};
+-	struct iomem_region *iomem;
+ 	int ret;
+ 
+ 	if (using_seccomp) {
+@@ -332,12 +331,6 @@ static int userspace_tramp(void *data)
+ 
+ 	fcntl(init_data.stub_data_fd, F_SETFD, 0);
+ 
+-	/* In SECCOMP mode, these FDs are passed when needed */
+-	if (!using_seccomp) {
+-		for (iomem = iomem_regions; iomem; iomem = iomem->next)
+-			fcntl(iomem->fd, F_SETFD, 0);
+-	}
+-
+ 	/* dup2 signaling FD/socket to STDIN */
+ 	if (dup2(tramp_data->sockpair[0], 0) < 0)
+ 		exit(3);
+@@ -553,7 +546,7 @@ extern unsigned long tt_extra_sched_jiffies;
+ void userspace(struct uml_pt_regs *regs)
+ {
+ 	int err, status, op;
+-	siginfo_t si_ptrace;
++	siginfo_t si_local;
+ 	siginfo_t *si;
+ 	int sig;
+ 
+@@ -563,6 +556,13 @@ void userspace(struct uml_pt_regs *regs)
+ 	while (1) {
+ 		struct mm_id *mm_id = current_mm_id();
+ 
++		/*
++		 * At any given time, only one CPU thread can enter the
++		 * turnstile to operate on the same stub process, including
++		 * executing stub system calls (mmap and munmap).
++		 */
++		enter_turnstile(mm_id);
++
+ 		/*
+ 		 * When we are in time-travel mode, userspace can theoretically
+ 		 * do a *lot* of work without being scheduled. The problem with
+@@ -630,9 +630,10 @@ void userspace(struct uml_pt_regs *regs)
+ 			}
+ 
+ 			if (proc_data->si_offset > sizeof(proc_data->sigstack) - sizeof(*si))
+-				panic("%s - Invalid siginfo offset from child",
+-				      __func__);
+-			si = (void *)&proc_data->sigstack[proc_data->si_offset];
++				panic("%s - Invalid siginfo offset from child", __func__);
++
++			si = &si_local;
++			memcpy(si, &proc_data->sigstack[proc_data->si_offset], sizeof(*si));
+ 
+ 			regs->is_user = 1;
+ 
+@@ -728,8 +729,8 @@ void userspace(struct uml_pt_regs *regs)
+ 				case SIGFPE:
+ 				case SIGWINCH:
+ 					ptrace(PTRACE_GETSIGINFO, pid, 0,
+-					       (struct siginfo *)&si_ptrace);
+-					si = &si_ptrace;
++					       (struct siginfo *)&si_local);
++					si = &si_local;
+ 					break;
+ 				default:
+ 					si = NULL;
+@@ -740,6 +741,8 @@ void userspace(struct uml_pt_regs *regs)
+ 			}
+ 		}
+ 
++		exit_turnstile(mm_id);
++
+ 		UPT_SYSCALL_NR(regs) = -1; /* Assume: It's not a syscall */
+ 
+ 		if (sig) {
+@@ -809,10 +812,9 @@ void switch_threads(jmp_buf *me, jmp_buf *you)
+ 
+ static jmp_buf initial_jmpbuf;
+ 
+-/* XXX Make these percpu */
+-static void (*cb_proc)(void *arg);
+-static void *cb_arg;
+-static jmp_buf *cb_back;
++static __thread void (*cb_proc)(void *arg);
++static __thread void *cb_arg;
++static __thread jmp_buf *cb_back;
+ 
+ int start_idle_thread(void *stack, jmp_buf *switch_buf)
+ {
+@@ -866,10 +868,10 @@ void initial_thread_cb_skas(void (*proc)(void *), void *arg)
+ 	cb_arg = arg;
+ 	cb_back = &here;
+ 
+-	block_signals_trace();
++	initial_jmpbuf_lock();
+ 	if (UML_SETJMP(&here) == 0)
+ 		UML_LONGJMP(&initial_jmpbuf, INIT_JMP_CALLBACK);
+-	unblock_signals_trace();
++	initial_jmpbuf_unlock();
+ 
+ 	cb_proc = NULL;
+ 	cb_arg = NULL;
+@@ -878,8 +880,9 @@ void initial_thread_cb_skas(void (*proc)(void *), void *arg)
+ 
+ void halt_skas(void)
+ {
+-	block_signals_trace();
++	initial_jmpbuf_lock();
+ 	UML_LONGJMP(&initial_jmpbuf, INIT_JMP_HALT);
++	/* unreachable */
+ }
+ 
+ static bool noreboot;
+@@ -899,6 +902,7 @@ __uml_setup("noreboot", noreboot_cmd_param,
+ 
+ void reboot_skas(void)
+ {
+-	block_signals_trace();
++	initial_jmpbuf_lock();
+ 	UML_LONGJMP(&initial_jmpbuf, noreboot ? INIT_JMP_HALT : INIT_JMP_REBOOT);
++	/* unreachable */
+ }
+diff --git a/arch/um/os-Linux/smp.c b/arch/um/os-Linux/smp.c
+new file mode 100644
+index 000000000000..18d3858a7cd2
+--- /dev/null
++++ b/arch/um/os-Linux/smp.c
+@@ -0,0 +1,148 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2025 Ant Group
++ * Author: Tiwei Bie <tiwei.btw@antgroup.com>
++ */
++
++#include <errno.h>
++#include <pthread.h>
++#include <signal.h>
++#include <kern_util.h>
++#include <um_malloc.h>
++#include <init.h>
++#include <os.h>
++#include <smp.h>
++#include "internal.h"
++
++struct cpu_thread_data {
++	int cpu;
++	sigset_t sigset;
++};
++
++static __thread int __curr_cpu;
++
++int uml_curr_cpu(void)
++{
++	return __curr_cpu;
++}
++
++static pthread_t cpu_threads[CONFIG_NR_CPUS];
++
++static void *cpu_thread(void *arg)
++{
++	struct cpu_thread_data *data = arg;
++
++	__curr_cpu = data->cpu;
++
++	uml_start_secondary(data);
++
++	return NULL;
++}
++
++int os_start_cpu_thread(int cpu)
++{
++	struct cpu_thread_data *data;
++	sigset_t sigset, oset;
++	int err;
++
++	data = uml_kmalloc(sizeof(*data), UM_GFP_ATOMIC);
++	if (!data)
++		return -ENOMEM;
++
++	sigfillset(&sigset);
++	if (sigprocmask(SIG_SETMASK, &sigset, &oset) < 0) {
++		err = errno;
++		goto err;
++	}
++
++	data->cpu = cpu;
++	data->sigset = oset;
++
++	err = pthread_create(&cpu_threads[cpu], NULL, cpu_thread, data);
++	if (sigprocmask(SIG_SETMASK, &oset, NULL) < 0)
++		panic("Failed to restore the signal mask, errno = %d", errno);
++	if (err != 0)
++		goto err;
++
++	return 0;
++
++err:
++	kfree(data);
++	return -err;
++}
++
++void os_start_secondary(void *arg, jmp_buf *switch_buf)
++{
++	struct cpu_thread_data *data = arg;
++
++	sigaddset(&data->sigset, IPI_SIGNAL);
++	sigaddset(&data->sigset, SIGIO);
++
++	if (sigprocmask(SIG_SETMASK, &data->sigset, NULL) < 0)
++		panic("Failed to restore the signal mask, errno = %d", errno);
++
++	kfree(data);
++	longjmp(*switch_buf, 1);
++
++	/* unreachable */
++	printk(UM_KERN_ERR "impossible long jump!");
++	fatal_sigsegv();
++}
++
++int os_send_ipi(int cpu, int vector)
++{
++	union sigval value = { .sival_int = vector };
++
++	return pthread_sigqueue(cpu_threads[cpu], IPI_SIGNAL, value);
++}
++
++static void __local_ipi_set(int enable)
++{
++	sigset_t sigset;
++
++	sigemptyset(&sigset);
++	sigaddset(&sigset, IPI_SIGNAL);
++
++	if (sigprocmask(enable ? SIG_UNBLOCK : SIG_BLOCK, &sigset, NULL) < 0)
++		panic("%s: sigprocmask failed, errno = %d", __func__, errno);
++}
++
++void os_local_ipi_enable(void)
++{
++	__local_ipi_set(1);
++}
++
++void os_local_ipi_disable(void)
++{
++	__local_ipi_set(0);
++}
++
++static void ipi_sig_handler(int sig, siginfo_t *si, void *uc)
++{
++	int save_errno = errno;
++
++	signals_enabled = 0;
++	um_trace_signals_off();
++
++	uml_ipi_handler(si->si_value.sival_int);
++
++	um_trace_signals_on();
++	signals_enabled = 1;
++
++	errno = save_errno;
++}
++
++void __init os_init_smp(void)
++{
++	struct sigaction action = {
++		.sa_sigaction = ipi_sig_handler,
++		.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART,
++	};
++
++	sigfillset(&action.sa_mask);
++
++	if (sigaction(IPI_SIGNAL, &action, NULL) < 0)
++		panic("%s: sigaction failed, errno = %d", __func__, errno);
++
++	cpu_threads[0] = pthread_self();
++}
+diff --git a/arch/um/os-Linux/start_up.c b/arch/um/os-Linux/start_up.c
+index a827c2e01aa5..054ac03bbf5e 100644
+--- a/arch/um/os-Linux/start_up.c
++++ b/arch/um/os-Linux/start_up.c
+@@ -22,6 +22,7 @@
+ #include <asm/unistd.h>
+ #include <init.h>
+ #include <os.h>
++#include <smp.h>
+ #include <kern_util.h>
+ #include <mem_user.h>
+ #include <ptrace_user.h>
+@@ -481,6 +482,9 @@ void __init os_early_checks(void)
+ 			fatal("SECCOMP userspace requested but not functional!\n");
+ 	}
+ 
++	if (uml_ncpus > 1)
++		fatal("SMP is not supported with PTRACE userspace.\n");
++
+ 	using_seccomp = 0;
+ 	check_ptrace();
+ 
+@@ -489,53 +493,3 @@ void __init os_early_checks(void)
+ 		fatal("Failed to initialize default registers");
+ 	stop_ptraced_child(pid, 1);
+ }
+-
+-int __init parse_iomem(char *str, int *add)
+-{
+-	struct iomem_region *new;
+-	struct stat64 buf;
+-	char *file, *driver;
+-	int fd, size;
+-
+-	driver = str;
+-	file = strchr(str,',');
+-	if (file == NULL) {
+-		os_warn("parse_iomem : failed to parse iomem\n");
+-		goto out;
+-	}
+-	*file = '\0';
+-	file++;
+-	fd = open(file, O_RDWR, 0);
+-	if (fd < 0) {
+-		perror("parse_iomem - Couldn't open io file");
+-		goto out;
+-	}
+-
+-	if (fstat64(fd, &buf) < 0) {
+-		perror("parse_iomem - cannot stat_fd file");
+-		goto out_close;
+-	}
+-
+-	new = malloc(sizeof(*new));
+-	if (new == NULL) {
+-		perror("Couldn't allocate iomem_region struct");
+-		goto out_close;
+-	}
+-
+-	size = (buf.st_size + UM_KERN_PAGE_SIZE) & ~(UM_KERN_PAGE_SIZE - 1);
+-
+-	*new = ((struct iomem_region) { .next		= iomem_regions,
+-					.driver		= driver,
+-					.fd		= fd,
+-					.size		= size,
+-					.phys		= 0,
+-					.virt		= 0 });
+-	iomem_regions = new;
+-	iomem_size += new->size + UM_KERN_PAGE_SIZE;
+-
+-	return 0;
+- out_close:
+-	close(fd);
+- out:
+-	return 1;
+-}
+diff --git a/arch/um/os-Linux/time.c b/arch/um/os-Linux/time.c
+index 4d5591d96d8c..13ebc86918d4 100644
+--- a/arch/um/os-Linux/time.c
++++ b/arch/um/os-Linux/time.c
+@@ -11,12 +11,15 @@
+ #include <errno.h>
+ #include <signal.h>
+ #include <time.h>
++#include <sys/signalfd.h>
+ #include <sys/time.h>
+ #include <kern_util.h>
+ #include <os.h>
++#include <smp.h>
+ #include <string.h>
++#include "internal.h"
+ 
+-static timer_t event_high_res_timer = 0;
++static timer_t event_high_res_timer[CONFIG_NR_CPUS] = { 0 };
+ 
+ static inline long long timespec_to_ns(const struct timespec *ts)
+ {
+@@ -31,20 +34,31 @@ long long os_persistent_clock_emulation(void)
+ 	return timespec_to_ns(&realtime_tp);
+ }
+ 
++#ifndef sigev_notify_thread_id
++#define sigev_notify_thread_id _sigev_un._tid
++#endif
++
+ /**
+  * os_timer_create() - create an new posix (interval) timer
+  */
+ int os_timer_create(void)
+ {
+-	timer_t *t = &event_high_res_timer;
++	int cpu = uml_curr_cpu();
++	timer_t *t = &event_high_res_timer[cpu];
++	struct sigevent sev = {
++		.sigev_notify = SIGEV_THREAD_ID,
++		.sigev_signo = SIGALRM,
++		.sigev_value.sival_ptr = t,
++		.sigev_notify_thread_id = gettid(),
++	};
+ 
+-	if (timer_create(CLOCK_MONOTONIC, NULL, t) == -1)
++	if (timer_create(CLOCK_MONOTONIC, &sev, t) == -1)
+ 		return -1;
+ 
+ 	return 0;
+ }
+ 
+-int os_timer_set_interval(unsigned long long nsecs)
++int os_timer_set_interval(int cpu, unsigned long long nsecs)
+ {
+ 	struct itimerspec its;
+ 
+@@ -54,13 +68,13 @@ int os_timer_set_interval(unsigned long long nsecs)
+ 	its.it_interval.tv_sec = nsecs / UM_NSEC_PER_SEC;
+ 	its.it_interval.tv_nsec = nsecs % UM_NSEC_PER_SEC;
+ 
+-	if (timer_settime(event_high_res_timer, 0, &its, NULL) == -1)
++	if (timer_settime(event_high_res_timer[cpu], 0, &its, NULL) == -1)
+ 		return -errno;
+ 
+ 	return 0;
+ }
+ 
+-int os_timer_one_shot(unsigned long long nsecs)
++int os_timer_one_shot(int cpu, unsigned long long nsecs)
+ {
+ 	struct itimerspec its = {
+ 		.it_value.tv_sec = nsecs / UM_NSEC_PER_SEC,
+@@ -70,19 +84,20 @@ int os_timer_one_shot(unsigned long long nsecs)
+ 		.it_interval.tv_nsec = 0, // we cheat here
+ 	};
+ 
+-	timer_settime(event_high_res_timer, 0, &its, NULL);
++	timer_settime(event_high_res_timer[cpu], 0, &its, NULL);
+ 	return 0;
+ }
+ 
+ /**
+  * os_timer_disable() - disable the posix (interval) timer
++ * @cpu: the CPU for which the timer is to be disabled
+  */
+-void os_timer_disable(void)
++void os_timer_disable(int cpu)
+ {
+ 	struct itimerspec its;
+ 
+ 	memset(&its, 0, sizeof(struct itimerspec));
+-	timer_settime(event_high_res_timer, 0, &its, NULL);
++	timer_settime(event_high_res_timer[cpu], 0, &its, NULL);
+ }
+ 
+ long long os_nsecs(void)
+@@ -93,23 +108,50 @@ long long os_nsecs(void)
+ 	return timespec_to_ns(&ts);
+ }
+ 
++static __thread int wake_signals;
++
++void os_idle_prepare(void)
++{
++	sigset_t set;
++
++	sigemptyset(&set);
++	sigaddset(&set, SIGALRM);
++	sigaddset(&set, IPI_SIGNAL);
++
++	/*
++	 * We need to use signalfd rather than sigsuspend in idle sleep
++	 * because the IPI signal is a real-time signal that carries data,
++	 * and unlike handling SIGALRM, we cannot simply flag it in
++	 * signals_pending.
++	 */
++	wake_signals = signalfd(-1, &set, SFD_CLOEXEC);
++	if (wake_signals < 0)
++		panic("Failed to create signal FD, errno = %d", errno);
++}
++
+ /**
+  * os_idle_sleep() - sleep until interrupted
+  */
+ void os_idle_sleep(void)
+ {
+-	struct itimerspec its;
+-	sigset_t set, old;
++	sigset_t set;
+ 
+-	/* block SIGALRM while we analyze the timer state */
++	/*
++	 * Block SIGALRM while performing the need_resched check.
++	 * Note that, because IRQs are disabled, the IPI signal is
++	 * already blocked.
++	 */
+ 	sigemptyset(&set);
+ 	sigaddset(&set, SIGALRM);
+-	sigprocmask(SIG_BLOCK, &set, &old);
++	sigprocmask(SIG_BLOCK, &set, NULL);
++
++	/*
++	 * Because disabling IRQs does not block SIGALRM, it is also
++	 * necessary to check for any pending timer alarms.
++	 */
++	if (!uml_need_resched() && !timer_alarm_pending())
++		os_poll(1, &wake_signals);
+ 
+-	/* check the timer, and if it'll fire then wait for it */
+-	timer_gettime(event_high_res_timer, &its);
+-	if (its.it_value.tv_sec || its.it_value.tv_nsec)
+-		sigsuspend(&old);
+-	/* either way, restore the signal mask */
++	/* Restore the signal mask. */
+ 	sigprocmask(SIG_UNBLOCK, &set, NULL);
+ }
+diff --git a/arch/x86/um/Kconfig b/arch/x86/um/Kconfig
+index 986045d5e638..c52fb5cb8d21 100644
+--- a/arch/x86/um/Kconfig
++++ b/arch/x86/um/Kconfig
+@@ -9,8 +9,11 @@ endmenu
+ config UML_X86
+ 	def_bool y
+ 	select ARCH_BINFMT_ELF_EXTRA_PHDRS if X86_32
++	select ARCH_USE_QUEUED_RWLOCKS
++	select ARCH_USE_QUEUED_SPINLOCKS
+ 	select DCACHE_WORD_ACCESS
+ 	select HAVE_EFFICIENT_UNALIGNED_ACCESS
++	select UML_SUBARCH_SUPPORTS_SMP if X86_CX8
+ 
+ config 64BIT
+ 	bool "64-bit kernel" if "$(SUBARCH)" = "x86"
+diff --git a/arch/x86/um/asm/spinlock.h b/arch/x86/um/asm/spinlock.h
+new file mode 100644
+index 000000000000..20fc77514214
+--- /dev/null
++++ b/arch/x86/um/asm/spinlock.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __ASM_UM_SPINLOCK_H
++#define __ASM_UM_SPINLOCK_H
++
++#include <asm/qspinlock.h>
++#include <asm/qrwlock.h>
++
++#endif /* __ASM_UM_SPINLOCK_H */
+diff --git a/arch/x86/um/shared/sysdep/kernel-offsets.h b/arch/x86/um/shared/sysdep/kernel-offsets.h
+deleted file mode 100644
+index 6fd1ed400399..000000000000
+--- a/arch/x86/um/shared/sysdep/kernel-offsets.h
++++ /dev/null
+@@ -1,17 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
+-#include <linux/stddef.h>
+-#include <linux/sched.h>
+-#include <linux/elf.h>
+-#include <linux/crypto.h>
+-#include <linux/kbuild.h>
+-#include <linux/audit.h>
+-#include <asm/mman.h>
+-#include <asm/seccomp.h>
+-
+-/* workaround for a warning with -Wmissing-prototypes */
+-void foo(void);
+-
+-void foo(void)
+-{
+-#include <common-offsets.h>
+-}
+diff --git a/arch/x86/um/vdso/um_vdso.c b/arch/x86/um/vdso/um_vdso.c
+index cbae2584124f..ca1468865b14 100644
+--- a/arch/x86/um/vdso/um_vdso.c
++++ b/arch/x86/um/vdso/um_vdso.c
+@@ -9,17 +9,11 @@
+ /* Disable profiling for userspace code */
+ #define DISABLE_BRANCH_PROFILING
+ 
++#include <vdso/gettime.h>
+ #include <linux/time.h>
+-#include <linux/getcpu.h>
+ #include <asm/unistd.h>
+ 
+-/* workaround for -Wmissing-prototypes warnings */
+-int __vdso_clock_gettime(clockid_t clock, struct __kernel_old_timespec *ts);
+-int __vdso_gettimeofday(struct __kernel_old_timeval *tv, struct timezone *tz);
+-__kernel_old_time_t __vdso_time(__kernel_old_time_t *t);
+-long __vdso_getcpu(unsigned int *cpu, unsigned int *node, struct getcpu_cache *unused);
+-
+-int __vdso_clock_gettime(clockid_t clock, struct __kernel_old_timespec *ts)
++int __vdso_clock_gettime(clockid_t clock, struct __kernel_timespec *ts)
+ {
+ 	long ret;
+ 
+@@ -30,7 +24,7 @@ int __vdso_clock_gettime(clockid_t clock, struct __kernel_old_timespec *ts)
+ 
+ 	return ret;
+ }
+-int clock_gettime(clockid_t, struct __kernel_old_timespec *)
++int clock_gettime(clockid_t, struct __kernel_timespec *)
+ 	__attribute__((weak, alias("__vdso_clock_gettime")));
+ 
+ int __vdso_gettimeofday(struct __kernel_old_timeval *tv, struct timezone *tz)
+@@ -58,21 +52,3 @@ __kernel_old_time_t __vdso_time(__kernel_old_time_t *t)
+ 	return secs;
+ }
+ __kernel_old_time_t time(__kernel_old_time_t *t) __attribute__((weak, alias("__vdso_time")));
+-
+-long
+-__vdso_getcpu(unsigned int *cpu, unsigned int *node, struct getcpu_cache *unused)
+-{
+-	/*
+-	 * UML does not support SMP, we can cheat here. :)
+-	 */
+-
+-	if (cpu)
+-		*cpu = 0;
+-	if (node)
+-		*node = 0;
+-
+-	return 0;
+-}
+-
+-long getcpu(unsigned int *cpu, unsigned int *node, struct getcpu_cache *tcache)
+-	__attribute__((weak, alias("__vdso_getcpu")));
+diff --git a/arch/x86/um/vdso/vdso.lds.S b/arch/x86/um/vdso/vdso.lds.S
+index 73c508587a98..401600effc0a 100644
+--- a/arch/x86/um/vdso/vdso.lds.S
++++ b/arch/x86/um/vdso/vdso.lds.S
+@@ -22,8 +22,6 @@ VERSION {
+ 		__vdso_clock_gettime;
+ 		gettimeofday;
+ 		__vdso_gettimeofday;
+-		getcpu;
+-		__vdso_getcpu;
+ 		time;
+ 		__vdso_time;
+ 	local: *;
+diff --git a/arch/x86/um/vdso/vma.c b/arch/x86/um/vdso/vma.c
+index dc8dfb2abd80..51a2b9f2eca9 100644
+--- a/arch/x86/um/vdso/vma.c
++++ b/arch/x86/um/vdso/vma.c
+@@ -10,7 +10,6 @@
+ #include <asm/elf.h>
+ #include <linux/init.h>
+ 
+-static unsigned int __read_mostly vdso_enabled = 1;
+ unsigned long um_vdso_addr;
+ static struct page *um_vdso;
+ 
+@@ -25,17 +24,11 @@ static int __init init_vdso(void)
+ 
+ 	um_vdso = alloc_page(GFP_KERNEL);
+ 	if (!um_vdso)
+-		goto oom;
++		panic("Cannot allocate vdso\n");
+ 
+ 	copy_page(page_address(um_vdso), vdso_start);
+ 
+ 	return 0;
+-
+-oom:
+-	printk(KERN_ERR "Cannot allocate vdso\n");
+-	vdso_enabled = 0;
+-
+-	return -ENOMEM;
+ }
+ subsys_initcall(init_vdso);
+ 
+@@ -48,9 +41,6 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+ 		.pages = &um_vdso,
+ 	};
+ 
+-	if (!vdso_enabled)
+-		return 0;
+-
+ 	if (mmap_write_lock_killable(mm))
+ 		return -EINTR;
+ 
+diff --git a/include/asm-generic/percpu.h b/include/asm-generic/percpu.h
+index 02aeca21479a..6628670bcb90 100644
+--- a/include/asm-generic/percpu.h
++++ b/include/asm-generic/percpu.h
+@@ -2,6 +2,8 @@
+ #ifndef _ASM_GENERIC_PERCPU_H_
+ #define _ASM_GENERIC_PERCPU_H_
+ 
++#ifndef __ASSEMBLER__
++
+ #include <linux/compiler.h>
+ #include <linux/threads.h>
+ #include <linux/percpu-defs.h>
+@@ -557,4 +559,5 @@ do {									\
+ 	this_cpu_generic_cmpxchg(pcp, oval, nval)
+ #endif
+ 
++#endif /* __ASSEMBLER__ */
+ #endif /* _ASM_GENERIC_PERCPU_H_ */
