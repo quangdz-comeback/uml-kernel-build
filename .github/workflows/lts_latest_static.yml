@@ -1,0 +1,160 @@
+name: "UML Kernel — LTS latest STATIC (no libc dependency)"
+
+# Same kernel as lts_latest.yml (newest LTS, currently 6.18.x) but linked
+# FULLY STATIC so the resulting `linux` binary has zero runtime .so
+# dependency and runs on any same-arch host -- glibc distros (Debian/Ubuntu)
+# AND musl distros (Alpine). VECTOR networking is kept.
+#
+# How: apply patches/vector-static-link.patch (VECTOR does not dlopen any
+# host library, so the MAY_HAVE_RUNTIME_DEPS guard is dropped), then enable
+# CONFIG_STATIC_LINK which embeds glibc statically into the binary.
+#
+# Use with: vec0:transport=vde,vnl=slirp://
+# (requires vde2 + libvdeplug-slirp on the host -- those are external
+#  helper processes, not linked into the kernel binary)
+
+on:
+  schedule:
+    - cron: '0 12 * * 1'          # every Monday
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential libncurses-dev flex bison \
+            libssl-dev libelf-dev bc dwarves wget curl jq tar xz-utils
+
+      - name: Pick newest LTS (excluding 6.12 — that's the oldstable workflow)
+        run: |
+          KVER=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
+            sort -V | tail -1)
+          MAJOR=$(echo "$KVER" | cut -d. -f1)
+          MINOR=$(echo "$KVER" | cut -d. -f2)
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          echo "KMAJOR=$MAJOR" >> "$GITHUB_ENV"
+          echo "KMINOR=$MINOR" >> "$GITHUB_ENV"
+          echo "[+] Selected $KVER"
+
+      - name: Download & extract
+        run: |
+          # cdn.kernel.org tarballs are flaky (404s); clone the tag directly.
+          git clone --depth 1 --branch "v${{ env.KVER }}" \
+            "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git" \
+            "linux-${{ env.KVER }}"
+
+      - name: Apply bundled UML patches
+        run: |
+          cd linux-${{ env.KVER }}
+          shopt -s nullglob
+          for p in ../patches/*.patch; do
+            echo "[+] Applying $(basename "$p")"
+            if git apply -v "$p"; then
+              :
+            elif patch -p1 --fuzz=3 < "$p"; then
+              echo "::warning::Applied $(basename "$p") with fuzz via patch(1)"
+            else
+              echo "::warning::$(basename "$p") did not apply cleanly, skipping"
+            fi
+          done
+
+      - name: Apply UML SMP support
+        run: |
+          cd linux-${{ env.KVER }}
+          bash ../patches/apply-smp.sh ../patches
+
+      - name: Patch UML (unwind_user.h)
+        run: |
+          cd linux-${{ env.KVER }}
+          if [ -f arch/x86/include/asm/unwind_user.h ] && \
+             ! grep -q unwind_user arch/um/include/asm/Kbuild 2>/dev/null; then
+            echo 'generic-y += unwind_user.h' >> arch/um/include/asm/Kbuild
+            echo "[+] Patched unwind_user.h"
+          fi
+
+      - name: Configure & build (STATIC)
+        run: |
+          cd linux-${{ env.KVER }}
+          make ARCH=um defconfig
+
+          # --- common options ---
+          scripts/config --file .config \
+            -e BLK_DEV -e BLK_DEV_LOOP -e BLK_DEV_UBD \
+            -e EXT4_FS -e EXT2_FS -e EXT3_FS -e FS_MBCACHE \
+            -e NET -e INET -e PACKET -e NETDEVICES -e NET_CORE -e TUN \
+            -e TTY -e UNIX98_PTYS -e DEVTMPFS -e DEVTMPFS_MOUNT \
+            -e TMPFS -e TMPFS_POSIX_ACL -e TMPFS_XATTR \
+            -e PROC_FS -e SYSFS -e FHANDLE \
+            -e SIGNALFD -e TIMERFD -e EPOLL -e EVENTFD \
+            -e BLK_DEV_INITRD -e OVERLAY_FS \
+            -e CGROUPS -e CGROUP_SCHED \
+            -e NAMESPACES -e UTS_NS -e IPC_NS -e PID_NS -e NET_NS \
+            -e DEVPTS_FS -e PTY \
+            -d AUDIT -d AUTOFS_FS -d AUTOFS4_FS \
+            -e NETFILTER -e NF_CONNTRACK -e NF_NAT \
+            -e IP_FORWARD -e IP_MULTICAST -e IP_ADVANCED_ROUTER \
+            -e IKCONFIG -e IKCONFIG_PROC -e CONFIG_IPV6 \
+            -e SMP --set-val NR_CPUS 64
+
+          # --- network transport ---
+          MAJOR=${{ env.KMAJOR }}; MINOR=${{ env.KMINOR }}
+          if [ "$MAJOR" -gt 6 ] || { [ "$MAJOR" -eq 6 ] && [ "$MINOR" -ge 16 ]; }; then
+            echo "[+] >= 6.16 → VECTOR transport (static-compatible)"
+            scripts/config --file .config -e UML_NET_VECTOR
+          else
+            echo "[+] < 6.16 → SLIRP transport (fallback)"
+            scripts/config --file .config \
+              -e SLHC -e SLIP -e SLIP_COMPRESSED -e SLIP_SMART -e SLIP_MODE_SLIP6 \
+              -e UML_NET -e UML_NET_SLIRP -d UML_NET_DAEMON
+          fi
+
+          # --- STATIC LINK: embed glibc into the binary ---
+          # Requires vector-static-link.patch (already applied above) to drop
+          # the false MAY_HAVE_RUNTIME_DEPS guard so VECTOR + STATIC coexist.
+          scripts/config --file .config -e STATIC_LINK
+
+          # Merge container config (Docker/Podman/LXC, cgroup v2)
+          ./scripts/kconfig/merge_config.sh -m -O . .config ../patches/containers.config >/dev/null
+
+          make ARCH=um olddefconfig
+
+          echo "=== verify static config survived ==="
+          grep -E '^CONFIG_STATIC_LINK=|^CONFIG_LD_SCRIPT_STATIC=|^CONFIG_UML_NET_VECTOR=' .config
+
+          make ARCH=um -j"$(nproc)"
+
+      - name: Verify static & strip
+        run: |
+          cp linux-${{ env.KVER }}/linux ./linux-uml
+
+          echo "=== file type ==="
+          file ./linux-uml
+          echo "=== ldd ==="
+          ldd ./linux-uml 2>&1 || true
+          echo "=== dynamic section (must be empty) ==="
+          readelf -d ./linux-uml 2>/dev/null | grep -i 'NEEDED' && {
+            echo "::error::Binary is NOT fully static (has NEEDED entries)"
+            exit 1
+          } || echo "[+] Fully static: no NEEDED .so entries"
+
+          strip ./linux-uml
+
+          TRANSPORT="VECTOR"
+          MAJOR=${{ env.KMAJOR }}; MINOR=${{ env.KMINOR }}
+          if [ "$MAJOR" -lt 6 ] || { [ "$MAJOR" -eq 6 ] && [ "$MINOR" -lt 16 ]; }; then
+            TRANSPORT="SLIRP"
+          fi
+          echo "${{ env.KVER }} ($TRANSPORT, static)" > VERSION
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-uml-lts-latest-static
+          path: |
+            linux-uml
+            VERSION

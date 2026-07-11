@@ -1,0 +1,40 @@
+From: UML static-link enablement
+Subject: [PATCH] um: vector: drop false MAY_HAVE_RUNTIME_DEPS select
+
+The UML_NET_VECTOR driver is marked `select MAY_HAVE_RUNTIME_DEPS`,
+which forces CONFIG_STATIC_LINK off. The intent of that guard is to
+prevent a static binary that secretly dlopen()s a host shared library
+(such a binary could never work without the host .so).
+
+VECTOR does not do this. Inspection of arch/um/drivers/vector_user.c and
+vector_transports.c shows:
+
+  * tap / raw / unix / fd / hybrid transports use only raw syscalls
+    (socket, ioctl(TUNSETIFF), epoll, sendmmsg, ...);
+  * the `vde` transport does NOT link libvdeplug and does NOT dlopen it --
+    it spawns the external `vde_plug` helper via run_helper() and talks to
+    it over an AF_UNIX socketpair, so no host .so is embedded or required;
+  * the only libc surface beyond plain syscalls is getaddrinfo(), which in
+    a static glibc build is resolved at link time (files + dns backends
+    compiled in) and never dlopen()s NSS modules.
+
+Therefore a fully-static UML+VECTOR binary has zero runtime .so
+requirement and runs on any same-arch host (glibc or musl/Alpine).
+
+Drop the bogus select so STATIC_LINK and UML_NET_VECTOR can coexist.
+
+Signed-off-by: quangdz-comeback <204571370+quangdz-comeback@users.noreply.github.com>
+---
+
+diff --git a/arch/um/drivers/Kconfig b/arch/um/drivers/Kconfig
+index 6a0354ca0..0a86b4f95 100644
+--- a/arch/um/drivers/Kconfig
++++ b/arch/um/drivers/Kconfig
+@@ -126,7 +126,6 @@ menu "UML Network Devices"
+ 
+ config UML_NET_VECTOR
+ 	bool "Vector I/O high performance network devices"
+-	select MAY_HAVE_RUNTIME_DEPS
+ 	help
+ 	  This User-Mode Linux network driver uses multi-message send
+ 	  and receive functions. The host running the UML guest must have
