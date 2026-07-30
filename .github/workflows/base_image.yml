@@ -216,10 +216,11 @@ jobs:
         run: |
           cp --sparse=always base.img base-sparse.img
           mv -f base-sparse.img base.img
-          gzip -9 -c base.img > base-${{ matrix.distro }}-${{ matrix.release }}.img.gz
+          OUT=base-${{ matrix.distro }}-${{ matrix.release }}.img.gz
+          gzip -6 -c base.img > "$OUT"
           echo "$(date -u +%Y-%m-%d) distro=${{ matrix.distro }} release=${{ matrix.release }} rootfs=${{ env.SERIAL }}" \
             > VERSION
-          ls -lh base.img.gz VERSION
+          ls -lh "$OUT" VERSION
 
       - uses: actions/upload-artifact@v6
         with:
