@@ -1,0 +1,183 @@
+name: "UML Base Image (Ubuntu Noble, VECTOR/VDE)"
+
+# Rebuilds the UML rootfs image from a clean linuxcontainers.org Ubuntu
+# Noble (24.04) rootfs.  Targets the VECTOR/VDE transport exclusively —
+# legacy SLIRP (UML_NET_SLIRP / eth0 SLIP) is deprecated.
+#
+# Networking is standardised on netplan → systemd-networkd, replacing the
+# old custom uml-net.sh / uml-net.service.  The interface vec0 gets a
+# static 10.0.2.15/24 address (slirp NAT defaults) automatically.
+#
+# Artifacts:
+#   base.img.gz — raw ext4 image, gzip-compressed (gunzip → use as ubd0)
+#   VERSION     — build date + rootfs serial
+#
+# Runs every Monday + manual trigger.
+
+on:
+  schedule:
+    - cron: '0 13 * * 1'          # every Monday, 1h after kernel builds
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y wget xz-utils e2fsprogs
+
+      - name: Download Ubuntu Noble rootfs
+        run: |
+          URL_PATH=$(curl -s http://images.linuxcontainers.org/meta/1.0/index-system \
+            | grep -v edge | grep default \
+            | awk '-F;' '(($1=="ubuntu") && ($2=="noble") && ($3=="amd64")) {print $NF}')
+          wget -O ubuntu-noble.tar.xz \
+            "http://images.linuxcontainers.org${URL_PATH}rootfs.tar.xz"
+          echo "Rootfs: ${URL_PATH}rootfs.tar.xz"
+          sha256sum ubuntu-noble.tar.xz
+          SERIAL=$(echo "$URL_PATH" | grep -oE '[0-9]{8}_[0-9]{2}:[0-9]{2}')
+          echo "SERIAL=$SERIAL" >> "$GITHUB_ENV"
+
+      - name: Create ext4 image
+        run: |
+          dd if=/dev/zero of=base.img bs=1M count=1024 status=progress
+          mkfs.ext4 -F -L rootfs base.img
+
+      - name: Populate rootfs
+        run: |
+          sudo mkdir /mnt/rootfs
+          sudo mount -o loop base.img /mnt/rootfs
+          sudo tar -xf ubuntu-noble.tar.xz -C /mnt/rootfs
+
+      - name: Install packages
+        run: |
+          sudo mount -t proc proc /mnt/rootfs/proc
+          sudo mount -t sysfs sysfs /mnt/rootfs/sys
+          sudo mount --bind /dev /mnt/rootfs/dev
+          sudo rm -f /mnt/rootfs/etc/resolv.conf
+          echo 'nameserver 1.1.1.1' | sudo tee /mnt/rootfs/etc/resolv.conf
+
+          sudo chroot /mnt/rootfs apt-get update
+          sudo chroot /mnt/rootfs apt-get install -y --no-install-recommends \
+            openssh-server iproute2 iputils-ping
+
+          sudo umount /mnt/rootfs/dev
+          sudo umount /mnt/rootfs/sys
+          sudo umount /mnt/rootfs/proc
+
+      - name: Configure system
+        run: |
+          # root password
+          sudo chroot /mnt/rootfs bash -c 'echo "root:root" | chpasswd'
+
+          # hostname
+          echo 'uml' | sudo tee /mnt/rootfs/etc/hostname
+          sudo tee /mnt/rootfs/etc/hosts >/dev/null <<'HOSTS'
+          127.0.0.1   localhost localhost.localdomain
+          127.0.1.1   uml
+          HOSTS
+
+          # getty on tty0 (console login)
+          sudo ln -sf /lib/systemd/system/getty@.service \
+            /mnt/rootfs/etc/systemd/system/getty.target.wants/getty@tty0.service
+
+          # fstab (UML block device)
+          sudo tee /mnt/rootfs/etc/fstab >/dev/null <<'FSTAB'
+          /dev/ubda   /       ext4    defaults    0 1
+          proc        /proc   proc    defaults    0 0
+          sysfs       /sys    sysfs   defaults    0 0
+          tmpfs       /run    tmpfs   nosuid,nodev,size=50%,mode=755  0 0
+          FSTAB
+
+          # SSH host-key regeneration on first boot
+          sudo cp rootfs/ssh-keygen.service /mnt/rootfs/etc/systemd/system/
+          sudo chroot /mnt/rootfs systemctl enable ssh-keygen
+          sudo chroot /mnt/rootfs systemctl enable ssh
+
+          # sysprep (image generalisation)
+          sudo cp rootfs/sysprep /mnt/rootfs/usr/bin/sysprep
+          sudo chmod +x /mnt/rootfs/usr/bin/sysprep
+
+      - name: Configure networking (netplan → systemd-networkd)
+        run: |
+          # Remove LXC default netplan (eth0 DHCP) — VECTOR-only.
+          sudo rm -f /mnt/rootfs/etc/netplan/10-lxc.yaml
+
+          sudo tee /mnt/rootfs/etc/netplan/01-vec0.yaml >/dev/null <<'NETPLAN'
+          # UML VECTOR/VDE network — auto-configured via netplan.
+          # Legacy SLIRP (eth0 SLIP) is deprecated; use vec0 only.
+          network:
+            version: 2
+            renderer: networkd
+            ethernets:
+              vec0:
+                match:
+                  name: vec0
+                addresses:
+                  - 10.0.2.15/24
+                routes:
+                  - to: default
+                    via: 10.0.2.2
+                nameservers:
+                  addresses:
+                    - 10.0.2.3
+          NETPLAN
+          sudo chmod 600 /mnt/rootfs/etc/netplan/01-vec0.yaml
+
+          # Enable network services
+          sudo chroot /mnt/rootfs systemctl enable systemd-networkd
+          sudo chroot /mnt/rootfs systemctl enable systemd-resolved
+
+          # resolv.conf → resolved stub
+          sudo rm -f /mnt/rootfs/etc/resolv.conf
+          sudo ln -sf /run/systemd/resolve/stub-resolv.conf \
+            /mnt/rootfs/etc/resolv.conf
+
+          # Don't wait for network at boot
+          sudo chroot /mnt/rootfs systemctl disable \
+            systemd-networkd-wait-online.service 2>/dev/null || true
+
+          # Mask cloud-init (fights with netplan)
+          sudo chroot /mnt/rootfs systemctl mask cloud-init.service 2>/dev/null || true
+
+      - name: Sysprep & finalise
+        run: |
+          # Empty machine-id → regenerated on first boot
+          sudo rm -f /mnt/rootfs/etc/machine-id
+          sudo touch /mnt/rootfs/etc/machine-id
+
+          # APT cleanup
+          sudo chroot /mnt/rootfs apt-get clean
+          sudo rm -rf /mnt/rootfs/var/lib/apt/lists/*
+
+          # Remove SSH host keys (regenerated by ssh-keygen.service)
+          sudo rm -f /mnt/rootfs/etc/ssh/ssh_host_*
+
+          # Clear logs
+          sudo find /mnt/rootfs/var/log -type f -exec sudo truncate -s 0 {} \;
+
+          # Zero-fill free space for compressibility
+          sudo dd if=/dev/zero of=/mnt/rootfs/ZERO bs=1M status=none || true
+          sudo rm -f /mnt/rootfs/ZERO
+          sudo sync
+          sudo umount /mnt/rootfs
+
+      - name: Sparsify & compress
+        run: |
+          cp --sparse=always base.img base-sparse.img
+          mv -f base-sparse.img base.img
+          gzip -9 -c base.img > base.img.gz
+          echo "$(date -u +%Y-%m-%d) rootfs=${{ env.SERIAL }}" > VERSION
+          ls -lh base.img base.img.gz VERSION
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: uml-base-image
+          path: |
+            base.img.gz
+            VERSION
+          retention-days: 30
