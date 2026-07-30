@@ -18,19 +18,27 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - distro: ubuntu
             release: noble
+          - distro: ubuntu
+            release: resolute
           - distro: debian
             release: bookworm
+          - distro: debian
+            release: trixie
           - distro: rockylinux
             release: "9"
+          - distro: rockylinux
+            release: "10"
           - distro: almalinux
             release: "9"
+          - distro: almalinux
+            release: "10"
 
     steps:
       - uses: actions/checkout@v6
