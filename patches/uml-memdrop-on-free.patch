@@ -14,7 +14,7 @@ index 6f54254aa..67991e120 100644
  typedef struct { unsigned long pgd; } pgd_t;
  
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..7b4a4a14a 100644
+index 32e3b1972..51836d94b 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
 @@ -22,6 +22,10 @@
@@ -28,26 +28,24 @@ index 32e3b1972..7b4a4a14a 100644
  
  #ifdef CONFIG_KASAN
  void __init kasan_init(void)
-@@ -57,6 +61,163 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -57,6 +61,178 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
 +/*
 + * memdrop: return free guest physmem to the host via MADV_REMOVE.
 + *
-+ * Punching a just-freed virtual address later races with reallocation.
-+ * Isolating a random free page punches the wrong pages (cold freelist
-+ * instead of the dirty high-water mark).
++ * Enqueue freed PFNs on the free path (no host syscall). Worker drains
++ * PCPs, then alloc_contig_range() — success means the page is still free
++ * and exclusively held — MADV_REMOVE, free_contig_range().
 + *
-+ * Correct path: enqueue the freed PFN. Worker runs alloc_contig_range on
-+ * that PFN; success means the page is still free and exclusively held, so
-+ * MADV_REMOVE is safe. free_contig_range returns it to the freelist with
-+ * host backing gone. Requires CONFIG_CONTIG_ALLOC.
++ * free_contig_range must not re-enqueue (per-CPU worker guard).
 + *
 + * Default batch: flush when pending >= 1MiB or after ~100ms.
 + */
-+#define MEMDROP_MAX_RANGES	512
++#define MEMDROP_MAX_RANGES	2048
 +#define MEMDROP_BATCH_PAGES	(1UL << (20 - PAGE_SHIFT)) /* 1 MiB */
++#define MEMDROP_MAX_PER_RUN	(16UL << (20 - PAGE_SHIFT)) /* 16 MiB */
 +#define MEMDROP_DELAY		(HZ / 10)		  /* 100 ms */
 +
 +struct memdrop_range {
@@ -62,6 +60,7 @@ index 32e3b1972..7b4a4a14a 100644
 +static unsigned int memdrop_head, memdrop_tail, memdrop_count;
 +static unsigned long memdrop_pending_pages;
 +static DEFINE_SPINLOCK(memdrop_lock);
++static DEFINE_PER_CPU(int, memdrop_in_worker);
 +
 +static void memdrop_work_fn(struct work_struct *work);
 +static DECLARE_DELAYED_WORK(memdrop_dwork, memdrop_work_fn);
@@ -97,11 +96,17 @@ index 32e3b1972..7b4a4a14a 100644
 +{
 +	struct memdrop_range r;
 +	unsigned int handled = 0;
++	unsigned int ok_pages = 0, fail_iso = 0;
 +
 +	if (!memdrop_mode)
 +		return;
 +
-+	while (handled < MEMDROP_BATCH_PAGES && memdrop_dequeue(&r)) {
++	/* Make recently-freed pages visible to the buddy/contig path. */
++	drain_all_pages(NULL);
++
++	this_cpu_inc(memdrop_in_worker);
++
++	while (handled < MEMDROP_MAX_PER_RUN && memdrop_dequeue(&r)) {
 +		unsigned long start = r.pfn;
 +		unsigned long end = r.pfn + r.nr;
 +		int err;
@@ -111,12 +116,14 @@ index 32e3b1972..7b4a4a14a 100644
 +					 GFP_KERNEL | __GFP_NOWARN |
 +					 __GFP_NORETRY);
 +		if (err) {
++			fail_iso += r.nr;
 +			handled += r.nr;
 +			continue;
 +		}
 +
 +		err = os_drop_memory(page_address(pfn_to_page(start)),
 +				     r.nr << PAGE_SHIFT);
++		/* Return without re-crediting (memdrop_in_worker set). */
 +		free_contig_range(start, r.nr);
 +
 +		if (unlikely(err)) {
@@ -126,12 +133,20 @@ index 32e3b1972..7b4a4a14a 100644
 +			memdrop_mode = 0;
 +			break;
 +		}
++		ok_pages += r.nr;
 +#else
 +		(void)start;
 +		(void)end;
++		fail_iso += r.nr;
 +#endif
 +		handled += r.nr;
 +	}
++
++	this_cpu_dec(memdrop_in_worker);
++
++	if (ok_pages || fail_iso)
++		pr_debug("memdrop: punched %u pages, isolate-miss %u\n",
++			 ok_pages, fail_iso);
 +
 +	if (memdrop_mode) {
 +		unsigned long flags;
@@ -192,7 +207,7 @@ index 32e3b1972..7b4a4a14a 100644
  /* Used during early boot */
  static unsigned long brk_end;
  
-@@ -84,6 +245,58 @@ void __init mem_init(void)
+@@ -84,6 +260,60 @@ void __init mem_init(void)
  	kmalloc_ok = 1;
  }
  
@@ -217,6 +232,8 @@ index 32e3b1972..7b4a4a14a 100644
 +void arch_free_page(struct page *page, int order)
 +{
 +	if (!memdrop_mode || !memdrop_ready)
++		return;
++	if (this_cpu_read(memdrop_in_worker))
 +		return;
 +
 +	memdrop_enqueue(page_to_pfn(page), 1U << order);
