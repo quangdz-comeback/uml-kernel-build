@@ -30,7 +30,7 @@
 #include <init.h>
 #include <os.h>
 #include <as-layout.h>
-#include "mconsole_kern.h"
+#include "../drivers/mconsole_kern.h"
 #include "uml_balloon.h"
 
 /* ---- policy defaults (bytes) — keep in sync with balloon/src/policy.py ---- */

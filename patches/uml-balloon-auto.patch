@@ -1,27 +1,6 @@
-diff --git a/arch/um/drivers/Makefile b/arch/um/drivers/Makefile
---- a/arch/um/drivers/Makefile	2026-07-31 02:02:29.663120673 +0000
-+++ b/arch/um/drivers/Makefile	2026-07-31 02:02:29.663120673 +0000
-@@ -7,7 +7,7 @@
- # in to pcap.o
- 
- vector-objs := vector_kern.o vector_user.o vector_transports.o
--mconsole-objs := mconsole_kern.o mconsole_user.o
-+mconsole-objs := mconsole_kern.o mconsole_user.o uml_balloon.o
- hostaudio-objs := hostaudio_kern.o
- ubd-objs := ubd_kern.o ubd_user.o
- port-objs := port_kern.o port_user.o
-@@ -23,7 +23,7 @@
- # When the above is fixed, don't forget to add this too!
- #targets += $(obj)/pcap.o
- 
--obj-y := stdio_console.o fd.o chan_kern.o chan_user.o line.o
-+obj-y := stdio_console.o fd.o chan_kern.o chan_user.o line.o uml_balloon.o
- obj-$(CONFIG_SSL) += ssl.o
- obj-$(CONFIG_STDERR_CONSOLE) += stderr_console.o
- 
 diff --git a/arch/um/drivers/mconsole_kern.c b/arch/um/drivers/mconsole_kern.c
---- a/arch/um/drivers/mconsole_kern.c	2026-07-31 02:02:29.663120673 +0000
-+++ b/arch/um/drivers/mconsole_kern.c	2026-07-31 02:02:29.663120673 +0000
+--- a/arch/um/drivers/mconsole_kern.c	2026-07-31 02:17:38.765588295 +0000
++++ b/arch/um/drivers/mconsole_kern.c	2026-07-31 02:17:38.765588295 +0000
 @@ -274,156 +274,7 @@
  	return NULL;
  }
@@ -176,14 +155,26 @@ diff --git a/arch/um/drivers/mconsole_kern.c b/arch/um/drivers/mconsole_kern.c
 -}
 -
 -__initcall(mem_mc_init);
-+/* Memory hotplug / balloon moved to uml_balloon.c (auto-balloon + mconsole mem=). */
++/* Memory hotplug / balloon moved to arch/um/kernel/uml_balloon.c (auto-balloon + mconsole mem=). */
  
  #define CONFIG_BUF_SIZE 64
  
-diff --git a/arch/um/drivers/uml_balloon.c b/arch/um/drivers/uml_balloon.c
+diff --git a/arch/um/kernel/Makefile b/arch/um/kernel/Makefile
+--- a/arch/um/kernel/Makefile	2026-07-31 02:17:38.985592110 +0000
++++ b/arch/um/kernel/Makefile	2026-07-31 02:17:38.985592110 +0000
+@@ -18,7 +18,7 @@
+ 	physmem.o process.o ptrace.o reboot.o sigio.o \
+ 	signal.o sysrq.o time.o tlb.o trap.o \
+ 	um_arch.o umid.o kmsg_dump.o capflags.o skas/
+-obj-y += load_file.o
++obj-y += load_file.o uml_balloon.o
+ 
+ obj-$(CONFIG_BLK_DEV_INITRD) += initrd.o
+ obj-$(CONFIG_GPROF)	+= gprof_syms.o
+diff --git a/arch/um/kernel/uml_balloon.c b/arch/um/kernel/uml_balloon.c
 new file mode 100644
 --- /dev/null
-+++ b/arch/um/drivers/uml_balloon.c	2026-07-31 02:02:29.663120673 +0000
++++ b/arch/um/kernel/uml_balloon.c	2026-07-31 02:17:38.765588295 +0000
 @@ -0,0 +1,556 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -217,7 +208,7 @@ new file mode 100644
 +#include <init.h>
 +#include <os.h>
 +#include <as-layout.h>
-+#include "mconsole_kern.h"
++#include "../drivers/mconsole_kern.h"
 +#include "uml_balloon.h"
 +
 +/* ---- policy defaults (bytes) — keep in sync with balloon/src/policy.py ---- */
@@ -741,10 +732,10 @@ new file mode 100644
 +	return 0;
 +}
 +__initcall(uml_balloon_init);
-diff --git a/arch/um/drivers/uml_balloon.h b/arch/um/drivers/uml_balloon.h
+diff --git a/arch/um/kernel/uml_balloon.h b/arch/um/kernel/uml_balloon.h
 new file mode 100644
 --- /dev/null
-+++ b/arch/um/drivers/uml_balloon.h	2026-07-31 02:02:29.663120673 +0000
++++ b/arch/um/kernel/uml_balloon.h	2026-07-31 02:17:38.765588295 +0000
 @@ -0,0 +1,24 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
