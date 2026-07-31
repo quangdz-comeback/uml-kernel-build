@@ -122,9 +122,8 @@ jobs:
           # Merge container config (Docker/Podman/LXC, cgroup v2)
           ./scripts/kconfig/merge_config.sh -m -O . .config ../patches/containers.config >/dev/null
 
-          # memdrop needs contig isolation
-          scripts/config --file .config -e COMPACTION -e MIGRATION -e CMA
-          scripts/config --file .config -e CONTIG_ALLOC 2>/dev/null || true
+          # memdrop via page_reporting
+          scripts/config --file .config -e PAGE_REPORTING
 
           make ARCH=um olddefconfig
 

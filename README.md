@@ -112,32 +112,27 @@ at a plain on-disk directory (verified: guest memory shows as
 `memfd` stops host writeback, but host RSS still tracks the guest high-water
 mark because physmem is one long `MAP_SHARED` mapping.
 
-This patch hooks `arch_free_page` and returns **still-free** pages to the host
-with `MADV_REMOVE`, without a balloon driver.
+This patch registers UML with the kernel **PAGE_REPORTING** framework (same
+machinery virtio free-page reporting uses). When enough free buddy pages of
+a given order accumulate, mm isolates them (they cannot be allocated), calls
+our reporter which `MADV_REMOVE`s the host backing, then returns them to the
+freelist. Guest free-count is unchanged; host RSS shrinks; next touch
+zero-faults.
 
-**Why not punch the freed address later?** The page may already have been
-reallocated — delayed punch corrupts live memory.
+This avoids the traps of naive approaches:
 
-**Why not `alloc_page` a random free page and punch it?** That punches cold
-freelist pages while the dirty high-water pages you care about stay resident.
+* delayed punch of a just-freed address → use-after-reuse
+* punching a random `alloc_page` → wrong pages (cold freelist)
+* fixed PFN queue → overflows on large munmap
 
-**Correct path:**
+Default is **batch**, not per-4K free-path syscalls:
 
-1. Free path sets bits in a **PFN bitmap** (scales with guest RAM; no overflow
-   on large munmap) — no host syscall on the free hot path.
-2. Workqueue drains PCPs, then walks set bits (batch at ≥1MiB or after ~100ms).
-3. `alloc_contig_range(pfn)` — succeeds only if still free, holds exclusively.
-4. `MADV_REMOVE` + `free_contig_range` — host backing gone; freelist size
-   unchanged; next touch zero-faults. Worker frees are not re-marked.
-
-Requires `CONFIG_CONTIG_ALLOC` (+ compaction/migration), enabled in
-`containers.config`.
-
-* `memdrop=batch` (default) — 1MiB / 100ms
-* `memdrop=on` — schedule flush on every free
+* `memdrop=batch` (default) — report free pages of order ≥ **3** (~32KiB)
+* `memdrop=on` — order ≥ **0** (framework still batches into scatterlists)
+* `memdrop=<order>` — custom minimum free order
 * `memdrop=off` — disabled
-* Queue full drops oldest entries rather than blocking the free path
-* First `MADV_REMOVE` failure disables memdrop for the boot
+
+Requires `CONFIG_PAGE_REPORTING=y` (enabled in `containers.config`).
 
 
 ### UML SMP support (`patches/apply-smp.sh`, `patches/smp-backport/`)
