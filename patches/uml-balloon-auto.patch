@@ -1,6 +1,6 @@
 diff --git a/arch/um/drivers/mconsole_kern.c b/arch/um/drivers/mconsole_kern.c
---- a/arch/um/drivers/mconsole_kern.c	2026-07-31 02:17:38.765588295 +0000
-+++ b/arch/um/drivers/mconsole_kern.c	2026-07-31 02:17:38.765588295 +0000
+--- a/arch/um/drivers/mconsole_kern.c	2026-07-31 02:30:05.702851021 +0000
++++ b/arch/um/drivers/mconsole_kern.c	2026-07-31 02:30:05.702851021 +0000
 @@ -274,156 +274,7 @@
  	return NULL;
  }
@@ -160,21 +160,20 @@ diff --git a/arch/um/drivers/mconsole_kern.c b/arch/um/drivers/mconsole_kern.c
  #define CONFIG_BUF_SIZE 64
  
 diff --git a/arch/um/kernel/Makefile b/arch/um/kernel/Makefile
---- a/arch/um/kernel/Makefile	2026-07-31 02:17:38.985592110 +0000
-+++ b/arch/um/kernel/Makefile	2026-07-31 02:17:38.985592110 +0000
-@@ -18,7 +18,7 @@
- 	physmem.o process.o ptrace.o reboot.o sigio.o \
+--- a/arch/um/kernel/Makefile	2026-07-31 02:30:05.906854693 +0000
++++ b/arch/um/kernel/Makefile	2026-07-31 02:30:05.906854693 +0000
+@@ -19,6 +19,7 @@
  	signal.o sysrq.o time.o tlb.o trap.o \
  	um_arch.o umid.o kmsg_dump.o capflags.o skas/
--obj-y += load_file.o
-+obj-y += load_file.o uml_balloon.o
+ obj-y += load_file.o
++obj-y += uml_balloon.o
  
  obj-$(CONFIG_BLK_DEV_INITRD) += initrd.o
  obj-$(CONFIG_GPROF)	+= gprof_syms.o
 diff --git a/arch/um/kernel/uml_balloon.c b/arch/um/kernel/uml_balloon.c
 new file mode 100644
 --- /dev/null
-+++ b/arch/um/kernel/uml_balloon.c	2026-07-31 02:17:38.765588295 +0000
++++ b/arch/um/kernel/uml_balloon.c	2026-07-31 02:30:05.702851021 +0000
 @@ -0,0 +1,556 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -735,7 +734,7 @@ new file mode 100644
 diff --git a/arch/um/kernel/uml_balloon.h b/arch/um/kernel/uml_balloon.h
 new file mode 100644
 --- /dev/null
-+++ b/arch/um/kernel/uml_balloon.h	2026-07-31 02:17:38.765588295 +0000
++++ b/arch/um/kernel/uml_balloon.h	2026-07-31 02:30:05.702851021 +0000
 @@ -0,0 +1,24 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
