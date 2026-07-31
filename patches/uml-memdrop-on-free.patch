@@ -14,30 +14,30 @@ index 6f54254aa..67991e120 100644
  typedef struct { unsigned long pgd; } pgd_t;
  
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..8bd51fd68 100644
+index 32e3b1972..ad50f8069 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
-@@ -22,6 +22,9 @@
+@@ -22,6 +22,10 @@
  #include <um_malloc.h>
  #include <linux/sched/task.h>
  #include <linux/kasan.h>
 +#include <linux/workqueue.h>
 +#include <linux/spinlock.h>
 +#include <linux/string.h>
++#include <linux/limits.h>
  
  #ifdef CONFIG_KASAN
  void __init kasan_init(void)
-@@ -57,6 +60,157 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -57,6 +61,159 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
 +/*
 + * memdrop: return freed guest physmem to the host via MADV_REMOVE.
 + *
-+ * arch_free_page() only enqueues ranges under a spinlock (IRQ/atomic-safe,
-+ * no host syscalls). A delayed-work worker performs MADV_REMOVE and merges
-+ * adjacent frees so typical order-0 munmap traffic is not one syscall per
-+ * 4K page on the free hot path.
++ * arch_free_page() only enqueues under a spinlock (no host syscalls on the
++ * free hot path). A delayed-work worker copies out the queue, drops the
++ * lock (IRQs enabled), then issues merged MADV_REMOVE calls.
 + *
 + * Default ("batch"):
 + *   - flush when >= 1MiB is pending, or
@@ -57,7 +57,7 @@ index 32e3b1972..8bd51fd68 100644
 +};
 +
 +static int memdrop_mode = 1; /* 0=off, 1=batch, 2=on */
-+static int memdrop_eager_order = 4; /* batch: schedule immediate flush at >= */
++static int memdrop_eager_order = 4;
 +static bool memdrop_ready;
 +
 +static struct memdrop_range memdrop_ranges[MEMDROP_MAX_RANGES];
@@ -72,54 +72,61 @@ index 32e3b1972..8bd51fd68 100644
 +{
 +	if (!memdrop_ready || !memdrop_mode)
 +		return;
++	/*
++	 * mod_delayed_work is IRQ-safe. Prefer queue_delayed_work when idle
++	 * so we do not constantly push the timer out on every free.
++	 */
 +	if (immediate)
 +		mod_delayed_work(system_wq, &memdrop_dwork, 0);
-+	else
-+		mod_delayed_work(system_wq, &memdrop_dwork, MEMDROP_DELAY);
++	else if (!delayed_work_pending(&memdrop_dwork))
++		queue_delayed_work(system_wq, &memdrop_dwork, MEMDROP_DELAY);
 +}
 +
-+static void memdrop_flush_locked(void)
++static void memdrop_do_remove(unsigned long addr, unsigned long len)
 +{
-+	struct memdrop_range local[MEMDROP_MAX_RANGES];
-+	int n, i, err_sticky = 0;
-+
-+	n = memdrop_nr;
-+	if (!n)
-+		return;
-+
-+	memcpy(local, memdrop_ranges, n * sizeof(local[0]));
-+	memdrop_nr = 0;
-+	memdrop_pending = 0;
-+
-+	/*
-+	 * Drop the lock across host syscalls. New frees can queue while we
-+	 * run; the worker reschedules itself if anything remains.
-+	 */
-+	spin_unlock(&memdrop_lock);
-+	for (i = 0; i < n; i++) {
-+		int err = os_drop_memory((void *)local[i].addr, local[i].len);
++	/* os_drop_memory takes an int length; chunk if needed. */
++	while (len) {
++		int chunk = (len > (unsigned long)INT_MAX) ?
++			INT_MAX : (int)len;
++		int err = os_drop_memory((void *)addr, chunk);
 +
 +		if (unlikely(err)) {
 +			printk(KERN_WARNING
-+			       "memdrop: MADV_REMOVE failed at 0x%lx len 0x%lx: %d - disabling\n",
-+			       local[i].addr, local[i].len, err);
-+			err_sticky = err;
-+			break;
++			       "memdrop: MADV_REMOVE failed at 0x%lx len %d: %d - disabling\n",
++			       addr, chunk, err);
++			memdrop_mode = 0;
++			return;
 +		}
++		addr += chunk;
++		len -= chunk;
 +	}
-+	spin_lock(&memdrop_lock);
-+	if (err_sticky)
-+		memdrop_mode = 0;
 +}
 +
 +static void memdrop_work_fn(struct work_struct *work)
 +{
++	struct memdrop_range local[MEMDROP_MAX_RANGES];
++	int n, i;
++	bool again = false;
++
 +	spin_lock_irq(&memdrop_lock);
-+	if (memdrop_mode)
-+		memdrop_flush_locked();
-+	if (memdrop_mode && memdrop_nr)
-+		mod_delayed_work(system_wq, &memdrop_dwork, 0);
++	n = memdrop_nr;
++	if (n) {
++		memcpy(local, memdrop_ranges, n * sizeof(local[0]));
++		memdrop_nr = 0;
++		memdrop_pending = 0;
++	}
 +	spin_unlock_irq(&memdrop_lock);
++
++	for (i = 0; i < n && memdrop_mode; i++)
++		memdrop_do_remove(local[i].addr, local[i].len);
++
++	spin_lock_irq(&memdrop_lock);
++	if (memdrop_mode && memdrop_nr)
++		again = true;
++	spin_unlock_irq(&memdrop_lock);
++
++	if (again)
++		mod_delayed_work(system_wq, &memdrop_dwork, 0);
 +}
 +
 +static void memdrop_queue(unsigned long addr, unsigned long len, int order)
@@ -128,7 +135,7 @@ index 32e3b1972..8bd51fd68 100644
 +	bool immediate = false;
 +	int i;
 +
-+	if (!memdrop_mode)
++	if (!memdrop_mode || !len)
 +		return;
 +
 +	spin_lock_irqsave(&memdrop_lock, flags);
@@ -156,11 +163,7 @@ index 32e3b1972..8bd51fd68 100644
 +	}
 +
 +	if (memdrop_nr >= MEMDROP_MAX_RANGES) {
-+		/*
-+		 * Queue full: do not syscall here (may be atomic). Kick the
-+		 * worker immediately; this free is not tracked (page stays
-+		 * host-resident until a later nearby free or large batch).
-+		 */
++		/* Queue full: kick worker; this free is not tracked. */
 +		immediate = true;
 +		goto out;
 +	}
@@ -185,10 +188,12 @@ index 32e3b1972..8bd51fd68 100644
  /* Used during early boot */
  static unsigned long brk_end;
  
-@@ -81,9 +235,70 @@ void __init arch_mm_preinit(void)
+@@ -84,6 +241,74 @@ void __init mem_init(void)
+ 	kmalloc_ok = 1;
+ }
  
- void __init mem_init(void)
- {
++static int __init memdrop_late_init(void)
++{
 +	if (!memdrop_mode)
 +		os_info("memdrop: disabled\n");
 +	else if (memdrop_mode == 2)
@@ -197,17 +202,19 @@ index 32e3b1972..8bd51fd68 100644
 +		os_info("memdrop: batch (1MiB / order>=%d / 100ms)\n",
 +			memdrop_eager_order);
 +
++	/* Enable only after workqueues are fully usable. */
 +	memdrop_ready = true;
- 	kmalloc_ok = 1;
- }
- 
++	return 0;
++}
++late_initcall(memdrop_late_init);
++
 +/*
 + * Called from __free_pages_prepare() after content is dead. Never issues
 + * host syscalls here (may run in atomic context); only queues work.
 + */
 +void arch_free_page(struct page *page, int order)
 +{
-+	if (!memdrop_mode)
++	if (!memdrop_mode || !memdrop_ready)
 +		return;
 +
 +	memdrop_queue((unsigned long)page_address(page),
