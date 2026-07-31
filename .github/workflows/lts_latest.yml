@@ -119,14 +119,19 @@ jobs:
       - name: Debug balloon build
         run: |
           cd linux-${{ env.KVER }}
-          echo "=== find uml_balloon ==="
+          echo "=== find uml_balloon BEFORE ==="
           find . -name 'uml_balloon*' -type f 2>/dev/null
-          echo "=== grep built-in.a ==="
+          echo "=== nm built-in.a ==="
           nm arch/um/drivers/built-in.a 2>/dev/null | grep -i balloon | head
-          echo "=== grep vmlinux ==="
+          echo "=== nm vmlinux ==="
           nm vmlinux 2>/dev/null | grep -i balloon | head
           echo "=== make V=1 uml_balloon.o ==="
-          make ARCH=um V=1 arch/um/drivers/uml_balloon.o 2>&1 | tail -20
+          make ARCH=um V=1 arch/um/drivers/uml_balloon.o 2>&1
+          echo "exit: $?"
+          echo "=== find uml_balloon AFTER ==="
+          find . -name 'uml_balloon*' -type f 2>/dev/null
+          echo "=== nm uml_balloon.o ==="
+          nm arch/um/drivers/uml_balloon.o 2>/dev/null | head -20
 
       - name: Strip & upload
         run: |
