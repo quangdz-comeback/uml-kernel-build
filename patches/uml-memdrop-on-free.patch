@@ -14,7 +14,7 @@ index 6f54254aa..67991e120 100644
  typedef struct { unsigned long pgd; } pgd_t;
  
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..57d189848 100644
+index 32e3b1972..c86651ce8 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
 @@ -22,6 +22,10 @@
@@ -24,40 +24,41 @@ index 32e3b1972..57d189848 100644
 +#include <linux/workqueue.h>
 +#include <linux/gfp.h>
 +#include <linux/atomic.h>
-+#include <linux/string.h>
++#include <linux/vmalloc.h>
+#include <linux/slab.h>
  
  #ifdef CONFIG_KASAN
  void __init kasan_init(void)
-@@ -57,6 +61,97 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -57,6 +61,104 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
 +/*
 + * memdrop: return free guest physmem to the host via MADV_REMOVE.
 + *
-+ * IMPORTANT: we must not MADV_REMOVE an address after the page may have been
-+ * reallocated. Delaying a punch of the just-freed virtual address races with
-+ * the buddy allocator and will corrupt live guest memory (seen as random
-+ * userspace segfaults).
++ * We must not MADV_REMOVE a just-freed address asynchronously — the page
++ * may already have been reallocated (that raced and crashed userspace).
 + *
-+ * Instead:
-+ *   1. arch_free_page() only counts freed pages and kicks a workqueue.
-+ *   2. The worker temporarily allocates free pages (isolating them from the
-+ *      buddy), punches their host backing, then frees them back. While
-+ *      isolated they cannot be given to anyone else, so the punch is safe.
-+ *   3. After free-back the guest freelist is unchanged in size; the host
-+ *      page is gone and the next touch zero-faults.
++ * Safe algorithm:
++ *   1. arch_free_page() only adds to a free-page credit counter.
++ *   2. A workqueue worker bulk-allocates free pages (isolating them),
++ *      punches their host backing, then frees them back with a TLS guard
++ *      so those frees do not re-credit.
++ *   3. Alloc-all-then-free-all avoids the PCP LIFO trap of punching the
++ *      same page over and over.
 + *
-+ * Default ("batch") flushes when >= 1MiB of frees have been observed or
-+ * after ~100ms with any pending credit. memdrop=on flushes every kick.
++ * Default batch: flush at >= 1MiB credit or after ~100ms.
 + */
 +#define MEMDROP_BATCH_PAGES	(1UL << (20 - PAGE_SHIFT))	/* 1 MiB */
-+#define MEMDROP_MAX_PER_RUN	(16UL << (20 - PAGE_SHIFT))	/* 16 MiB */
++#define MEMDROP_MAX_PER_RUN	(8UL << (20 - PAGE_SHIFT))	/* 8 MiB */
 +#define MEMDROP_DELAY		(HZ / 10)			/* 100 ms */
 +
 +static int memdrop_mode = 1; /* 0=off, 1=batch, 2=on */
 +static bool memdrop_ready;
-+static atomic_long_t memdrop_credit; /* pages freed since last flush */
++static atomic_long_t memdrop_credit;
++
++/* Frees from the worker must not re-arm credit. */
++static DEFINE_PER_CPU(int, memdrop_in_worker);
 +
 +static void memdrop_work_fn(struct work_struct *work);
 +static DECLARE_DELAYED_WORK(memdrop_dwork, memdrop_work_fn);
@@ -67,15 +68,16 @@ index 32e3b1972..57d189848 100644
 +	if (!memdrop_ready || !memdrop_mode)
 +		return;
 +	if (immediate)
-+		mod_delayed_work(system_unbound_wq, &memdrop_dwork, 0);
++		mod_delayed_work(system_wq, &memdrop_dwork, 0);
 +	else if (!delayed_work_pending(&memdrop_dwork))
-+		queue_delayed_work(system_unbound_wq, &memdrop_dwork,
-+				   MEMDROP_DELAY);
++		queue_delayed_work(system_wq, &memdrop_dwork, MEMDROP_DELAY);
 +}
 +
 +static void memdrop_work_fn(struct work_struct *work)
 +{
-+	unsigned long credit, todo, i;
++	struct page **pages;
++	unsigned long credit, todo, got, i;
++	int err = 0;
 +
 +	if (!memdrop_mode)
 +		return;
@@ -84,30 +86,29 @@ index 32e3b1972..57d189848 100644
 +	if (!credit)
 +		return;
 +
-+	todo = credit;
-+	if (todo > MEMDROP_MAX_PER_RUN)
-+		todo = MEMDROP_MAX_PER_RUN;
++	todo = min(credit, MEMDROP_MAX_PER_RUN);
++	pages = kvmalloc_array(todo, sizeof(*pages), GFP_KERNEL);
++	if (!pages) {
++		atomic_long_add(credit, &memdrop_credit);
++		memdrop_schedule(false);
++		return;
++	}
 +
-+	for (i = 0; i < todo && memdrop_mode; i++) {
-+		struct page *page;
-+		int err;
-+
-+		/*
-+		 * Pull a free page off the buddy so nobody else can own it
-+		 * while we punch. GFP_ATOMIC: we are in wq context but want
-+		 * to avoid reclaim recursion; if the system is tight we
-+		 * simply stop early and leave remaining credit for later.
-+		 */
-+		page = alloc_page(GFP_ATOMIC | __GFP_NOWARN | __GFP_NORETRY);
-+		if (!page) {
-+			/* Put unused credit back. */
-+			atomic_long_add(todo - i, &memdrop_credit);
++	/* Phase 1: isolate free pages so nobody else can own them. */
++	for (got = 0; got < todo; got++) {
++		pages[got] = alloc_page(GFP_KERNEL | __GFP_NOWARN |
++					__GFP_NORETRY);
++		if (!pages[got])
 +			break;
-+		}
++	}
 +
-+		err = os_drop_memory(page_address(page), PAGE_SIZE);
-+		__free_page(page);
++	/* Put back credit we could not isolate; keep surplus credit too. */
++	if (credit > got)
++		atomic_long_add(credit - got, &memdrop_credit);
 +
++	/* Phase 2: punch host backing while pages are exclusively held. */
++	for (i = 0; i < got && memdrop_mode; i++) {
++		err = os_drop_memory(page_address(pages[i]), PAGE_SIZE);
 +		if (unlikely(err)) {
 +			printk(KERN_WARNING
 +			       "memdrop: MADV_REMOVE failed: %d - disabling\n",
@@ -117,7 +118,14 @@ index 32e3b1972..57d189848 100644
 +		}
 +	}
 +
-+	/* More credit arrived while we ran, or we deferred some. */
++	/* Phase 3: return pages to freelist without re-crediting. */
++	this_cpu_inc(memdrop_in_worker);
++	for (i = 0; i < got; i++)
++		__free_page(pages[i]);
++	this_cpu_dec(memdrop_in_worker);
++
++	kvfree(pages);
++
 +	if (memdrop_mode && atomic_long_read(&memdrop_credit) > 0)
 +		memdrop_schedule(atomic_long_read(&memdrop_credit) >=
 +				 MEMDROP_BATCH_PAGES);
@@ -126,7 +134,7 @@ index 32e3b1972..57d189848 100644
  /* Used during early boot */
  static unsigned long brk_end;
  
-@@ -84,6 +179,66 @@ void __init mem_init(void)
+@@ -84,6 +186,67 @@ void __init mem_init(void)
  	kmalloc_ok = 1;
  }
  
@@ -135,9 +143,9 @@ index 32e3b1972..57d189848 100644
 +	if (!memdrop_mode)
 +		os_info("memdrop: disabled\n");
 +	else if (memdrop_mode == 2)
-+		os_info("memdrop: on (flush free pages via workqueue)\n");
++		os_info("memdrop: on (isolate free pages via workqueue)\n");
 +	else
-+		os_info("memdrop: batch (1MiB credit / 100ms, safe isolate)\n");
++		os_info("memdrop: batch (1MiB / 100ms, isolate then punch)\n");
 +
 +	memdrop_ready = true;
 +	return 0;
@@ -145,15 +153,16 @@ index 32e3b1972..57d189848 100644
 +late_initcall(memdrop_late_init);
 +
 +/*
-+ * Count freed pages and schedule a host give-back. Must not punch `page`
-+ * asynchronously: it is about to re-enter the freelist and may be reused
-+ * before a delayed worker runs.
++ * Only account credit. Never punch `page` here: after we return it goes
++ * onto the freelist and may be reused before any delayed worker runs.
 + */
 +void arch_free_page(struct page *page, int order)
 +{
 +	unsigned long nr;
 +
 +	if (!memdrop_mode || !memdrop_ready)
++		return;
++	if (this_cpu_read(memdrop_in_worker))
 +		return;
 +
 +	nr = 1UL << order;
@@ -184,8 +193,8 @@ index 32e3b1972..57d189848 100644
 +"memdrop=off\n"
 +"    Do not return free guest pages to the host.\n"
 +"memdrop=batch\n"
-+"    Default. After frees accumulate to ~1MiB (or after 100ms), temporarily\n"
-+"    isolate free pages, MADV_REMOVE their host backing, and free them back.\n"
++"    Default. When free-credit reaches ~1MiB (or after 100ms), isolate a\n"
++"    batch of free pages, MADV_REMOVE their host backing, free them back.\n"
 +"memdrop=on\n"
 +"    Same isolate path, but schedule a flush on every free kick.\n\n"
 +);

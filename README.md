@@ -120,10 +120,12 @@ returns free RAM to the host with `os_drop_memory()` / `MADV_REMOVE`.
 (the next owner gets its memory punched out from under it). So the free path
 only accumulates a **credit** of freed pages. A workqueue worker then:
 
-1. `alloc_page` — temporarily isolate a free page from the buddy
-2. `MADV_REMOVE` that page's host backing
-3. `__free_page` — return it to the freelist (guest free count unchanged;
-   host page is gone and the next touch zero-faults)
+1. bulk-`alloc_page` — isolate a batch of free pages from the buddy
+2. `MADV_REMOVE` each held page's host backing
+3. `__free_page` them back (with a TLS guard so worker frees do not
+   re-credit). Guest free count unchanged; host pages are gone and
+   the next touch zero-faults. Bulk alloc-then-free avoids PCP LIFO
+   re-punching the same page.
 
 Default is **batch**, not per-page inline syscalls:
 
