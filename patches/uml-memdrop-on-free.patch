@@ -14,7 +14,7 @@ index 6f54254aa..67991e120 100644
  typedef struct { unsigned long pgd; } pgd_t;
  
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..856add222 100644
+index 32e3b1972..7b4a4a14a 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
 @@ -22,6 +22,10 @@
@@ -28,7 +28,7 @@ index 32e3b1972..856add222 100644
  
  #ifdef CONFIG_KASAN
  void __init kasan_init(void)
-@@ -57,6 +61,164 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -57,6 +61,163 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
@@ -127,7 +127,6 @@ index 32e3b1972..856add222 100644
 +			break;
 +		}
 +#else
-+		/* Built without contig alloc — cannot safely isolate. */
 +		(void)start;
 +		(void)end;
 +#endif
@@ -193,26 +192,22 @@ index 32e3b1972..856add222 100644
  /* Used during early boot */
  static unsigned long brk_end;
  
-@@ -84,6 +246,71 @@ void __init mem_init(void)
+@@ -84,6 +245,58 @@ void __init mem_init(void)
  	kmalloc_ok = 1;
  }
  
 +static int __init memdrop_late_init(void)
 +{
 +	if (!IS_ENABLED(CONFIG_CONTIG_ALLOC)) {
-+		os_warn("memdrop: CONFIG_CONTIG_ALLOC missing, disabled
-+");
++		os_warn("memdrop: CONFIG_CONTIG_ALLOC missing, disabled\n");
 +		memdrop_mode = 0;
 +	}
 +	if (!memdrop_mode)
-+		os_info("memdrop: disabled
-+");
++		os_info("memdrop: disabled\n");
 +	else if (memdrop_mode == 2)
-+		os_info("memdrop: on (PFN queue, contig-isolate)
-+");
++		os_info("memdrop: on (PFN queue, contig-isolate)\n");
 +	else
-+		os_info("memdrop: batch (1MiB / 100ms, PFN+contig)
-+");
++		os_info("memdrop: batch (1MiB / 100ms, PFN+contig)\n");
 +
 +	memdrop_ready = true;
 +	return 0;
@@ -238,28 +233,19 @@ index 32e3b1972..856add222 100644
 +	else if (!strcmp(line, "batch"))
 +		memdrop_mode = 1;
 +	else {
-+		os_warn("memdrop: invalid '%s', using batch
-+", line);
++		os_warn("memdrop: invalid '%s', using batch\n", line);
 +		memdrop_mode = 1;
 +	}
 +	return 0;
 +}
 +__uml_setup("memdrop=", uml_memdrop_setup,
-+"memdrop=off
-+"
-+"    Do not return free guest pages to the host.
-+"
-+"memdrop=batch
-+"
-+"    Default. Queue freed PFNs; after ~1MiB or 100ms, contig-isolate still-
-+"
-+"    free pages, MADV_REMOVE their host backing, return them to freelist.
-+"
-+"memdrop=on
-+"
-+"    Same PFN path, but schedule a flush on every free.
-+
-+"
++"memdrop=off\n"
++"    Do not return free guest pages to the host.\n"
++"memdrop=batch\n"
++"    Default. Queue freed PFNs; after ~1MiB or 100ms, contig-isolate still-\n"
++"    free pages, MADV_REMOVE their host backing, return them to freelist.\n"
++"memdrop=on\n"
++"    Same PFN path, but schedule a flush on every free.\n\n"
 +);
 +
  #if IS_ENABLED(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA)
