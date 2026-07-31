@@ -109,33 +109,35 @@ at a plain on-disk directory (verified: guest memory shows as
 
 ### `uml-memdrop-on-free.patch`
 
-`memfd` (or tmpfs tempfile) stops host writeback, but it does **not** give RAM
-back when the guest frees pages: UML physmem is one long `MAP_SHARED` mapping,
-so host RSS follows the guest high-water mark.
+`memfd` stops host writeback, but host RSS still tracks the guest high-water
+mark because physmem is one long `MAP_SHARED` mapping.
 
-This patch hooks `arch_free_page` (called from `__free_pages_prepare`) and
-returns free RAM to the host with `os_drop_memory()` / `MADV_REMOVE`.
+This patch hooks `arch_free_page` and returns **still-free** pages to the host
+with `MADV_REMOVE`, without a balloon driver.
 
-**Safety:** a delayed punch of the just-freed address races with reallocation
-(the next owner gets its memory punched out from under it). So the free path
-only accumulates a **credit** of freed pages. A workqueue worker then:
+**Why not punch the freed address later?** The page may already have been
+reallocated — delayed punch corrupts live memory.
 
-1. bulk-`alloc_page` — isolate a batch of free pages from the buddy
-2. `MADV_REMOVE` each held page's host backing
-3. `__free_page` them back (with a TLS guard so worker frees do not
-   re-credit). Guest free count unchanged; host pages are gone and
-   the next touch zero-faults. Bulk alloc-then-free avoids PCP LIFO
-   re-punching the same page.
+**Why not `alloc_page` a random free page and punch it?** That punches cold
+freelist pages while the dirty high-water pages you care about stay resident.
 
-Default is **batch**, not per-page inline syscalls:
+**Correct path:**
 
-* `memdrop=batch` (default) — flush when free-credit ≥ **1MiB**, or after **~100ms**
-* `memdrop=on` — schedule a flush on every free kick (still isolate+wq)
-* `memdrop=off` — old behaviour
-* First `MADV_REMOVE` failure disables the feature for the boot
+1. Free path enqueues the **PFN** (and order) under a spinlock — no host syscall.
+2. Workqueue drains the queue (batch at ≥1MiB pending or after ~100ms).
+3. `alloc_contig_range(pfn, pfn+nr)` — succeeds only if the page is still free,
+   and holds it exclusively.
+4. `MADV_REMOVE` + `free_contig_range` — host backing gone; guest freelist size
+   unchanged; next touch zero-faults.
 
-After a guest workload releases memory you should see the UML process RSS
-fall on the host without any balloon driver.
+Requires `CONFIG_CONTIG_ALLOC` (+ compaction/migration), enabled in
+`containers.config`.
+
+* `memdrop=batch` (default) — 1MiB / 100ms
+* `memdrop=on` — schedule flush on every free
+* `memdrop=off` — disabled
+* Queue full drops oldest entries rather than blocking the free path
+* First `MADV_REMOVE` failure disables memdrop for the boot
 
 
 ### UML SMP support (`patches/apply-smp.sh`, `patches/smp-backport/`)

@@ -14,51 +14,58 @@ index 6f54254aa..67991e120 100644
  typedef struct { unsigned long pgd; } pgd_t;
  
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..9b36663ef 100644
+index 32e3b1972..2932ef907 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
-@@ -22,6 +22,11 @@
+@@ -22,6 +22,10 @@
  #include <um_malloc.h>
  #include <linux/sched/task.h>
  #include <linux/kasan.h>
 +#include <linux/workqueue.h>
 +#include <linux/gfp.h>
-+#include <linux/atomic.h>
-+#include <linux/vmalloc.h>
-+#include <linux/slab.h>
++#include <linux/mmzone.h>
++#include <linux/spinlock.h>
  
  #ifdef CONFIG_KASAN
  void __init kasan_init(void)
-@@ -57,6 +62,104 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -57,6 +61,172 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
 +/*
 + * memdrop: return free guest physmem to the host via MADV_REMOVE.
 + *
-+ * We must not MADV_REMOVE a just-freed address asynchronously — the page
-+ * may already have been reallocated (that raced and crashed userspace).
++ * Punching a just-freed virtual address later is a use-after-reuse race
++ * (the page may already belong to someone else). Isolating a *random*
++ * free page and punching it does not help either: dirty high-water pages
++ * stay resident while cold free pages get punched.
 + *
-+ * Safe algorithm:
-+ *   1. arch_free_page() only adds to a free-page credit counter.
-+ *   2. A workqueue worker bulk-allocates free pages (isolating them),
-+ *      punches their host backing, then frees them back with a TLS guard
-+ *      so those frees do not re-credit.
-+ *   3. Alloc-all-then-free-all avoids the PCP LIFO trap of punching the
-+ *      same page over and over.
++ * Correct approach: remember the PFN that was freed. The worker tries
++ * alloc_contig_range() on that PFN; success means the page is still free
++ * and now exclusively held, so MADV_REMOVE is safe. Then free_contig_range
++ * returns it to the freelist with host backing gone.
 + *
-+ * Default batch: flush at >= 1MiB credit or after ~100ms.
++ * Requires CONFIG_CONTIG_ALLOC (enabled in containers.config).
++ *
++ * Default batch: flush when pending >= 1MiB or after ~100ms.
++ * Free path only enqueues under a spinlock — no host syscall there.
 + */
-+#define MEMDROP_BATCH_PAGES	(1UL << (20 - PAGE_SHIFT))	/* 1 MiB */
-+#define MEMDROP_MAX_PER_RUN	(8UL << (20 - PAGE_SHIFT))	/* 8 MiB */
-+#define MEMDROP_DELAY		(HZ / 10)			/* 100 ms */
++#define MEMDROP_MAX_RANGES	512
++#define MEMDROP_BATCH_PAGES	(1UL << (20 - PAGE_SHIFT)) /* 1 MiB */
++#define MEMDROP_DELAY		(HZ / 10)		  /* 100 ms */
++
++struct memdrop_range {
++	unsigned long pfn;
++	unsigned int  nr; /* page count */
++};
 +
 +static int memdrop_mode = 1; /* 0=off, 1=batch, 2=on */
 +static bool memdrop_ready;
-+static atomic_long_t memdrop_credit;
 +
-+/* Frees from the worker must not re-arm credit. */
-+static DEFINE_PER_CPU(int, memdrop_in_worker);
++static struct memdrop_range memdrop_q[MEMDROP_MAX_RANGES];
++static unsigned int memdrop_head, memdrop_tail, memdrop_count;
++static unsigned long memdrop_pending_pages;
++static DEFINE_SPINLOCK(memdrop_lock);
 +
 +static void memdrop_work_fn(struct work_struct *work);
 +static DECLARE_DELAYED_WORK(memdrop_dwork, memdrop_work_fn);
@@ -73,42 +80,56 @@ index 32e3b1972..9b36663ef 100644
 +		queue_delayed_work(system_wq, &memdrop_dwork, MEMDROP_DELAY);
 +}
 +
++static bool memdrop_dequeue(struct memdrop_range *out)
++{
++	unsigned long flags;
++	bool ok = false;
++
++	spin_lock_irqsave(&memdrop_lock, flags);
++	if (memdrop_count) {
++		*out = memdrop_q[memdrop_head];
++		memdrop_head = (memdrop_head + 1) % MEMDROP_MAX_RANGES;
++		memdrop_count--;
++		memdrop_pending_pages -= out->nr;
++		ok = true;
++	}
++	spin_unlock_irqrestore(&memdrop_lock, flags);
++	return ok;
++}
++
 +static void memdrop_work_fn(struct work_struct *work)
 +{
-+	struct page **pages;
-+	unsigned long credit, todo, got, i;
-+	int err = 0;
++	struct memdrop_range r;
++	unsigned int handled = 0;
 +
 +	if (!memdrop_mode)
 +		return;
 +
-+	credit = atomic_long_xchg(&memdrop_credit, 0);
-+	if (!credit)
-+		return;
++	/*
++	 * Drain up to one batch worth per invocation so we do not monopolize
++	 * a workqueue thread. Reschedule if more remains.
++	 */
++	while (handled < MEMDROP_BATCH_PAGES && memdrop_dequeue(&r)) {
++		unsigned long start = r.pfn;
++		unsigned long end = r.pfn + r.nr;
++		int err;
 +
-+	todo = min(credit, MEMDROP_MAX_PER_RUN);
-+	pages = kvmalloc_array(todo, sizeof(*pages), GFP_KERNEL);
-+	if (!pages) {
-+		atomic_long_add(credit, &memdrop_credit);
-+		memdrop_schedule(false);
-+		return;
-+	}
++		/*
++		 * Isolate only if still free. Failure is normal (page was
++		 * reused) — just skip; host keeps that page until a later
++		 * free of it is observed again.
++		 */
++		err = alloc_contig_range(start, end, ACR_FLAGS_NONE,
++					 GFP_KERNEL | __GFP_NOWARN |
++					 __GFP_NORETRY);
++		if (err) {
++			handled += r.nr;
++			continue;
++		}
 +
-+	/* Phase 1: isolate free pages so nobody else can own them. */
-+	for (got = 0; got < todo; got++) {
-+		pages[got] = alloc_page(GFP_KERNEL | __GFP_NOWARN |
-+					__GFP_NORETRY);
-+		if (!pages[got])
-+			break;
-+	}
++		err = os_drop_memory(page_address(pfn_to_page(start)), r.nr << PAGE_SHIFT);
++		free_contig_range(start, r.nr);
 +
-+	/* Put back credit we could not isolate; keep surplus credit too. */
-+	if (credit > got)
-+		atomic_long_add(credit - got, &memdrop_credit);
-+
-+	/* Phase 2: punch host backing while pages are exclusively held. */
-+	for (i = 0; i < got && memdrop_mode; i++) {
-+		err = os_drop_memory(page_address(pages[i]), PAGE_SIZE);
 +		if (unlikely(err)) {
 +			printk(KERN_WARNING
 +			       "memdrop: MADV_REMOVE failed: %d - disabling\n",
@@ -116,36 +137,86 @@ index 32e3b1972..9b36663ef 100644
 +			memdrop_mode = 0;
 +			break;
 +		}
++		handled += r.nr;
 +	}
 +
-+	/* Phase 3: return pages to freelist without re-crediting. */
-+	this_cpu_inc(memdrop_in_worker);
-+	for (i = 0; i < got; i++)
-+		__free_page(pages[i]);
-+	this_cpu_dec(memdrop_in_worker);
++	if (memdrop_mode) {
++		unsigned long flags;
++		bool more;
 +
-+	kvfree(pages);
++		spin_lock_irqsave(&memdrop_lock, flags);
++		more = memdrop_count > 0;
++		spin_unlock_irqrestore(&memdrop_lock, flags);
++		if (more)
++			memdrop_schedule(true);
++	}
++}
 +
-+	if (memdrop_mode && atomic_long_read(&memdrop_credit) > 0)
-+		memdrop_schedule(atomic_long_read(&memdrop_credit) >=
-+				 MEMDROP_BATCH_PAGES);
++static void memdrop_enqueue(unsigned long pfn, unsigned int nr)
++{
++	unsigned long flags;
++	bool immediate = false;
++	unsigned int last;
++
++	spin_lock_irqsave(&memdrop_lock, flags);
++
++	if (!memdrop_mode)
++		goto out;
++
++	/* Merge with previous range if contiguous. */
++	if (memdrop_count) {
++		last = (memdrop_tail + MEMDROP_MAX_RANGES - 1) %
++			MEMDROP_MAX_RANGES;
++		if (memdrop_q[last].pfn + memdrop_q[last].nr == pfn) {
++			memdrop_q[last].nr += nr;
++			memdrop_pending_pages += nr;
++			goto queued;
++		}
++	}
++
++	if (memdrop_count >= MEMDROP_MAX_RANGES) {
++		/* Drop oldest to make room; better than blocking free path. */
++		memdrop_pending_pages -= memdrop_q[memdrop_head].nr;
++		memdrop_head = (memdrop_head + 1) % MEMDROP_MAX_RANGES;
++		memdrop_count--;
++	}
++
++	memdrop_q[memdrop_tail].pfn = pfn;
++	memdrop_q[memdrop_tail].nr = nr;
++	memdrop_tail = (memdrop_tail + 1) % MEMDROP_MAX_RANGES;
++	memdrop_count++;
++	memdrop_pending_pages += nr;
++
++queued:
++	if (memdrop_mode == 2 ||
++	    memdrop_pending_pages >= MEMDROP_BATCH_PAGES ||
++	    memdrop_count >= (MEMDROP_MAX_RANGES * 3 / 4))
++		immediate = true;
++
++out:
++	spin_unlock_irqrestore(&memdrop_lock, flags);
++	memdrop_schedule(immediate);
 +}
 +
  /* Used during early boot */
  static unsigned long brk_end;
  
-@@ -84,6 +187,67 @@ void __init mem_init(void)
+@@ -84,6 +254,62 @@ void __init mem_init(void)
  	kmalloc_ok = 1;
  }
  
 +static int __init memdrop_late_init(void)
 +{
++#ifndef CONFIG_CONTIG_ALLOC
++	os_warn("memdrop: CONFIG_CONTIG_ALLOC missing, disabled\n");
++	memdrop_mode = 0;
++#endif
 +	if (!memdrop_mode)
 +		os_info("memdrop: disabled\n");
 +	else if (memdrop_mode == 2)
-+		os_info("memdrop: on (isolate free pages via workqueue)\n");
++		os_info("memdrop: on (PFN queue, contig-isolate, workqueue)\n");
 +	else
-+		os_info("memdrop: batch (1MiB / 100ms, isolate then punch)\n");
++		os_info("memdrop: batch (1MiB / 100ms, PFN+contig isolate)\n");
 +
 +	memdrop_ready = true;
 +	return 0;
@@ -153,24 +224,15 @@ index 32e3b1972..9b36663ef 100644
 +late_initcall(memdrop_late_init);
 +
 +/*
-+ * Only account credit. Never punch `page` here: after we return it goes
-+ * onto the freelist and may be reused before any delayed worker runs.
++ * Record the freed PFN for later host give-back. Do not punch here: the
++ * page re-enters the freelist immediately after we return.
 + */
 +void arch_free_page(struct page *page, int order)
 +{
-+	unsigned long nr;
-+
 +	if (!memdrop_mode || !memdrop_ready)
 +		return;
-+	if (this_cpu_read(memdrop_in_worker))
-+		return;
 +
-+	nr = 1UL << order;
-+	if (atomic_long_add_return(nr, &memdrop_credit) >= MEMDROP_BATCH_PAGES ||
-+	    memdrop_mode == 2)
-+		memdrop_schedule(true);
-+	else
-+		memdrop_schedule(false);
++	memdrop_enqueue(page_to_pfn(page), 1U << order);
 +}
 +
 +static int __init uml_memdrop_setup(char *line, int *add)
@@ -193,10 +255,10 @@ index 32e3b1972..9b36663ef 100644
 +"memdrop=off\n"
 +"    Do not return free guest pages to the host.\n"
 +"memdrop=batch\n"
-+"    Default. When free-credit reaches ~1MiB (or after 100ms), isolate a\n"
-+"    batch of free pages, MADV_REMOVE their host backing, free them back.\n"
++"    Default. Queue freed PFNs; after ~1MiB or 100ms, contig-isolate still-\n"
++"    free pages, MADV_REMOVE their host backing, return them to freelist.\n"
 +"memdrop=on\n"
-+"    Same isolate path, but schedule a flush on every free kick.\n\n"
++"    Same PFN path, but schedule a flush on every free.\n\n"
 +);
 +
  #if IS_ENABLED(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA)
