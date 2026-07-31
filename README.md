@@ -170,27 +170,28 @@ This is an upstream limitation of the initial SMP support.
 
 ## Container support (Docker / Podman / LXC)
 
-`patches/containers.config` is merged into every build via
-`scripts/kconfig/merge_config.sh`, enabling full container primitives:
+`patches/containers.config` is merged into every kernel build, then the
+workflow re-asserts critical knobs with `scripts/config` so unknown symbols
+on older LTS do not silently drop features. Enabled primitives:
 
 * **Namespaces** — `user/pid/net/ipc/uts/cgroup` (userns for rootless).
-* **Cgroup v2** — all controllers (`memory/cpu/io/pids/device/...`). The
-  kernel exposes v2 by mounting `cgroup2`; no Kconfig switch is needed,
-  only the controllers. To use v2 in the guest:
+* **Cgroup v2** — controllers including `memory/cpu/io/pids/device/cpuset`,
+  plus `FAIR_GROUP_SCHED` / `CFS_BANDWIDTH` / freezer / cpuacct / BPF.
+  Mount v2 in the guest:
 
   ```bash
   mount -t cgroup2 none /sys/fs/cgroup
-  echo "+memory +cpu +pids" > /sys/fs/cgroup/cgroup.subtree_control
+  echo "+memory +cpu +pids +cpuset" > /sys/fs/cgroup/cgroup.subtree_control
   ```
 
-  `/sys/fs/cgroup/cgroup.controllers` then lists `cpu io memory pids misc`.
   (systemd does this automatically.)
 * **Seccomp-filter** — hard-required by Docker/Podman.
-* **Networking** — `veth`, `bridge`, `bridge-nf`, full netfilter/iptables
-  (`MASQUERADE`, `conntrack`, `addrtype`, ...) for publish-port NAT.
-* **Storage** — `overlay2` (overlayfs), `fuse`, `fhandle` for
-  fuse-overlayfs rootless fallback.
-* **BPF / security** — `bpf_syscall`, `keys`, `security`, `securityfs`.
+* **Checkpoint/restore** — `CHECKPOINT_RESTORE` for CRIU-style tooling.
+* **Networking** — `veth`, `bridge`, `bridge-nf`, `macvlan`, `ipvlan`, `tap`,
+  full netfilter/iptables (+ ip6tables) for publish-port NAT.
+* **Storage** — `overlay2` (overlayfs), `fuse`, `fhandle`, ext4 POSIX ACL +
+  security xattrs.
+* **memdrop** — `PAGE_REPORTING=y` (pairs with `uml-memdrop-on-free.patch`).
 
 ### UML-specific caveats
 
