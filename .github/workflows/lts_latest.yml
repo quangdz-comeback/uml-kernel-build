@@ -41,6 +41,10 @@ jobs:
             "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git" \
             "linux-${{ env.KVER }}"
 
+      - name: Apply UML SMP support
+        run: |
+          cd linux-${{ env.KVER }}
+          bash ../patches/apply-smp.sh ../patches
       - name: Apply bundled UML patches
         run: |
           cd linux-${{ env.KVER }}
@@ -55,10 +59,6 @@ jobs:
               echo "::warning::$(basename "$p") did not apply cleanly, skipping"
             fi
           done
-      - name: Apply UML SMP support
-        run: |
-          cd linux-${{ env.KVER }}
-          bash ../patches/apply-smp.sh ../patches
 
       - name: Patch UML (unwind_user.h)
         run: |
