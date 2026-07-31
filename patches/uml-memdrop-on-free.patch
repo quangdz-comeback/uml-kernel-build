@@ -1,5 +1,5 @@
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..8a3d60657 100644
+index 32e3b1972..65779c7c6 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
 @@ -22,6 +22,9 @@
@@ -12,27 +12,20 @@ index 32e3b1972..8a3d60657 100644
  
  #ifdef CONFIG_KASAN
  void __init kasan_init(void)
-@@ -57,6 +60,57 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -57,6 +60,116 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
 +/*
 + * memdrop: return free guest physmem to the host via MADV_REMOVE.
 + *
-+ * Uses the kernel PAGE_REPORTING framework (same path virtio-balloon free-
-+ * page reporting uses). The mm free path notifies when enough free pages
-+ * of a given order have accumulated; the reporter:
-+ *   1. isolates free pages from the buddy (they cannot be allocated),
-+ *   2. calls our report() which MADV_REMOVEs their host backing,
-+ *   3. returns them to the freelist with PageReported set.
++ * Uses PAGE_REPORTING: mm isolates free buddy pages, we MADV_REMOVE their
++ * host backing, then they return to the freelist. Default batch order >= 3.
 + *
-+ * No use-after-reuse, no fixed queue overflow, no random free-page punch.
-+ *
-+ * Default batch: report free pages of order >= 3 (32KiB chunks).
-+ * memdrop=on: order >= 0 (every free page, still batched by the framework).
++ * Entire block lives at file scope (do not insert inside another function).
 + */
 +static int memdrop_mode = 1; /* 0=off, 1=batch, 2=on */
-+static unsigned int memdrop_order = 3; /* batch default */
++static unsigned int memdrop_order = 3;
 +
 +static struct page_reporting_dev_info memdrop_prdev;
 +
@@ -44,21 +37,18 @@ index 32e3b1972..8a3d60657 100644
 +
 +	for_each_sg(sgl, sg, nents, i) {
 +		struct page *page = sg_page(sg);
-+		unsigned int order = get_order(sg->length);
++		unsigned int order;
 +		int err;
 +
-+		if (!page)
++		if (!page || !sg->length)
 +			continue;
 +
++		order = get_order(sg->length);
 +		err = os_drop_memory(page_address(page), PAGE_SIZE << order);
 +		if (unlikely(err)) {
 +			printk(KERN_WARNING
 +			       "memdrop: MADV_REMOVE failed: %d - disabling\n",
 +			       err);
-+			/*
-+			 * Still return 0 so pages are put back cleanly;
-+			 * unregister to stop further reports.
-+			 */
 +			page_reporting_unregister(&memdrop_prdev);
 +			memdrop_mode = 0;
 +			return 0;
@@ -67,13 +57,6 @@ index 32e3b1972..8a3d60657 100644
 +	return 0;
 +}
 +
- /* Used during early boot */
- static unsigned long brk_end;
- 
-@@ -84,6 +138,76 @@ void __init mem_init(void)
- 	kmalloc_ok = 1;
- }
- 
 +static int __init memdrop_late_init(void)
 +{
 +	int err;
@@ -104,7 +87,6 @@ index 32e3b1972..8a3d60657 100644
 +	return 0;
 +}
 +late_initcall(memdrop_late_init);
-+
 +
 +static int __init uml_memdrop_setup(char *line, int *add)
 +{
@@ -137,13 +119,13 @@ index 32e3b1972..8a3d60657 100644
 +"memdrop=off\n"
 +"    Do not return free guest pages to the host.\n"
 +"memdrop=batch\n"
-+"    Default. Use page_reporting on free pages of order >= 3 (~32KiB).\n"
++"    Default. page_reporting on free pages of order >= 3 (~32KiB).\n"
 +"memdrop=on\n"
 +"    page_reporting on free pages of order >= 0 (framework still batches).\n"
 +"memdrop=<order>\n"
 +"    page_reporting with this minimum free order.\n\n"
 +);
 +
- #if IS_ENABLED(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA)
- /*
-  * Create a page table and place a pointer to it in a middle page
+ /* Used during early boot */
+ static unsigned long brk_end;
+ 
