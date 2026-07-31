@@ -1,0 +1,150 @@
+From: UML memdrop
+Subject: [PATCH] um: return freed physmem pages to the host via MADV_REMOVE
+
+UML backs guest "physical" memory with a single MAP_SHARED mapping of a
+tempfile/memfd. Freeing a page in the guest buddy allocator only updates
+guest bookkeeping — the host shmem/pagecache page stays resident, so host
+RSS tracks the guest's high-water mark rather than its live working set.
+
+The host-side helper os_drop_memory() (madvise MADV_REMOVE) already punches
+a hole in that shared mapping and is used by the mconsole mem hot-unplug
+path. Wire the same primitive into the generic free path through
+arch_free_page(), which mm calls from __free_pages_prepare() after the page
+contents are dead and before it re-enters the freelist.
+
+On the next guest alloc that touches the page, the host zero-fills it on
+fault — the same behaviour freelist pages already depend on for poisoned /
+init-on-free content.
+
+Default: memdrop=9 (only drop frees of order >= 9, i.e. 2MiB+ chunks).
+That covers pageblock-scale buddy merges and keeps the free path off the
+4K hot path. The free path disables itself on the first MADV_REMOVE
+failure so hosts without support keep working, just without RSS give-back.
+Boot options:
+  memdrop=off          disable
+  memdrop=on           enable for every free (order >= 0)
+  memdrop=<min_order>  only drop frees with order >= min_order
+                       (default 9 ≈ 2MiB chunks)
+
+Signed-off-by: UML memdrop
+---
+ arch/um/include/asm/page.h |  4 ++
+ arch/um/kernel/mem.c       | 70 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 74 insertions(+)
+
+diff --git a/arch/um/include/asm/page.h b/arch/um/include/asm/page.h
+index 000000000000..111111111111 100644
+--- a/arch/um/include/asm/page.h
++++ b/arch/um/include/asm/page.h
+@@ -28,6 +28,10 @@ struct page;
+ 
+ #define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
+ 
++/* Return freed guest RAM to the host (see arch_free_page in kernel/mem.c). */
++void arch_free_page(struct page *page, int order);
++#define HAVE_ARCH_FREE_PAGE
++
+ typedef struct { unsigned long pte; } pte_t;
+ typedef struct { unsigned long pgd; } pgd_t;
+ 
+diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
+index 000000000000..222222222222 100644
+--- a/arch/um/kernel/mem.c
++++ b/arch/um/kernel/mem.c
+@@ -54,6 +54,15 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+ /* Initialized at boot time, and readonly after that */
+ int kmalloc_ok = 0;
+ 
++/*
++ * Return freed guest pages to the host by punching them out of the
++ * shared physmem mapping (MADV_REMOVE). memdrop_min_order is the
++ * minimum buddy order we bother to drop; -1 disables the feature.
++ *
++ * Default order 9 (2MiB). Cmdline may lower/raise the threshold or turn
++ * it off before any frees run; the free path itself may force -1 on
++ * first failure.
++ */
++static int memdrop_min_order = 9;
++
+ /* Used during early boot */
+ static unsigned long brk_end;
+ 
+@@ -76,6 +85,67 @@ void __init arch_mm_preinit(void)
+ 
+ void __init mem_init(void)
+ {
++	if (memdrop_min_order < 0)
++		os_info("memdrop: disabled\n");
++	else
++		os_info("memdrop: returning frees of order >= %d to host\n",
++			memdrop_min_order);
++
+ 	kmalloc_ok = 1;
+ }
+ 
++/*
++ * Called from __free_pages_prepare() after kasan/poison/init-on-free and
++ * before the page hits the freelist. Content is dead. Free buddy pages are
++ * not mapped into userspace stubs, so MADV_REMOVE only affects the kernel
++ * identity map of physmem (MAP_SHARED on physmem_fd) and releases the host
++ * page for every alias of that offset.
++ *
++ * Out of line: host syscall cost dominates any call overhead.
++ */
++void arch_free_page(struct page *page, int order)
++{
++	void *addr;
++	int err;
++
++	if (memdrop_min_order < 0 || order < memdrop_min_order)
++		return;
++
++	addr = page_address(page);
++	err = os_drop_memory(addr, PAGE_SIZE << order);
++	if (unlikely(err)) {
++		/*
++		 * Not fatal: page remains a valid freelist entry, it just
++		 * stays charged on the host. Disable further attempts on
++		 * the first failure so a sticky error cannot flood the
++		 * free path (and so hosts without MADV_REMOVE degrade
++		 * cleanly to the old behaviour).
++		 */
++		printk(KERN_WARNING
++		       "memdrop: MADV_REMOVE failed at %p order %d: %d — disabling\n",
++		       addr, order, err);
++		memdrop_min_order = -1;
++	}
++}
++
++static int __init uml_memdrop_setup(char *line, int *add)
++{
++	*add = 0;
++
++	if (!strcmp(line, "off"))
++		memdrop_min_order = -1;
++	else if (!line[0] || !strcmp(line, "on"))
++		memdrop_min_order = 0;
++	else {
++		char *end;
++		unsigned long val = simple_strtoul(line, &end, 0);
++
++		if (end == line || *end != '\0' || val > 31) {
++			os_warn("memdrop: invalid value '%s', using on\n", line);
++			memdrop_min_order = 0;
++		} else
++			memdrop_min_order = (int)val;
++	}
++	return 0;
++}
++__uml_setup("memdrop=", uml_memdrop_setup,
++"memdrop=off\n"
++"    Do not return freed guest pages to the host.\n"
++"memdrop=on\n"
++"    Return every freed page to the host via MADV_REMOVE.\n"
++"memdrop=<min_order>\n"
++"    Only return frees of at least this buddy order (default 9 ≈ 2MiB).\n\n"
++);
++
+ void __init arch_zone_limits_init(unsigned long *max_zone_pfns)
+ {
+ 	max_zone_pfns[ZONE_NORMAL] = high_physmem >> PAGE_SHIFT;

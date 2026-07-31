@@ -107,6 +107,32 @@ at a plain on-disk directory (verified: guest memory shows as
 `/memfd:uml-physmem (deleted)` and the tempdir stays empty).
 
 
+### `uml-memdrop-on-free.patch`
+
+`memfd` (or tmpfs tempfile) stops host writeback, but it does **not** give RAM
+back when the guest frees pages: UML physmem is one long `MAP_SHARED` mapping,
+so host RSS follows the guest high-water mark.
+
+This patch hooks the generic mm free path (`arch_free_page` → already called
+from `__free_pages_prepare`) and punches each freed range out of that mapping
+with the existing `os_drop_memory()` helper (`madvise(MADV_REMOVE)`). That is
+the same primitive mconsole `config mem=-N` already uses for manual unplug;
+here it runs automatically on every buddy free.
+
+* Default: `memdrop=9` — only drop frees of order ≥ 9 (~2MiB chunks), so
+  the 4K free hot path stays cheap while pageblock-scale merges still
+  return RAM to the host.
+* `memdrop=on` — drop every free (order ≥ 0; higher host-syscall cost).
+* `memdrop=off` — old behaviour (host keeps pages).
+* `memdrop=<order>` — custom minimum buddy order.
+* First `MADV_REMOVE` failure disables the feature for the rest of the boot
+  so hosts without support keep running.
+
+After a guest workload releases memory (and buddy merges up to the
+threshold) you should see the UML process RSS fall on the host without
+any balloon driver.
+
+
 ### UML SMP support (`patches/apply-smp.sh`, `patches/smp-backport/`)
 
 Upstream UML was single-CPU for its entire history until **v6.19** (Oct 2025),
