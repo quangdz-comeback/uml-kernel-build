@@ -113,24 +113,29 @@ at a plain on-disk directory (verified: guest memory shows as
 back when the guest frees pages: UML physmem is one long `MAP_SHARED` mapping,
 so host RSS follows the guest high-water mark.
 
-This patch hooks the generic mm free path (`arch_free_page` → already called
-from `__free_pages_prepare`) and punches each freed range out of that mapping
-with the existing `os_drop_memory()` helper (`madvise(MADV_REMOVE)`). That is
-the same primitive mconsole `config mem=-N` already uses for manual unplug;
-here it runs automatically on every buddy free.
+This patch hooks the generic mm free path (`arch_free_page`, already called
+from `__free_pages_prepare`) and returns freed ranges to the host with the
+existing `os_drop_memory()` helper (`madvise(MADV_REMOVE)` — same primitive
+mconsole `config mem=-N` uses for manual unplug).
 
-* Default: `memdrop=9` — only drop frees of order ≥ 9 (~2MiB chunks), so
-  the 4K free hot path stays cheap while pageblock-scale merges still
-  return RAM to the host.
-* `memdrop=on` — drop every free (order ≥ 0; higher host-syscall cost).
-* `memdrop=off` — old behaviour (host keeps pages).
-* `memdrop=<order>` — custom minimum buddy order.
+Important: `arch_free_page` sees the free **request** order (usually 0 for
+`munmap`), not the post-coalesce buddy order. A plain “only drop order ≥ 9”
+threshold therefore almost never fires on normal userspace frees. Instead
+memdrop **queues** frees under a spinlock (no host syscall on the free hot
+path) and a delayed-work worker flushes merged ranges:
+
+* Default: `memdrop=batch`
+  * flush when ≥ **1MiB** is pending, or
+  * a free of order ≥ **4** (64KiB) arrives, or
+  * ~**100ms** has passed with anything pending
+* `memdrop=on` — schedule a flush on every free (still via workqueue)
+* `memdrop=off` — old behaviour (host keeps pages)
+* `memdrop=<eager_order>` — like batch, but force-flush schedule at that order
 * First `MADV_REMOVE` failure disables the feature for the rest of the boot
-  so hosts without support keep running.
 
-After a guest workload releases memory (and buddy merges up to the
-threshold) you should see the UML process RSS fall on the host without
-any balloon driver.
+Adjacent frees are merged before the host syscall, so a 512MiB munmap is not
+512k individual `madvise` calls. After a guest workload releases memory the
+UML process RSS on the host should fall without any balloon driver.
 
 
 ### UML SMP support (`patches/apply-smp.sh`, `patches/smp-backport/`)

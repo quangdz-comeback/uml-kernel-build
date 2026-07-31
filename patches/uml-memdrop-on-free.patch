@@ -14,101 +14,243 @@ index 6f54254aa..67991e120 100644
  typedef struct { unsigned long pgd; } pgd_t;
  
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..8578570e1 100644
+index 32e3b1972..8bd51fd68 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
-@@ -57,6 +57,17 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -22,6 +22,9 @@
+ #include <um_malloc.h>
+ #include <linux/sched/task.h>
+ #include <linux/kasan.h>
++#include <linux/workqueue.h>
++#include <linux/spinlock.h>
++#include <linux/string.h>
+ 
+ #ifdef CONFIG_KASAN
+ void __init kasan_init(void)
+@@ -57,6 +60,157 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
 +/*
-+ * Return freed guest pages to the host by punching them out of the
-+ * shared physmem mapping (MADV_REMOVE). memdrop_min_order is the
-+ * minimum buddy order we bother to drop; -1 disables the feature.
++ * memdrop: return freed guest physmem to the host via MADV_REMOVE.
 + *
-+ * Default order 9 (2MiB). Cmdline may lower/raise the threshold or turn
-+ * it off before any frees run; the free path itself may force -1 on
-+ * first failure.
++ * arch_free_page() only enqueues ranges under a spinlock (IRQ/atomic-safe,
++ * no host syscalls). A delayed-work worker performs MADV_REMOVE and merges
++ * adjacent frees so typical order-0 munmap traffic is not one syscall per
++ * 4K page on the free hot path.
++ *
++ * Default ("batch"):
++ *   - flush when >= 1MiB is pending, or
++ *   - flush when a free of order >= 4 (64KiB) arrives, or
++ *   - flush after ~100ms with anything pending
++ * memdrop=on   : schedule flush on every free (still via workqueue)
++ * memdrop=off  : disabled
++ * memdrop=<n>  : batch, but force-flush schedule when order >= n
 + */
-+static int memdrop_min_order = 9;
++#define MEMDROP_MAX_RANGES	256
++#define MEMDROP_BATCH_BYTES	(1UL << 20)	/* 1 MiB */
++#define MEMDROP_DELAY		(HZ / 10)	/* 100 ms */
++
++struct memdrop_range {
++	unsigned long addr;
++	unsigned long len;
++};
++
++static int memdrop_mode = 1; /* 0=off, 1=batch, 2=on */
++static int memdrop_eager_order = 4; /* batch: schedule immediate flush at >= */
++static bool memdrop_ready;
++
++static struct memdrop_range memdrop_ranges[MEMDROP_MAX_RANGES];
++static int memdrop_nr;
++static unsigned long memdrop_pending;
++static DEFINE_SPINLOCK(memdrop_lock);
++
++static void memdrop_work_fn(struct work_struct *work);
++static DECLARE_DELAYED_WORK(memdrop_dwork, memdrop_work_fn);
++
++static void memdrop_schedule(bool immediate)
++{
++	if (!memdrop_ready || !memdrop_mode)
++		return;
++	if (immediate)
++		mod_delayed_work(system_wq, &memdrop_dwork, 0);
++	else
++		mod_delayed_work(system_wq, &memdrop_dwork, MEMDROP_DELAY);
++}
++
++static void memdrop_flush_locked(void)
++{
++	struct memdrop_range local[MEMDROP_MAX_RANGES];
++	int n, i, err_sticky = 0;
++
++	n = memdrop_nr;
++	if (!n)
++		return;
++
++	memcpy(local, memdrop_ranges, n * sizeof(local[0]));
++	memdrop_nr = 0;
++	memdrop_pending = 0;
++
++	/*
++	 * Drop the lock across host syscalls. New frees can queue while we
++	 * run; the worker reschedules itself if anything remains.
++	 */
++	spin_unlock(&memdrop_lock);
++	for (i = 0; i < n; i++) {
++		int err = os_drop_memory((void *)local[i].addr, local[i].len);
++
++		if (unlikely(err)) {
++			printk(KERN_WARNING
++			       "memdrop: MADV_REMOVE failed at 0x%lx len 0x%lx: %d - disabling\n",
++			       local[i].addr, local[i].len, err);
++			err_sticky = err;
++			break;
++		}
++	}
++	spin_lock(&memdrop_lock);
++	if (err_sticky)
++		memdrop_mode = 0;
++}
++
++static void memdrop_work_fn(struct work_struct *work)
++{
++	spin_lock_irq(&memdrop_lock);
++	if (memdrop_mode)
++		memdrop_flush_locked();
++	if (memdrop_mode && memdrop_nr)
++		mod_delayed_work(system_wq, &memdrop_dwork, 0);
++	spin_unlock_irq(&memdrop_lock);
++}
++
++static void memdrop_queue(unsigned long addr, unsigned long len, int order)
++{
++	unsigned long flags;
++	bool immediate = false;
++	int i;
++
++	if (!memdrop_mode)
++		return;
++
++	spin_lock_irqsave(&memdrop_lock, flags);
++
++	if (!memdrop_mode)
++		goto out;
++
++	/* Merge into an existing adjacent/overlapping range if possible. */
++	for (i = 0; i < memdrop_nr; i++) {
++		unsigned long a = memdrop_ranges[i].addr;
++		unsigned long e = a + memdrop_ranges[i].len;
++		unsigned long ne = addr + len;
++
++		if (ne < a || addr > e)
++			continue;
++		if (addr < a)
++			a = addr;
++		if (ne > e)
++			e = ne;
++		memdrop_pending -= memdrop_ranges[i].len;
++		memdrop_ranges[i].addr = a;
++		memdrop_ranges[i].len = e - a;
++		memdrop_pending += memdrop_ranges[i].len;
++		goto queued;
++	}
++
++	if (memdrop_nr >= MEMDROP_MAX_RANGES) {
++		/*
++		 * Queue full: do not syscall here (may be atomic). Kick the
++		 * worker immediately; this free is not tracked (page stays
++		 * host-resident until a later nearby free or large batch).
++		 */
++		immediate = true;
++		goto out;
++	}
++
++	memdrop_ranges[memdrop_nr].addr = addr;
++	memdrop_ranges[memdrop_nr].len = len;
++	memdrop_nr++;
++	memdrop_pending += len;
++
++queued:
++	if (memdrop_mode == 2 ||
++	    order >= memdrop_eager_order ||
++	    memdrop_pending >= MEMDROP_BATCH_BYTES ||
++	    memdrop_nr >= (MEMDROP_MAX_RANGES * 3 / 4))
++		immediate = true;
++
++out:
++	spin_unlock_irqrestore(&memdrop_lock, flags);
++	memdrop_schedule(immediate);
++}
 +
  /* Used during early boot */
  static unsigned long brk_end;
  
-@@ -81,9 +92,78 @@ void __init arch_mm_preinit(void)
+@@ -81,9 +235,70 @@ void __init arch_mm_preinit(void)
  
  void __init mem_init(void)
  {
-+	if (memdrop_min_order < 0)
++	if (!memdrop_mode)
 +		os_info("memdrop: disabled\n");
++	else if (memdrop_mode == 2)
++		os_info("memdrop: on (flush every free via workqueue)\n");
 +	else
-+		os_info("memdrop: returning frees of order >= %d to host\n",
-+			memdrop_min_order);
++		os_info("memdrop: batch (1MiB / order>=%d / 100ms)\n",
++			memdrop_eager_order);
 +
++	memdrop_ready = true;
  	kmalloc_ok = 1;
  }
  
 +/*
-+ * Called from __free_pages_prepare() after kasan/poison/init-on-free and
-+ * before the page hits the freelist. Content is dead. Free buddy pages are
-+ * not mapped into userspace stubs, so MADV_REMOVE only affects the kernel
-+ * identity map of physmem (MAP_SHARED on physmem_fd) and releases the host
-+ * page for every alias of that offset.
-+ *
-+ * Out of line: host syscall cost dominates any call overhead.
++ * Called from __free_pages_prepare() after content is dead. Never issues
++ * host syscalls here (may run in atomic context); only queues work.
 + */
 +void arch_free_page(struct page *page, int order)
 +{
-+	void *addr;
-+	int err;
-+
-+	if (memdrop_min_order < 0 || order < memdrop_min_order)
++	if (!memdrop_mode)
 +		return;
 +
-+	addr = page_address(page);
-+	err = os_drop_memory(addr, PAGE_SIZE << order);
-+	if (unlikely(err)) {
-+		/*
-+		 * Not fatal: page remains a valid freelist entry, it just
-+		 * stays charged on the host. Disable further attempts on
-+		 * the first failure so a sticky error cannot flood the
-+		 * free path (and so hosts without MADV_REMOVE degrade
-+		 * cleanly to the old behaviour).
-+		 */
-+		printk(KERN_WARNING
-+		       "memdrop: MADV_REMOVE failed at %p order %d: %d - disabling\n",
-+		       addr, order, err);
-+		memdrop_min_order = -1;
-+	}
++	memdrop_queue((unsigned long)page_address(page),
++		      PAGE_SIZE << order, order);
 +}
 +
 +static int __init uml_memdrop_setup(char *line, int *add)
 +{
 +	*add = 0;
 +
-+	if (!strcmp(line, "off"))
-+		memdrop_min_order = -1;
-+	else if (!line[0] || !strcmp(line, "on"))
-+		memdrop_min_order = 0;
-+	else {
++	if (!strcmp(line, "off")) {
++		memdrop_mode = 0;
++	} else if (!line[0] || !strcmp(line, "on")) {
++		memdrop_mode = 2;
++		memdrop_eager_order = 0;
++	} else if (!strcmp(line, "batch")) {
++		memdrop_mode = 1;
++		memdrop_eager_order = 4;
++	} else {
 +		char *end;
 +		unsigned long val = simple_strtoul(line, &end, 0);
 +
 +		if (end == line || *end != '\0' || val > 31) {
-+			os_warn("memdrop: invalid value '%s', using on\n", line);
-+			memdrop_min_order = 0;
-+		} else
-+			memdrop_min_order = (int)val;
++			os_warn("memdrop: invalid '%s', using batch\n", line);
++			memdrop_mode = 1;
++			memdrop_eager_order = 4;
++		} else {
++			memdrop_mode = 1;
++			memdrop_eager_order = (int)val;
++		}
 +	}
 +	return 0;
 +}
 +__uml_setup("memdrop=", uml_memdrop_setup,
 +"memdrop=off\n"
 +"    Do not return freed guest pages to the host.\n"
++"memdrop=batch\n"
++"    Default. Queue frees and MADV_REMOVE from a workqueue when\n"
++"    ~1MiB is pending, a free of order >= 4 arrives, or after 100ms.\n"
 +"memdrop=on\n"
-+"    Return every freed page to the host via MADV_REMOVE.\n"
-+"memdrop=<min_order>\n"
-+"    Only return frees of at least this buddy order (default 9 ~ 2MiB).\n\n"
++"    Flush the queue on every free (still via workqueue, not inline).\n"
++"memdrop=<eager_order>\n"
++"    Like batch, but force a flush when free order >= eager_order.\n\n"
 +);
 +
  #if IS_ENABLED(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA)
