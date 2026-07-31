@@ -123,12 +123,12 @@ freelist pages while the dirty high-water pages you care about stay resident.
 
 **Correct path:**
 
-1. Free path enqueues the **PFN** (and order) under a spinlock — no host syscall.
-2. Workqueue drains the queue (batch at ≥1MiB pending or after ~100ms).
-3. `alloc_contig_range(pfn, pfn+nr)` — succeeds only if the page is still free,
-   and holds it exclusively.
-4. `MADV_REMOVE` + `free_contig_range` — host backing gone; guest freelist size
-   unchanged; next touch zero-faults.
+1. Free path sets bits in a **PFN bitmap** (scales with guest RAM; no overflow
+   on large munmap) — no host syscall on the free hot path.
+2. Workqueue drains PCPs, then walks set bits (batch at ≥1MiB or after ~100ms).
+3. `alloc_contig_range(pfn)` — succeeds only if still free, holds exclusively.
+4. `MADV_REMOVE` + `free_contig_range` — host backing gone; freelist size
+   unchanged; next touch zero-faults. Worker frees are not re-marked.
 
 Requires `CONFIG_CONTIG_ALLOC` (+ compaction/migration), enabled in
 `containers.config`.

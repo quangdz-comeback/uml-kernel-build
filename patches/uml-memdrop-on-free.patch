@@ -14,7 +14,7 @@ index 6f54254aa..67991e120 100644
  typedef struct { unsigned long pgd; } pgd_t;
  
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..51836d94b 100644
+index 32e3b1972..e720c9016 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
 @@ -22,6 +22,10 @@
@@ -24,42 +24,38 @@ index 32e3b1972..51836d94b 100644
 +#include <linux/workqueue.h>
 +#include <linux/gfp.h>
 +#include <linux/mmzone.h>
-+#include <linux/spinlock.h>
++#include <linux/bitmap.h>
  
  #ifdef CONFIG_KASAN
  void __init kasan_init(void)
-@@ -57,6 +61,178 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -57,6 +61,103 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
 +/*
 + * memdrop: return free guest physmem to the host via MADV_REMOVE.
 + *
-+ * Enqueue freed PFNs on the free path (no host syscall). Worker drains
-+ * PCPs, then alloc_contig_range() — success means the page is still free
-+ * and exclusively held — MADV_REMOVE, free_contig_range().
++ * Free path sets bits in a PFN bitmap (O(1) per page, no host syscall).
++ * Worker drains PCPs, then for each set bit tries alloc_contig_range —
++ * success means the page is still free and held exclusively — punches
++ * host backing and free_contig_range. free_contig_range must not re-set
++ * bits (per-CPU worker guard).
 + *
-+ * free_contig_range must not re-enqueue (per-CPU worker guard).
++ * A fixed-size PFN queue overflows under large munmap (512MiB = 128k
++ * pages); a bitmap scales with physmem (1GiB guest => 32KiB bitmap).
 + *
-+ * Default batch: flush when pending >= 1MiB or after ~100ms.
++ * Default batch: flush when set-pages >= 1MiB or after ~100ms.
 + */
-+#define MEMDROP_MAX_RANGES	2048
-+#define MEMDROP_BATCH_PAGES	(1UL << (20 - PAGE_SHIFT)) /* 1 MiB */
-+#define MEMDROP_MAX_PER_RUN	(16UL << (20 - PAGE_SHIFT)) /* 16 MiB */
-+#define MEMDROP_DELAY		(HZ / 10)		  /* 100 ms */
-+
-+struct memdrop_range {
-+	unsigned long pfn;
-+	unsigned int nr;
-+};
++#define MEMDROP_BATCH_PAGES	(1UL << (20 - PAGE_SHIFT))	/* 1 MiB */
++#define MEMDROP_MAX_PER_RUN	(16UL << (20 - PAGE_SHIFT))	/* 16 MiB */
++#define MEMDROP_DELAY		(HZ / 10)			/* 100 ms */
 +
 +static int memdrop_mode = 1; /* 0=off, 1=batch, 2=on */
 +static bool memdrop_ready;
 +
-+static struct memdrop_range memdrop_q[MEMDROP_MAX_RANGES];
-+static unsigned int memdrop_head, memdrop_tail, memdrop_count;
-+static unsigned long memdrop_pending_pages;
-+static DEFINE_SPINLOCK(memdrop_lock);
++static unsigned long *memdrop_bitmap;
++static unsigned long memdrop_nbits;
++static atomic_long_t memdrop_set_pages;
 +static DEFINE_PER_CPU(int, memdrop_in_worker);
 +
 +static void memdrop_work_fn(struct work_struct *work);
@@ -67,7 +63,7 @@ index 32e3b1972..51836d94b 100644
 +
 +static void memdrop_schedule(bool immediate)
 +{
-+	if (!memdrop_ready || !memdrop_mode)
++	if (!memdrop_ready || !memdrop_mode || !memdrop_bitmap)
 +		return;
 +	if (immediate)
 +		mod_delayed_work(system_wq, &memdrop_dwork, 0);
@@ -75,56 +71,39 @@ index 32e3b1972..51836d94b 100644
 +		queue_delayed_work(system_wq, &memdrop_dwork, MEMDROP_DELAY);
 +}
 +
-+static bool memdrop_dequeue(struct memdrop_range *out)
-+{
-+	unsigned long flags;
-+	bool ok = false;
-+
-+	spin_lock_irqsave(&memdrop_lock, flags);
-+	if (memdrop_count) {
-+		*out = memdrop_q[memdrop_head];
-+		memdrop_head = (memdrop_head + 1) % MEMDROP_MAX_RANGES;
-+		memdrop_count--;
-+		memdrop_pending_pages -= out->nr;
-+		ok = true;
-+	}
-+	spin_unlock_irqrestore(&memdrop_lock, flags);
-+	return ok;
-+}
-+
 +static void memdrop_work_fn(struct work_struct *work)
 +{
-+	struct memdrop_range r;
-+	unsigned int handled = 0;
-+	unsigned int ok_pages = 0, fail_iso = 0;
++	unsigned long bit, done = 0, ok = 0, miss = 0;
 +
-+	if (!memdrop_mode)
++	if (!memdrop_mode || !memdrop_bitmap)
 +		return;
 +
-+	/* Make recently-freed pages visible to the buddy/contig path. */
 +	drain_all_pages(NULL);
-+
 +	this_cpu_inc(memdrop_in_worker);
 +
-+	while (handled < MEMDROP_MAX_PER_RUN && memdrop_dequeue(&r)) {
-+		unsigned long start = r.pfn;
-+		unsigned long end = r.pfn + r.nr;
++	for_each_set_bit(bit, memdrop_bitmap, memdrop_nbits) {
 +		int err;
 +
++		if (done >= MEMDROP_MAX_PER_RUN)
++			break;
++
++		if (!test_and_clear_bit(bit, memdrop_bitmap))
++			continue;
++		atomic_long_dec(&memdrop_set_pages);
++		done++;
++
 +#ifdef CONFIG_CONTIG_ALLOC
-+		err = alloc_contig_range(start, end, ACR_FLAGS_NONE,
++		err = alloc_contig_range(bit, bit + 1, ACR_FLAGS_NONE,
 +					 GFP_KERNEL | __GFP_NOWARN |
 +					 __GFP_NORETRY);
 +		if (err) {
-+			fail_iso += r.nr;
-+			handled += r.nr;
++			miss++;
 +			continue;
 +		}
 +
-+		err = os_drop_memory(page_address(pfn_to_page(start)),
-+				     r.nr << PAGE_SHIFT);
-+		/* Return without re-crediting (memdrop_in_worker set). */
-+		free_contig_range(start, r.nr);
++		err = os_drop_memory(page_address(pfn_to_page(bit)),
++				     PAGE_SIZE);
++		free_contig_range(bit, 1);
 +
 +		if (unlikely(err)) {
 +			printk(KERN_WARNING
@@ -133,81 +112,27 @@ index 32e3b1972..51836d94b 100644
 +			memdrop_mode = 0;
 +			break;
 +		}
-+		ok_pages += r.nr;
++		ok++;
 +#else
-+		(void)start;
-+		(void)end;
-+		fail_iso += r.nr;
++		miss++;
 +#endif
-+		handled += r.nr;
 +	}
 +
 +	this_cpu_dec(memdrop_in_worker);
 +
-+	if (ok_pages || fail_iso)
-+		pr_debug("memdrop: punched %u pages, isolate-miss %u\n",
-+			 ok_pages, fail_iso);
++	if (ok || miss)
++		pr_debug("memdrop: punched %lu miss %lu remain %ld\n",
++			 ok, miss, atomic_long_read(&memdrop_set_pages));
 +
-+	if (memdrop_mode) {
-+		unsigned long flags;
-+		bool more;
-+
-+		spin_lock_irqsave(&memdrop_lock, flags);
-+		more = memdrop_count > 0;
-+		spin_unlock_irqrestore(&memdrop_lock, flags);
-+		if (more)
-+			memdrop_schedule(true);
-+	}
-+}
-+
-+static void memdrop_enqueue(unsigned long pfn, unsigned int nr)
-+{
-+	unsigned long flags;
-+	bool immediate = false;
-+	unsigned int last;
-+
-+	spin_lock_irqsave(&memdrop_lock, flags);
-+
-+	if (!memdrop_mode)
-+		goto out;
-+
-+	if (memdrop_count) {
-+		last = (memdrop_tail + MEMDROP_MAX_RANGES - 1) %
-+			MEMDROP_MAX_RANGES;
-+		if (memdrop_q[last].pfn + memdrop_q[last].nr == pfn) {
-+			memdrop_q[last].nr += nr;
-+			memdrop_pending_pages += nr;
-+			goto queued;
-+		}
-+	}
-+
-+	if (memdrop_count >= MEMDROP_MAX_RANGES) {
-+		memdrop_pending_pages -= memdrop_q[memdrop_head].nr;
-+		memdrop_head = (memdrop_head + 1) % MEMDROP_MAX_RANGES;
-+		memdrop_count--;
-+	}
-+
-+	memdrop_q[memdrop_tail].pfn = pfn;
-+	memdrop_q[memdrop_tail].nr = nr;
-+	memdrop_tail = (memdrop_tail + 1) % MEMDROP_MAX_RANGES;
-+	memdrop_count++;
-+	memdrop_pending_pages += nr;
-+
-+queued:
-+	if (memdrop_mode == 2 ||
-+	    memdrop_pending_pages >= MEMDROP_BATCH_PAGES ||
-+	    memdrop_count >= (MEMDROP_MAX_RANGES * 3 / 4))
-+		immediate = true;
-+
-+out:
-+	spin_unlock_irqrestore(&memdrop_lock, flags);
-+	memdrop_schedule(immediate);
++	if (memdrop_mode && atomic_long_read(&memdrop_set_pages) > 0)
++		memdrop_schedule(atomic_long_read(&memdrop_set_pages) >=
++				 MEMDROP_BATCH_PAGES);
 +}
 +
  /* Used during early boot */
  static unsigned long brk_end;
  
-@@ -84,6 +260,60 @@ void __init mem_init(void)
+@@ -84,6 +185,97 @@ void __init mem_init(void)
  	kmalloc_ok = 1;
  }
  
@@ -216,13 +141,31 @@ index 32e3b1972..51836d94b 100644
 +	if (!IS_ENABLED(CONFIG_CONTIG_ALLOC)) {
 +		os_warn("memdrop: CONFIG_CONTIG_ALLOC missing, disabled\n");
 +		memdrop_mode = 0;
++		return 0;
 +	}
-+	if (!memdrop_mode)
-+		os_info("memdrop: disabled\n");
-+	else if (memdrop_mode == 2)
-+		os_info("memdrop: on (PFN queue, contig-isolate)\n");
++
++	/*
++	 * Cover all possible page-frame numbers the buddy may free.
++	 * max_pfn is final after mem_init setup paths; use max_low_pfn
++	 * which UML sets in arch_mm_preinit / setup_physmem.
++	 */
++	memdrop_nbits = max_pfn ? max_pfn : max_low_pfn;
++	if (memdrop_nbits < 1024)
++		memdrop_nbits = 1024;
++
++	memdrop_bitmap = bitmap_zalloc(memdrop_nbits, GFP_KERNEL);
++	if (!memdrop_bitmap) {
++		os_warn("memdrop: bitmap alloc failed, disabled\n");
++		memdrop_mode = 0;
++		return 0;
++	}
++
++	if (memdrop_mode == 2)
++		os_info("memdrop: on (PFN bitmap, contig-isolate)\n");
++	else if (memdrop_mode)
++		os_info("memdrop: batch (1MiB / 100ms, PFN bitmap+contig)\n");
 +	else
-+		os_info("memdrop: batch (1MiB / 100ms, PFN+contig)\n");
++		os_info("memdrop: disabled\n");
 +
 +	memdrop_ready = true;
 +	return 0;
@@ -231,12 +174,31 @@ index 32e3b1972..51836d94b 100644
 +
 +void arch_free_page(struct page *page, int order)
 +{
-+	if (!memdrop_mode || !memdrop_ready)
++	unsigned long pfn, i, nr;
++	long set;
++
++	if (!memdrop_mode || !memdrop_ready || !memdrop_bitmap)
 +		return;
 +	if (this_cpu_read(memdrop_in_worker))
 +		return;
 +
-+	memdrop_enqueue(page_to_pfn(page), 1U << order);
++	pfn = page_to_pfn(page);
++	nr = 1UL << order;
++
++	for (i = 0; i < nr; i++) {
++		unsigned long p = pfn + i;
++
++		if (p >= memdrop_nbits)
++			break;
++		if (!test_and_set_bit(p, memdrop_bitmap))
++			atomic_long_inc(&memdrop_set_pages);
++	}
++
++	set = atomic_long_read(&memdrop_set_pages);
++	if (memdrop_mode == 2 || set >= MEMDROP_BATCH_PAGES)
++		memdrop_schedule(true);
++	else
++		memdrop_schedule(false);
 +}
 +
 +static int __init uml_memdrop_setup(char *line, int *add)
@@ -259,10 +221,10 @@ index 32e3b1972..51836d94b 100644
 +"memdrop=off\n"
 +"    Do not return free guest pages to the host.\n"
 +"memdrop=batch\n"
-+"    Default. Queue freed PFNs; after ~1MiB or 100ms, contig-isolate still-\n"
-+"    free pages, MADV_REMOVE their host backing, return them to freelist.\n"
++"    Default. Mark freed PFNs in a bitmap; after ~1MiB or 100ms, contig-\n"
++"    isolate still-free pages, MADV_REMOVE, return to freelist.\n"
 +"memdrop=on\n"
-+"    Same PFN path, but schedule a flush on every free.\n\n"
++"    Same bitmap path, but schedule a flush on every free.\n\n"
 +);
 +
  #if IS_ENABLED(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA)
