@@ -14,7 +14,7 @@ index 6f54254aa..67991e120 100644
  typedef struct { unsigned long pgd; } pgd_t;
  
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..2932ef907 100644
+index 32e3b1972..744ff126e 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
 @@ -22,6 +22,10 @@
@@ -28,7 +28,7 @@ index 32e3b1972..2932ef907 100644
  
  #ifdef CONFIG_KASAN
  void __init kasan_init(void)
-@@ -57,6 +61,172 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -57,6 +61,178 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
@@ -119,6 +119,7 @@ index 32e3b1972..2932ef907 100644
 +		 * reused) — just skip; host keeps that page until a later
 +		 * free of it is observed again.
 +		 */
++#ifdef CONFIG_CONTIG_ALLOC
 +		err = alloc_contig_range(start, end, ACR_FLAGS_NONE,
 +					 GFP_KERNEL | __GFP_NOWARN |
 +					 __GFP_NORETRY);
@@ -127,8 +128,13 @@ index 32e3b1972..2932ef907 100644
 +			continue;
 +		}
 +
-+		err = os_drop_memory(page_address(pfn_to_page(start)), r.nr << PAGE_SHIFT);
++		err = os_drop_memory(page_address(pfn_to_page(start)),
++				     r.nr << PAGE_SHIFT);
 +		free_contig_range(start, r.nr);
++#else
++		handled += r.nr;
++		continue;
++#endif
 +
 +		if (unlikely(err)) {
 +			printk(KERN_WARNING
@@ -201,16 +207,16 @@ index 32e3b1972..2932ef907 100644
  /* Used during early boot */
  static unsigned long brk_end;
  
-@@ -84,6 +254,62 @@ void __init mem_init(void)
+@@ -84,6 +260,62 @@ void __init mem_init(void)
  	kmalloc_ok = 1;
  }
  
 +static int __init memdrop_late_init(void)
 +{
-+#ifndef CONFIG_CONTIG_ALLOC
-+	os_warn("memdrop: CONFIG_CONTIG_ALLOC missing, disabled\n");
-+	memdrop_mode = 0;
-+#endif
++if (!IS_ENABLED(CONFIG_CONTIG_ALLOC)) {
++		os_warn("memdrop: CONFIG_CONTIG_ALLOC missing, disabled\n");
++		memdrop_mode = 0;
++	}
 +	if (!memdrop_mode)
 +		os_info("memdrop: disabled\n");
 +	else if (memdrop_mode == 2)
