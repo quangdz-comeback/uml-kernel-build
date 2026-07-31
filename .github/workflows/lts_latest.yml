@@ -116,6 +116,18 @@ jobs:
           make ARCH=um olddefconfig
           make ARCH=um -j"$(nproc)"
 
+      - name: Debug balloon build
+        run: |
+          cd linux-${{ env.KVER }}
+          echo "=== find uml_balloon ==="
+          find . -name 'uml_balloon*' -type f 2>/dev/null
+          echo "=== grep built-in.a ==="
+          nm arch/um/drivers/built-in.a 2>/dev/null | grep -i balloon | head
+          echo "=== grep vmlinux ==="
+          nm vmlinux 2>/dev/null | grep -i balloon | head
+          echo "=== make V=1 uml_balloon.o ==="
+          make ARCH=um V=1 arch/um/drivers/uml_balloon.o 2>&1 | tail -20
+
       - name: Strip & upload
         run: |
           cp linux-${{ env.KVER }}/linux ./linux-uml
