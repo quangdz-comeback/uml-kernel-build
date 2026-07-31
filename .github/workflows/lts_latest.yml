@@ -55,11 +55,6 @@ jobs:
               echo "::warning::$(basename "$p") did not apply cleanly, skipping"
             fi
           done
-          echo "=== Verify Makefile has uml_balloon ==="
-          grep -n uml_balloon arch/um/drivers/Makefile || echo "WARNING: uml_balloon NOT in Makefile!"
-          echo "=== Verify uml_balloon.c exists ==="
-          ls -la arch/um/drivers/uml_balloon.c arch/um/drivers/uml_balloon.h
-
       - name: Apply UML SMP support
         run: |
           cd linux-${{ env.KVER }}
@@ -115,23 +110,6 @@ jobs:
 
           make ARCH=um olddefconfig
           make ARCH=um -j"$(nproc)"
-
-      - name: Debug balloon build
-        run: |
-          cd linux-${{ env.KVER }}
-          echo "=== find uml_balloon BEFORE ==="
-          find . -name 'uml_balloon*' -type f 2>/dev/null
-          echo "=== nm built-in.a ==="
-          nm arch/um/drivers/built-in.a 2>/dev/null | grep -i balloon | head
-          echo "=== nm vmlinux ==="
-          nm vmlinux 2>/dev/null | grep -i balloon | head
-          echo "=== make V=1 uml_balloon.o ==="
-          make ARCH=um V=1 arch/um/drivers/uml_balloon.o 2>&1
-          echo "exit: $?"
-          echo "=== find uml_balloon AFTER ==="
-          find . -name 'uml_balloon*' -type f 2>/dev/null
-          echo "=== nm uml_balloon.o ==="
-          nm arch/um/drivers/uml_balloon.o 2>/dev/null | head -20
 
       - name: Strip & upload
         run: |
