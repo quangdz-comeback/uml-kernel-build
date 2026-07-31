@@ -1,18 +1,17 @@
 diff --git a/arch/um/drivers/Makefile b/arch/um/drivers/Makefile
---- a/arch/um/drivers/Makefile	2026-07-30 17:21:08.773445089 +0000
-+++ b/arch/um/drivers/Makefile	2026-07-30 17:21:08.773445089 +0000
-@@ -7,7 +7,7 @@
- # in to pcap.o
+--- a/arch/um/drivers/Makefile	2026-07-31 01:18:57.552798789 +0000
++++ b/arch/um/drivers/Makefile	2026-07-31 01:18:57.552798789 +0000
+@@ -29,6 +29,7 @@
  
- vector-objs := vector_kern.o vector_user.o vector_transports.o
--mconsole-objs := mconsole_kern.o mconsole_user.o
-+mconsole-objs := mconsole_kern.o mconsole_user.o uml_balloon.o
- hostaudio-objs := hostaudio_kern.o
- ubd-objs := ubd_kern.o ubd_user.o
- port-objs := port_kern.o port_user.o
+ obj-$(CONFIG_UML_NET_VECTOR) += vector.o
+ obj-$(CONFIG_MCONSOLE) += mconsole.o
++obj-$(CONFIG_MCONSOLE) += uml_balloon.o
+ obj-$(CONFIG_MMAPPER) += mmapper_kern.o 
+ obj-$(CONFIG_BLK_DEV_UBD) += ubd.o 
+ obj-$(CONFIG_UML_SOUND) += hostaudio.o
 diff --git a/arch/um/drivers/mconsole_kern.c b/arch/um/drivers/mconsole_kern.c
---- a/arch/um/drivers/mconsole_kern.c	2026-07-30 17:21:08.773445089 +0000
-+++ b/arch/um/drivers/mconsole_kern.c	2026-07-30 17:21:08.773445089 +0000
+--- a/arch/um/drivers/mconsole_kern.c	2026-07-31 01:18:57.552798789 +0000
++++ b/arch/um/drivers/mconsole_kern.c	2026-07-31 01:18:57.552798789 +0000
 @@ -274,156 +274,7 @@
  	return NULL;
  }
@@ -174,7 +173,7 @@ diff --git a/arch/um/drivers/mconsole_kern.c b/arch/um/drivers/mconsole_kern.c
 diff --git a/arch/um/drivers/uml_balloon.c b/arch/um/drivers/uml_balloon.c
 new file mode 100644
 --- /dev/null
-+++ b/arch/um/drivers/uml_balloon.c	2026-07-30 17:21:08.773445089 +0000
++++ b/arch/um/drivers/uml_balloon.c	2026-07-31 01:18:57.552798789 +0000
 @@ -0,0 +1,556 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -735,7 +734,7 @@ new file mode 100644
 diff --git a/arch/um/drivers/uml_balloon.h b/arch/um/drivers/uml_balloon.h
 new file mode 100644
 --- /dev/null
-+++ b/arch/um/drivers/uml_balloon.h	2026-07-30 17:21:08.773445089 +0000
++++ b/arch/um/drivers/uml_balloon.h	2026-07-31 01:18:57.552798789 +0000
 @@ -0,0 +1,24 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
