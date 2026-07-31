@@ -14,7 +14,7 @@ index 6f54254aa..67991e120 100644
  typedef struct { unsigned long pgd; } pgd_t;
  
 diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
-index 32e3b1972..744ff126e 100644
+index 32e3b1972..856add222 100644
 --- a/arch/um/kernel/mem.c
 +++ b/arch/um/kernel/mem.c
 @@ -22,6 +22,10 @@
@@ -28,27 +28,23 @@ index 32e3b1972..744ff126e 100644
  
  #ifdef CONFIG_KASAN
  void __init kasan_init(void)
-@@ -57,6 +61,178 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
+@@ -57,6 +61,164 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD];
  /* Initialized at boot time, and readonly after that */
  int kmalloc_ok = 0;
  
 +/*
 + * memdrop: return free guest physmem to the host via MADV_REMOVE.
 + *
-+ * Punching a just-freed virtual address later is a use-after-reuse race
-+ * (the page may already belong to someone else). Isolating a *random*
-+ * free page and punching it does not help either: dirty high-water pages
-+ * stay resident while cold free pages get punched.
++ * Punching a just-freed virtual address later races with reallocation.
++ * Isolating a random free page punches the wrong pages (cold freelist
++ * instead of the dirty high-water mark).
 + *
-+ * Correct approach: remember the PFN that was freed. The worker tries
-+ * alloc_contig_range() on that PFN; success means the page is still free
-+ * and now exclusively held, so MADV_REMOVE is safe. Then free_contig_range
-+ * returns it to the freelist with host backing gone.
-+ *
-+ * Requires CONFIG_CONTIG_ALLOC (enabled in containers.config).
++ * Correct path: enqueue the freed PFN. Worker runs alloc_contig_range on
++ * that PFN; success means the page is still free and exclusively held, so
++ * MADV_REMOVE is safe. free_contig_range returns it to the freelist with
++ * host backing gone. Requires CONFIG_CONTIG_ALLOC.
 + *
 + * Default batch: flush when pending >= 1MiB or after ~100ms.
-+ * Free path only enqueues under a spinlock — no host syscall there.
 + */
 +#define MEMDROP_MAX_RANGES	512
 +#define MEMDROP_BATCH_PAGES	(1UL << (20 - PAGE_SHIFT)) /* 1 MiB */
@@ -56,7 +52,7 @@ index 32e3b1972..744ff126e 100644
 +
 +struct memdrop_range {
 +	unsigned long pfn;
-+	unsigned int  nr; /* page count */
++	unsigned int nr;
 +};
 +
 +static int memdrop_mode = 1; /* 0=off, 1=batch, 2=on */
@@ -105,20 +101,11 @@ index 32e3b1972..744ff126e 100644
 +	if (!memdrop_mode)
 +		return;
 +
-+	/*
-+	 * Drain up to one batch worth per invocation so we do not monopolize
-+	 * a workqueue thread. Reschedule if more remains.
-+	 */
 +	while (handled < MEMDROP_BATCH_PAGES && memdrop_dequeue(&r)) {
 +		unsigned long start = r.pfn;
 +		unsigned long end = r.pfn + r.nr;
 +		int err;
 +
-+		/*
-+		 * Isolate only if still free. Failure is normal (page was
-+		 * reused) — just skip; host keeps that page until a later
-+		 * free of it is observed again.
-+		 */
 +#ifdef CONFIG_CONTIG_ALLOC
 +		err = alloc_contig_range(start, end, ACR_FLAGS_NONE,
 +					 GFP_KERNEL | __GFP_NOWARN |
@@ -131,10 +118,6 @@ index 32e3b1972..744ff126e 100644
 +		err = os_drop_memory(page_address(pfn_to_page(start)),
 +				     r.nr << PAGE_SHIFT);
 +		free_contig_range(start, r.nr);
-+#else
-+		handled += r.nr;
-+		continue;
-+#endif
 +
 +		if (unlikely(err)) {
 +			printk(KERN_WARNING
@@ -143,6 +126,11 @@ index 32e3b1972..744ff126e 100644
 +			memdrop_mode = 0;
 +			break;
 +		}
++#else
++		/* Built without contig alloc — cannot safely isolate. */
++		(void)start;
++		(void)end;
++#endif
 +		handled += r.nr;
 +	}
 +
@@ -169,7 +157,6 @@ index 32e3b1972..744ff126e 100644
 +	if (!memdrop_mode)
 +		goto out;
 +
-+	/* Merge with previous range if contiguous. */
 +	if (memdrop_count) {
 +		last = (memdrop_tail + MEMDROP_MAX_RANGES - 1) %
 +			MEMDROP_MAX_RANGES;
@@ -181,7 +168,6 @@ index 32e3b1972..744ff126e 100644
 +	}
 +
 +	if (memdrop_count >= MEMDROP_MAX_RANGES) {
-+		/* Drop oldest to make room; better than blocking free path. */
 +		memdrop_pending_pages -= memdrop_q[memdrop_head].nr;
 +		memdrop_head = (memdrop_head + 1) % MEMDROP_MAX_RANGES;
 +		memdrop_count--;
@@ -207,32 +193,32 @@ index 32e3b1972..744ff126e 100644
  /* Used during early boot */
  static unsigned long brk_end;
  
-@@ -84,6 +260,62 @@ void __init mem_init(void)
+@@ -84,6 +246,71 @@ void __init mem_init(void)
  	kmalloc_ok = 1;
  }
  
 +static int __init memdrop_late_init(void)
 +{
-+if (!IS_ENABLED(CONFIG_CONTIG_ALLOC)) {
-+		os_warn("memdrop: CONFIG_CONTIG_ALLOC missing, disabled\n");
++	if (!IS_ENABLED(CONFIG_CONTIG_ALLOC)) {
++		os_warn("memdrop: CONFIG_CONTIG_ALLOC missing, disabled
++");
 +		memdrop_mode = 0;
 +	}
 +	if (!memdrop_mode)
-+		os_info("memdrop: disabled\n");
++		os_info("memdrop: disabled
++");
 +	else if (memdrop_mode == 2)
-+		os_info("memdrop: on (PFN queue, contig-isolate, workqueue)\n");
++		os_info("memdrop: on (PFN queue, contig-isolate)
++");
 +	else
-+		os_info("memdrop: batch (1MiB / 100ms, PFN+contig isolate)\n");
++		os_info("memdrop: batch (1MiB / 100ms, PFN+contig)
++");
 +
 +	memdrop_ready = true;
 +	return 0;
 +}
 +late_initcall(memdrop_late_init);
 +
-+/*
-+ * Record the freed PFN for later host give-back. Do not punch here: the
-+ * page re-enters the freelist immediately after we return.
-+ */
 +void arch_free_page(struct page *page, int order)
 +{
 +	if (!memdrop_mode || !memdrop_ready)
@@ -252,19 +238,28 @@ index 32e3b1972..744ff126e 100644
 +	else if (!strcmp(line, "batch"))
 +		memdrop_mode = 1;
 +	else {
-+		os_warn("memdrop: invalid '%s', using batch\n", line);
++		os_warn("memdrop: invalid '%s', using batch
++", line);
 +		memdrop_mode = 1;
 +	}
 +	return 0;
 +}
 +__uml_setup("memdrop=", uml_memdrop_setup,
-+"memdrop=off\n"
-+"    Do not return free guest pages to the host.\n"
-+"memdrop=batch\n"
-+"    Default. Queue freed PFNs; after ~1MiB or 100ms, contig-isolate still-\n"
-+"    free pages, MADV_REMOVE their host backing, return them to freelist.\n"
-+"memdrop=on\n"
-+"    Same PFN path, but schedule a flush on every free.\n\n"
++"memdrop=off
++"
++"    Do not return free guest pages to the host.
++"
++"memdrop=batch
++"
++"    Default. Queue freed PFNs; after ~1MiB or 100ms, contig-isolate still-
++"
++"    free pages, MADV_REMOVE their host backing, return them to freelist.
++"
++"memdrop=on
++"
++"    Same PFN path, but schedule a flush on every free.
++
++"
 +);
 +
  #if IS_ENABLED(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA)
