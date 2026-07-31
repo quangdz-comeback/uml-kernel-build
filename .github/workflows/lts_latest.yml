@@ -55,6 +55,10 @@ jobs:
               echo "::warning::$(basename "$p") did not apply cleanly, skipping"
             fi
           done
+          echo "=== Verify Makefile has uml_balloon ==="
+          grep -n uml_balloon arch/um/drivers/Makefile || echo "WARNING: uml_balloon NOT in Makefile!"
+          echo "=== Verify uml_balloon.c exists ==="
+          ls -la arch/um/drivers/uml_balloon.c arch/um/drivers/uml_balloon.h
 
       - name: Apply UML SMP support
         run: |
