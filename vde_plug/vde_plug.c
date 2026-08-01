@@ -8,8 +8,23 @@
  * then sends/receives Ethernet frames as length-prefixed messages.
  * This binary bridges those frames to libslirp for NAT.
  *
+ * Two operating modes:
+ *
+ *   1. STANDALONE (switch: false) — classic behaviour. One slirp NAT stack per
+ *      instance, guest always ends up on 10.0.2.15.
+ *
+ *   2. SWITCH (switch: true, default) — instances on the same host share an
+ *      L2 broadcast domain through a unix SEQPACKET socket (vde.socket).
+ *      The first instance to bind the socket becomes the HUB: it runs the
+ *      learning switch plus the uplink (slirp NAT or a host tap device).
+ *      Later instances become PEERs: pure wires into the hub.
+ *
+ *      Because every guest shares one segment, addresses come from a single
+ *      DHCP server (slirp's, or the real LAN's when uplink=tap). Guests get
+ *      distinct leases (10.0.2.15, .16, .17 ...) instead of all claiming .15.
+ *
  * Config: reads config.yaml from same directory as binary for port forwards,
- * IPv6 settings, etc. VNL params override config file.
+ * IPv6 settings, network/DHCP range, switch socket, uplink. VNL params override.
  *
  * Based on vdeplug4 (Renzo Davoli, GPLv2+) and libvdeplug_slirp (LGPLv2.1+).
  */
@@ -22,11 +37,19 @@
 #include <unistd.h>
 #include <signal.h>
 #include <poll.h>
+#include <fcntl.h>
+#include <time.h>
+#include <limits.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <getopt.h>
 #include <libgen.h>
+#include <net/if.h>
+#include <linux/if_tun.h>
 
 #ifdef STATIC_BUILD
 #include <libvdeslirp.h>
@@ -38,6 +61,10 @@
 #define ETH_HDRLEN     14
 #define MAX_LINE       512
 #define MAX_PORTS      64
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 /* ── Port forward entry ── */
 struct portfwd {
@@ -59,7 +86,25 @@ struct config {
 	int portfwd;
 	struct portfwd ports[MAX_PORTS];
 	int nports;
+
+	/* switch / private network */
+	int sw_enabled;               /* switch: true|false            */
+	char sw_socket[PATH_MAX];     /* socket: /tmp/vde.socket       */
+	int sw_mode;                  /* socket_mode: 0600             */
+
+	/* uplink */
+	char uplink[64];              /* uplink: slirp | tap:NAME      */
+
+	/* virtual network (slirp uplink only) */
+	char network[64];             /* network: 10.0.2.0/24          */
+	char host_addr[64];           /* host: 10.0.2.2                */
+	char dhcp_start[64];          /* dhcp_start: 10.0.2.15         */
+	char nameserver[64];          /* nameserver: 10.0.2.3          */
+	char hostname[64];            /* hostname: uml                 */
+	int mtu;
 };
+
+static struct config cfg_file;
 
 /* Trim leading/trailing whitespace */
 static char *trim(char *s) {
@@ -79,9 +124,23 @@ static char *unquote(char *s) {
 	return s;
 }
 
+static int parse_bool(const char *v) {
+	return (strcmp(v, "true") == 0 || strcmp(v, "yes") == 0 ||
+	        strcmp(v, "on") == 0   || strcmp(v, "1") == 0);
+}
+
+static void copy_str(char *dst, size_t n, const char *src) {
+	snprintf(dst, n, "%s", src);
+}
+
 /* Parse config.yaml - lightweight, no libyaml needed */
 static void parse_config(const char *path, struct config *cfg) {
 	memset(cfg, 0, sizeof(*cfg));
+
+	/* defaults */
+	cfg->sw_enabled = 1;
+	cfg->sw_mode = 0600;
+	copy_str(cfg->uplink, sizeof(cfg->uplink), "slirp");
 
 	FILE *f = fopen(path, "r");
 	if (!f) return;
@@ -117,7 +176,8 @@ static void parse_config(const char *path, struct config *cfg) {
 			pf->guest_port = atoi(trim(colon + 1));
 			if (pf->host_port <= 0 || pf->guest_port <= 0) continue;
 			inet_pton(AF_INET, "0.0.0.0", &pf->host_addr);
-			inet_pton(AF_INET, "10.0.2.15", &pf->guest_addr);
+			/* guest_addr 0.0.0.0 = first DHCP lease, resolved at fwd time */
+			pf->guest_addr.s_addr = 0;
 			cfg->nports++;
 			continue;
 		}
@@ -130,15 +190,308 @@ static void parse_config(const char *path, struct config *cfg) {
 		*colon = '\0';
 		char *key = trim(p);
 		char *val = trim(colon + 1);
+		char *hash = strchr(val, '#');
+		if (hash) { *hash = '\0'; val = trim(val); }
+		val = unquote(val);
 
 		if (strcmp(key, "ipv6") == 0)
-			cfg->ipv6 = (strcmp(val, "true") == 0);
+			cfg->ipv6 = parse_bool(val);
 		else if (strcmp(key, "portfwd") == 0)
-			cfg->portfwd = (strcmp(val, "true") == 0);
+			cfg->portfwd = parse_bool(val);
 		else if (strcmp(key, "ports") == 0)
 			in_ports = 1;
+		else if (strcmp(key, "switch") == 0)
+			cfg->sw_enabled = parse_bool(val);
+		else if (strcmp(key, "socket") == 0)
+			copy_str(cfg->sw_socket, sizeof(cfg->sw_socket), val);
+		else if (strcmp(key, "socket_mode") == 0)
+			cfg->sw_mode = (int)strtol(val, NULL, 8);
+		else if (strcmp(key, "uplink") == 0)
+			copy_str(cfg->uplink, sizeof(cfg->uplink), val);
+		else if (strcmp(key, "network") == 0)
+			copy_str(cfg->network, sizeof(cfg->network), val);
+		else if (strcmp(key, "host") == 0 || strcmp(key, "gateway") == 0)
+			copy_str(cfg->host_addr, sizeof(cfg->host_addr), val);
+		else if (strcmp(key, "dhcp_start") == 0)
+			copy_str(cfg->dhcp_start, sizeof(cfg->dhcp_start), val);
+		else if (strcmp(key, "nameserver") == 0 || strcmp(key, "dns") == 0)
+			copy_str(cfg->nameserver, sizeof(cfg->nameserver), val);
+		else if (strcmp(key, "hostname") == 0)
+			copy_str(cfg->hostname, sizeof(cfg->hostname), val);
+		else if (strcmp(key, "mtu") == 0)
+			cfg->mtu = atoi(val);
 	}
 	fclose(f);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Switch socket path resolution
+ *
+ * Priority: config `socket:` → $VDE_SWITCH_SOCKET → /tmp/vde.socket →
+ *           $TMPDIR/vde.socket → ./vde.socket (binary's own directory)
+ *
+ * Pterodactyl and similar sandboxes often have no writable /tmp, hence the
+ * cascade. The chosen path is printed so peers can be pointed at it.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Can we create a unix socket under this directory? */
+static int dir_usable(const char *dir) {
+	struct stat st;
+	if (stat(dir, &st) != 0) return 0;
+	if (!S_ISDIR(st.st_mode)) return 0;
+	return access(dir, W_OK | X_OK) == 0;
+}
+
+static void resolve_switch_socket(char *out, size_t n, const char *self_dir)
+{
+	const char *env;
+
+	/* 1. explicit config */
+	if (cfg_file.sw_socket[0]) {
+		copy_str(out, n, cfg_file.sw_socket);
+		return;
+	}
+
+	/* 2. environment override */
+	env = getenv("VDE_SWITCH_SOCKET");
+	if (env && *env) {
+		copy_str(out, n, env);
+		return;
+	}
+
+	/* 3. /tmp — the shared location that lets sibling instances find us */
+	if (dir_usable("/tmp")) {
+		snprintf(out, n, "/tmp/vde.socket");
+		return;
+	}
+
+	/* 4. $TMPDIR */
+	env = getenv("TMPDIR");
+	if (env && *env && dir_usable(env)) {
+		snprintf(out, n, "%s/vde.socket", env);
+		return;
+	}
+
+	/* 5. fall back to the binary's own directory */
+	if (self_dir && dir_usable(self_dir)) {
+		snprintf(out, n, "%s/vde.socket", self_dir);
+		return;
+	}
+
+	/* 6. last resort: cwd */
+	snprintf(out, n, "vde.socket");
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Learning switch
+ *
+ * The hub keeps one SEQPACKET listener. Each connected peer is a port.
+ * Port -1 is the uplink (slirp or tap). MAC→port learning keeps unicast off
+ * the other guests; unknown/multicast/broadcast floods everywhere else.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#define MAX_PEERS      32
+#define MAC_TABLE_SIZE 256
+#define MAC_TTL        300     /* seconds */
+#define PORT_UPLINK    (-1)
+
+struct mac_entry {
+	unsigned char mac[6];
+	int port;              /* index into peers[], or PORT_UPLINK */
+	time_t seen;
+	int valid;
+};
+
+struct sw_state {
+	int listen_fd;
+	char sock_path[PATH_MAX];
+	int peers[MAX_PEERS];  /* -1 = free slot */
+	int npeers;
+	struct mac_entry macs[MAC_TABLE_SIZE];
+};
+
+static struct sw_state sw;
+static int sw_is_hub = 0;
+
+static unsigned mac_hash(const unsigned char *m) {
+	return ((m[3] << 16) ^ (m[4] << 8) ^ m[5] ^ (m[0] << 4)) % MAC_TABLE_SIZE;
+}
+
+static void mac_learn(const unsigned char *mac, int port) {
+	/* never learn from a multicast/broadcast source address */
+	if (mac[0] & 0x01) return;
+
+	unsigned h = mac_hash(mac);
+	for (unsigned i = 0; i < MAC_TABLE_SIZE; i++) {
+		struct mac_entry *e = &sw.macs[(h + i) % MAC_TABLE_SIZE];
+		if (e->valid && memcmp(e->mac, mac, 6) == 0) {
+			e->port = port;
+			e->seen = time(NULL);
+			return;
+		}
+		if (!e->valid) {
+			memcpy(e->mac, mac, 6);
+			e->port = port;
+			e->seen = time(NULL);
+			e->valid = 1;
+			return;
+		}
+	}
+	/* table full: overwrite the bucket head */
+	struct mac_entry *e = &sw.macs[h];
+	memcpy(e->mac, mac, 6);
+	e->port = port;
+	e->seen = time(NULL);
+	e->valid = 1;
+}
+
+/* Returns port, or INT_MIN when unknown (caller floods) */
+static int mac_lookup(const unsigned char *mac) {
+	unsigned h = mac_hash(mac);
+	time_t now = time(NULL);
+	for (unsigned i = 0; i < MAC_TABLE_SIZE; i++) {
+		struct mac_entry *e = &sw.macs[(h + i) % MAC_TABLE_SIZE];
+		if (!e->valid) break;
+		if (memcmp(e->mac, mac, 6) == 0) {
+			if (now - e->seen > MAC_TTL) { e->valid = 0; break; }
+			return e->port;
+		}
+	}
+	return INT_MIN;
+}
+
+static void mac_forget_port(int port) {
+	for (unsigned i = 0; i < MAC_TABLE_SIZE; i++)
+		if (sw.macs[i].valid && sw.macs[i].port == port)
+			sw.macs[i].valid = 0;
+}
+
+/*
+ * Try to become the hub by binding the socket. Returns:
+ *   1  = we are the hub (listen_fd set)
+ *   0  = somebody else owns it; *peer_fd is a connection to them
+ *  -1  = error
+ */
+static int sw_bind_or_connect(const char *path, int mode, int *peer_fd)
+{
+	struct sockaddr_un addr;
+	int fd;
+
+	if (strlen(path) >= sizeof(addr.sun_path)) {
+		fprintf(stderr, "[vde_plug] switch: socket path too long: %s\n", path);
+		return -1;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	copy_str(addr.sun_path, sizeof(addr.sun_path), path);
+
+	/* First try to join an existing switch. */
+	fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+	if (fd < 0) return -1;
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+		*peer_fd = fd;
+		return 0;
+	}
+	close(fd);
+
+	/*
+	 * Nobody answered. A stale socket file blocks bind(), so remove it —
+	 * safe now that we know connect() failed (ECONNREFUSED/ENOENT).
+	 */
+	unlink(path);
+
+	fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+	if (fd < 0) return -1;
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		int saved = errno;
+		close(fd);
+		/* Lost the race: another instance bound between our calls. */
+		if (saved == EADDRINUSE) {
+			fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+			if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+				*peer_fd = fd;
+				return 0;
+			}
+			if (fd >= 0) close(fd);
+		}
+		errno = saved;
+		return -1;
+	}
+	if (listen(fd, MAX_PEERS) < 0) {
+		close(fd);
+		unlink(path);
+		return -1;
+	}
+	chmod(path, mode ? mode : 0600);
+
+	sw.listen_fd = fd;
+	copy_str(sw.sock_path, sizeof(sw.sock_path), path);
+	return 1;
+}
+
+static void sw_cleanup(void) {
+	if (sw_is_hub && sw.sock_path[0]) {
+		unlink(sw.sock_path);
+		sw.sock_path[0] = '\0';
+	}
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Uplink: tap device (for Proxmox-style bridged networking)
+ *
+ * With `uplink: tap:NAME` the hub attaches to an existing host tap instead of
+ * running slirp. DHCP then comes from the real LAN, so guests get real leases.
+ * The tap must already exist and be up (created by the host admin, e.g.
+ * added to vmbr0 on Proxmox); we only open it.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static int tap_open(const char *name)
+{
+	struct ifreq ifr;
+	int fd = open("/dev/net/tun", O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "[vde_plug] tap: open /dev/net/tun: %s\n", strerror(errno));
+		return -1;
+	}
+	memset(&ifr, 0, sizeof(ifr));
+	ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+	copy_str(ifr.ifr_name, IFNAMSIZ, name);
+	if (ioctl(fd, TUNSETIFF, &ifr) < 0) {
+		fprintf(stderr, "[vde_plug] tap: TUNSETIFF %s: %s\n", name, strerror(errno));
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Uplink abstraction — slirp or tap behind one read/write pair
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+enum uplink_kind { UP_NONE, UP_SLIRP, UP_TAP };
+
+struct uplink {
+	enum uplink_kind kind;
+	int fd;                /* slirp poll fd, or tap fd */
+};
+
+static struct uplink up;
+
+static ssize_t uplink_recv(void *buf, size_t n) {
+	switch (up.kind) {
+	case UP_SLIRP: return vdeslirp_recv(slirp, buf, n);
+	case UP_TAP:   return read(up.fd, buf, n);
+	default:       return -1;
+	}
+}
+
+static ssize_t uplink_send(const void *buf, size_t n) {
+	switch (up.kind) {
+	case UP_SLIRP: return vdeslirp_send(slirp, buf, n);
+	case UP_TAP:   return write(up.fd, buf, n);
+	default:       return -1;
+	}
 }
 
 /* ── VNL parameter parsing (simple key=val/key=val) ── */
@@ -147,7 +500,12 @@ static void parse_vnl_params(char *params, SlirpConfig *cfg, int *has_v6) {
 	char *save, *tok;
 	for (tok = strtok_r(params, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
 		char *eq = strchr(tok, '=');
-		if (!eq) continue;
+		if (!eq) {
+			/* bare flags */
+			if (strcmp(tok, "switch") == 0)   cfg_file.sw_enabled = 1;
+			else if (strcmp(tok, "noswitch") == 0) cfg_file.sw_enabled = 0;
+			continue;
+		}
 		*eq = '\0';
 		char *k = tok, *v = eq + 1;
 		if (strcmp(k, "v6") == 0 && strcmp(v, "1") == 0) *has_v6 = 1;
@@ -159,10 +517,260 @@ static void parse_vnl_params(char *params, SlirpConfig *cfg, int *has_v6) {
 		}
 		else if (strcmp(k, "mtu") == 0) cfg->if_mtu = atoi(v);
 		else if (strcmp(k, "mru") == 0) cfg->if_mru = atoi(v);
+		/* switch / uplink overrides */
+		else if (strcmp(k, "switch") == 0) cfg_file.sw_enabled = parse_bool(v);
+		else if (strcmp(k, "socket") == 0)
+			copy_str(cfg_file.sw_socket, sizeof(cfg_file.sw_socket), v);
+		else if (strcmp(k, "uplink") == 0)
+			copy_str(cfg_file.uplink, sizeof(cfg_file.uplink), v);
+		else if (strcmp(k, "dhcp_start") == 0)
+			copy_str(cfg_file.dhcp_start, sizeof(cfg_file.dhcp_start), v);
+		else if (strcmp(k, "network") == 0)
+			copy_str(cfg_file.network, sizeof(cfg_file.network), v);
 	}
 }
 
-/* ── Main ── */
+/* ══════════════════════════════════════════════════════════════════════════
+ * slirp setup — network/DHCP range from config
+ *
+ * Defaults match upstream slirp (10.0.2.0/24, host .2, DNS .3, DHCP from .15)
+ * so existing setups keep working. When several guests share the switch they
+ * each get a distinct lease walking upward from dhcp_start.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static void apply_network_config(SlirpConfig *scfg)
+{
+	if (cfg_file.network[0]) {
+		char tmp[64];
+		copy_str(tmp, sizeof(tmp), cfg_file.network);
+		char *slash = strchr(tmp, '/');
+		int prefix = 24;
+		if (slash) { prefix = atoi(slash + 1); *slash = '\0'; }
+		if (inet_pton(AF_INET, tmp, &scfg->vnetwork) == 1)
+			vdeslirp_setvprefix(scfg, prefix);
+	}
+	if (cfg_file.host_addr[0])
+		inet_pton(AF_INET, cfg_file.host_addr, &scfg->vhost);
+	if (cfg_file.dhcp_start[0])
+		inet_pton(AF_INET, cfg_file.dhcp_start, &scfg->vdhcp_start);
+	if (cfg_file.nameserver[0])
+		inet_pton(AF_INET, cfg_file.nameserver, &scfg->vnameserver);
+	if (cfg_file.hostname[0])
+		scfg->vhostname = cfg_file.hostname;
+	if (cfg_file.mtu > 0) {
+		scfg->if_mtu = cfg_file.mtu;
+		scfg->if_mru = cfg_file.mtu;
+	}
+}
+
+/* Port forwards target the first DHCP lease unless the config says otherwise. */
+static void apply_port_forwards(struct in_addr dhcp_start)
+{
+	if (!cfg_file.portfwd) return;
+
+	char gbuf[INET_ADDRSTRLEN];
+	for (int i = 0; i < cfg_file.nports; i++) {
+		struct portfwd *pf = &cfg_file.ports[i];
+		struct in_addr guest = pf->guest_addr.s_addr ? pf->guest_addr : dhcp_start;
+		int r = vdeslirp_add_fwd(slirp, pf->is_udp,
+				pf->host_addr, pf->host_port,
+				guest, pf->guest_port);
+		inet_ntop(AF_INET, &guest, gbuf, sizeof(gbuf));
+		fprintf(stderr, "[vde_plug] %sfwd :%d -> %s:%d %s\n",
+				pf->is_udp ? "udp" : "tcp",
+				pf->host_port, gbuf, pf->guest_port,
+				r == 0 ? "ok" : strerror(errno));
+	}
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Hub loop — own the switch socket, bridge guest ↔ peers ↔ uplink
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Our own guest sits on a reserved port number so learning can address it. */
+#define PORT_LOCAL (MAX_PEERS)
+
+static void hub_send(int port, int local_fd, const void *buf, size_t len)
+{
+	if (port == PORT_UPLINK) { uplink_send(buf, len); return; }
+	if (port == PORT_LOCAL)  { if (local_fd >= 0) send(local_fd, buf, len, 0); return; }
+	if (port >= 0 && port < MAX_PEERS && sw.peers[port] >= 0)
+		send(sw.peers[port], buf, len, 0);
+}
+
+static void hub_flood(int from_port, int local_fd, const void *buf, size_t len)
+{
+	if (from_port != PORT_UPLINK) uplink_send(buf, len);
+	if (from_port != PORT_LOCAL && local_fd >= 0) send(local_fd, buf, len, 0);
+	for (int i = 0; i < MAX_PEERS; i++)
+		if (sw.peers[i] >= 0 && i != from_port)
+			send(sw.peers[i], buf, len, 0);
+}
+
+/* One frame arrived on from_port: learn the source, then forward. */
+static void hub_forward(int from_port, int local_fd, unsigned char *buf, size_t len)
+{
+	if (len < ETH_HDRLEN) return;
+
+	const unsigned char *dst = buf;
+	const unsigned char *src = buf + 6;
+
+	mac_learn(src, from_port);
+
+	if (dst[0] & 0x01) {           /* broadcast / multicast */
+		hub_flood(from_port, local_fd, buf, len);
+		return;
+	}
+
+	int port = mac_lookup(dst);
+	if (port == INT_MIN) {         /* unknown unicast */
+		hub_flood(from_port, local_fd, buf, len);
+		return;
+	}
+	if (port == from_port) return; /* would hairpin */
+	hub_send(port, local_fd, buf, len);
+}
+
+static int hub_loop(int local_fd)
+{
+	unsigned char buf[VDE_ETHBUFSIZE];
+
+	while (running) {
+		struct pollfd pfd[MAX_PEERS + 3];
+		int map[MAX_PEERS + 3];   /* pfd index -> port (or sentinel) */
+		int n = 0;
+
+		/* local guest */
+		pfd[n].fd = local_fd; pfd[n].events = POLLIN; pfd[n].revents = 0;
+		map[n++] = PORT_LOCAL;
+
+		/* uplink */
+		if (up.kind != UP_NONE) {
+			pfd[n].fd = up.fd; pfd[n].events = POLLIN; pfd[n].revents = 0;
+			map[n++] = PORT_UPLINK;
+		}
+
+		/* listener for new peers */
+		int listen_idx = n;
+		pfd[n].fd = sw.listen_fd; pfd[n].events = POLLIN; pfd[n].revents = 0;
+		map[n++] = INT_MIN;
+
+		/* connected peers */
+		for (int i = 0; i < MAX_PEERS; i++) {
+			if (sw.peers[i] < 0) continue;
+			pfd[n].fd = sw.peers[i]; pfd[n].events = POLLIN; pfd[n].revents = 0;
+			map[n++] = i;
+		}
+
+		int r = poll(pfd, n, 1000);
+		if (r < 0) { if (errno == EINTR) continue; break; }
+		if (r == 0) continue;
+
+		for (int k = 0; k < n; k++) {
+			short ev = pfd[k].revents;
+			if (!ev) continue;
+
+			/* new peer */
+			if (k == listen_idx) {
+				if (!(ev & POLLIN)) continue;
+				int cfd = accept(sw.listen_fd, NULL, NULL);
+				if (cfd < 0) continue;
+				int slot = -1;
+				for (int i = 0; i < MAX_PEERS; i++)
+					if (sw.peers[i] < 0) { slot = i; break; }
+				if (slot < 0) {
+					fprintf(stderr, "[vde_plug] switch: peer limit reached\n");
+					close(cfd);
+					continue;
+				}
+				sw.peers[slot] = cfd;
+				sw.npeers++;
+				fprintf(stderr, "[vde_plug] switch: peer %d joined (%d total)\n",
+						slot, sw.npeers);
+				continue;
+			}
+
+			int port = map[k];
+
+			/* local guest died -> the VM is gone, so are we */
+			if (port == PORT_LOCAL && (ev & (POLLHUP | POLLERR)))
+				return 0;
+
+			if (port == PORT_UPLINK && (ev & (POLLHUP | POLLERR)))
+				return 0;
+
+			/* peer disconnect */
+			if (port >= 0 && port < MAX_PEERS && (ev & (POLLHUP | POLLERR))) {
+				close(sw.peers[port]);
+				sw.peers[port] = -1;
+				sw.npeers--;
+				mac_forget_port(port);
+				fprintf(stderr, "[vde_plug] switch: peer %d left (%d total)\n",
+						port, sw.npeers);
+				continue;
+			}
+
+			if (!(ev & POLLIN)) continue;
+
+			ssize_t rx;
+			if (port == PORT_UPLINK)
+				rx = uplink_recv(buf, sizeof(buf));
+			else if (port == PORT_LOCAL)
+				rx = recv(local_fd, buf, sizeof(buf), 0);
+			else
+				rx = recv(sw.peers[port], buf, sizeof(buf), 0);
+
+			if (rx <= 0) {
+				if (port == PORT_LOCAL || port == PORT_UPLINK) return 0;
+				close(sw.peers[port]);
+				sw.peers[port] = -1;
+				sw.npeers--;
+				mac_forget_port(port);
+				continue;
+			}
+
+			hub_forward(port, local_fd, buf, (size_t)rx);
+		}
+	}
+	return 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Peer loop — straight wire between our guest and the hub
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static int peer_loop(int local_fd, int hub_fd)
+{
+	unsigned char buf[VDE_ETHBUFSIZE];
+	struct pollfd pfd[2] = {
+		{ .fd = local_fd, .events = POLLIN },
+		{ .fd = hub_fd,   .events = POLLIN },
+	};
+
+	while (running) {
+		int n = poll(pfd, 2, 1000);
+		if (n < 0) { if (errno == EINTR) continue; break; }
+		if (pfd[0].revents & (POLLHUP | POLLERR)) break;
+		if (pfd[1].revents & (POLLHUP | POLLERR)) {
+			fprintf(stderr, "[vde_plug] switch: hub went away\n");
+			break;
+		}
+		if (pfd[0].revents & POLLIN) {
+			ssize_t rx = recv(local_fd, buf, sizeof(buf), 0);
+			if (rx <= 0) break;
+			send(hub_fd, buf, rx, 0);
+		}
+		if (pfd[1].revents & POLLIN) {
+			ssize_t rx = recv(hub_fd, buf, sizeof(buf), 0);
+			if (rx <= 0) break;
+			send(local_fd, buf, rx, 0);
+		}
+	}
+	return 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════ Main ════ */
+
 int main(int argc, char *argv[])
 {
 	char *vnl = NULL;
@@ -188,22 +796,24 @@ int main(int argc, char *argv[])
 			vnl = argv[i];
 	}
 
-	/* Find config.yaml next to binary */
-	char config_path[4096];
+	/* Find config.yaml next to binary; remember the dir for socket fallback */
+	char config_path[PATH_MAX];
+	char self_dir[PATH_MAX];
+	self_dir[0] = '\0';
 	{
-		char self[4096];
+		char self[PATH_MAX];
 		ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
 		if (n > 0) {
 			self[n] = '\0';
 			char *dir = dirname(self);
+			copy_str(self_dir, sizeof(self_dir), dir);
 			snprintf(config_path, sizeof(config_path), "%s/config.yaml", dir);
 		} else {
-			strcpy(config_path, "config.yaml");
+			copy_str(config_path, sizeof(config_path), "config.yaml");
 		}
 	}
 
-	/* Parse config file */
-	struct config cfg_file;
+	/* Parse config file (also seeds switch/uplink defaults) */
 	parse_config(config_path, &cfg_file);
 
 	/* Parse VNL: strip "slirp://" prefix */
@@ -225,72 +835,141 @@ int main(int argc, char *argv[])
 		free(pcopy);
 	}
 
-	if (has_v6) {
-		scfg.in6_enabled = 1;
-	} else {
-		scfg.in6_enabled = 0;
-	}
+	scfg.in6_enabled = has_v6 ? 1 : 0;
 
-	slirp = vdeslirp_open(&scfg);
-	if (!slirp) {
-		fprintf(stderr, "[vde_plug] vdeslirp_open: %s\n", strerror(errno));
-		return 1;
-	}
-
-	/* Apply port forwards from config */
-	if (cfg_file.portfwd) {
-		for (int i = 0; i < cfg_file.nports; i++) {
-			struct portfwd *pf = &cfg_file.ports[i];
-			int r = vdeslirp_add_fwd(slirp, pf->is_udp,
-					pf->host_addr, pf->host_port,
-					pf->guest_addr, pf->guest_port);
-			fprintf(stderr, "[vde_plug] %sfwd :%d -> 10.0.2.15:%d %s\n",
-					pf->is_udp ? "udp" : "tcp",
-					pf->host_port, pf->guest_port,
-					r == 0 ? "ok" : strerror(errno));
-		}
-	}
-
-	int slirp_fd = vdeslirp_fd(slirp);
+	/* Network / DHCP range from config (defaults keep 10.0.2.0/24) */
+	apply_network_config(&scfg);
 
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGTERM, sig_handler);
 	signal(SIGINT, sig_handler);
 
-	fprintf(stderr, "[vde_plug] started (descr=%s vnl=%s fd=%d slirp_fd=%d ipv6=%d ports=%d)\n",
-			descr ? descr : "-", vnl ? vnl : "-",
-			seqpacket_fd, slirp_fd, has_v6, cfg_file.nports);
+	if (seqpacket_fd < 0) {
+		fprintf(stderr, "[vde_plug] no seqpacket fd, nothing to do\n");
+		return 1;
+	}
 
-	/* === SEQPACKET MODE (normal UML operation) === */
-	if (seqpacket_fd >= 0) {
+	/*
+	 * Decide our role. In switch mode the first instance to bind the socket
+	 * runs slirp/tap for everybody; the rest are plain wires. Only the hub
+	 * touches the uplink, so exactly one DHCP server serves the segment and
+	 * guests receive distinct leases.
+	 */
+	for (int i = 0; i < MAX_PEERS; i++) sw.peers[i] = -1;
+	sw.listen_fd = -1;
+
+	int hub_fd = -1;
+	char sock_path[PATH_MAX] = "";
+
+	if (cfg_file.sw_enabled) {
+		resolve_switch_socket(sock_path, sizeof(sock_path), self_dir);
+		int r = sw_bind_or_connect(sock_path, cfg_file.sw_mode, &hub_fd);
+		if (r == 1) {
+			sw_is_hub = 1;
+			atexit(sw_cleanup);
+		} else if (r == 0) {
+			sw_is_hub = 0;
+		} else {
+			fprintf(stderr, "[vde_plug] switch: %s unusable (%s), standalone\n",
+					sock_path, strerror(errno));
+			cfg_file.sw_enabled = 0;
+		}
+	}
+
+	/* Uplink is the hub's job (or standalone mode's). */
+	int need_uplink = (!cfg_file.sw_enabled || sw_is_hub);
+
+	up.kind = UP_NONE;
+	up.fd = -1;
+
+	if (need_uplink) {
+		if (strncmp(cfg_file.uplink, "tap:", 4) == 0) {
+			int tfd = tap_open(cfg_file.uplink + 4);
+			if (tfd < 0) {
+				fprintf(stderr, "[vde_plug] uplink tap failed, falling back to slirp\n");
+			} else {
+				up.kind = UP_TAP;
+				up.fd = tfd;
+			}
+		} else if (strcmp(cfg_file.uplink, "none") == 0) {
+			/* isolated private segment, no internet */
+		}
+
+		if (up.kind == UP_NONE && strcmp(cfg_file.uplink, "none") != 0) {
+			slirp = vdeslirp_open(&scfg);
+			if (!slirp) {
+				fprintf(stderr, "[vde_plug] vdeslirp_open: %s\n", strerror(errno));
+				return 1;
+			}
+			up.kind = UP_SLIRP;
+			up.fd = vdeslirp_fd(slirp);
+			apply_port_forwards(scfg.vdhcp_start);
+		}
+	}
+
+	/* Status line */
+	{
+		const char *role = !cfg_file.sw_enabled ? "standalone"
+		                 : (sw_is_hub ? "hub" : "peer");
+		const char *upname = up.kind == UP_SLIRP ? "slirp"
+		                   : up.kind == UP_TAP   ? cfg_file.uplink
+		                   : "none";
+		char dhcpbuf[INET_ADDRSTRLEN] = "-";
+		if (up.kind == UP_SLIRP)
+			inet_ntop(AF_INET, &scfg.vdhcp_start, dhcpbuf, sizeof(dhcpbuf));
+
+		fprintf(stderr,
+			"[vde_plug] started (descr=%s vnl=%s fd=%d role=%s uplink=%s "
+			"dhcp_from=%s ipv6=%d ports=%d",
+			descr ? descr : "-", vnl ? vnl : "-",
+			seqpacket_fd, role, upname, dhcpbuf, has_v6, cfg_file.nports);
+		if (cfg_file.sw_enabled)
+			fprintf(stderr, " socket=%s", sock_path);
+		fprintf(stderr, ")\n");
+	}
+
+	int rc;
+	if (cfg_file.sw_enabled && sw_is_hub)
+		rc = hub_loop(seqpacket_fd);
+	else if (cfg_file.sw_enabled)
+		rc = peer_loop(seqpacket_fd, hub_fd);
+	else {
+		/* standalone: guest ↔ uplink, no switch */
 		unsigned char buf[VDE_ETHBUFSIZE];
 		struct pollfd pfd[2] = {
 			{ .fd = seqpacket_fd, .events = POLLIN },
-			{ .fd = slirp_fd,     .events = POLLIN },
+			{ .fd = up.fd,        .events = POLLIN },
 		};
+		int nfd = (up.kind == UP_NONE) ? 1 : 2;
 		while (running) {
-			int n = poll(pfd, 2, 1000);
+			int n = poll(pfd, nfd, 1000);
 			if (n < 0) { if (errno == EINTR) continue; break; }
 			if (pfd[0].revents & (POLLHUP | POLLERR)) break;
-			if (pfd[1].revents & (POLLHUP | POLLERR)) break;
+			if (nfd > 1 && (pfd[1].revents & (POLLHUP | POLLERR))) break;
 			if (pfd[0].revents & POLLIN) {
 				ssize_t rx = recv(seqpacket_fd, buf, sizeof(buf), 0);
 				if (rx <= 0) break;
-				vdeslirp_send(slirp, buf, rx);
+				uplink_send(buf, rx);
 			}
-			if (pfd[1].revents & POLLIN) {
-				ssize_t rx = vdeslirp_recv(slirp, buf, sizeof(buf));
+			if (nfd > 1 && (pfd[1].revents & POLLIN)) {
+				ssize_t rx = uplink_recv(buf, sizeof(buf));
 				if (rx > 0)
 					send(seqpacket_fd, buf, rx, 0);
 			}
 		}
-	} else {
-		fprintf(stderr, "[vde_plug] no seqpacket fd, nothing to do\n");
-		vdeslirp_close(slirp);
-		return 1;
+		rc = 0;
 	}
 
-	vdeslirp_close(slirp);
+	if (hub_fd >= 0) close(hub_fd);
+	if (up.kind == UP_TAP && up.fd >= 0) close(up.fd);
+	if (up.kind == UP_SLIRP && slirp) vdeslirp_close(slirp);
+	if (sw_is_hub) {
+		for (int i = 0; i < MAX_PEERS; i++)
+			if (sw.peers[i] >= 0) close(sw.peers[i]);
+		if (sw.listen_fd >= 0) close(sw.listen_fd);
+		sw_cleanup();
+	}
+
 	fprintf(stderr, "[vde_plug] shutdown\n");
-	return 0;
+	return rc;
 }

@@ -1,18 +1,41 @@
-# slirp.yaml — Network configuration for slirp bridge
+# slirp.yaml / config.yaml — network configuration for the vde_plug bridge
 #
-# Protocol toggles:
-#   tcp: true/false   — allow TCP port forwards (default: true)
-#   udp: true/false   — allow UDP port forwards (default: false)
-#
-# Port forwarding:
-#   portfwd: true     — enable port forward rules below
-#   ports:            — list of host_port:guest_port mappings
-#     - 2222:22         (TCP by default)
-#     - udp 5353:53     (explicit UDP)
-#     - tcp 8080:80     (explicit TCP)
+# Place next to the vde_plug binary (it is located via /proc/self/exe).
 
-tcp: true
-udp: true
+# ── Private switch between instances on the same host ──────────────────────
+# switch: true   — instances sharing `socket` land on one L2 segment.
+#                  The first one to bind the socket becomes the hub and runs
+#                  the uplink; the others are wires into it. Because a single
+#                  DHCP server then serves the segment, guests get distinct
+#                  leases (10.0.2.15, .16, .17 …) instead of all claiming .15.
+# switch: false  — classic one-NAT-per-instance behaviour.
+switch: true
+
+# Socket path. Omit to auto-resolve:
+#   $VDE_SWITCH_SOCKET → /tmp/vde.socket → $TMPDIR/vde.socket → <bindir>/vde.socket
+# The fallback matters in sandboxes (Pterodactyl) with no writable /tmp.
+# socket: /tmp/vde.socket
+socket_mode: 0600
+
+# ── Uplink (hub only) ──────────────────────────────────────────────────────
+# slirp     — userspace NAT, no privileges needed (default)
+# tap:NAME  — attach to an existing host tap; DHCP then comes from the real
+#             LAN, so guests get real addresses. Use this on Proxmox with a
+#             tap already enslaved to vmbr0. Needs access to /dev/net/tun.
+# none      — isolated segment, guest-to-guest only, no internet
+uplink: slirp
+
+# ── Virtual network (uplink: slirp only) ───────────────────────────────────
+network: 10.0.2.0/24
+gateway: 10.0.2.2
+nameserver: 10.0.2.3
+dhcp_start: 10.0.2.15
+# mtu: 1500
+
+ipv6: false
+
+# ── Port forwarding (uplink: slirp only) ───────────────────────────────────
+# Rules without an explicit guest address target the first DHCP lease.
 portfwd: true
 ports:
   - 2222:22

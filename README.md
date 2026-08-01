@@ -62,12 +62,69 @@ echo "nameserver 10.0.2.3" > /etc/resolv.conf
 
 After this, the guest should be able to access the internet via SLIRP.
 
-For port forwarding, create a file named `slirp_config` in same folder and add forwarded port in format `[guest_port]:[host_port]` like this:
+### Networking config (`config.yaml`)
+
+`vde_plug` reads `config.yaml` from **its own directory** (resolved via
+`/proc/self/exe`, so finding the binary through `PATH` still works). See
+`slirp.yaml` in this repo for a fully commented template.
+
+Note that UML locates the helper with `execvp("vde_plug")` — the path in
+`vnl=` is *not* used for that. The binary's directory must be in `PATH`:
+
+```bash
+export PATH="$PWD:$PATH"
 ```
-22:2222
-80:8080
-...
+
+#### Private network between instances
+
+With `switch: true` (the default) every instance sharing one socket lands on
+a single L2 segment. The first instance to bind the socket becomes the **hub**
+and runs the uplink (slirp NAT or a host tap); later instances are **peers**,
+plain wires into the hub. The hub is a MAC-learning switch, so unicast between
+two guests does not hit the others.
+
+Because one DHCP server now serves the whole segment, guests receive
+**distinct leases** — `10.0.2.15`, `.16`, `.17`, … — instead of every instance
+claiming `.15`. Nothing needs to be configured per instance.
+
+Socket path resolution, in order:
+
+1. `socket:` in `config.yaml`
+2. `$VDE_SWITCH_SOCKET`
+3. `/tmp/vde.socket` — the shared default
+4. `$TMPDIR/vde.socket`
+5. `<binary dir>/vde.socket`
+
+Steps 4–5 matter in sandboxes such as Pterodactyl where `/tmp` is missing or
+read-only. The resolved path is printed on the status line. A leftover socket
+file from a crashed hub is reclaimed automatically (`connect()` is tried before
+`bind()`, so a live hub is never disturbed).
+
+Set `switch: false` for the classic one-NAT-per-instance behaviour.
+
+#### Uplink modes
+
+| `uplink:` | Behaviour |
+|---|---|
+| `slirp` | Userspace NAT, no privileges. Default. |
+| `tap:NAME` | Attach to an existing host tap. DHCP comes from the real LAN, so guests get real addresses — this is the Proxmox/bridged case. Needs `/dev/net/tun`; falls back to slirp if unavailable. |
+| `none` | Isolated segment: guest-to-guest only, no internet. |
+
+The tap must already exist and be enslaved to the bridge (e.g. `vmbr0`);
+`vde_plug` only opens it.
+
+#### Port forwarding
+
+```yaml
+portfwd: true
+ports:
+  - 2222:22        # host:guest, TCP by default
+  - 8080:80
+  - udp 5353:53
 ```
+
+Rules target the first DHCP lease (`dhcp_start`). Only the hub publishes
+forwards, since only the hub owns the slirp stack.
 
 ---
 
@@ -76,6 +133,7 @@ For port forwarding, create a file named `slirp_config` in same folder and add f
 * You can use any Linux Cloud Image compatible with UML.
 * Adjust `mem` parameter according to your host's available RAM.
 * SLIRP allows network access without needing root privileges.
+* `init=/sbin/init` works for both systemd and OpenRC guests.
 
 
 ---
