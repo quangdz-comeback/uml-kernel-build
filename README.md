@@ -158,13 +158,30 @@ The tap must already exist and be enslaved to the bridge (e.g. `vmbr0`);
 ```yaml
 portfwd: true
 ports:
-  - 2222:22        # host:guest, TCP by default
-  - 8080:80
+  - 2222:22                 # fallback: first client on the segment
+  - 10.0.2.16:2223:22       # pinned to one guest
+  - .17:2224:22             # same, short form
   - udp 5353:53
 ```
 
-Rules target the first DHCP lease (`dhcp_start`). Only the hub publishes
-forwards, since only the hub owns the slirp stack.
+Two rule shapes:
+
+| Form | Meaning |
+|---|---|
+| `HOST:GUEST` | **Fallback.** Follows the first client to lease an address. |
+| `ADDR:HOST:GUEST` | **Pinned** to that guest. `ADDR` may be full (`10.0.2.16`) or the `.N` shorthand (`.17`), completed from `network`. |
+
+In **standalone** mode there is only ever one guest, so `HOST:GUEST` resolves to
+`dhcp_start` right away and behaves exactly as it always has.
+
+On a **shared switch** several clients lease addresses, so a bare `HOST:GUEST`
+rule is ambiguous. It is installed against `dhcp_start` up front, then latched
+onto whichever address is actually handed out first (the hub watches DHCP ACKs
+on the uplink) and left there. Pinned rules never move. Leases are allocated in
+order from `dhcp_start`, so the second guest is `.16`, the third `.17`, etc.
+
+Only the hub publishes forwards, since only the hub owns the slirp stack.
+Malformed rules are reported and skipped rather than aborting startup.
 
 ---
 

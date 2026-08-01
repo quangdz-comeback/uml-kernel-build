@@ -71,8 +71,20 @@ struct portfwd {
 	int is_udp;
 	struct in_addr host_addr;
 	int host_port;
-	struct in_addr guest_addr;
 	int guest_port;
+
+	/*
+	 * Guest target, resolved in this order:
+	 *   guest_addr != 0   explicit address from the config
+	 *   last_octet >= 1   ".N" shorthand, completed with the virtual network
+	 *   otherwise         fallback rule — follows the first client on the
+	 *                     segment, re-pointed once its lease is observed
+	 */
+	struct in_addr guest_addr;
+	int last_octet;
+
+	int applied;                   /* currently installed in slirp */
+	struct in_addr applied_to;     /* address it is installed for */
 };
 
 /* ── Globals ── */
@@ -133,6 +145,51 @@ static void copy_str(char *dst, size_t n, const char *src) {
 	snprintf(dst, n, "%s", src);
 }
 
+/*
+ * Parse the address/port part of a forward rule.
+ *
+ *   "2222:22"           → fallback, follows the first client to lease
+ *   "10.0.2.16:2222:22" → pinned to that guest
+ *   ".16:2222:22"       → same, host part completed from the virtual network
+ *
+ * Returns 0 on a malformed rule (caller skips it).
+ */
+static int parse_portfwd_spec(char *spec, struct portfwd *pf)
+{
+	char *c1 = strchr(spec, ':');
+	if (!c1) return 0;
+	char *c2 = strchr(c1 + 1, ':');
+
+	if (!c2) {
+		/* HOST:GUEST — no address, this is the fallback form */
+		*c1 = '\0';
+		pf->host_port  = atoi(trim(spec));
+		pf->guest_port = atoi(trim(c1 + 1));
+		pf->guest_addr.s_addr = 0;
+		pf->last_octet = 0;
+	} else {
+		/* ADDR:HOST:GUEST */
+		*c1 = '\0';
+		*c2 = '\0';
+		char *addr = trim(spec);
+		pf->host_port  = atoi(trim(c1 + 1));
+		pf->guest_port = atoi(trim(c2 + 1));
+
+		if (addr[0] == '.') {
+			/* ".N" shorthand — completed once the network is known */
+			pf->last_octet = atoi(addr + 1);
+			pf->guest_addr.s_addr = 0;
+			if (pf->last_octet < 1 || pf->last_octet > 254) return 0;
+		} else if (inet_pton(AF_INET, addr, &pf->guest_addr) != 1) {
+			fprintf(stderr, "[vde_plug] portfwd: bad address '%s', ignored\n", addr);
+			return 0;
+		}
+	}
+
+	return (pf->host_port > 0 && pf->host_port < 65536 &&
+	        pf->guest_port > 0 && pf->guest_port < 65536);
+}
+
 /* Parse config.yaml - lightweight, no libyaml needed */
 static void parse_config(const char *path, struct config *cfg) {
 	memset(cfg, 0, sizeof(*cfg));
@@ -165,19 +222,21 @@ static void parse_config(const char *path, struct config *cfg) {
 			p = unquote(p);
 
 			struct portfwd *pf = &cfg->ports[cfg->nports];
-			pf->is_udp = 0;
+			memset(pf, 0, sizeof(*pf));
 			if (strncmp(p, "udp ", 4) == 0) { pf->is_udp = 1; p += 4; }
 			else if (strncmp(p, "tcp ", 4) == 0) { p += 4; }
+			p = trim(p);
 
-			char *colon = strchr(p, ':');
-			if (!colon) continue;
-			*colon = '\0';
-			pf->host_port = atoi(trim(p));
-			pf->guest_port = atoi(trim(colon + 1));
-			if (pf->host_port <= 0 || pf->guest_port <= 0) continue;
+			/*
+			 * Two accepted shapes:
+			 *   HOST:GUEST              fallback — first client to lease
+			 *   ADDR:HOST:GUEST         pinned to one guest address
+			 * ADDR may be a full address (10.0.2.16) or the ".N"
+			 * shorthand (.16), completed from the virtual network.
+			 */
+			if (!parse_portfwd_spec(p, pf)) continue;
+
 			inet_pton(AF_INET, "0.0.0.0", &pf->host_addr);
-			/* guest_addr 0.0.0.0 = first DHCP lease, resolved at fwd time */
-			pf->guest_addr.s_addr = 0;
 			cfg->nports++;
 			continue;
 		}
@@ -563,24 +622,160 @@ static void apply_network_config(SlirpConfig *scfg)
 	}
 }
 
-/* Port forwards target the first DHCP lease unless the config says otherwise. */
-static void apply_port_forwards(struct in_addr dhcp_start)
+/* ══════════════════════════════════════════════════════════════════════════
+ * Port forwarding
+ *
+ * A rule is either *pinned* to a guest address or a *fallback*.
+ *
+ * Pinned rules (`10.0.2.16:2222:22` or `.16:2222:22`) are installed once and
+ * never move. They are how you reach a specific machine when several share
+ * the segment — the address is known up front because leases are handed out
+ * in order from dhcp_start.
+ *
+ * Fallback rules (`2222:22`, the historical form) follow the first client to
+ * appear. In standalone mode that is simply the guest, so the old behaviour is
+ * unchanged. On a shared switch the first lease wins, and if the rule was
+ * installed before that lease was seen it is moved onto the real address.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Virtual network, kept so ".N" shorthand can be completed. */
+static struct in_addr fwd_network;
+static struct in_addr fwd_dhcp_start;
+
+/* First guest address observed on the segment; 0 until a lease is seen. */
+static struct in_addr first_client;
+
+/* Complete a ".N" rule against the virtual network. */
+static struct in_addr octet_to_addr(int last_octet)
 {
+	struct in_addr a;
+	a.s_addr = (fwd_network.s_addr & htonl(0xffffff00)) |
+	           htonl((uint32_t)last_octet & 0xff);
+	return a;
+}
+
+/* Where should this rule point right now? 0 = not resolvable yet. */
+static struct in_addr fwd_target(const struct portfwd *pf)
+{
+	struct in_addr none = { 0 };
+
+	if (pf->guest_addr.s_addr) return pf->guest_addr;
+	if (pf->last_octet)        return octet_to_addr(pf->last_octet);
+	if (first_client.s_addr)   return first_client;
+
+	/*
+	 * Standalone: only ever one guest, so dhcp_start is correct immediately
+	 * and there is no reason to wait for the lease.
+	 */
+	if (!cfg_file.sw_enabled) return fwd_dhcp_start;
+
+	return none;
+}
+
+static void fwd_install(struct portfwd *pf, struct in_addr target, const char *why)
+{
+	char gbuf[INET_ADDRSTRLEN];
+	inet_ntop(AF_INET, &target, gbuf, sizeof(gbuf));
+
+	if (pf->applied) {
+		if (pf->applied_to.s_addr == target.s_addr) return;
+		vdeslirp_remove_fwd(slirp, pf->is_udp, pf->host_addr, pf->host_port);
+		pf->applied = 0;
+	}
+
+	int r = vdeslirp_add_fwd(slirp, pf->is_udp,
+			pf->host_addr, pf->host_port,
+			target, pf->guest_port);
+	if (r == 0) {
+		pf->applied = 1;
+		pf->applied_to = target;
+	}
+	fprintf(stderr, "[vde_plug] %sfwd :%d -> %s:%d %s%s\n",
+			pf->is_udp ? "udp" : "tcp",
+			pf->host_port, gbuf, pf->guest_port,
+			r == 0 ? "ok" : strerror(errno),
+			why ? why : "");
+}
+
+static void apply_port_forwards(const SlirpConfig *scfg)
+{
+	fwd_network = scfg->vnetwork;
+	fwd_dhcp_start = scfg->vdhcp_start;
+
 	if (!cfg_file.portfwd) return;
 
-	char gbuf[INET_ADDRSTRLEN];
 	for (int i = 0; i < cfg_file.nports; i++) {
 		struct portfwd *pf = &cfg_file.ports[i];
-		struct in_addr guest = pf->guest_addr.s_addr ? pf->guest_addr : dhcp_start;
-		int r = vdeslirp_add_fwd(slirp, pf->is_udp,
-				pf->host_addr, pf->host_port,
-				guest, pf->guest_port);
-		inet_ntop(AF_INET, &guest, gbuf, sizeof(gbuf));
-		fprintf(stderr, "[vde_plug] %sfwd :%d -> %s:%d %s\n",
-				pf->is_udp ? "udp" : "tcp",
-				pf->host_port, gbuf, pf->guest_port,
-				r == 0 ? "ok" : strerror(errno));
+		struct in_addr t = fwd_target(pf);
+
+		if (!t.s_addr) {
+			/*
+			 * Fallback rule on a shared switch and nobody has leased
+			 * yet. Point it at dhcp_start for now (the usual outcome
+			 * anyway) and correct it when the first lease appears.
+			 */
+			fwd_install(pf, fwd_dhcp_start, " (pending first client)");
+			continue;
+		}
+		fwd_install(pf, t, NULL);
 	}
+}
+
+/*
+ * Re-point fallback rules once we know who the first client actually is.
+ * Pinned rules are left alone.
+ */
+static void portfwd_note_first_client(struct in_addr addr)
+{
+	if (first_client.s_addr || !addr.s_addr) return;
+	first_client = addr;
+
+	if (!cfg_file.portfwd || up.kind != UP_SLIRP) return;
+
+	char buf[INET_ADDRSTRLEN];
+	inet_ntop(AF_INET, &addr, buf, sizeof(buf));
+
+	for (int i = 0; i < cfg_file.nports; i++) {
+		struct portfwd *pf = &cfg_file.ports[i];
+		if (pf->guest_addr.s_addr || pf->last_octet) continue;  /* pinned */
+		if (pf->applied && pf->applied_to.s_addr == addr.s_addr) continue;
+		fwd_install(pf, addr, " (first client)");
+	}
+}
+
+/*
+ * Watch DHCP ACKs going to the guests so fallback rules can latch onto the
+ * first address actually handed out. Only the yiaddr field is needed, so this
+ * stays a cheap header peek on the uplink-to-guest path.
+ *
+ * Ethernet(14) + IPv4 + UDP(8) + BOOTP; yiaddr is at BOOTP offset 16.
+ */
+static void sniff_dhcp_ack(const unsigned char *f, size_t len)
+{
+	if (first_client.s_addr) return;
+	if (len < 14 + 20 + 8 + 32) return;
+	if (!(f[12] == 0x08 && f[13] == 0x00)) return;      /* IPv4 */
+
+	const unsigned char *ip = f + 14;
+	if ((ip[0] >> 4) != 4) return;
+	if (ip[9] != 17) return;                            /* UDP */
+
+	size_t ihl = (size_t)(ip[0] & 0x0f) * 4;
+	if (ihl < 20 || len < 14 + ihl + 8 + 32) return;
+
+	const unsigned char *udp = ip + ihl;
+	unsigned sport = (unsigned)(udp[0] << 8 | udp[1]);
+	unsigned dport = (unsigned)(udp[2] << 8 | udp[3]);
+	if (sport != 67 || dport != 68) return;             /* server -> client */
+
+	const unsigned char *bp = udp + 8;
+	if (bp[0] != 2) return;                             /* BOOTREPLY */
+
+	struct in_addr yi;
+	memcpy(&yi, bp + 16, 4);
+	if (!yi.s_addr) return;
+
+	portfwd_note_first_client(yi);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -713,9 +908,11 @@ static int hub_loop(int local_fd)
 			if (!(ev & POLLIN)) continue;
 
 			ssize_t rx;
-			if (port == PORT_UPLINK)
+			if (port == PORT_UPLINK) {
 				rx = uplink_recv(buf, sizeof(buf));
-			else if (port == PORT_LOCAL)
+				/* latch fallback forwards onto the first lease */
+				if (rx > 0) sniff_dhcp_ack(buf, (size_t)rx);
+			} else if (port == PORT_LOCAL)
 				rx = recv(local_fd, buf, sizeof(buf), 0);
 			else
 				rx = recv(sw.peers[port], buf, sizeof(buf), 0);
@@ -903,7 +1100,7 @@ int main(int argc, char *argv[])
 			}
 			up.kind = UP_SLIRP;
 			up.fd = vdeslirp_fd(slirp);
-			apply_port_forwards(scfg.vdhcp_start);
+			apply_port_forwards(&scfg);
 		}
 	}
 
@@ -953,8 +1150,15 @@ int main(int argc, char *argv[])
 			}
 			if (nfd > 1 && (pfd[1].revents & POLLIN)) {
 				ssize_t rx = uplink_recv(buf, sizeof(buf));
-				if (rx > 0)
+				if (rx > 0) {
+					/*
+					 * Normally the single guest leases dhcp_start,
+					 * which fwd_target() already assumed. Watch
+					 * anyway in case it asked for something else.
+					 */
+					sniff_dhcp_ack(buf, (size_t)rx);
 					send(seqpacket_fd, buf, rx, 0);
+				}
 			}
 		}
 		rc = 0;
