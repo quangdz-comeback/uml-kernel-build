@@ -440,3 +440,41 @@ Be aware this is unproven on `ARCH=um`: OpenZFS's SPL leans on x86 FPU
 save/restore and per-cpu primitives that UML implements differently, so expect
 to do porting work. If you want CoW with snapshots and send/receive and don't
 specifically need ZFS, **btrfs is enabled** and needs no out-of-tree build.
+
+### Verified at runtime (6.18.41, artifact `linux-uml-lts-latest`)
+
+Booted with three scratch ubd disks plus an ISO image, guest packages
+`squashfs-tools lvm2 cryptsetup xfsprogs btrfs-progs dosfstools exfatprogs mdadm`:
+
+```
+/proc/filesystems: ext2 ext3 ext4 squashfs vfat msdos exfat iso9660 udf xfs btrfs
+                   fuseblk overlay hostfs ...
+
+squashfs -comp gzip/lz4/lzo/xz/zstd   all five mount + read back
+mount -o loop,ro,threads=2            threads= accepted (MOUNT_DECOMP_THREADS)
+vfat -o iocharset=utf8                'tên dài tiếng việt.txt' round-trips
+exfat                                 mkfs + mount + write
+xfs                                   mount, write, -o uquota -> "Quotacheck: Done."
+btrfs                                 subvolume create + snapshot, crc32c
+lvm  linear / striped -i2 / thinpool  all created, mkfs'd, mounted
+lvm  snapshot                         origin="after", snapshot still "before"
+thin volume 256M on a 96M pool        over-provisioning works
+LUKS2 aes-xts-plain64, keysize 512    open, mkfs, write, close
+md raid1 over 2 ubd disks             "active with 2 out of 2 mirrors", resync done
+dm-integrity sha256                   format, open, mkfs, write
+dm-verity sha256                      mount ro OK; after corrupting a block:
+                                      "data block 2000 is corrupted" -> EIO
+iso9660+Joliet                        mounted from /dev/ubdd and over loop
+/dev/loop0..15                        BLK_DEV_LOOP_MIN_COUNT=16
+```
+
+Two tool-level gotchas found while testing, neither a kernel issue:
+
+* `mkfs.xfs` refuses a device smaller than 300 MB.
+* `mkfs.ext4` picks a 1024-byte block size on small images, which dm-verity
+  then rejects with `bad block size 1024`. Use
+  `mkfs.ext4 -b 4096` plus `veritysetup --data-block-size 4096`.
+
+FAT also logs `utf8 is not a recommended IO charset for FAT filesystems,
+filesystem will be case sensitive!` — upstream's standing advice is
+`iocharset=iso8859-1` with `utf8=1` if case-insensitivity matters to you.
