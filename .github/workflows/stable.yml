@@ -118,8 +118,11 @@ jobs:
               -e UML_NET -e UML_NET_SLIRP -d UML_NET_DAEMON
           fi
 
-          # Merge container config (Docker/Podman/LXC, cgroup v2) + memdrop
-          ./scripts/kconfig/merge_config.sh -m -O . .config ../patches/containers.config >/dev/null
+          # Merge container config (Docker/Podman/LXC, cgroup v2, memdrop), then the
+          # storage fragment (loop, squashfs, FAT/exFAT, XFS, btrfs, ISO/UDF,
+          # device-mapper/LVM, md-raid, LUKS).
+          ./scripts/kconfig/merge_config.sh -m -O . .config \
+            ../patches/containers.config ../patches/storage.config >/dev/null
 
           # Force container extras + memdrop PAGE_REPORTING (merge can drop unknowns
           # across kernel versions; scripts/config re-asserts the critical set).
@@ -136,10 +139,47 @@ jobs:
           # MEMCG_SWAP exists on older LTS only; ignore if absent.
           scripts/config --file .config -e MEMCG_SWAP 2>/dev/null || true
 
+          # Re-assert storage knobs. merge_config.sh silently drops symbols whose
+          # dependencies are not yet satisfied at merge time, and `olddefconfig`
+          # will not turn them back on, so set them explicitly here.
+          scripts/config --file .config \
+            -e BLK_DEV_LOOP --set-val BLK_DEV_LOOP_MIN_COUNT 16 \
+            -e SQUASHFS -e SQUASHFS_XATTR -e SQUASHFS_ZLIB -e SQUASHFS_LZ4 \
+            -e SQUASHFS_LZO -e SQUASHFS_XZ -e SQUASHFS_ZSTD \
+            -e FAT_FS -e MSDOS_FS -e VFAT_FS -e EXFAT_FS \
+            -e NLS -e NLS_CODEPAGE_437 -e NLS_ISO8859_1 -e NLS_UTF8 -e NLS_ASCII \
+            -e XFS_FS -e XFS_QUOTA -e XFS_POSIX_ACL -e XFS_RT \
+            -e BTRFS_FS -e BTRFS_FS_POSIX_ACL \
+            -e ISO9660_FS -e JOLIET -e ZISOFS -e UDF_FS \
+            -e MD -e BLK_DEV_MD -e BLK_DEV_DM -e DM_SNAPSHOT \
+            -e DM_THIN_PROVISIONING -e DM_MIRROR -e DM_RAID -e DM_ZERO \
+            -e DM_CRYPT -e DM_VERITY -e DM_INTEGRITY \
+            -e MD_RAID0 -e MD_RAID1 -e MD_RAID10 -e MD_RAID456 \
+            -e QUOTA -e QUOTACTL -e QFMT_V2 \
+            -e CRYPTO_XTS -e CRYPTO_AES -e CRYPTO_SHA256 -e CRYPTO_ESSIV \
+            -e CRYPTO_USER_API_HASH -e CRYPTO_USER_API_SKCIPHER \
+            -e MODULES -e MODULE_UNLOAD -e KALLSYMS -e KALLSYMS_ALL \
+            -d MODULE_SIG_FORCE
+          # Squashfs decompression mode is a Kconfig `choice`; setting the member
+          # directly is the only way to move it off FILE_CACHE.
+          scripts/config --file .config -e SQUASHFS_FILE_DIRECT || true
+          # MD_LINEAR/MD_BITMAP were renamed/removed across versions; best-effort.
+          scripts/config --file .config -e MD_LINEAR 2>/dev/null || true
+          scripts/config --file .config -e MD_BITMAP 2>/dev/null || true
+
           echo "=== verify memdrop/container knobs ==="
           grep -E '^CONFIG_(PAGE_REPORTING|USER_NS|CPUSETS|CHECKPOINT_RESTORE|VETH|BRIDGE|SECCOMP_FILTER|MEMCG)=' .config || true
 
           make ARCH=um olddefconfig
+
+          echo "=== verify storage knobs ==="
+          grep -E '^CONFIG_(BLK_DEV_LOOP|SQUASHFS|VFAT_FS|EXFAT_FS|XFS_FS|BTRFS_FS|ISO9660_FS|UDF_FS|BLK_DEV_DM|BLK_DEV_MD|DM_CRYPT|DM_THIN_PROVISIONING|NLS_UTF8|MODULES)=' .config || true
+          # Fail loudly rather than shipping a kernel that silently lost a feature.
+          for sym in BLK_DEV_LOOP SQUASHFS VFAT_FS XFS_FS BTRFS_FS BLK_DEV_DM \
+                     BLK_DEV_MD DM_CRYPT DM_THIN_PROVISIONING NLS_UTF8 ISO9660_FS; do
+            grep -q "^CONFIG_${sym}=[ym]" .config || {
+              echo "::error::CONFIG_${sym} is not enabled after olddefconfig"; exit 1; }
+          done
           make ARCH=um -j"$(nproc)"
 
       - name: Strip & upload

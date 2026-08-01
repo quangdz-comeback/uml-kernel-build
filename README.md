@@ -305,18 +305,33 @@ on older LTS do not silently drop features. Enabled primitives:
 * **Networking** — `veth`, `bridge`, `bridge-nf`, `macvlan`, `ipvlan`, `tap`,
   full netfilter/iptables (+ ip6tables) for publish-port NAT.
 * **Storage** — `overlay2` (overlayfs), `fuse`, `fhandle`, ext4 POSIX ACL +
-  security xattrs.
+  security xattrs. Extra filesystems and volume managers live in
+  `patches/storage.config` (see [Storage & filesystems](#storage--filesystems)).
 * **memdrop** — `PAGE_REPORTING=y` (pairs with `uml-memdrop-on-free.patch`).
 
 ### UML-specific caveats
 
-1. **No loop device** (`/dev/loop*`) — Docker's loopback/devicemapper
-   storage won't work. Use **overlay2** on a raw `ubd` backing file.
-2. **No host TAP** — `veth`/`bridge` work *inside* the guest for
+1. **No host TAP** — `veth`/`bridge` work *inside* the guest for
    container↔container traffic, but egress to the host goes through UML's
    own vector/slirp transport, not a host bridge.
-3. **No KVM/hardware virt** — nested containers run as plain user-space
-   (not nested VMs).
+2. **No KVM/hardware virt** — nested containers run as plain user-space
+   (not nested VMs). Nested *UML* does not work either: UML deliberately
+   returns `-EIO` for `PTRACE_SYSEMU` (`arch/um/kernel/ptrace.c`), which an
+   inner UML requires. Under `seccomp=on` the inner kernel boots as far as
+   `Run /sbin/init as init process` and then its userspace dies, because
+   `MAP_SHARED|MAP_ANONYMOUS` is not coherent across `CLONE_VM` in a UML
+   guest — exactly what the seccomp stub's `struct stub_data` relies on.
+3. **`WRITE_ZEROES` unsupported** — the ubd backend rejects it, so `mkfs`
+   on a loop device prints one
+   `operation not supported error, dev loop0, ... op 0x9:(WRITE_ZEROES)`
+   line. The block layer falls back to writing zeros; the result is correct.
+
+ptrace itself is otherwise complete: `PTRACE_SYSCALL`, `GETREGSET`/`SETREGSET`,
+`PEEKUSER`, `PEEKDATA` and `process_vm_readv` all behave as on hardware, so
+**strace, gdb, proot and fakeroot work** (verified). gdb logs a cosmetic
+`Attempted to relay unknown signal 5 (si_code = 128)` per breakpoint —
+`relay_signal()` in `arch/um/kernel/trap.c` does not recognise the siginfo
+layout of an `int3` trap, prints the warning, then delivers via `force_sig()`.
 
 ### Verified at runtime (6.18.38 + SMP + container config)
 
@@ -327,3 +342,101 @@ unshare --user --mount --pid --net --fork: NS_OK
 ip link add veth0 type veth peer veth1: ok
 ip link add br0 type bridge: ok
 ```
+
+## Storage & filesystems
+
+`patches/storage.config` is merged after `containers.config` in every kernel
+workflow, and the critical symbols are re-asserted with `scripts/config`
+afterwards. `merge_config.sh` silently drops a symbol whose dependencies are
+not yet satisfied at merge time, and `olddefconfig` will not bring it back, so
+the workflow re-sets each one and then **fails the build** if any is missing:
+
+```bash
+for sym in BLK_DEV_LOOP SQUASHFS VFAT_FS XFS_FS BTRFS_FS BLK_DEV_DM \
+           BLK_DEV_MD DM_CRYPT DM_THIN_PROVISIONING NLS_UTF8 ISO9660_FS; do
+  grep -q "^CONFIG_${sym}=[ym]" .config || exit 1
+done
+```
+
+| Area | Symbols |
+|---|---|
+| Loop devices | `BLK_DEV_LOOP`, `BLK_DEV_LOOP_MIN_COUNT=16` |
+| Squashfs | `SQUASHFS` + `FILE_DIRECT`, `XATTR`, zlib/lz4/lzo/xz/zstd |
+| FAT | `FAT_FS`, `MSDOS_FS`, `VFAT_FS`, `EXFAT_FS`, default iocharset `utf8` |
+| NLS | `NLS_UTF8`, `NLS_CODEPAGE_437/850`, `NLS_ISO8859_1/15`, `NLS_ASCII` |
+| XFS | `XFS_FS`, `XFS_QUOTA`, `XFS_POSIX_ACL`, `XFS_RT`, `XFS_ONLINE_SCRUB` |
+| btrfs | `BTRFS_FS`, `BTRFS_FS_POSIX_ACL` |
+| Optical | `ISO9660_FS`, `JOLIET`, `ZISOFS`, `UDF_FS` |
+| device-mapper | `BLK_DEV_DM`, `DM_SNAPSHOT`, `DM_THIN_PROVISIONING`, `DM_MIRROR`, `DM_RAID`, `DM_ZERO`, `DM_CACHE`, `DM_WRITECACHE`, `DM_ERA`, `DM_CLONE`, `DM_DELAY`, `DM_FLAKEY`, `DM_MULTIPATH` |
+| LUKS / integrity | `DM_CRYPT`, `DM_VERITY`, `DM_INTEGRITY` + `CRYPTO_XTS/AES/SHA256/ESSIV` |
+| md RAID | `BLK_DEV_MD`, `MD_LINEAR`, `MD_RAID0/1/10/456` |
+| Quota | `QUOTA`, `QUOTACTL`, `QFMT_V2` |
+| Out-of-tree modules | `MODULES`, `MODULE_UNLOAD`, `KALLSYMS_ALL`, `MODULE_SIG` off |
+
+NLS matters more than it looks: VFAT stores long filenames as UTF-16, so
+without `NLS_UTF8` a `mount -o iocharset=utf8` fails outright.
+
+`SQUASHFS_FILE_DIRECT` and the decompressor mode are Kconfig `choice` members,
+which `merge_config.sh` cannot always move off the default — the workflow sets
+them explicitly.
+
+### Using a loop device in the guest
+
+Loop devices work; the earlier "no loop device" note in this README was wrong.
+`CONFIG_BLK_DEV_LOOP=y` is built in, `/dev/loop-control` is present, and
+devices past `BLK_DEV_LOOP_MIN_COUNT` are allocated on demand.
+
+```bash
+# explicit
+L=$(losetup -f --show /path/to/image.img)
+mount "$L" /mnt
+
+# or the shorthand
+mount -o loop /path/to/image.img /mnt
+mount -o loop,ro,offset=1048576 disk.img /mnt      # offset/sizelimit work too
+```
+
+Verified in-guest: `mkfs.ext4` + mount + read/write, `mount -o loop`,
+12 simultaneous loop devices, a loop image nested inside another loop image,
+`ro`, and `-o offset=/--sizelimit`.
+
+### LVM on a ubd disk
+
+```bash
+pvcreate /dev/ubdb
+vgcreate vg0 /dev/ubdb
+lvcreate -L 2G -n data vg0
+mkfs.xfs /dev/vg0/data
+mount /dev/vg0/data /mnt
+```
+
+Thin pools and snapshots are available (`DM_THIN_PROVISIONING`, `DM_SNAPSHOT`).
+Install `lvm2` in the guest; the kernel side needs nothing beyond the above.
+
+### LUKS
+
+```bash
+cryptsetup luksFormat /dev/ubdb          # aes-xts-plain64 + sha256 default
+cryptsetup open /dev/ubdb secret
+mkfs.ext4 /dev/mapper/secret
+```
+
+### ZFS
+
+ZFS is **not** enabled by a kernel config option and cannot be — OpenZFS is
+CDDL-licensed and lives outside the mainline tree, so no `CONFIG_ZFS` symbol
+exists. What these builds provide instead are the prerequisites for compiling
+it out-of-tree (`MODULES`, `MODULE_UNLOAD`, `KALLSYMS_ALL`, unsigned modules
+allowed, zlib/lz4/zstd):
+
+```bash
+# against the same kernel tree the workflow built
+./autogen.sh
+./configure --with-linux=/path/to/linux-6.18.x --with-linux-obj=/path/to/linux-6.18.x
+make -j"$(nproc)"
+```
+
+Be aware this is unproven on `ARCH=um`: OpenZFS's SPL leans on x86 FPU
+save/restore and per-cpu primitives that UML implements differently, so expect
+to do porting work. If you want CoW with snapshots and send/receive and don't
+specifically need ZFS, **btrfs is enabled** and needs no out-of-tree build.
