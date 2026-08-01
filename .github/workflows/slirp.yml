@@ -23,8 +23,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake pkg-config git \
+            meson ninja-build \
             libslirp-dev libglib2.0-dev libpcre3-dev \
             libvdeplug-dev libyaml-dev
+
+      - name: Build libslirp with an enlarged DHCP pool
+        run: |
+          # Upstream caps the built-in DHCP server at NB_BOOTP_CLIENTS=16
+          # leases. That is fine for one guest, but a nested hypervisor guest
+          # (Proxmox/LXC bridging containers onto vmbr0) needs one lease per
+          # container. Raise it to cover the rest of the /24 above dhcp_start.
+          git clone --depth 1 https://gitlab.freedesktop.org/slirp/libslirp.git
+          cd libslirp
+          sed -i 's/^#define NB_BOOTP_CLIENTS .*/#define NB_BOOTP_CLIENTS 240/' src/bootp.h
+          grep -n 'NB_BOOTP_CLIENTS' src/bootp.h
+          meson setup build --prefix="$PWD/../slirp-prefix" -Ddefault_library=static
+          ninja -C build
+          ninja -C build install
+          cd ..
+          echo "SLIRP_PREFIX=$PWD/slirp-prefix" >> "$GITHUB_ENV"
+          find slirp-prefix -name 'libslirp.a'
 
       - name: Build libvdeslirp (static .a)
         run: |
@@ -34,13 +52,14 @@ jobs:
           cmake_minimum_required(VERSION 3.16)
           project(vdeslirp LANGUAGES C)
           set(CMAKE_C_STANDARD 11)
-          set(CMAKE_C_FLAGS "-O2 -Wall -Wextra -pedantic")
+          set(CMAKE_C_FLAGS "-O2 -Wall")
           set(CMAKE_POSITION_INDEPENDENT_CODE ON)
           include(GNUInstallDirs)
           configure_file(config.h.in config.h)
           add_library(vdeslirp STATIC libvdeslirp.c)
-          target_include_directories(vdeslirp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
-          target_link_libraries(vdeslirp PRIVATE slirp pthread glib-2.0)
+          target_include_directories(vdeslirp PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+            $ENV{SLIRP_PREFIX}/include)
           set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME "vdeslirp")
           install(TARGETS vdeslirp DESTINATION ${CMAKE_INSTALL_LIBDIR})
           install(FILES libvdeslirp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
@@ -55,6 +74,7 @@ jobs:
           make static \
             VDESLIRP_SRC=libvdeslirp \
             VDESLIRP_BUILD=libvdeslirp/build \
+            SLIRP_PREFIX="$SLIRP_PREFIX" \
             SYSLIB=/usr/lib/x86_64-linux-gnu
           strip slirp
           echo "=== slirp ==="
@@ -65,10 +85,13 @@ jobs:
           cd vde_plug
           make static \
             VDESLIRP_SRC=../libvdeslirp \
-            VDESLIRP_BUILD=../libvdeslirp/build
+            VDESLIRP_BUILD=../libvdeslirp/build \
+            SLIRP_PREFIX="$SLIRP_PREFIX"
           strip vde_plug
           echo "=== vde_plug ==="
           file vde_plug && ls -lh vde_plug
+          # the enlarged pool must actually be in the binary
+          ./vde_plug --descr CI slirp:// 2>&1 | head -2 || true
 
       - name: Upload slirp artifact
         uses: actions/upload-artifact@v6

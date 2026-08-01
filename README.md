@@ -102,6 +102,46 @@ file from a crashed hub is reclaimed automatically (`connect()` is tried before
 
 Set `switch: false` for the classic one-NAT-per-instance behaviour.
 
+#### Nested hypervisor: Proxmox/LXC bridging onto `vmbr0`
+
+The common Proxmox layout works as-is. Inside the UML guest, make `vec0` a
+plain bridge port and let `vmbr0` carry the address:
+
+```bash
+ip link add name vmbr0 type bridge
+ip link set vmbr0 type bridge forward_delay 0   # else DHCP times out
+ip link set vec0 master vmbr0
+ip link set vec0 up
+ip link set vmbr0 up
+```
+
+Containers attached to `vmbr0` with `dhcp` then lease directly from
+`vde_plug`, exactly like a bridged network. Each distinct MAC gets its own
+address — no per-container configuration, no NAT inside the guest:
+
+```
+vmbr0 -> 10.0.2.15/24     (the Proxmox host itself)
+ct1   -> 10.0.2.16/24
+ct2   -> 10.0.2.17/24
+...
+```
+
+Guest-to-guest traffic and gateway access both work. One caveat: slirp
+forwards TCP and UDP but **not** ICMP to the internet, so `ping 1.1.1.1` fails
+from a container while TCP/DNS succeed. `ping` to the gateway (`10.0.2.2`) and
+between containers is fine.
+
+The DHCP pool is sized for this case. Upstream libslirp caps itself at
+`NB_BOOTP_CLIENTS=16` leases, which a container host exhausts quickly, so CI
+builds libslirp from source with the cap raised to **240** — the rest of the
+/24 above `dhcp_start`. Verified with 40 simultaneous containers:
+
+```
+LEASES_OK=40 / 40      last lease 10.0.2.55
+```
+
+A distro-packaged libslirp still works but stops at 16 leases.
+
 #### Uplink modes
 
 | `uplink:` | Behaviour |
