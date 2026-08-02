@@ -114,6 +114,7 @@ struct config {
 	char nameserver[64];          /* nameserver: 10.0.2.3          */
 	char hostname[64];            /* hostname: uml                 */
 	int mtu;
+	int batch;                    /* batch: 16 (frames per syscall) */
 };
 
 static struct config cfg_file;
@@ -279,6 +280,8 @@ static void parse_config(const char *path, struct config *cfg) {
 			copy_str(cfg->hostname, sizeof(cfg->hostname), val);
 		else if (strcmp(key, "mtu") == 0)
 			cfg->mtu = atoi(val);
+		else if (strcmp(key, "batch") == 0)
+			cfg->batch = atoi(val);
 	}
 	fclose(f);
 }
@@ -586,6 +589,7 @@ static void parse_vnl_params(char *params, SlirpConfig *cfg, int *has_v6) {
 			copy_str(cfg_file.dhcp_start, sizeof(cfg_file.dhcp_start), v);
 		else if (strcmp(k, "network") == 0)
 			copy_str(cfg_file.network, sizeof(cfg_file.network), v);
+		else if (strcmp(k, "batch") == 0) cfg_file.batch = atoi(v);
 	}
 }
 
@@ -779,6 +783,147 @@ static void sniff_dhcp_ack(const unsigned char *f, size_t len)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+ * Micro-batching
+ *
+ * Every frame currently costs one recv + one send. On a unix SEQPACKET pair a
+ * syscall boundary is ~86 ns while the per-message kernel work (skb alloc,
+ * copy, queue, wake) is ~900 ns, so batching the *boundary* alone buys very
+ * little: measured on this host, recvmmsg(16) trims ~2.00 syscalls/frame to
+ * ~0.13 but leaves CPU per frame unchanged.
+ *
+ * Where it does pay is the hub's flood path. A broadcast frame is sent once
+ * per port, so with P ports the cost is P sends per frame. Batching lets one
+ * sendmmsg() carry every queued frame to a given port, which is why the win
+ * scales with peer count rather than with frame rate.
+ *
+ * Design constraints that shaped this:
+ *   - MSG_DONTWAIT only. A blocking recvmmsg() waits for the *whole* batch
+ *     (or for SO_RCVTIMEO) and would add exactly the latency we must not add.
+ *     With MSG_DONTWAIT we take whatever poll() already made ready and return.
+ *     That is the "cheap timeout": zero.
+ *   - The mmsghdr/iovec arrays are built once at startup. recvmmsg does not
+ *     modify msg_iov or iov_len, only msg_len, so per-iteration setup would be
+ *     pure overhead (an early version of this did that and measured slower).
+ *   - SEQPACKET preserves message boundaries, so one frame is one msg_len and
+ *     no re-framing is needed.
+ *   - The uplink stays one-frame-at-a-time. slirp is a userspace NAT reached
+ *     through vdeslirp_recv(), not a socket we may assume is non-blocking, and
+ *     it is not the hot path for guest↔guest traffic.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#define BATCH_MAX     64
+#define BATCH_DEFAULT 16
+
+static int batch_n = BATCH_DEFAULT;   /* frames per recvmmsg/sendmmsg */
+
+struct batch {
+	unsigned char (*buf)[VDE_ETHBUFSIZE];
+	struct mmsghdr *rx;      /* for recvmmsg: iov points at buf[i]      */
+	struct iovec   *rxiov;
+	struct mmsghdr *tx;      /* for sendmmsg: iov_len set per frame     */
+	struct iovec   *txiov;
+	int n;                   /* frames currently held                  */
+};
+
+static int batch_init(struct batch *b)
+{
+	if (batch_n < 1) batch_n = 1;
+	if (batch_n > BATCH_MAX) batch_n = BATCH_MAX;
+
+	b->buf   = calloc((size_t)batch_n, VDE_ETHBUFSIZE);
+	b->rx    = calloc((size_t)batch_n, sizeof(*b->rx));
+	b->rxiov = calloc((size_t)batch_n, sizeof(*b->rxiov));
+	b->tx    = calloc((size_t)batch_n, sizeof(*b->tx));
+	b->txiov = calloc((size_t)batch_n, sizeof(*b->txiov));
+	if (!b->buf || !b->rx || !b->rxiov || !b->tx || !b->txiov)
+		return -1;
+
+	for (int i = 0; i < batch_n; i++) {
+		b->rxiov[i].iov_base = b->buf[i];
+		b->rxiov[i].iov_len  = VDE_ETHBUFSIZE;
+		b->rx[i].msg_hdr.msg_iov    = &b->rxiov[i];
+		b->rx[i].msg_hdr.msg_iovlen = 1;
+
+		b->txiov[i].iov_base = b->buf[i];
+		b->tx[i].msg_hdr.msg_iov    = &b->txiov[i];
+		b->tx[i].msg_hdr.msg_iovlen = 1;
+	}
+	b->n = 0;
+	return 0;
+}
+
+/*
+ * Drain up to batch_n frames that poll() already reported ready.
+ * Returns frames read, 0 if the queue was empty, or -1 on a real error
+ * (caller treats that as peer death, same as a short recv would be).
+ *
+ * batch_n == 1 deliberately falls back to plain recv(): recvmmsg with a
+ * one-entry array costs more than recv() for identical behaviour, so "batch: 1"
+ * really is the unbatched path, not a one-element batch.
+ */
+static int batch_recv(struct batch *b, int fd)
+{
+	b->n = 0;
+
+	if (batch_n == 1) {
+		ssize_t r = recv(fd, b->buf[0], VDE_ETHBUFSIZE, MSG_DONTWAIT);
+		if (r < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+				return 0;
+			return -1;
+		}
+		if (r == 0) return -1;
+		b->rx[0].msg_len = (unsigned)r;
+		b->n = 1;
+		return 1;
+	}
+
+	int n = recvmmsg(fd, b->rx, (unsigned)batch_n, MSG_DONTWAIT, NULL);
+	if (n < 0) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+			return 0;
+		return -1;
+	}
+	if (n == 0) return -1;         /* orderly shutdown */
+	b->n = n;
+	return n;
+}
+
+/* Frame i of the batch. */
+static inline unsigned char *batch_frame(struct batch *b, int i, size_t *len)
+{
+	*len = b->rx[i].msg_len;
+	return b->buf[i];
+}
+
+/*
+ * Send frames [from, to) of the batch to one fd in as few syscalls as we can.
+ * A short sendmmsg is normal under pressure; we retry the remainder and give
+ * up on EAGAIN rather than spin, because an over-full peer must not stall the
+ * whole switch. Dropping is the correct behaviour for a bridge.
+ */
+static void batch_send(struct batch *b, int fd, int from, int to)
+{
+	if (to - from == 1) {
+		send(fd, b->buf[from], b->rx[from].msg_len, MSG_DONTWAIT);
+		return;
+	}
+
+	for (int i = from; i < to; i++)
+		b->txiov[i].iov_len = b->rx[i].msg_len;
+
+	int i = from;
+	while (i < to) {
+		int k = sendmmsg(fd, b->tx + i, (unsigned)(to - i), MSG_DONTWAIT);
+		if (k <= 0) {
+			if (errno == EINTR) continue;
+			return;                /* EAGAIN/ENOBUFS: drop the rest */
+		}
+		i += k;
+	}
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
  * Hub loop — own the switch socket, bridge guest ↔ peers ↔ uplink
  * ══════════════════════════════════════════════════════════════════════════ */
 
@@ -826,9 +971,92 @@ static void hub_forward(int from_port, int local_fd, unsigned char *buf, size_t 
 	hub_send(port, local_fd, buf, len);
 }
 
+/*
+ * Batched forward.
+ *
+ * Learning has to happen per frame, and so does the destination lookup, but
+ * the *sends* can be grouped. Frames arriving back-to-back on one port almost
+ * always belong to the same flow and therefore share a destination, so walking
+ * the batch and emitting one sendmmsg per run of identical destinations
+ * captures nearly all of the available saving while staying strictly in order.
+ *
+ * Ordering guarantee: a run is flushed before the next run starts, so frames
+ * to any given port leave in the order they arrived. That matters — reordering
+ * inside a TCP flow would cost far more in retransmits than batching saves.
+ */
+#define DEST_FLOOD (-2)
+#define DEST_DROP  (-3)
+
+static int hub_dest(int from_port, unsigned char *buf, size_t len)
+{
+	if (len < ETH_HDRLEN) return DEST_DROP;
+
+	mac_learn(buf + 6, from_port);
+
+	if (buf[0] & 0x01) return DEST_FLOOD;          /* bcast/mcast */
+
+	int port = mac_lookup(buf);
+	if (port == INT_MIN) return DEST_FLOOD;        /* unknown unicast */
+	if (port == from_port) return DEST_DROP;       /* hairpin */
+	return port;
+}
+
+/* Flush frames [from,to) of the batch to a single destination port. */
+static void hub_emit(struct batch *b, int dest, int from_port, int local_fd,
+                     int from, int to)
+{
+	if (dest == DEST_DROP) return;
+
+	if (dest == DEST_FLOOD) {
+		/* uplink is not a socket; feed it frame by frame */
+		if (from_port != PORT_UPLINK)
+			for (int i = from; i < to; i++)
+				uplink_send(b->buf[i], b->rx[i].msg_len);
+		if (from_port != PORT_LOCAL && local_fd >= 0)
+			batch_send(b, local_fd, from, to);
+		for (int p = 0; p < MAX_PEERS; p++)
+			if (sw.peers[p] >= 0 && p != from_port)
+				batch_send(b, sw.peers[p], from, to);
+		return;
+	}
+
+	if (dest == PORT_UPLINK) {
+		for (int i = from; i < to; i++)
+			uplink_send(b->buf[i], b->rx[i].msg_len);
+		return;
+	}
+	if (dest == PORT_LOCAL) {
+		if (local_fd >= 0) batch_send(b, local_fd, from, to);
+		return;
+	}
+	if (dest >= 0 && dest < MAX_PEERS && sw.peers[dest] >= 0)
+		batch_send(b, sw.peers[dest], from, to);
+}
+
+static void hub_forward_batch(struct batch *b, int from_port, int local_fd)
+{
+	int run_start = 0;
+	int run_dest = hub_dest(from_port, b->buf[0], b->rx[0].msg_len);
+
+	for (int i = 1; i < b->n; i++) {
+		int d = hub_dest(from_port, b->buf[i], b->rx[i].msg_len);
+		if (d == run_dest) continue;
+		hub_emit(b, run_dest, from_port, local_fd, run_start, i);
+		run_start = i;
+		run_dest = d;
+	}
+	hub_emit(b, run_dest, from_port, local_fd, run_start, b->n);
+}
+
 static int hub_loop(int local_fd)
 {
 	unsigned char buf[VDE_ETHBUFSIZE];
+	struct batch b;
+
+	if (batch_init(&b) < 0) {
+		fprintf(stderr, "[vde_plug] batch alloc failed, running unbatched\n");
+		batch_n = 1;
+	}
 
 	while (running) {
 		struct pollfd pfd[MAX_PEERS + 3];
@@ -907,26 +1135,34 @@ static int hub_loop(int local_fd)
 
 			if (!(ev & POLLIN)) continue;
 
-			ssize_t rx;
+			/*
+			 * The uplink is a userspace NAT stack, not a socket, so it
+			 * keeps the one-frame path. Guest and peer sockets are
+			 * SEQPACKET and get drained in a batch.
+			 */
 			if (port == PORT_UPLINK) {
-				rx = uplink_recv(buf, sizeof(buf));
+				ssize_t rx = uplink_recv(buf, sizeof(buf));
+				if (rx <= 0) return 0;
 				/* latch fallback forwards onto the first lease */
-				if (rx > 0) sniff_dhcp_ack(buf, (size_t)rx);
-			} else if (port == PORT_LOCAL)
-				rx = recv(local_fd, buf, sizeof(buf), 0);
-			else
-				rx = recv(sw.peers[port], buf, sizeof(buf), 0);
+				sniff_dhcp_ack(buf, (size_t)rx);
+				hub_forward(port, local_fd, buf, (size_t)rx);
+				continue;
+			}
 
-			if (rx <= 0) {
-				if (port == PORT_LOCAL || port == PORT_UPLINK) return 0;
+			int fd = (port == PORT_LOCAL) ? local_fd : sw.peers[port];
+			int got = batch_recv(&b, fd);
+
+			if (got < 0) {
+				if (port == PORT_LOCAL) return 0;
 				close(sw.peers[port]);
 				sw.peers[port] = -1;
 				sw.npeers--;
 				mac_forget_port(port);
 				continue;
 			}
+			if (got == 0) continue;   /* spurious wakeup */
 
-			hub_forward(port, local_fd, buf, (size_t)rx);
+			hub_forward_batch(&b, port, local_fd);
 		}
 	}
 	return 0;
@@ -938,7 +1174,10 @@ static int hub_loop(int local_fd)
 
 static int peer_loop(int local_fd, int hub_fd)
 {
+	struct batch b;
 	unsigned char buf[VDE_ETHBUFSIZE];
+	int batched = (batch_init(&b) == 0);
+
 	struct pollfd pfd[2] = {
 		{ .fd = local_fd, .events = POLLIN },
 		{ .fd = hub_fd,   .events = POLLIN },
@@ -952,15 +1191,23 @@ static int peer_loop(int local_fd, int hub_fd)
 			fprintf(stderr, "[vde_plug] switch: hub went away\n");
 			break;
 		}
-		if (pfd[0].revents & POLLIN) {
-			ssize_t rx = recv(local_fd, buf, sizeof(buf), 0);
-			if (rx <= 0) break;
-			send(hub_fd, buf, rx, 0);
-		}
-		if (pfd[1].revents & POLLIN) {
-			ssize_t rx = recv(hub_fd, buf, sizeof(buf), 0);
-			if (rx <= 0) break;
-			send(local_fd, buf, rx, 0);
+
+		/* Both directions are plain SEQPACKET wires: drain and relay. */
+		for (int d = 0; d < 2; d++) {
+			if (!(pfd[d].revents & POLLIN)) continue;
+			int in  = d ? hub_fd : local_fd;
+			int out = d ? local_fd : hub_fd;
+
+			if (!batched) {
+				ssize_t rx = recv(in, buf, sizeof(buf), 0);
+				if (rx <= 0) return 0;
+				send(out, buf, rx, 0);
+				continue;
+			}
+			int got = batch_recv(&b, in);
+			if (got < 0) return 0;
+			if (got == 0) continue;
+			batch_send(&b, out, 0, got);
 		}
 	}
 	return 0;
@@ -1055,6 +1302,13 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < MAX_PEERS; i++) sw.peers[i] = -1;
 	sw.listen_fd = -1;
 
+	/*
+	 * Batch size. 0/absent keeps the default; 1 disables batching entirely,
+	 * which is useful for A/B measurement and as an escape hatch.
+	 */
+	if (cfg_file.batch > 0) batch_n = cfg_file.batch;
+	if (batch_n > BATCH_MAX) batch_n = BATCH_MAX;
+
 	int hub_fd = -1;
 	char sock_path[PATH_MAX] = "";
 
@@ -1122,6 +1376,7 @@ int main(int argc, char *argv[])
 			seqpacket_fd, role, upname, dhcpbuf, has_v6, cfg_file.nports);
 		if (cfg_file.sw_enabled)
 			fprintf(stderr, " socket=%s", sock_path);
+		fprintf(stderr, " batch=%d", batch_n);
 		fprintf(stderr, ")\n");
 	}
 
@@ -1132,6 +1387,8 @@ int main(int argc, char *argv[])
 		rc = peer_loop(seqpacket_fd, hub_fd);
 	else {
 		/* standalone: guest ↔ uplink, no switch */
+		struct batch b;
+		int batched = (batch_init(&b) == 0);
 		unsigned char buf[VDE_ETHBUFSIZE];
 		struct pollfd pfd[2] = {
 			{ .fd = seqpacket_fd, .events = POLLIN },
@@ -1144,9 +1401,24 @@ int main(int argc, char *argv[])
 			if (pfd[0].revents & (POLLHUP | POLLERR)) break;
 			if (nfd > 1 && (pfd[1].revents & (POLLHUP | POLLERR))) break;
 			if (pfd[0].revents & POLLIN) {
-				ssize_t rx = recv(seqpacket_fd, buf, sizeof(buf), 0);
-				if (rx <= 0) break;
-				uplink_send(buf, rx);
+				/*
+				 * Guest -> uplink. Batch the reads even though slirp
+				 * must be fed one frame at a time; that still removes
+				 * one syscall per frame on the receive side.
+				 */
+				if (!batched) {
+					ssize_t rx = recv(seqpacket_fd, buf, sizeof(buf), 0);
+					if (rx <= 0) break;
+					uplink_send(buf, rx);
+				} else {
+					int got = batch_recv(&b, seqpacket_fd);
+					if (got < 0) break;
+					for (int i = 0; i < got; i++) {
+						size_t len;
+						unsigned char *f = batch_frame(&b, i, &len);
+						uplink_send(f, len);
+					}
+				}
 			}
 			if (nfd > 1 && (pfd[1].revents & POLLIN)) {
 				ssize_t rx = uplink_recv(buf, sizeof(buf));

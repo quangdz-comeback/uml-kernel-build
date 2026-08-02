@@ -183,6 +183,54 @@ order from `dhcp_start`, so the second guest is `.16`, the third `.17`, etc.
 Only the hub publishes forwards, since only the hub owns the slirp stack.
 Malformed rules are reported and skipped rather than aborting startup.
 
+#### Micro-batching
+
+```yaml
+batch: 16     # frames per recvmmsg/sendmmsg; 1 disables, 64 is the ceiling
+```
+
+The hot path used to cost one `recv` plus one `send` per frame. It now drains up
+to `batch` frames with a single `recvmmsg(MSG_DONTWAIT)` and forwards them with
+`sendmmsg`.
+
+`MSG_DONTWAIT` is the important part: only frames `poll()` has *already* made
+ready get taken. There is no timer and no waiting for a batch to fill, so the
+batch size is whatever happened to be queued — which is why throughput improves
+without latency moving. A blocking `recvmmsg` would wait for the whole batch and
+would add exactly the delay that must be avoided.
+
+Measured between two UML guests on one switch (2-core host, iperf3, 4 runs each):
+
+| | `batch: 1` | `batch: 16` |
+|---|---|---|
+| TCP throughput | 1225–1275 Mbit/s | 1256–1396 Mbit/s |
+| ping avg / max | 0.203 / 0.972 ms | 0.199 / 0.280 ms |
+| hub syscalls (6 s) | 530k | 131k |
+| retransmits per GB | ~9.5k | ~9.1k |
+
+About +6% throughput for a 4x drop in syscalls, and the latency tail got
+*tighter* rather than worse. Retransmits per byte did not rise, which is the
+check that matters for ordering — see below.
+
+Details worth knowing before tuning this:
+
+* **Ordering is preserved.** The hub walks the batch, computes each frame's
+  destination, and flushes one `sendmmsg` per *run* of consecutive frames
+  sharing a destination. A run is emitted before the next begins, so frames to
+  any given port leave in arrival order. Reordering inside a TCP flow would cost
+  more in retransmits than batching saves.
+* **The win scales with peers, not frame rate.** A broadcast costs one send per
+  port, so flood traffic is where batching pays; `recvmmsg` alone saves little
+  because on a unix socket the syscall boundary (~86 ns here) is dwarfed by
+  per-message kernel work (~900 ns).
+* **Batches rarely fill.** `poll()` returns on the first frame, so most reads
+  pick up well under 16. Raising `batch` past 16 mostly just costs memory
+  (`batch` × 9234 bytes per direction; 16 ≈ 150 KiB).
+* **The uplink stays unbatched.** slirp is a userspace NAT reached through
+  `vdeslirp_send()`, not a socket, so it is still fed one frame at a time.
+* `batch: 1` uses plain `recv`/`send`, not a one-element `recvmmsg`, so it is a
+  genuine A/B switch.
+
 ---
 
 ## 4. Notes

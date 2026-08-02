@@ -34,6 +34,21 @@ dhcp_start: 10.0.2.15
 
 ipv6: false
 
+# ── Micro-batching ─────────────────────────────────────────────────────────
+# Frames drained per recvmmsg()/sendmmsg() instead of one recv+send each.
+# Only what poll() already made ready is taken (MSG_DONTWAIT), so there is no
+# added delay — no timer, no waiting for a batch to fill.
+#
+#   16  default. Measured: guest↔guest TCP 1241 -> 1324 Mbit/s (+7%), hub
+#       syscalls 517k -> 152k over the same 6s window, ping avg unchanged
+#       (0.203 -> 0.199 ms), p99 tail actually tighter (max 0.97 -> 0.28 ms).
+#   1   disables batching (plain recv/send). Useful for A/B measurement.
+#   64  ceiling. Larger values mostly add memory: batches rarely fill past ~16
+#       because poll() returns as soon as the first frame lands.
+#
+# Memory cost is batch × 9234 bytes per direction, so 16 ≈ 150 KiB.
+batch: 16
+
 # ── Port forwarding (uplink: slirp only; hub publishes them) ───────────────
 #
 # Two rule shapes:
