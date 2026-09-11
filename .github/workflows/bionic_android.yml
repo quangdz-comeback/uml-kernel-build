@@ -2,9 +2,10 @@ name: "Build bionic (Android NDK) — kernel + network helpers"
 
 # Two bionic artifacts for running UML inside an Android app:
 #
-#   kernel   linux-bionic — the UML kernel (kernel_version input, default
-#            7.2.4 — the arm64 port series also applies to 7.3+ — plus bundled
-#            patches) linked static against bionic, built by the port's
+#   kernel   linux-bionic — the UML kernel (kernel_version input; empty
+#            default tracks the latest stable from kernel.org — the arm64
+#            port series also applies to 7.3+ — plus bundled patches) linked
+#            static against bionic, built by the port's
 #            own harness/build-bionic.sh. Config is defconfig + STATIC_LINK +
 #            UML_NET_VECTOR; pass EXTRA_CONFIG for docker/usb-wifi fragments
 #            when building by hand.
@@ -34,10 +35,10 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: 'Kernel version to build (release like 7.2.4, or -rc like 7.3-rc2)'
+        description: 'Kernel version (release like 7.3.0, or -rc like 7.3-rc2; empty = latest stable)'
         required: false
         type: string
-        default: '7.2.4'
+        default: ''
   push:
     paths:
       - 'vde_plug/**'
@@ -72,14 +73,26 @@ jobs:
 
       - name: Download & extract linux kernel
         env:
-          KVER: ${{ inputs.kernel_version || '7.2.4' }}
+          KVER_INPUT: ${{ inputs.kernel_version }}
         run: |
-          # The arm64 port applies to 7.2.4 and 7.3+ alike (its syscall.c hunk
-          # stops short of the seccomp context that changed upstream), so the
-          # version is a dispatch input. -rc tags exist only in mainline;
-          # releases in the stable tree. Cloning beats cdn.kernel.org tarballs,
-          # which are flaky and do not carry -rc tags at all. Same repo-root
-          # caveat as above: extract outside the checkout.
+          # Resolve the version: an explicit dispatch input wins; otherwise
+          # track the latest stable release published on kernel.org, so the
+          # default build floats with upstream instead of staying pinned. The
+          # arm64 port applies to 7.2.4 and 7.3+ alike (its syscall.c hunk
+          # stops short of the seccomp context that changed upstream), so a
+          # stable bump is usually transparent; if it ever stops applying the
+          # step below fails loudly and the version can be pinned by hand.
+          KVER="${KVER_INPUT}"
+          if [[ -z "$KVER" ]]; then
+            KVER="$(curl -fL --retry 3 https://www.kernel.org/releases.json \
+              | jq -r '.latest_stable.version')"
+            echo "kernel version resolved to latest stable: $KVER"
+          fi
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          # -rc tags exist only in mainline; releases in the stable tree.
+          # Cloning beats cdn.kernel.org tarballs, which are flaky and do not
+          # carry -rc tags at all. Same repo-root caveat as above: extract
+          # outside the checkout.
           if [[ "$KVER" == *-rc* ]]; then
             git clone --depth 1 --branch "v$KVER" \
               https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
