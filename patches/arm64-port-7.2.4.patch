@@ -6490,7 +6490,7 @@ index ba7494f9b..98b590ee2 100644
  void handle_syscall(struct uml_pt_regs *r)
  {
  	struct pt_regs *regs = container_of(r, struct pt_regs, regs);
-@@ -21,10 +33,21 @@ void handle_syscall(struct uml_pt_regs *r)
+@@ -21,9 +33,20 @@ void handle_syscall(struct uml_pt_regs *r)
  
  	/* Initialize the syscall number and default return value. */
  	UPT_SYSCALL_NR(r) = PT_SYSCALL_NR(r->gp);
@@ -6513,7 +6513,6 @@ index ba7494f9b..98b590ee2 100644
 +	}
  
  	/* Do the seccomp check after ptrace; failures should be fast. */
- 	if (secure_computing() == -1)
 diff --git a/arch/um/kernel/smp.c b/arch/um/kernel/smp.c
 index f1e52b734..6890b3bc1 100644
 --- a/arch/um/kernel/smp.c

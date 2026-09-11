@@ -2,8 +2,9 @@ name: "Build bionic (Android NDK) — kernel + network helpers"
 
 # Two bionic artifacts for running UML inside an Android app:
 #
-#   kernel   linux-bionic — the UML kernel (7.2.4 + bundled patches + arm64
-#            port series) linked static against bionic, built by the port's
+#   kernel   linux-bionic — the UML kernel (kernel_version input, default
+#            7.2.4 — the arm64 port series also applies to 7.3+ — plus bundled
+#            patches) linked static against bionic, built by the port's
 #            own harness/build-bionic.sh. Config is defconfig + STATIC_LINK +
 #            UML_NET_VECTOR; pass EXTRA_CONFIG for docker/usb-wifi fragments
 #            when building by hand.
@@ -31,6 +32,12 @@ name: "Build bionic (Android NDK) — kernel + network helpers"
 
 on:
   workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Kernel version to build (release like 7.2.4, or -rc like 7.3-rc2)'
+        required: false
+        type: string
+        default: '7.2.4'
   push:
     paths:
       - 'vde_plug/**'
@@ -63,17 +70,26 @@ jobs:
           unzip -q ndk.zip -d "$RUNNER_TEMP/ndk"
           echo "NDK=$RUNNER_TEMP/ndk/android-ndk-r27c" >> "$GITHUB_ENV"
 
-      - name: Download & extract linux-7.2.4
+      - name: Download & extract linux kernel
+        env:
+          KVER: ${{ inputs.kernel_version || '7.2.4' }}
         run: |
-          # Outside the checkout repo on purpose: `git apply` run from a
-          # subdirectory of a repository resolves patch paths against the repo
-          # root and silently ignores everything outside the cwd — every patch
-          # would no-op with exit 0. The kernel tree must live where repo
-          # discovery finds no repository.
-          curl -fL --retry 3 -o "$RUNNER_TEMP/linux.tar.xz" \
-            https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.4.tar.xz
-          tar xf "$RUNNER_TEMP/linux.tar.xz" -C "$RUNNER_TEMP"
-          echo "KDIR=$RUNNER_TEMP/linux-7.2.4" >> "$GITHUB_ENV"
+          # The arm64 port applies to 7.2.4 and 7.3+ alike (its syscall.c hunk
+          # stops short of the seccomp context that changed upstream), so the
+          # version is a dispatch input. -rc tags exist only in mainline;
+          # releases in the stable tree. Cloning beats cdn.kernel.org tarballs,
+          # which are flaky and do not carry -rc tags at all. Same repo-root
+          # caveat as above: extract outside the checkout.
+          if [[ "$KVER" == *-rc* ]]; then
+            git clone --depth 1 --branch "v$KVER" \
+              https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
+              "$RUNNER_TEMP/linux"
+          else
+            git clone --depth 1 --branch "v$KVER" \
+              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+              "$RUNNER_TEMP/linux"
+          fi
+          echo "KDIR=$RUNNER_TEMP/linux" >> "$GITHUB_ENV"
 
       - name: Apply bundled UML patches
         run: |
@@ -90,7 +106,7 @@ jobs:
         run: |
           cd "$KDIR"
           git apply --check "$GITHUB_WORKSPACE/patches/arm64-port-7.2.4.patch" || {
-            echo "::error::arm64 port does not apply on linux-7.2.4 + bundled patches"
+            echo "::error::arm64 port does not apply on $KVER + bundled patches"
             exit 1
           }
           git apply "$GITHUB_WORKSPACE/patches/arm64-port-7.2.4.patch"
