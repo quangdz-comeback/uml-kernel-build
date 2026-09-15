@@ -1,0 +1,56 @@
+From aa3e6faf620b1091ae85b07c0106918d48fcce05 Mon Sep 17 00:00:00 2001
+From: Tiwei Bie <tiwei.btw@antgroup.com>
+Date: Mon, 27 Oct 2025 08:18:15 +0800
+Subject: [PATCH] um: Enable SMP support on x86
+
+Implement spinlock support for SMP on UML/x86, leveraging x86's
+spinlock implementation. In addition, to support SMP on CPUs that
+do not support CX8, some additional work is required. However,
+considering that such CPUs are already very outdated, and x86 is
+also removing support for them [1], let's enable SMP support only
+on CPUs that support CX8.
+
+[1] https://lore.kernel.org/lkml/20250515085708.2510123-1-mingo@kernel.org/
+
+Signed-off-by: Tiwei Bie <tiwei.btw@antgroup.com>
+Link: https://patch.msgid.link/20251027001815.1666872-9-tiwei.bie@linux.dev
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/x86/um/Kconfig        | 3 +++
+ arch/x86/um/asm/spinlock.h | 8 ++++++++
+ 2 files changed, 11 insertions(+)
+ create mode 100644 arch/x86/um/asm/spinlock.h
+
+diff --git a/arch/x86/um/Kconfig b/arch/x86/um/Kconfig
+index 986045d5e638..c52fb5cb8d21 100644
+--- a/arch/x86/um/Kconfig
++++ b/arch/x86/um/Kconfig
+@@ -9,8 +9,11 @@ endmenu
+ config UML_X86
+ 	def_bool y
+ 	select ARCH_BINFMT_ELF_EXTRA_PHDRS if X86_32
++	select ARCH_USE_QUEUED_RWLOCKS
++	select ARCH_USE_QUEUED_SPINLOCKS
+ 	select DCACHE_WORD_ACCESS
+ 	select HAVE_EFFICIENT_UNALIGNED_ACCESS
++	select UML_SUBARCH_SUPPORTS_SMP if X86_CX8
+ 
+ config 64BIT
+ 	bool "64-bit kernel" if "$(SUBARCH)" = "x86"
+diff --git a/arch/x86/um/asm/spinlock.h b/arch/x86/um/asm/spinlock.h
+new file mode 100644
+index 000000000000..20fc77514214
+--- /dev/null
++++ b/arch/x86/um/asm/spinlock.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __ASM_UM_SPINLOCK_H
++#define __ASM_UM_SPINLOCK_H
++
++#include <asm/qspinlock.h>
++#include <asm/qrwlock.h>
++
++#endif /* __ASM_UM_SPINLOCK_H */
+-- 
+2.43.0
+

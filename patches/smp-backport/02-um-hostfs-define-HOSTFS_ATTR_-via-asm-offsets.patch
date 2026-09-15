@@ -1,0 +1,104 @@
+From f11839c16c3f03570097f0bda61fd90272a00cb8 Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Tue, 7 Oct 2025 09:14:52 +0200
+Subject: [PATCH] um/hostfs: define HOSTFS_ATTR_* via asm-offsets
+
+The HOSTFS_ATTR_* values were meant to be standalone for
+communication between hostfs's kernel and user code parts.
+However, it's easy to forget that HOSTFS_ATTR_* should be
+used even on the kernel side, and that wasn't consistently
+done. As a result, the values need to match ATTR_* values,
+which is not useful to maintain by hand. Instead, generate
+them via asm-offsets like other constants that UML needs
+in user-side code that aren't otherwise available in any
+header files that can be included there.
+
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+Reviewed-by: Hongbo Li <lihongbo22@huawei.com>
+Link: https://patch.msgid.link/20251007071452.367989-3-johannes@sipsolutions.net
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/um/include/shared/common-offsets.h    | 10 +++++++
+ arch/x86/um/shared/sysdep/kernel-offsets.h |  1 +
+ fs/hostfs/hostfs.h                         | 34 +---------------------
+ 3 files changed, 12 insertions(+), 33 deletions(-)
+
+diff --git a/arch/um/include/shared/common-offsets.h b/arch/um/include/shared/common-offsets.h
+index 8ca66a1918c3..fcec75a93e0c 100644
+--- a/arch/um/include/shared/common-offsets.h
++++ b/arch/um/include/shared/common-offsets.h
+@@ -18,3 +18,13 @@ DEFINE(UM_NSEC_PER_USEC, NSEC_PER_USEC);
+ DEFINE(UM_KERN_GDT_ENTRY_TLS_ENTRIES, GDT_ENTRY_TLS_ENTRIES);
+ 
+ DEFINE(UM_SECCOMP_ARCH_NATIVE, SECCOMP_ARCH_NATIVE);
++
++DEFINE(HOSTFS_ATTR_MODE, ATTR_MODE);
++DEFINE(HOSTFS_ATTR_UID, ATTR_UID);
++DEFINE(HOSTFS_ATTR_GID, ATTR_GID);
++DEFINE(HOSTFS_ATTR_SIZE, ATTR_SIZE);
++DEFINE(HOSTFS_ATTR_ATIME, ATTR_ATIME);
++DEFINE(HOSTFS_ATTR_MTIME, ATTR_MTIME);
++DEFINE(HOSTFS_ATTR_CTIME, ATTR_CTIME);
++DEFINE(HOSTFS_ATTR_ATIME_SET, ATTR_ATIME_SET);
++DEFINE(HOSTFS_ATTR_MTIME_SET, ATTR_MTIME_SET);
+diff --git a/arch/x86/um/shared/sysdep/kernel-offsets.h b/arch/x86/um/shared/sysdep/kernel-offsets.h
+index 6fd1ed400399..ee6b44ef2217 100644
+--- a/arch/x86/um/shared/sysdep/kernel-offsets.h
++++ b/arch/x86/um/shared/sysdep/kernel-offsets.h
+@@ -5,6 +5,7 @@
+ #include <linux/crypto.h>
+ #include <linux/kbuild.h>
+ #include <linux/audit.h>
++#include <linux/fs.h>
+ #include <asm/mman.h>
+ #include <asm/seccomp.h>
+ 
+diff --git a/fs/hostfs/hostfs.h b/fs/hostfs/hostfs.h
+index 15b2f094d36e..aa02599b770f 100644
+--- a/fs/hostfs/hostfs.h
++++ b/fs/hostfs/hostfs.h
+@@ -3,40 +3,8 @@
+ #define __UM_FS_HOSTFS
+ 
+ #include <os.h>
++#include <generated/asm-offsets.h>
+ 
+-/*
+- * These are exactly the same definitions as in fs.h, but the names are
+- * changed so that this file can be included in both kernel and user files.
+- */
+-
+-#define HOSTFS_ATTR_MODE	1
+-#define HOSTFS_ATTR_UID 	2
+-#define HOSTFS_ATTR_GID 	4
+-#define HOSTFS_ATTR_SIZE	8
+-#define HOSTFS_ATTR_ATIME	16
+-#define HOSTFS_ATTR_MTIME	32
+-#define HOSTFS_ATTR_CTIME	64
+-#define HOSTFS_ATTR_ATIME_SET	128
+-#define HOSTFS_ATTR_MTIME_SET	256
+-
+-/* This one is unused by hostfs. */
+-#define HOSTFS_ATTR_FORCE	512	/* Not a change, but a change it */
+-#define HOSTFS_ATTR_ATTR_FLAG	1024
+-
+-/*
+- * If you are very careful, you'll notice that these two are missing:
+- *
+- * #define ATTR_KILL_SUID	2048
+- * #define ATTR_KILL_SGID	4096
+- *
+- * and this is because they were added in 2.5 development.
+- * Actually, they are not needed by most ->setattr() methods - they are set by
+- * callers of notify_change() to notify that the setuid/setgid bits must be
+- * dropped.
+- * notify_change() will delete those flags, make sure attr->ia_valid & ATTR_MODE
+- * is on, and remove the appropriate bits from attr->ia_mode (attr is a
+- * "struct iattr *"). -BlaisorBlade
+- */
+ struct hostfs_timespec {
+ 	long long tv_sec;
+ 	long long tv_nsec;
+-- 
+2.43.0
+

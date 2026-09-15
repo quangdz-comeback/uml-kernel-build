@@ -1,0 +1,6 @@
+version: 2
+ethernets:
+  vec0:
+    match:
+      name: vec0
+    dhcp4: true

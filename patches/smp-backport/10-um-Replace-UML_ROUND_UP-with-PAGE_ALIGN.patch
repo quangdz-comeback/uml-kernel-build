@@ -1,0 +1,69 @@
+From 9c84022c1d1f0cfd8f02fa8e2b275ccd361891d2 Mon Sep 17 00:00:00 2001
+From: Tiwei Bie <tiwei.btw@antgroup.com>
+Date: Mon, 27 Oct 2025 13:45:18 +0800
+Subject: [PATCH] um: Replace UML_ROUND_UP() with PAGE_ALIGN()
+
+Although UML_ROUND_UP() is defined in a shared header file, it
+depends on the PAGE_SIZE and PAGE_MASK macros, so it can only be
+used in kernel code. Considering its name is not very clear and
+its functionality is the same as PAGE_ALIGN(), replace its usages
+with a direct call to PAGE_ALIGN() and remove it.
+
+Signed-off-by: Tiwei Bie <tiwei.btw@antgroup.com>
+Link: https://patch.msgid.link/20251027054519.1996090-4-tiwei.bie@linux.dev
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/um/include/shared/kern_util.h | 3 ---
+ arch/um/kernel/mem.c               | 2 +-
+ arch/um/kernel/um_arch.c           | 5 ++---
+ 3 files changed, 3 insertions(+), 7 deletions(-)
+
+diff --git a/arch/um/include/shared/kern_util.h b/arch/um/include/shared/kern_util.h
+index 00ca3e12fd9a..949a03c7861e 100644
+--- a/arch/um/include/shared/kern_util.h
++++ b/arch/um/include/shared/kern_util.h
+@@ -15,9 +15,6 @@ extern int uml_exitcode;
+ 
+ extern int kmalloc_ok;
+ 
+-#define UML_ROUND_UP(addr) \
+-	((((unsigned long) addr) + PAGE_SIZE - 1) & PAGE_MASK)
+-
+ extern unsigned long alloc_stack(int order, int atomic);
+ extern void free_stack(unsigned long stack, int order);
+ 
+diff --git a/arch/um/kernel/mem.c b/arch/um/kernel/mem.c
+index 32e3b1972dc1..19d40b58eac4 100644
+--- a/arch/um/kernel/mem.c
++++ b/arch/um/kernel/mem.c
+@@ -71,7 +71,7 @@ void __init arch_mm_preinit(void)
+ 	/* Map in the area just after the brk now that kmalloc is about
+ 	 * to be turned on.
+ 	 */
+-	brk_end = (unsigned long) UML_ROUND_UP(sbrk(0));
++	brk_end = PAGE_ALIGN((unsigned long) sbrk(0));
+ 	map_memory(brk_end, __pa(brk_end), uml_reserved - brk_end, 1, 1, 0);
+ 	memblock_free((void *)brk_end, uml_reserved - brk_end);
+ 	uml_reserved = brk_end;
+diff --git a/arch/um/kernel/um_arch.c b/arch/um/kernel/um_arch.c
+index fcabef8c7224..6f9a49e6c6a0 100644
+--- a/arch/um/kernel/um_arch.c
++++ b/arch/um/kernel/um_arch.c
+@@ -348,12 +348,11 @@ int __init linux_main(int argc, char **argv, char **envp)
+ 	 * so they actually get what they asked for. This should
+ 	 * add zero for non-exec shield users
+ 	 */
+-
+-	diff = UML_ROUND_UP(brk_start) - UML_ROUND_UP(&_end);
++	diff = PAGE_ALIGN(brk_start) - PAGE_ALIGN((unsigned long) &_end);
+ 	if (diff > 1024 * 1024) {
+ 		os_info("Adding %ld bytes to physical memory to account for "
+ 			"exec-shield gap\n", diff);
+-		physmem_size += UML_ROUND_UP(brk_start) - UML_ROUND_UP(&_end);
++		physmem_size += diff;
+ 	}
+ 
+ 	uml_physmem = (unsigned long) __binary_start & PAGE_MASK;
+-- 
+2.43.0
+

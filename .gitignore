@@ -1,0 +1,17 @@
+# Local kernel source tree (downloaded by workflows)
+linux-src/
+linux-*/
+
+# Local build logs
+build.log
+*.log
+
+# Build artifacts
+linux-uml
+slirp
+VERSION
+vde_plug/vde_plug
+
+__pycache__/
+*.py[cod]
+.pytest_cache/

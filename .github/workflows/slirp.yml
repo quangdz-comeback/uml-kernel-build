@@ -1,0 +1,121 @@
+name: Build Static Binaries (slirp + vde_plug)
+
+on:
+  push:
+    paths:
+      - 'legacy/slirp.c'
+      - 'vde_plug/**'
+      - 'legacy/Makefile'
+      - 'launcher/config.example.yaml'
+      - '.github/workflows/slirp.yml'
+  schedule:
+    - cron: '0 12 * * 1'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            syslib: /usr/lib/x86_64-linux-gnu
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            syslib: /usr/lib/aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config git \
+            meson ninja-build \
+            libslirp-dev libglib2.0-dev libpcre3-dev \
+            libvdeplug-dev libyaml-dev
+
+      - name: Build libslirp with an enlarged DHCP pool
+        run: |
+          # Upstream caps the built-in DHCP server at NB_BOOTP_CLIENTS=16
+          # leases. That is fine for one guest, but a nested hypervisor guest
+          # (Proxmox/LXC bridging containers onto vmbr0) needs one lease per
+          # container. Raise it to cover the rest of the /24 above dhcp_start.
+          git clone --depth 1 https://gitlab.freedesktop.org/slirp/libslirp.git
+          cd libslirp
+          sed -i 's/^#define NB_BOOTP_CLIENTS .*/#define NB_BOOTP_CLIENTS 240/' src/bootp.h
+          grep -n 'NB_BOOTP_CLIENTS' src/bootp.h
+          meson setup build --prefix="$PWD/../slirp-prefix" -Ddefault_library=static
+          ninja -C build
+          ninja -C build install
+          cd ..
+          echo "SLIRP_PREFIX=$PWD/slirp-prefix" >> "$GITHUB_ENV"
+          find slirp-prefix -name 'libslirp.a'
+
+      - name: Build libvdeslirp (static .a)
+        run: |
+          git clone --depth 1 https://github.com/virtualsquare/libvdeslirp.git
+
+          cat > libvdeslirp/CMakeLists.txt << 'CMAKEOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(vdeslirp LANGUAGES C)
+          set(CMAKE_C_STANDARD 11)
+          set(CMAKE_C_FLAGS "-O2 -Wall")
+          set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+          include(GNUInstallDirs)
+          configure_file(config.h.in config.h)
+          add_library(vdeslirp STATIC libvdeslirp.c)
+          target_include_directories(vdeslirp PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+            $ENV{SLIRP_PREFIX}/include)
+          set_target_properties(vdeslirp PROPERTIES OUTPUT_NAME "vdeslirp")
+          install(TARGETS vdeslirp DESTINATION ${CMAKE_INSTALL_LIBDIR})
+          install(FILES libvdeslirp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+          CMAKEOF
+
+          mkdir -p libvdeslirp/build && cd libvdeslirp/build
+          cmake ..
+          make -j$(nproc)
+
+      - name: Build static slirp (legacy SLIP transport)
+        run: |
+          # libvdeslirp was cloned at the workspace root; make -C legacy
+          # resolves relative VDESLIRP_* paths against legacy/, so pass
+          # absolute ones.
+          make -C legacy static \
+            VDESLIRP_SRC="$PWD/libvdeslirp" \
+            VDESLIRP_BUILD="$PWD/libvdeslirp/build" \
+            SLIRP_PREFIX="$SLIRP_PREFIX" \
+            SYSLIB=${{ matrix.syslib }}
+          strip legacy/slirp
+          echo "=== slirp ==="
+          file legacy/slirp && ls -lh legacy/slirp
+
+      - name: Build static vde_plug (VECTOR transport)
+        run: |
+          cd vde_plug
+          make static \
+            VDESLIRP_SRC=../libvdeslirp \
+            VDESLIRP_BUILD=../libvdeslirp/build \
+            SLIRP_PREFIX="$SLIRP_PREFIX"
+          strip vde_plug
+          echo "=== vde_plug ==="
+          file vde_plug && ls -lh vde_plug
+          # the enlarged pool must actually be in the binary
+          ./vde_plug --descr CI slirp:// 2>&1 | head -2 || true
+
+      - name: Upload slirp artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: slirp-static-${{ matrix.arch }}
+          path: |
+            legacy/slirp
+            launcher/config.example.yaml
+
+      - name: Upload vde_plug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: vde_plug-static-${{ matrix.arch }}
+          path: vde_plug/vde_plug

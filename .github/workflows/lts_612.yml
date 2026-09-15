@@ -1,0 +1,188 @@
+name: "UML Kernel — LTS 6.12 (VECTOR + SLIRP)"
+
+# Builds the 6.12.x LTS kernel. VECTOR is enabled, so it boots with the
+# launcher's vec0:transport=vde,vnl=slirp:// like every other kernel in
+# this repo; SLIRP is kept for the legacy eth0=slirp,,./slirp helper path.
+
+on:
+  schedule:
+    - cron: '0 12 * * 1'          # every Monday
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # GitHub has no hosted Debian runner — build in a bookworm container;
+    # the Ubuntu label is only the VM host.
+    container: debian:bookworm
+    # Container jobs run steps with dash(1) by default; the steps below
+    # use bashisms (shopt), so pin bash.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install deps
+        run: |
+          apt-get update -y
+          apt-get install -y build-essential libncurses-dev flex bison \
+            libssl-dev libelf-dev bc dwarves wget curl jq tar xz-utils \
+            libglib2.0-dev libpcre3-dev pkg-config \
+            git ca-certificates perl
+
+      - uses: actions/checkout@v7
+
+      - name: Pick latest 6.12.x LTS
+        run: |
+          KVER=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.moniker=="longterm") | .version' | \
+            grep '^6\.12\.' | sort -V | tail -1)
+          [ -z "$KVER" ] && { echo "::error::No 6.12 LTS found"; exit 1; }
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          echo "[+] Selected $KVER"
+
+      - name: Download & extract
+        run: |
+          # cdn.kernel.org tarballs are flaky (404s); clone the tag directly.
+          git clone --depth 1 --branch "v${{ env.KVER }}" \
+            "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git" \
+            "linux-${{ env.KVER }}"
+
+      - name: Apply UML SMP support
+        run: |
+          cd linux-${{ env.KVER }}
+          bash ../patches/apply-smp.sh ../patches
+      - name: Apply bundled UML patches
+        run: |
+          cd linux-${{ env.KVER }}
+          shopt -s nullglob
+          for p in ../patches/*.patch; do
+            # arm64-port targets 7.2.x only; never fuzz-apply it onto other trees.
+            case "$(basename "$p")" in arm64-port-*) continue;; esac
+            echo "[+] Applying $(basename "$p")"
+            if git apply -v "$p"; then
+              :
+            elif patch -p1 --fuzz=3 < "$p"; then
+              echo "::warning::Applied $(basename "$p") with fuzz via patch(1)"
+            else
+              case "$(basename "$p")" in
+                uml-memdrop-on-free.patch|uml-physmem-memfd.patch)
+                  echo "::error::critical patch $(basename "$p") failed to apply"
+                  exit 1
+                  ;;
+                *)
+                  echo "::warning::$(basename "$p") did not apply cleanly, skipping"
+                  ;;
+              esac
+            fi
+          done
+
+
+      - name: Patch UML (unwind_user.h)
+        run: |
+          cd linux-${{ env.KVER }}
+          if [ -f arch/x86/include/asm/unwind_user.h ] && \
+             ! grep -q unwind_user arch/um/include/asm/Kbuild 2>/dev/null; then
+            echo 'generic-y += unwind_user.h' >> arch/um/include/asm/Kbuild
+            echo "[+] Patched unwind_user.h"
+          fi
+
+      - name: Configure & build
+        run: |
+          cd linux-${{ env.KVER }}
+          make ARCH=um defconfig
+          scripts/config --file .config \
+            -e BLK_DEV -e BLK_DEV_LOOP -e BLK_DEV_UBD \
+            -e EXT4_FS -e EXT2_FS -e EXT3_FS -e FS_MBCACHE \
+            -e NET -e INET -e PACKET -e NETDEVICES -e NET_CORE -e TUN \
+            -e SLHC -e SLIP -e SLIP_COMPRESSED -e SLIP_SMART -e SLIP_MODE_SLIP6 \
+            -e UML_NET -e UML_NET_SLIRP -d UML_NET_DAEMON \
+            -e UML_NET_VECTOR \
+            -e TTY -e UNIX98_PTYS -e DEVTMPFS -e DEVTMPFS_MOUNT \
+            -e TMPFS -e TMPFS_POSIX_ACL -e TMPFS_XATTR \
+            -e PROC_FS -e SYSFS -e FHANDLE \
+            -e SIGNALFD -e TIMERFD -e EPOLL -e EVENTFD \
+            -e BLK_DEV_INITRD -e OVERLAY_FS \
+            -e CGROUPS -e CGROUP_SCHED \
+            -e NAMESPACES -e UTS_NS -e IPC_NS -e PID_NS -e NET_NS \
+            -e DEVPTS_FS -e PTY \
+            -d AUDIT -d AUTOFS_FS -d AUTOFS4_FS \
+            -e NETFILTER -e NF_CONNTRACK -e NF_NAT \
+            -e IP_FORWARD -e IP_MULTICAST -e IP_ADVANCED_ROUTER \
+            -e IKCONFIG -e IKCONFIG_PROC -e CONFIG_IPV6 \
+            -e SMP --set-val NR_CPUS 64
+          # Merge container config (Docker/Podman/LXC, cgroup v2, memdrop), then the
+          # storage fragment (loop, squashfs, FAT/exFAT, XFS, btrfs, ISO/UDF,
+          # device-mapper/LVM, md-raid, LUKS).
+          ./scripts/kconfig/merge_config.sh -m -O . .config \
+            ../patches/containers.config ../patches/storage.config >/dev/null
+
+          # Force container extras + memdrop PAGE_REPORTING (merge can drop unknowns
+          # across kernel versions; scripts/config re-asserts the critical set).
+          scripts/config --file .config \
+            -e PAGE_REPORTING \
+            -e CPUSETS -e PROC_PID_CPUSET \
+            -e USER_NS -e CHECKPOINT_RESTORE \
+            -e FAIR_GROUP_SCHED -e CFS_BANDWIDTH -e CGROUP_FREEZER \
+            -e CGROUP_DEVICE -e CGROUP_CPUACCT -e MEMCG \
+            -e CGROUP_BPF -e EXT4_FS_POSIX_ACL -e EXT4_FS_SECURITY \
+            -e VETH -e BRIDGE -e BRIDGE_NETFILTER -e MACVLAN -e IPVLAN -e TAP \
+            -e IP_NF_IPTABLES -e IP_NF_FILTER -e IP_NF_NAT -e IP6_NF_IPTABLES \
+            -e SECCOMP -e SECCOMP_FILTER
+          # MEMCG_SWAP exists on older LTS only; ignore if absent.
+          scripts/config --file .config -e MEMCG_SWAP 2>/dev/null || true
+
+          # Re-assert storage knobs. merge_config.sh silently drops symbols whose
+          # dependencies are not yet satisfied at merge time, and `olddefconfig`
+          # will not turn them back on, so set them explicitly here.
+          scripts/config --file .config \
+            -e BLK_DEV_LOOP --set-val BLK_DEV_LOOP_MIN_COUNT 16 \
+            -e SQUASHFS -e SQUASHFS_XATTR -e SQUASHFS_ZLIB -e SQUASHFS_LZ4 \
+            -e SQUASHFS_LZO -e SQUASHFS_XZ -e SQUASHFS_ZSTD \
+            -e FAT_FS -e MSDOS_FS -e VFAT_FS -e EXFAT_FS \
+            -e NLS -e NLS_CODEPAGE_437 -e NLS_ISO8859_1 -e NLS_UTF8 -e NLS_ASCII \
+            -e XFS_FS -e XFS_QUOTA -e XFS_POSIX_ACL -e XFS_RT \
+            -e BTRFS_FS -e BTRFS_FS_POSIX_ACL \
+            -e ISO9660_FS -e JOLIET -e ZISOFS -e UDF_FS \
+            -e MD -e BLK_DEV_MD -e BLK_DEV_DM -e DM_SNAPSHOT \
+            -e DM_THIN_PROVISIONING -e DM_MIRROR -e DM_RAID -e DM_ZERO \
+            -e DM_CRYPT -e DM_VERITY -e DM_INTEGRITY \
+            -e MD_RAID0 -e MD_RAID1 -e MD_RAID10 -e MD_RAID456 \
+            -e QUOTA -e QUOTACTL -e QFMT_V2 \
+            -e CRYPTO_XTS -e CRYPTO_AES -e CRYPTO_SHA256 -e CRYPTO_ESSIV \
+            -e CRYPTO_USER_API_HASH -e CRYPTO_USER_API_SKCIPHER \
+            -e MODULES -e MODULE_UNLOAD -e KALLSYMS -e KALLSYMS_ALL \
+            -d MODULE_SIG_FORCE
+          # Squashfs decompression mode is a Kconfig `choice`; setting the member
+          # directly is the only way to move it off FILE_CACHE.
+          scripts/config --file .config -e SQUASHFS_FILE_DIRECT || true
+          # MD_LINEAR/MD_BITMAP were renamed/removed across versions; best-effort.
+          scripts/config --file .config -e MD_LINEAR 2>/dev/null || true
+          scripts/config --file .config -e MD_BITMAP 2>/dev/null || true
+
+          echo "=== verify memdrop/container knobs ==="
+          grep -E '^CONFIG_(PAGE_REPORTING|USER_NS|CPUSETS|CHECKPOINT_RESTORE|VETH|BRIDGE|SECCOMP_FILTER|MEMCG)=' .config || true
+
+          make ARCH=um olddefconfig
+
+          echo "=== verify storage knobs ==="
+          grep -E '^CONFIG_(BLK_DEV_LOOP|SQUASHFS|VFAT_FS|EXFAT_FS|XFS_FS|BTRFS_FS|ISO9660_FS|UDF_FS|BLK_DEV_DM|BLK_DEV_MD|DM_CRYPT|DM_THIN_PROVISIONING|NLS_UTF8|MODULES)=' .config || true
+          # Fail loudly rather than shipping a kernel that silently lost a feature.
+          for sym in BLK_DEV_LOOP SQUASHFS VFAT_FS XFS_FS BTRFS_FS BLK_DEV_DM \
+                     BLK_DEV_MD DM_CRYPT DM_THIN_PROVISIONING NLS_UTF8 ISO9660_FS; do
+            grep -q "^CONFIG_${sym}=[ym]" .config || {
+              echo "::error::CONFIG_${sym} is not enabled after olddefconfig"; exit 1; }
+          done
+          make ARCH=um -j"$(nproc)"
+
+      - name: Strip & upload
+        run: |
+          cp linux-${{ env.KVER }}/linux ./linux-uml
+          strip ./linux-uml
+          echo "${{ env.KVER }} (VECTOR+SLIRP)" > VERSION
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-uml-6.12
+          path: |
+            linux-uml
+            VERSION

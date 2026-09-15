@@ -1,0 +1,120 @@
+name: vdeplug-go (netstack vde_plug)
+
+on:
+  push:
+    paths:
+      - 'vdeplug-go/**'
+      - '.github/workflows/vdeplug_go.yml'
+  schedule:
+    # Weekly canary: build + test against the latest module versions.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Float deps to upstream latest
+        # go.mod cannot express "track latest" (Go pins exact versions), so
+        # resolve to the newest stable of every module at build time. The
+        # committed go.mod is the known-good floor for local dev.
+        run: go get -u ./... && go mod tidy
+        working-directory: vdeplug-go
+
+      - name: Drop gVisor's stray bridge_test.go from the module cache
+        # gVisor intermittently ships pkg/tcpip/stack/bridge_test.go
+        # declaring `package bridge_test` next to the directory's package
+        # stack, which kills any module build importing pkg/tcpip/stack.
+        # The script drops it from the cache, making floating safe again.
+        run: ./fix-gvisor-cache.sh
+        working-directory: vdeplug-go
+
+      - name: Vet
+        run: go vet ./...
+        working-directory: vdeplug-go
+
+      - name: Unit + e2e (fleet boot/switching/failover)
+        # The e2e test is self-contained: it builds the binary itself and
+        # drives fake guests over socketpairs — no UML kernel, no root.
+        run: go test -timeout 120s -v ./...
+        working-directory: vdeplug-go
+
+  deps:
+    # Canary against the latest of everything: builds and tests with the
+    # newest Go + module versions instead of the pinned go.mod. Failure
+    # here means an upstream change is coming; it does not block builds.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Upgrade every module to latest
+        run: go get -u ./... && go mod tidy
+        working-directory: vdeplug-go
+
+      - name: Drop gVisor's stray bridge_test.go from the module cache
+        run: ./fix-gvisor-cache.sh
+        working-directory: vdeplug-go
+
+      - name: Vet + test against latest deps
+        run: go vet ./... && go test -timeout 120s ./...
+        working-directory: vdeplug-go
+
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64
+            runner: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+            cgo: 0
+          - target: arm64
+            runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            cgo: 0
+          - target: android-arm64
+            runner: ubuntu-24.04
+            goos: android
+            goarch: arm64
+            cgo: 0
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Float deps to upstream latest
+        run: go get -u ./... && go mod tidy
+        working-directory: vdeplug-go
+
+      - name: Drop gVisor's stray bridge_test.go from the module cache
+        run: ./fix-gvisor-cache.sh
+        working-directory: vdeplug-go
+
+      - name: Build static vde_plug (${{ matrix.target }})
+        run: |
+          CGO_ENABLED=${{ matrix.cgo }} GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -trimpath -ldflags="-s -w" -o vde_plug .
+          file vde_plug && ls -lh vde_plug
+        working-directory: vdeplug-go
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: vdeplug-go-${{ matrix.target }}
+          path: vdeplug-go/vde_plug

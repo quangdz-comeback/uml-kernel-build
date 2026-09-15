@@ -1,0 +1,194 @@
+name: Trigger, Build, and Publish Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g., v1.0.0 or leave blank for date-based tag)'
+        required: false
+        type: string
+      cpu_model:
+        description: 'CPU model name to report in /proc/cpuinfo (blank = show the host CPU)'
+        required: false
+        type: string
+
+jobs:
+  trigger-build-and-release:
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write  # Required to create/publish releases
+      actions: write   # Required to trigger workflows (`gh workflow run`)
+      checks: read     # Required to monitor workflow status
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Determine Release Tag
+        id: vars
+        run: |
+          if [ -n "${{ inputs.tag_name }}" ]; then
+            TAG_NAME="${{ inputs.tag_name }}"
+          else
+            TAG_NAME="v$(date +'%Y.%m.%d')-${{ github.run_number }}"
+          fi
+          
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Trigger Build Workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          EXTRA_ARGS=()
+          if [ -n "${{ inputs.cpu_model }}" ]; then
+            echo "[+] Forwarding cpu_model='${{ inputs.cpu_model }}' to build workflows"
+            EXTRA_ARGS+=(-f "cpu_model=${{ inputs.cpu_model }}")
+          fi
+
+          echo "[+] Triggering 'UML Kernel — LTS latest (VECTOR/VDE)'..."
+          gh workflow run "UML Kernel — LTS latest (VECTOR/VDE)" --repo "$REPO" --ref "${{ github.ref_name }}" "${EXTRA_ARGS[@]}"
+
+          echo "[+] Triggering 'UML Kernel — stable arm64 (linux-um port)'..."
+          gh workflow run "UML Kernel — stable arm64 (linux-um port)" --repo "$REPO" --ref "${{ github.ref_name }}" "${EXTRA_ARGS[@]}"
+
+          echo "[+] Triggering 'Build Static Binaries (slirp + vde_plug)'..."
+          gh workflow run "Build Static Binaries (slirp + vde_plug)" --repo "$REPO" --ref "${{ github.ref_name }}"
+
+          echo "[+] Triggering 'UML Base Image (distro-agnostic, VECTOR/VDE)'..."
+          gh workflow run "UML Base Image (distro-agnostic, VECTOR/VDE)" --repo "$REPO" --ref "${{ github.ref_name }}"
+
+          # Give GitHub API a few seconds to register the new runs
+          sleep 10
+
+      - name: Wait for Build Workflows to Complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Function to wait for a workflow run triggered recently to complete
+          wait_for_workflow() {
+            WORKFLOW_NAME="$1"
+            echo "=================================================="
+            echo "[+] Monitoring workflow: '$WORKFLOW_NAME'"
+            echo "=================================================="
+
+            # Get the latest run ID for the workflow on current branch
+            RUN_ID=$(gh run list --repo "$REPO" --workflow "$WORKFLOW_NAME" --branch "${{ github.ref_name }}" --limit 1 --json databaseId -q '.[0].databaseId')
+
+            if [ -z "$RUN_ID" ]; then
+              echo "::error::Could not find run ID for workflow '$WORKFLOW_NAME'"
+              exit 1
+            fi
+
+            echo "[+] Tracking Run ID: $RUN_ID"
+
+            # Poll status every 20 seconds
+            while true; do
+              STATUS=$(gh run view "$RUN_ID" --repo "$REPO" --json status,conclusion -q '.status')
+              
+              if [ "$STATUS" = "completed" ]; then
+                CONCLUSION=$(gh run view "$RUN_ID" --repo "$REPO" --json conclusion -q '.conclusion')
+                echo "[+] Workflow '$WORKFLOW_NAME' completed with conclusion: $CONCLUSION"
+                
+                if [ "$CONCLUSION" != "success" ]; then
+                  echo "::error::Workflow '$WORKFLOW_NAME' (Run ID: $RUN_ID) failed with conclusion: $CONCLUSION"
+                  exit 1
+                fi
+                break
+              fi
+
+              echo "[*] Workflow '$WORKFLOW_NAME' is still $STATUS... waiting 20s"
+              sleep 20
+            done
+          }
+
+          # Wait for all build pipelines to finish building
+          wait_for_workflow "UML Kernel — LTS latest (VECTOR/VDE)"
+          wait_for_workflow "UML Kernel — stable arm64 (linux-um port)"
+          wait_for_workflow "Build Static Binaries (slirp + vde_plug)"
+          wait_for_workflow "UML Base Image (distro-agnostic, VECTOR/VDE)"
+
+      - name: Fetch Artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p ./tmp-kernel ./tmp-kernel-arm64 ./tmp-tools ./tmp-images
+
+          KERNEL_RUN_ID=$(gh run list --repo "$REPO" --workflow "UML Kernel — LTS latest (VECTOR/VDE)" --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          echo "[+] Downloading artifacts from Kernel Run ID: $KERNEL_RUN_ID"
+          gh run download "$KERNEL_RUN_ID" --repo "$REPO" --dir ./tmp-kernel
+
+          ARM64_KERNEL_RUN_ID=$(gh run list --repo "$REPO" --workflow "UML Kernel — stable arm64 (linux-um port)" --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          echo "[+] Downloading artifacts from arm64 Kernel Run ID: $ARM64_KERNEL_RUN_ID"
+          gh run download "$ARM64_KERNEL_RUN_ID" --repo "$REPO" --dir ./tmp-kernel-arm64
+
+          TOOLS_RUN_ID=$(gh run list --repo "$REPO" --workflow "Build Static Binaries (slirp + vde_plug)" --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          echo "[+] Downloading artifacts from Tools Run ID: $TOOLS_RUN_ID"
+          gh run download "$TOOLS_RUN_ID" --repo "$REPO" --dir ./tmp-tools
+
+          IMAGE_RUN_ID=$(gh run list --repo "$REPO" --workflow "UML Base Image (distro-agnostic, VECTOR/VDE)" --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          echo "[+] Downloading artifacts from Image Run ID: $IMAGE_RUN_ID"
+          gh run download "$IMAGE_RUN_ID" --repo "$REPO" --dir ./tmp-images
+
+      - name: Organize Release Assets
+        run: |
+          mkdir -p ./release-assets
+
+          echo "=== Downloaded Files Structure ==="
+          find ./tmp-kernel ./tmp-kernel-arm64 ./tmp-tools ./tmp-images -type f
+
+          # Locate and copy target files regardless of artifact folder nesting
+          find ./tmp-kernel -type f -name "linux-uml" -exec cp {} ./release-assets/ \;
+          find ./tmp-kernel -type f -name "VERSION" -exec cp {} ./release-assets/ \;
+          find ./tmp-kernel-arm64 -type f -name "linux-uml-arm64" -exec cp {} ./release-assets/ \;
+          find ./tmp-kernel-arm64 -type f -name "VERSION" -exec cp {} ./release-assets/VERSION-arm64 \;
+
+          # slirp/vde_plug artifacts are now arch-suffixed (x86_64 + arm64);
+          # copy each into arch-tagged release assets and keep one config example.
+          for d in ./tmp-tools/*; do
+            [ -d "$d" ] || continue
+            case "$(basename "$d")" in
+              *arm64)  arch=-arm64 ;;
+              *x86_64) arch=-x86_64 ;;
+              *)       arch= ;;
+            esac
+            [ -f "$d/slirp" ]    && cp "$d/slirp"    "./release-assets/slirp${arch}"
+            [ -f "$d/vde_plug" ] && cp "$d/vde_plug" "./release-assets/vde_plug${arch}"
+          done
+          find ./tmp-tools -type f -name "config.example.yaml" -exec cp {} ./release-assets/ \;
+          # Base image artifacts are raw .img (compression moved out of the
+          # build matrix) — gzip here so release assets keep the .img.gz
+          # format.
+          find ./tmp-images -type f -name "*.img" | while read -r f; do
+            echo "[+] Compressing $(basename "$f")"
+            gzip -6 -c "$f" > "./release-assets/$(basename "$f").gz"
+          done
+
+          echo "=== Staged Release Assets ==="
+          ls -lh ./release-assets/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.vars.outputs.tag_name }}"
+          
+          K_VERSION="Latest LTS"
+          if [ -f ./release-assets/VERSION ]; then
+            K_VERSION=$(cat ./release-assets/VERSION)
+          fi
+
+          gh release create "$TAG" ./release-assets/* \
+            --title "UML Kernel & Networking Suite ($TAG)" \
+            --notes "### Included Binaries
+          * **\`linux-uml\`**: Kernel build for **${K_VERSION}** (x86_64)
+          * **\`linux-uml-arm64\`**: Kernel build for arm64 (VECTOR transport, via the linux-um port) — see \`VERSION-arm64\`
+          * **\`slirp-x86_64\`** / **\`slirp-arm64\`**: Static slirp binaries with enlarged DHCP pool
+          * **\`vde_plug-x86_64\`** / **\`vde_plug-arm64\`**: Static vde_plug binaries with VECTOR transport support
+
+          ### Included Images
+          * **\`base-*.img.gz\`**: Fresh UML rootfs cloud images (amd64 + arm64; Ubuntu Noble/Resolute, Debian Bookworm/Trixie, Rocky 9/10, Alma 9/10) with cloud-init NoCloud networking baked in" \
+            --generate-notes

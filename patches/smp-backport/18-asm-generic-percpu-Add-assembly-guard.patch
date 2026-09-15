@@ -1,0 +1,48 @@
+From 8d748955279cfe1996e51ac51a4f746468614a10 Mon Sep 17 00:00:00 2001
+From: Tiwei Bie <tiwei.btw@antgroup.com>
+Date: Mon, 27 Oct 2025 08:18:14 +0800
+Subject: [PATCH] asm-generic: percpu: Add assembly guard
+
+Currently, asm/percpu.h is directly or indirectly included by
+some assembly files on x86. Some of them (e.g., checksum_32.S)
+are also used on um. But x86 and um provide different versions
+of asm/percpu.h -- um uses asm-generic/percpu.h directly.
+
+When SMP is enabled, asm-generic/percpu.h will introduce C code
+that cannot be assembled. Since asm-generic/percpu.h currently
+is not designed for use in assembly, and these assembly files
+do not actually need asm/percpu.h on um, let's add the assembly
+guard in asm-generic/percpu.h to fix this issue.
+
+Cc: Arnd Bergmann <arnd@arndb.de>
+Cc: linux-arch@vger.kernel.org
+Signed-off-by: Tiwei Bie <tiwei.btw@antgroup.com>
+Acked-by: Arnd Bergmann <arnd@arndb.de>
+Link: https://patch.msgid.link/20251027001815.1666872-8-tiwei.bie@linux.dev
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ include/asm-generic/percpu.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/include/asm-generic/percpu.h b/include/asm-generic/percpu.h
+index 02aeca21479a..6628670bcb90 100644
+--- a/include/asm-generic/percpu.h
++++ b/include/asm-generic/percpu.h
+@@ -2,6 +2,8 @@
+ #ifndef _ASM_GENERIC_PERCPU_H_
+ #define _ASM_GENERIC_PERCPU_H_
+ 
++#ifndef __ASSEMBLER__
++
+ #include <linux/compiler.h>
+ #include <linux/threads.h>
+ #include <linux/percpu-defs.h>
+@@ -557,4 +559,5 @@ do {									\
+ 	this_cpu_generic_cmpxchg(pcp, oval, nval)
+ #endif
+ 
++#endif /* __ASSEMBLER__ */
+ #endif /* _ASM_GENERIC_PERCPU_H_ */
+-- 
+2.43.0
+

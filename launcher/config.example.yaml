@@ -1,0 +1,85 @@
+# config.yaml — configuration for the launcher (../boot) and the vde_plug
+# network helper. Copy to `config.yaml` next to the launcher and the helper
+# binary (both are located via /proc/self/exe, so PATH lookup still works).
+
+# ── Launcher (boot) ────────────────────────────────────────────────────────
+# memory: guest RAM, passed as mem= (default 2G). Command line: ./boot 4G
+# ncpus:   guest vCPUs (default 1; seccomp=on is added automatically).
+# memory: 2G
+# ncpus: 1
+
+# ── Private switch between instances on the same host ──────────────────────
+# switch: true   — instances sharing `socket` land on one L2 segment.
+#                  The first one to bind the socket becomes the hub and runs
+#                  the uplink; the others are wires into it. Because a single
+#                  DHCP server then serves the segment, guests get distinct
+#                  leases (10.0.2.15, .16, .17 …) instead of all claiming .15.
+# switch: false  — classic one-NAT-per-instance behaviour.
+switch: true
+
+# Socket path. Omit to auto-resolve:
+#   $VDE_SWITCH_SOCKET → /tmp/vde.socket → $TMPDIR/vde.socket → <bindir>/vde.socket
+# The fallback matters in sandboxes (Pterodactyl) with no writable /tmp.
+# socket: /tmp/vde.socket
+socket_mode: 0600
+
+# ── Uplink (hub only) ──────────────────────────────────────────────────────
+# slirp     — userspace NAT, no privileges needed (default)
+# tap:NAME  — attach to an existing host tap; DHCP then comes from the real
+#             LAN, so guests get real addresses. Use this on Proxmox with a
+#             tap already enslaved to vmbr0. Needs access to /dev/net/tun.
+# none      — isolated segment, guest-to-guest only, no internet
+uplink: slirp
+
+# ── Virtual network (uplink: slirp only) ───────────────────────────────────
+network: 10.0.2.0/24
+gateway: 10.0.2.2
+nameserver: 10.0.2.3
+dhcp_start: 10.0.2.15
+# mtu: 1500
+
+ipv6: false
+
+# ── Micro-batching ─────────────────────────────────────────────────────────
+# Frames drained per recvmmsg()/sendmmsg() instead of one recv+send each.
+# Only what poll() already made ready is taken (MSG_DONTWAIT), so there is no
+# added delay — no timer, no waiting for a batch to fill.
+#
+#   16  default. Measured: guest↔guest TCP 1241 -> 1324 Mbit/s (+7%), hub
+#       syscalls 517k -> 152k over the same 6s window, ping avg unchanged
+#       (0.203 -> 0.199 ms), p99 tail actually tighter (max 0.97 -> 0.28 ms).
+#   1   disables batching (plain recv/send). Useful for A/B measurement.
+#   64  ceiling. Larger values mostly add memory: batches rarely fill past ~16
+#       because poll() returns as soon as the first frame lands.
+#
+# Memory cost is batch × 9234 bytes per direction, so 16 ≈ 150 KiB.
+batch: 16
+
+# ── Port forwarding (uplink: slirp only; hub publishes them) ───────────────
+#
+# Two rule shapes:
+#
+#   HOST:GUEST              fallback — follows the first client on the segment
+#   ADDR:HOST:GUEST         pinned to one guest address
+#
+# ADDR may be written in full (10.0.2.16) or as the ".N" shorthand (.16),
+# which is completed from `network` above.
+#
+# In standalone mode (switch: false) there is only ever one guest, so the
+# fallback form behaves exactly as it always has and points at dhcp_start.
+#
+# On a shared switch several clients lease addresses, so a bare HOST:GUEST rule
+# is ambiguous — it latches onto whoever leases first and stays there. Use the
+# pinned form to reach a specific machine. Leases are handed out in order from
+# dhcp_start, so the second guest is .16, the third .17, and so on.
+portfwd: true
+ports:
+  # fallback: first client to lease
+  - 2222:22
+  - 8080:80
+  - udp 5353:53
+
+  # pinned to specific guests
+  # - 10.0.2.16:2223:22
+  # - .17:2224:22
+  # - udp .16:5354:53
