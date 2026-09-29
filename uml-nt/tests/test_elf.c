@@ -492,13 +492,16 @@ static void test_real_guest(const char *path)
 			     p[text_seg].p_filesz) == 0);
 	}
 
-	/* the patch sweep eats every syscall site — init.S has 10
-	 * (hi, fault1, fault2, guard0, fork, child write, child exit,
-	 * parent write, parent exit, fail) */
+	/* the patch sweep eats every syscall site — init.S has 31
+	 * (M3.4 ten: hi, fault1, fault2, guard0, fork, child write,
+	 * child exit, parent write, parent exit, fail; M3.7 adds 21:
+	 * wait4, getpid, getppid, set_tid, sigprocmask, 2 markers,
+	 * brk x2, marker, mmap, marker, munmap, mmap-fixed, 2
+	 * markers, exit + 5 fail paths) */
 	patched = uml_nt_patch_syscalls(
 		sec + out.seg[text_seg].run_off,
 		out.seg[text_seg].end - out.seg[text_seg].start, 0);
-	CHECK(patched == 10);
+	CHECK(patched == 31);
 	printf("real guest: %d region(s), entry 0x%llx, %lu patched\n",
 	       out.nseg, out.entry, patched);
 }
