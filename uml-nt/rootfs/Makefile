@@ -33,7 +33,13 @@ staging/hi.sh:
 	@mkdir -p staging
 	printf 'echo hi\n' > $@
 
-rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh
+# S4c: the exec-chain proof binary — /sbin/init execve()s it through
+# the guest syscall path (the STEP2-OK native gate).
+staging/bin/step2: ../guest/step2.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
+rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh staging/bin/step2
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 

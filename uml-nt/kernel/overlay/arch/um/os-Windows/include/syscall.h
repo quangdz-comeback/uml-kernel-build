@@ -114,4 +114,11 @@ int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
 		       unsigned long long va, unsigned long long len,
 		       unsigned long long off);
 
+/* Consume the execve conn-switch flag (serve_conn, right after the
+ * handler): 1 = the syscall exec'd successfully — the conn (and its
+ * stub_data d) were destroyed mid-round (exec_mmap → mmctx_destroy);
+ * the caller must bail the protocol round without touching c/d, and
+ * the userspace() loop restarts on the new conn. */
+int uml_nt_syscall_consume_exec(void);
+
 #endif /* __UM_OS_WINDOWS_SYSCALL_H */

@@ -76,6 +76,22 @@ static long sys_close(int fd)
 	return ret;
 }
 
+/* Success never returns — the task becomes the new image (the
+ * kernel-side dispatch runs kernel_execve and the userspace() loop
+ * restarts on the new conn). */
+static long sys_execve(const char *path, const char *const *argv,
+		       const char *const *envp)
+{
+	long ret;
+
+	__asm__ volatile ("syscall"
+			  : "=a" (ret)
+			  : "a" (59L), "D" (path), "S" (argv),
+			    "d" (envp)
+			  : "rcx", "r11", "memory");
+	return ret;
+}
+
 /*
  * M3.8 S4b: the exec chain still starts here, but the S4 goal is the
  * busybox shell — this init now proves the REAL VFS surface first:
@@ -107,5 +123,17 @@ void _start(void)
 	}
 	sys_write(1, "OPENAT-READ-OK: ", 16);
 	sys_write(1, buf, (unsigned long)n);
-	sys_exit(0);
+
+	/* S4c: chain the exec — the dispatch's kernel_execve swaps this
+	 * task to /bin/step2 (STEP2-OK, exit 0); a failure returns
+	 * errno here. */
+	{
+		static const char *const argv[] = { "/bin/step2", (void *)0 };
+
+		if (sys_execve("/bin/step2", argv, (void *)0) != 0) {
+			sys_write(1, "EXEC-FAIL\n", 10);
+			sys_exit(6);
+		}
+	}
+	sys_exit(0); /* unreachable: exec success never returns */
 }

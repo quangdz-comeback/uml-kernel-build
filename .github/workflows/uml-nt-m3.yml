@@ -315,4 +315,9 @@ jobs:
           # guest pointers valid via the D15 uaccess walker. The bytes
           # read back are /hi.sh — the script busybox runs in S4c.
           grep -q "OPENAT-READ-OK: echo hi" initexec.log || { echo "S4b: openat/read never served through the real VFS (see [syscall] ENOSYS lines)"; exit 1; }
-          echo "M3.8 S3+S4b NATIVE INIT-EXEC OK: binfmt_umlnt + userspace() + write(2) + openat/read VFS"
+          # M3.8 S4c: guest execve — the dispatch's kernel_execve
+          # swaps the init task to /bin/step2 (conn switch: exec_mmap
+          # destroys the old conn mid-round, the loop bootstraps the
+          # new one from current_pt_regs).
+          grep -q "STEP2-OK" initexec.log || { echo "S4c: guest execve never completed the conn switch (see [syscall] execve lines)"; exit 1; }
+          echo "M3.8 S3+S4b+S4c NATIVE INIT-EXEC OK: binfmt_umlnt + userspace() + write(2) + openat/read VFS + execve chain"

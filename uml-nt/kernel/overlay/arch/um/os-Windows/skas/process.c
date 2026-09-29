@@ -203,6 +203,18 @@ void userspace(struct uml_pt_regs *regs)
 
 		cmd = c->d->cmd;
 		rc = uml_nt_pump_conn(c);
+		if (rc == 2) {
+			/* execve conn switch: the old conn (and its d)
+			 * were destroyed mid-round — no reg pull (d is
+			 * gone). The loop re-reads current_mm_id(); the
+			 * NEW conn bootstraps from current_pt_regs,
+			 * where binfmt's start_thread wrote the entry. */
+			os_info("userspace: exec conn switch → new mm "
+				"pid %d\n",
+				current_mm_id() ? current_mm_id()->pid :
+						  -1);
+			continue;
+		}
 		/* The INIT round carries no trap regs (d->regs is still
 		 * the zeroed bootstrap state — the stub publishes INIT
 		 * before its first VEH trap); pulling there would wipe

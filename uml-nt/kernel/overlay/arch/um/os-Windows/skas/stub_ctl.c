@@ -276,6 +276,14 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	c->plan_left = 0;
 	c->plan_has_retval = 0;
 	uml_nt_syscall_handle(c, d);
+	if (uml_nt_syscall_consume_exec()) {
+		/* execve succeeded INSIDE the handler: exec_mmap
+		 * dropped the old mm — c and d are freed/unmapped
+		 * (mmctx_destroy). Bail without the plan streaming or
+		 * the evt_out release; the userspace() loop restarts
+		 * on the new conn. */
+		return 2;
+	}
 	if (c->plan_left > 0)
 		issue_plan_op(c, &c->plan.ops[c->plan_next]);
 	return 0;
@@ -508,11 +516,15 @@ fail:
 }
 
 /* Serve one signaled conn: seq-check, dispatch, release. Returns 1
- * when the conn halted (kernel terminated it), -1 on protocol error.
+ * when the conn halted (kernel terminated it), 2 when the round
+ * EXECed (conn destroyed mid-dispatch — no release, the loop
+ * restarts on the new conn), -1 on protocol error.
  * EXPORT (S2): the real userspace() loop serves through this — same
  * machinery as the probe's service loop, one protocol. */
 int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 {
+	int rc;
+
 	mb();
 	if (c->d->req_seq != c->d->done_seq + 1) {
 		os_info("[stubtest] seq desync pid %lu req=%llu done=%llu\n",
@@ -520,7 +532,9 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			c->d->done_seq);
 		return -1;
 	}
-	serve_conn(c);
+	rc = serve_conn(c);
+	if (rc == 2)
+		return 2; /* exec: c/d are dead — no mb, no evt_out */
 	mb();
 	nt->NtSetEvent(c->evt_out, NULL);
 	if (c->d->halt || c->d->action == UML_STUB_ACTION_KILL) {

@@ -22,6 +22,8 @@
  * M3.8 boot-failure pointer ("cứ thêm + unit test").
  */
 #include <linux/kernel.h>
+#include <linux/binfmts.h>
+#include <linux/mm.h>
 #include <linux/string.h>
 
 #include <asm/syscall.h>
@@ -334,6 +336,117 @@ static unsigned long long sys_sigprocmask(struct uml_nt_stub_conn *c,
 	return 0;
 }
 
+/* execve (below) destroys the conn MID-DISPATCH on success: exec_mmap
+ * drops the old mm (destroy_context → mmctx_destroy frees the conn and
+ * unmaps d) and binfmt_umlnt loads the new image into a NEW conn —
+ * start_thread wrote its entry into current_pt_regs. The handler must
+ * not touch c or d afterwards; serve_conn consumes this flag (and
+ * bails the protocol round — the dead stub gets no evt_out) and the
+ * userspace() loop restarts on the new conn. */
+static int exec_pending;
+
+int uml_nt_syscall_consume_exec(void)
+{
+	int p = exec_pending;
+
+	exec_pending = 0;
+	return p;
+}
+
+/* execve(2): kernel_execve in THIS task's context (the pump thread —
+ * upstream parity: the syscall runs in the guest task's kernel
+ * thread; init is a user_mode_thread, so no PF_KTHREAD refusal).
+ * Strings walk guest memory through the D15 uacc — argv/envp are
+ * guest pointer arrays. Success never returns to the guest caller. */
+static unsigned long long sys_execve(struct uml_nt_stub_conn *c,
+				     const unsigned long long *a)
+{
+	/* argv + envp strings in one flat slab (64 × 513 ≈ 33 KB —
+	 * kvmalloc, not the 16 KB task stack). */
+#define UML_NT_EXEC_MAX_STR 32u
+#define UML_NT_EXEC_STRLEN  512u
+	char path[UML_NT_EXEC_STRLEN + 1];
+	char (*strs)[UML_NT_EXEC_STRLEN + 1];
+	const char **kargv, **kenvp;
+	unsigned long long i, nav = 0, nev = 0;
+	int rc;
+
+	if (a[0] == 0 ||
+	    uml_nt_uacc_strncpy(path, c->mm, uml_boot.physmem_base, a[0],
+				UML_NT_EXEC_STRLEN) < 0)
+		return SC_RET(SC_EFAULT);
+
+	strs = kvmalloc((UML_NT_EXEC_MAX_STR * 2) * sizeof(*strs),
+			GFP_KERNEL);
+	kargv = kvmalloc((UML_NT_EXEC_MAX_STR + 1) * sizeof(*kargv),
+			 GFP_KERNEL);
+	kenvp = kvmalloc((UML_NT_EXEC_MAX_STR + 1) * sizeof(*kenvp),
+			 GFP_KERNEL);
+	if (strs == NULL || kargv == NULL || kenvp == NULL) {
+		kvfree(strs);
+		kvfree(kargv);
+		kvfree(kenvp);
+		return SC_RET(SC_ENOMEM);
+	}
+
+	if (a[1] != 0) {
+		for (i = 0; i < UML_NT_EXEC_MAX_STR; i++) {
+			unsigned long long p;
+
+			if (uml_nt_uacc_walk(c->mm, uml_boot.physmem_base,
+					     a[1] + i * 8, 8, (char *)&p,
+					     UML_NT_UACC_FROM_GUEST) < 0)
+				goto efault;
+			if (p == 0)
+				break;
+			if (uml_nt_uacc_strncpy(strs[nav], c->mm,
+						uml_boot.physmem_base, p,
+						UML_NT_EXEC_STRLEN) < 0)
+				goto efault;
+			kargv[nav] = strs[nav];
+			nav++;
+		}
+	}
+	if (a[2] != 0) {
+		for (i = 0; i < UML_NT_EXEC_MAX_STR; i++) {
+			unsigned long long p;
+
+			if (uml_nt_uacc_walk(c->mm, uml_boot.physmem_base,
+					     a[2] + i * 8, 8, (char *)&p,
+					     UML_NT_UACC_FROM_GUEST) < 0)
+				goto efault;
+			if (p == 0)
+				break;
+			if (uml_nt_uacc_strncpy(
+				    strs[UML_NT_EXEC_MAX_STR + nev], c->mm,
+				    uml_boot.physmem_base, p,
+				    UML_NT_EXEC_STRLEN) < 0)
+				goto efault;
+			kenvp[nev] = strs[UML_NT_EXEC_MAX_STR + nev];
+			nev++;
+		}
+	}
+	kargv[nav] = NULL;
+	kenvp[nev] = NULL;
+
+	rc = kernel_execve(path, kargv, kenvp);
+	kvfree(kargv);
+	kvfree(kenvp);
+	kvfree(strs);
+	if (rc == 0) {
+		exec_pending = 1;
+		return 0; /* the guest caller no longer exists */
+	}
+	os_info("[syscall] execve(%s): failed rc=%d\n", path, rc);
+	return (unsigned long long)(long long)rc;
+
+efault:
+	kvfree(kargv);
+	kvfree(kenvp);
+	kvfree(strs);
+	return SC_RET(SC_EFAULT);
+}
+
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			   struct uml_nt_stub_data *d)
 {
@@ -428,6 +541,9 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		uml_nt_sys_fork(c, d);
 		ret = d->retval;
 		break;
+	case 59: /* execve — conn switch (see exec_pending above) */
+		ret = sys_execve(c, a);
+		break;
 	case 61: /* wait4 */
 		uml_nt_sys_wait4(c, d, a);
 		ret = d->retval;
@@ -443,6 +559,11 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		break;
 	}
 
+	if (exec_pending) {
+		/* The exec destroyed this conn (and d): touch neither.
+		 * The out: teardown below only clears the globals. */
+		goto out;
+	}
 	d->retval = ret;
 	d->err = ((long long)ret < 0 && (long long)ret > -512) ? 1 : 0;
 	if (c->plan_left > 0) {

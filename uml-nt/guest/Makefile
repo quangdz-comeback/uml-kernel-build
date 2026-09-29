@@ -16,13 +16,22 @@ CC     ?= clang
 LD     ?= ld.lld
 IMAGE_BASE := 0x62000000
 
-all: guest-init.elf
+all: guest-init.elf step2.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
 	$(LD) -static -nostdlib -e _start -z max-page-size=0x10000 \
 		--image-base=$(IMAGE_BASE) -o $@ init.o
 
+# S4c: the exec-chain proof binary — /sbin/init execve()s it through
+# the guest syscall path (freestanding static, no TLS: musl's
+# arch_prctl(ARCH_SET_FS) is the S4c2 slice).
+step2.elf: step2.c
+	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
+		-Wall -o $@ $<
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "step2 must be a static ELF" >&2; exit 1; }
+
 clean:
-	rm -f init.o guest-init.elf
+	rm -f init.o guest-init.elf step2.elf
 .PHONY: all clean
