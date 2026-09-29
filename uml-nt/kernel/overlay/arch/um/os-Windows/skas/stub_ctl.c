@@ -129,18 +129,29 @@ static int __init uml_nt_stubtest_init(void)
 
 		dsec = nt->CreateFileMappingW((HANDLE)-1, &sa, 0x04 /*RW*/,
 					      0, UML_STUB_SECTION_SIZE, NULL);
-		if (dsec == NULL)
+		if (dsec == NULL) {
+			os_info("[stubtest] CreateFileMappingW failed "
+				"win32=%lu\n", nt->RtlGetLastWin32Error());
 			goto fail;
+		}
 		evt_in = nt->CreateEventW(&sa, 0, 0, NULL);  /* stub→kern */
 		evt_out = nt->CreateEventW(&sa, 0, 0, NULL); /* kern→stub */
-		if (evt_in == NULL || evt_out == NULL)
+		if (evt_in == NULL || evt_out == NULL) {
+			os_info("[stubtest] CreateEventW failed win32=%lu\n",
+				nt->RtlGetLastWin32Error());
 			goto fail;
+		}
+		os_info("[stubtest] dsec=%p evt_in=%p evt_out=%p\n",
+			dsec, evt_in, evt_out);
 	}
 
 	view = nt->MapViewOfFileEx(dsec, 0x000F001F /*FILE_MAP_ALL_ACCESS*/,
 				   0, 0, UML_STUB_SECTION_SIZE, NULL);
-	if (view == NULL)
+	if (view == NULL) {
+		os_info("[stubtest] MapViewOfFileEx failed win32=%lu\n",
+			nt->RtlGetLastWin32Error());
 		goto fail;
+	}
 	d = view;
 	d->magic = UML_STUB_MAGIC;
 	d->version = UML_STUB_VERSION;
@@ -168,6 +179,7 @@ static int __init uml_nt_stubtest_init(void)
 	memset(&si, 0, sizeof(si));
 	si.cb = sizeof(si);
 	memset(&pi, 0, sizeof(pi));
+	os_info("[stubtest] spawning: %s\n", cmd);
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
 				0x4 /*CREATE_SUSPENDED*/, NULL, NULL,
 				&si, &pi)) {
@@ -175,6 +187,7 @@ static int __init uml_nt_stubtest_init(void)
 			nt->RtlGetLastWin32Error());
 		goto fail;
 	}
+	os_info("[stubtest] CreateProcess ok\n");
 	d->pid = pi.dwProcessId;
 	os_info("[stubtest] stub pid %lu — resuming\n",
 		(unsigned long)pi.dwProcessId);
