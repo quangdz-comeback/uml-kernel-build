@@ -30,31 +30,31 @@ jobs:
         run: |
           mkdir -p uml-nt/spikes/results
           cd uml-nt/spikes
-          ./s1_veh.exe | tee results/s1_veh.json
+          ./s1_veh.exe && cat results/s1_veh.json
 
       - name: Run S2 — cross-process sync
         shell: msys2 {0}
         run: |
           cd uml-nt/spikes
-          ./s2_xproc.exe | tee results/s2_xproc.json
+          ./s2_xproc.exe && cat results/s2_xproc.json
 
       - name: Run S5 — spawn/discard/fixed-map
         shell: msys2 {0}
         run: |
           cd uml-nt/spikes
-          ./s5_spawn.exe | tee results/s5_spawn.json
+          ./s5_spawn.exe && cat results/s5_spawn.json
 
       - name: Run S3+S4 — ELF launcher
         shell: msys2 {0}
         run: |
           cd uml-nt/spikes
-          ./s3_launcher.exe payload.elf | tee results/s3_launcher.json
+          ./s3_launcher.exe payload.elf && cat results/s3_launcher.json
 
       - name: Run S6 — ud2 scanner (no objdump ground truth on Windows)
         shell: msys2 {0}
         run: |
           cd uml-nt/spikes
-          ./s6_scan.exe payload.elf | tee results/s6_scan.json
+          ./s6_scan.exe payload.elf && cat results/s6_scan.json
 
       - name: Upload results
         uses: actions/upload-artifact@v4
