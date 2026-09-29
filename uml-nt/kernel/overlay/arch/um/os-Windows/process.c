@@ -37,7 +37,25 @@ pid_t os_reap_child(void)
 
 void os_alarm_process(int pid)
 {
-	stub_panic("process.c: os_alarm_process");
+	/* Upstream: kill(pid, SIGALRM) — interrupt the guest process so
+	 * it traps back into the kernel (the tick's event_handler, the
+	 * line AFTER this call upstream, still runs either way). The
+	 * NT stub has no preempt-interrupt channel yet: injecting a
+	 * trap into running guest code is the M4 signals work. The
+	 * honest interim behavior is a NO-OP: the tick IRQ flag is set
+	 * and the kernel sees it at the guest's NEXT trap (a sys-
+	 * call/fault round-trip), which is exactly the time-travel
+	 * "do not notify" mode upstream already tolerates. LOUD ONCE —
+	 * this PANIC'd (parking the timer thread) the first S3 boot:
+	 * current->mm exists from exec_mmap on, so every tick after
+	 * exec landed here. Never park a host thread. */
+	static int warned;
+
+	if (!warned) {
+		warned = 1;
+		os_info("os_alarm_process: guest tick-interrupt not "
+			"implemented (M4) — tick lands at next trap\n");
+	}
 }
 
 void init_new_thread_signals(void)
