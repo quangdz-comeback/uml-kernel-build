@@ -22,7 +22,8 @@ command -v "$CC" >/dev/null 2>&1 || { echo "clang not found"; exit 1; }
 EXPECTED=(file.c start_up.c mem.c process.c execvp.c helper.c umid.c \
 signal.c util.c time.c irq.c sigio.c tty.c registers.c main.c \
 user_syms.c stub-impl.c skas/mem.c skas/process.c skas/scan_patch.c \
-skas/stub_ctl.c skas/fault.c skas/vma.c skas/physalloc.c)
+skas/stub_ctl.c skas/fault.c skas/vma.c skas/physalloc.c \
+skas/physbackend.c)
 ACTUAL="$(cd "$SRC" && find . -name '*.c' | sed 's|^\./||' | sort | tr '\n' ' ')"
 EXPECTED_SORTED="$(printf '%s\n' "${EXPECTED[@]}" | sort | tr '\n' ' ')"
 if [[ "$ACTUAL" != "$EXPECTED_SORTED" ]]; then

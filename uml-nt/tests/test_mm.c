@@ -1,16 +1,23 @@
 /* test_mm.c — unit tests for the M3.2 memory core: physalloc (run
- * allocator + COW refcounts), vma (mm/VMA surgery), fault (plan
+ * refcount layer + backend mocks), vma (mm/VMA surgery), fault (plan
  * generation). Pure logic, compiled with the overlay files as-is on
  * Linux CI (same pattern as test_scan_patch.c).
  *
- * Ownership model: a run enters use via uml_nt_phys_alloc (refs = 1);
- * sharing bumps it via uml_nt_phys_ref. Refcounts track REFERENCING
- * CONTEXTS (mm's), not VMA pieces — a COW split unrefs the old run.
+ * Ownership model: a run enters use via uml_nt_phys_alloc (the backend
+ * hands a page-allocator run, refs = 1); sharing bumps it via
+ * uml_nt_phys_ref. Refcounts track REFERENCING CONTEXTS (mm's), not
+ * VMA pieces — a COW split unrefs the old run.
+ *
+ * D11 (M3.3): the backend IS the kernel page allocator kernel-side
+ * (alloc_pages order 4); here it is mocked. Offsets are DYNAMIC — the
+ * mock deliberately starts at a non-zero base so no test can pass by
+ * assuming the section head or a fixed layout above the image.
  *
  * Geometry contract under test (vma.h): VMAs are 64K-run multiples —
  * every COW split keeps MapViewOfFile offsets 64K-aligned.
  */
 #include <stdio.h>
+#include <string.h>
 #include <fault.h>
 #include <vma.h>
 #include <physalloc.h>
@@ -26,51 +33,76 @@ static int fails;
 #define RUN  UML_NT_PHYS_RUN_SIZE
 #define RAM  0x60000000ull
 
+/* ---- backend mock (D11): a tiny "buddy" of MOCK_RUNS runs ---- */
+
+#define MOCK_RUNS 16
+#define MOCK_BASE (1ull << 20) /* 1 MiB — deliberately not the head */
+static unsigned char mock_taken[MOCK_RUNS];
+
+static void mock_reset(void)
+{
+	memset(mock_taken, 0, sizeof(mock_taken));
+}
+
+long long uml_nt_phys_backend_alloc(void **page_out)
+{
+	int i;
+
+	for (i = 0; i < MOCK_RUNS; i++) {
+		if (!mock_taken[i]) {
+			mock_taken[i] = 1;
+			*page_out = &mock_taken[i];
+			return MOCK_BASE + (long long)i * RUN;
+		}
+	}
+	return -1;
+}
+
+void uml_nt_phys_backend_free(void *page)
+{
+	int i = (int)((char *)page - (char *)mock_taken);
+
+	if (i >= 0 && i < MOCK_RUNS)
+		mock_taken[i] = 0;
+}
+
 static void test_phys(void)
 {
 	struct uml_nt_phys p;
+	unsigned long long r0, r1;
 
 	CHECK(uml_nt_phys_init(&p, 64 * RUN) == 0);
 	CHECK(uml_nt_phys_init(&p, (UML_NT_PHYS_MAX_RUNS + 1) *
 			       RUN) == -1);
 
-	CHECK(uml_nt_phys_alloc(&p) == 0 * (long long)RUN);
-	CHECK(uml_nt_phys_alloc(&p) == 1 * (long long)RUN);
-	CHECK(uml_nt_phys_refs(&p, 0) == 1);
+	mock_reset();
+	r0 = uml_nt_phys_alloc(&p);
+	r1 = uml_nt_phys_alloc(&p);
+	CHECK(r0 == MOCK_BASE);
+	CHECK(r1 == MOCK_BASE + (long long)RUN);
+	CHECK(uml_nt_phys_refs(&p, r0) == 1);
 
 	/* sharing: ref an ALLOCATED run */
-	CHECK(uml_nt_phys_ref(&p, 0) == 2);
-	CHECK(uml_nt_phys_unref(&p, 0) == 1);
-	CHECK(uml_nt_phys_unref(&p, 0) == 0);
-	CHECK(uml_nt_phys_refs(&p, 0) == 0);
-	/* freed run is reusable */
-	CHECK(uml_nt_phys_alloc(&p) == 0 * (long long)RUN);
+	CHECK(uml_nt_phys_ref(&p, r0) == 2);
+	CHECK(uml_nt_phys_unref(&p, r0) == 1);
+	CHECK(uml_nt_phys_unref(&p, r0) == 0);
+	CHECK(uml_nt_phys_refs(&p, r0) == 0);
+	/* freed run is reusable (the backend hands it out again) */
+	CHECK(uml_nt_phys_alloc(&p) == (long long)r0);
 
 	/* bad handles */
 	CHECK(uml_nt_phys_ref(&p, RUN * 1000) == -1);   /* out of range */
 	CHECK(uml_nt_phys_ref(&p, 0x1000) == -1);       /* not run-aligned */
-	CHECK(uml_nt_phys_unref(&p, 8 * RUN) == -1);    /* free run */
-	CHECK(uml_nt_phys_ref(&p, 8 * RUN) == -1);      /* ref a free run */
+	CHECK(uml_nt_phys_unref(&p, r1 + 8 * RUN) == -1); /* free run */
+	CHECK(uml_nt_phys_ref(&p, r1 + 8 * RUN) == -1);   /* ref free run */
 
-	/* exhaust: 2 runs taken, 62 left */
+	/* exhaust: the MOCK pool (16 runs), 2 taken so far */
 	{
 		int i;
 
-		for (i = 0; i < 62; i++)
-			CHECK(uml_nt_phys_alloc(&p) >= 0);
-		CHECK(uml_nt_phys_alloc(&p) == -1);
-	}
-
-	/* alloc_at: claim a specific free run; double-claim fails */
-	{
-		struct uml_nt_phys p2;
-
-		CHECK(uml_nt_phys_init(&p2, 8 * RUN) == 0);
-		CHECK(uml_nt_phys_alloc_at(&p2, 3 * RUN) == 0);
-		CHECK(uml_nt_phys_alloc_at(&p2, 3 * RUN) == -1);
-		CHECK(uml_nt_phys_alloc(&p2) == 0); /* lowest free */
-		CHECK(uml_nt_phys_alloc_at(&p2, 0x1000) == -1);
-		CHECK(uml_nt_phys_alloc_at(&p2, 8 * RUN) == -1);
+		for (i = 0; i < MOCK_RUNS - 2; i++)
+			CHECK((long long)uml_nt_phys_alloc(&p) >= 0);
+		CHECK((long long)uml_nt_phys_alloc(&p) == -1);
 	}
 }
 
@@ -79,6 +111,7 @@ static void test_vma(void)
 	struct uml_nt_phys ph;
 	struct uml_nt_mm a, b, c;
 	struct uml_nt_vma *v;
+	unsigned long long r0, r1;
 
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
 	uml_nt_mm_init(&a);
@@ -124,67 +157,74 @@ static void test_vma(void)
 	/* clone: writable VMAs become COW; every run of the span is
 	 * reffed (owner alloc'd them); drop releases. rsp outside the
 	 * VMA = nothing eager-copies. */
+	mock_reset();
 	uml_nt_mm_init(&a);
-	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0); /* fresh pool */
-	CHECK(uml_nt_phys_alloc(&ph) == 0);          /* run 0 */
-	CHECK(uml_nt_phys_alloc(&ph) == RUN);        /* run 1 */
-	CHECK(uml_nt_vma_add(&a, RAM, RAM + 2 * RUN, 0,
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	r0 = uml_nt_phys_alloc(&ph);
+	r1 = uml_nt_phys_alloc(&ph);
+	CHECK(r0 == MOCK_BASE && r1 == MOCK_BASE + (long long)RUN);
+	CHECK(uml_nt_vma_add(&a, RAM, RAM + 2 * RUN, r0,
 			     UML_NT_PAGE_READWRITE, 0) == 0);
 	CHECK(uml_nt_mm_clone(&b, &a, &ph, RAM + 8 * RUN) == 0);
 	CHECK(b.nvma == 1);
 	CHECK((b.vma[0].flags & UML_NT_VMA_COW) != 0);
-	CHECK(uml_nt_phys_refs(&ph, 0) == 2);
-	CHECK(uml_nt_phys_refs(&ph, RUN) == 2);
+	CHECK(uml_nt_phys_refs(&ph, r0) == 2);
+	CHECK(uml_nt_phys_refs(&ph, r1) == 2);
 	uml_nt_mm_drop(&b, &ph);
-	CHECK(uml_nt_phys_refs(&ph, 0) == 1);
-	CHECK(uml_nt_phys_refs(&ph, RUN) == 1);
+	CHECK(uml_nt_phys_refs(&ph, r0) == 1);
+	CHECK(uml_nt_phys_refs(&ph, r1) == 1);
 
 	/* clone with rsp INSIDE the VMA (rsp = one past the last stack
-	 * byte — the VMA owns [start, rsp)): eager-copy into fresh
-	 * contiguous runs, no COW flag, source refs untouched. */
+	 * byte — the VMA owns [start, rsp)): eager-copy into a fresh
+	 * run pair, no COW flag, source refs untouched. (The mock is
+	 * sequential so the pair is contiguous; the real buddy makes
+	 * no such promise — the multi-run span design is open, M4.) */
+	mock_reset();
 	uml_nt_mm_init(&a);
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
-	CHECK(uml_nt_phys_alloc(&ph) == 0);
-	CHECK(uml_nt_phys_alloc(&ph) == RUN);
-	CHECK(uml_nt_vma_add(&a, RAM, RAM + 2 * RUN, 0,
+	r0 = uml_nt_phys_alloc(&ph);
+	r1 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_vma_add(&a, RAM, RAM + 2 * RUN, r0,
 			     UML_NT_PAGE_READWRITE, 0) == 0);
 	CHECK(uml_nt_mm_clone(&b, &a, &ph, RAM + 2 * RUN) == 0);
 	CHECK(b.nvma == 1);
 	CHECK((b.vma[0].flags & UML_NT_VMA_COW) == 0);
-	CHECK(b.vma[0].run_off == 2 * RUN); /* next free pair */
-	CHECK(uml_nt_phys_refs(&ph, 0) == 1);   /* parent-only now */
-	CHECK(uml_nt_phys_refs(&ph, RUN) == 1);
-	CHECK(uml_nt_phys_refs(&ph, 2 * RUN) == 1);
-	CHECK(uml_nt_phys_refs(&ph, 3 * RUN) == 1);
+	CHECK(b.vma[0].run_off == r0 + 2 * (long long)RUN);
+	CHECK(uml_nt_phys_refs(&ph, r0) == 1);   /* parent-only now */
+	CHECK(uml_nt_phys_refs(&ph, r1) == 1);
+	CHECK(uml_nt_phys_refs(&ph, r0 + 2 * (long long)RUN) == 1);
+	CHECK(uml_nt_phys_refs(&ph, r0 + 3 * (long long)RUN) == 1);
 	uml_nt_mm_drop(&b, &ph);
-	CHECK(uml_nt_phys_refs(&ph, 2 * RUN) == 0);
-	CHECK(uml_nt_phys_refs(&ph, 3 * RUN) == 0);
+	CHECK(uml_nt_phys_refs(&ph, r0 + 2 * (long long)RUN) == 0);
+	CHECK(uml_nt_phys_refs(&ph, r0 + 3 * (long long)RUN) == 0);
 
 	/* read-only VMAs do NOT become COW */
+	mock_reset();
 	uml_nt_mm_init(&a);
-	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0); /* fresh pool */
-	CHECK(uml_nt_phys_alloc(&ph) == 0);
-	CHECK(uml_nt_vma_add(&a, RAM, RAM + RUN, 0,
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	r0 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_vma_add(&a, RAM, RAM + RUN, r0,
 			     UML_NT_PAGE_READONLY, 0) == 0);
 	CHECK(uml_nt_mm_clone(&c, &a, &ph, RAM + 8 * RUN) == 0);
 	CHECK((c.vma[0].flags & UML_NT_VMA_COW) == 0);
-	CHECK(uml_nt_phys_refs(&ph, 0) == 2);
+	CHECK(uml_nt_phys_refs(&ph, r0) == 2);
 	uml_nt_mm_drop(&c, &ph);
-	CHECK(uml_nt_phys_refs(&ph, 0) == 1);
+	CHECK(uml_nt_phys_refs(&ph, r0) == 1);
 
 	/* cow_split: fault at RAM+RUN+0x8000 (run k=1 of a 2-run VMA) */
+	mock_reset();
 	uml_nt_mm_init(&a);
-	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0); /* fresh pool */
-	CHECK(uml_nt_phys_alloc(&ph) == 0);
-	CHECK(uml_nt_phys_alloc(&ph) == RUN);
-	CHECK(uml_nt_phys_ref(&ph, 0) == 2);   /* a sharer joins */
-	CHECK(uml_nt_phys_ref(&ph, RUN) == 2);
-	CHECK(uml_nt_vma_add(&a, RAM, RAM + 2 * RUN, 0,
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	r0 = uml_nt_phys_alloc(&ph);
+	r1 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_phys_ref(&ph, r0) == 2);   /* a sharer joins */
+	CHECK(uml_nt_phys_ref(&ph, r1) == 2);
+	CHECK(uml_nt_vma_add(&a, RAM, RAM + 2 * RUN, r0,
 			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
 	{
-		long long new_run = uml_nt_phys_alloc(&ph);
+		unsigned long long new_run = uml_nt_phys_alloc(&ph);
 
-		CHECK(new_run == 2 * (long long)RUN);
+		CHECK(new_run == r0 + 2 * RUN);
 		v = uml_nt_vma_find(&a, RAM + RUN + 0x8000);
 		CHECK(v != 0);
 		CHECK(uml_nt_vma_cow_split(&a, &ph, v, RAM + RUN + 0x8000,
@@ -192,7 +232,7 @@ static void test_vma(void)
 		CHECK(a.nvma == 2);
 		/* pre piece: shared run, COW kept */
 		v = uml_nt_vma_find(&a, RAM + 0x8000);
-		CHECK(v != 0 && v->run_off == 0 &&
+		CHECK(v != 0 && v->run_off == (unsigned long long)r0 &&
 		      v->end == RAM + RUN &&
 		      (v->flags & UML_NT_VMA_COW));
 		/* middle piece: private run, COW cleared, prot intact */
@@ -203,27 +243,29 @@ static void test_vma(void)
 		      v->prot == UML_NT_PAGE_READWRITE);
 		/* refcounts: this mm gave up its claim on the old run
 		 * (2 -> 1, the sharer keeps it) and owns the new one */
-		CHECK(uml_nt_phys_refs(&ph, 0) == 2);
-		CHECK(uml_nt_phys_refs(&ph, RUN) == 1);
-		CHECK(uml_nt_phys_refs(&ph, 2 * RUN) == 1);
+		CHECK(uml_nt_phys_refs(&ph, r0) == 2);
+		CHECK(uml_nt_phys_refs(&ph, r1) == 1);
+		CHECK(uml_nt_phys_refs(&ph, new_run) == 1);
 	}
 
 	/* cow_split of a single-run VMA: no pieces beyond the middle */
+	mock_reset();
 	uml_nt_mm_init(&a);
-	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0); /* fresh pool */
-	CHECK(uml_nt_phys_alloc(&ph) == 0);          /* sharer holder */
-	CHECK(uml_nt_phys_ref(&ph, 0) == 2);
-	CHECK(uml_nt_vma_add(&a, RAM, RAM + RUN, 0,
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	r0 = uml_nt_phys_alloc(&ph);          /* sharer holder */
+	CHECK(uml_nt_phys_ref(&ph, r0) == 2);
+	CHECK(uml_nt_vma_add(&a, RAM, RAM + RUN, r0,
 			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
-	CHECK(uml_nt_phys_alloc(&ph) == RUN);        /* private target */
+	r1 = uml_nt_phys_alloc(&ph);          /* private target */
+	CHECK(r1 == r0 + (long long)RUN);
 	v = uml_nt_vma_find(&a, RAM + 0x8000);
 	CHECK(v != 0);
-	CHECK(uml_nt_vma_cow_split(&a, &ph, v, RAM + 0x8000, RUN) == 0);
+	CHECK(uml_nt_vma_cow_split(&a, &ph, v, RAM + 0x8000, r1) == 0);
 	CHECK(a.nvma == 1);
-	CHECK(a.vma[0].run_off == RUN &&
+	CHECK(a.vma[0].run_off == (unsigned long long)r1 &&
 	      !(a.vma[0].flags & UML_NT_VMA_COW));
-	CHECK(uml_nt_phys_refs(&ph, 0) == 1); /* sharer keeps it */
-	CHECK(uml_nt_phys_refs(&ph, RUN) == 1);
+	CHECK(uml_nt_phys_refs(&ph, r0) == 1); /* sharer keeps it */
+	CHECK(uml_nt_phys_refs(&ph, r1) == 1);
 
 	/* protection classification */
 	CHECK(uml_nt_prot_writable(UML_NT_PAGE_READWRITE));
@@ -235,17 +277,21 @@ static void test_vma(void)
 	CHECK(uml_nt_prot_readonly(UML_NT_PAGE_EXECUTE_READWRITE) == 0x20u);
 }
 
-/* Fixture: a 2-run COW-shared VMA [RAM, RAM+2RUN) backed by runs 0
- * and RUN; a second context references both (refs = 2). */
+/* Fixture: a 2-run COW-shared VMA [RAM, RAM+2RUN) backed by the mock's
+ * first two runs; a second context references both (refs = 2). The
+ * offsets are recorded for the caller in fix_r0/fix_r1. */
+static unsigned long long fix_r0, fix_r1;
+
 static void fixture(struct uml_nt_phys *ph, struct uml_nt_mm *mm)
 {
+	mock_reset();
 	CHECK(uml_nt_phys_init(ph, 32 * RUN) == 0);
 	uml_nt_mm_init(mm);
-	CHECK(uml_nt_phys_alloc(ph) == 0);
-	CHECK(uml_nt_phys_alloc(ph) == (long long)RUN);
-	CHECK(uml_nt_phys_ref(ph, 0) == 2);   /* the second context */
-	CHECK(uml_nt_phys_ref(ph, RUN) == 2);
-	CHECK(uml_nt_vma_add(mm, RAM, RAM + 2 * RUN, 0,
+	fix_r0 = uml_nt_phys_alloc(ph);
+	fix_r1 = uml_nt_phys_alloc(ph);
+	CHECK(uml_nt_phys_ref(ph, fix_r0) == 2);  /* the second context */
+	CHECK(uml_nt_phys_ref(ph, fix_r1) == 2);
+	CHECK(uml_nt_vma_add(mm, RAM, RAM + 2 * RUN, fix_r0,
 			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
 }
 
@@ -254,6 +300,7 @@ static void test_fault(void)
 	struct uml_nt_phys ph;
 	struct uml_nt_mm mm;
 	struct uml_nt_fault_plan plan;
+	unsigned long long r0, r1;
 
 	/* wild pointer */
 	fixture(&ph, &mm);
@@ -264,8 +311,8 @@ static void test_fault(void)
 	/* private write fault (unref the sharer): single PROTECT op
 	 * with the VMA's own protection */
 	fixture(&ph, &mm);
-	CHECK(uml_nt_phys_unref(&ph, 0) == 1);
-	CHECK(uml_nt_phys_unref(&ph, RUN) == 1);
+	CHECK(uml_nt_phys_unref(&ph, fix_r0) == 1);
+	CHECK(uml_nt_phys_unref(&ph, fix_r1) == 1);
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x800, UML_NT_FAULT_WRITE,
 			      &plan) == 0);
 	CHECK(!plan.kill && plan.n_ops == 1);
@@ -275,7 +322,7 @@ static void test_fault(void)
 
 	/* COW write fault on run k=1 (page RAM+RUN+0x8000): unmap the
 	 * old view, map pre (readonly), map middle (private RW), copy
-	 * directive run RUN -> fresh run 2*RUN (allocated inside the
+	 * directive run fix_r1 -> fresh run (allocated inside the
 	 * fault path — the test does not pre-allocate it). */
 	fixture(&ph, &mm);
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + RUN + 0x8000,
@@ -286,21 +333,24 @@ static void test_fault(void)
 	CHECK(plan.ops[1].op == UML_NT_FOP_MAP);
 	CHECK(plan.ops[1].va == RAM && plan.ops[1].len == RUN);
 	CHECK(plan.ops[1].prot == UML_NT_PAGE_READONLY);
-	CHECK(plan.ops[1].off == 0);
+	CHECK(plan.ops[1].off == fix_r0);
 	CHECK(plan.ops[2].op == UML_NT_FOP_MAP);
 	CHECK(plan.ops[2].va == RAM + RUN &&
 	      plan.ops[2].len == RUN);
 	CHECK(plan.ops[2].prot == UML_NT_PAGE_READWRITE);
-	CHECK(plan.ops[2].off == 2 * RUN);
-	CHECK(plan.copy_src_off == RUN && plan.copy_dst_off == 2 * RUN);
+	CHECK(plan.ops[2].off == fix_r0 + 2 * RUN);
+	CHECK(plan.copy_src_off == fix_r1 &&
+	      plan.copy_dst_off == fix_r0 + 2 * RUN);
 	/* mm surgery visible: pre stays shared+COW, middle private */
 	CHECK(mm.nvma == 2);
-	CHECK(mm.vma[0].run_off == 0 && (mm.vma[0].flags & UML_NT_VMA_COW));
-	CHECK(mm.vma[1].run_off == 2 * RUN &&
+	CHECK(mm.vma[0].run_off == (unsigned long long)fix_r0 &&
+	      (mm.vma[0].flags & UML_NT_VMA_COW));
+	CHECK(mm.vma[1].run_off ==
+	      (unsigned long long)(fix_r0 + 2 * RUN) &&
 	      !(mm.vma[1].flags & UML_NT_VMA_COW));
 	/* refcounts: old run 2 -> 1 (sharer), new run owned */
-	CHECK(uml_nt_phys_refs(&ph, RUN) == 1);
-	CHECK(uml_nt_phys_refs(&ph, 2 * RUN) == 1);
+	CHECK(uml_nt_phys_refs(&ph, fix_r1) == 1);
+	CHECK(uml_nt_phys_refs(&ph, fix_r0 + 2 * RUN) == 1);
 
 	/* COW write fault on the FIRST run: no pre piece */
 	fixture(&ph, &mm);
@@ -310,18 +360,19 @@ static void test_fault(void)
 	CHECK(plan.ops[0].op == UML_NT_FOP_UNMAP);
 	CHECK(plan.ops[1].op == UML_NT_FOP_MAP);
 	CHECK(plan.ops[1].va == RAM);       /* middle now */
-	CHECK(plan.ops[1].off == 2 * RUN);
+	CHECK(plan.ops[1].off == fix_r0 + 2 * (long long)RUN);
 	CHECK(plan.ops[2].op == UML_NT_FOP_MAP);
 	CHECK(plan.ops[2].va == RAM + RUN); /* post piece */
-	CHECK(plan.ops[2].off == RUN);
-	CHECK(plan.copy_src_off == 0);
+	CHECK(plan.ops[2].off == fix_r1);
+	CHECK(plan.copy_src_off == fix_r0);
 
 	/* COW on a single-run VMA: UNMAP + MAP only */
+	mock_reset();
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
 	uml_nt_mm_init(&mm);
-	CHECK(uml_nt_phys_alloc(&ph) == 0);
-	CHECK(uml_nt_phys_ref(&ph, 0) == 2);
-	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, 0,
+	r0 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_phys_ref(&ph, r0) == 2);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, r0,
 			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x8000, UML_NT_FAULT_WRITE,
 			      &plan) == 0);
@@ -329,23 +380,26 @@ static void test_fault(void)
 	CHECK(plan.ops[0].op == UML_NT_FOP_UNMAP);
 	CHECK(plan.ops[1].op == UML_NT_FOP_MAP &&
 	      plan.ops[1].prot == UML_NT_PAGE_READWRITE);
-	CHECK(plan.copy_src_off == 0 && plan.copy_dst_off == RUN);
+	CHECK(plan.copy_src_off == r0 &&
+	      plan.copy_dst_off == r0 + (long long)RUN);
 
 	/* write into a read-only VMA: kill (SIGSEGV at M4) */
+	mock_reset();
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
 	uml_nt_mm_init(&mm);
-	CHECK(uml_nt_phys_alloc(&ph) == 0);
-	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, 0,
+	r0 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, r0,
 			     UML_NT_PAGE_READONLY, 0) == 0);
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x800, UML_NT_FAULT_WRITE,
 			      &plan) == -1);
 	CHECK(plan.kill);
 
 	/* DEP fault on an executable VMA: restore, no copy */
+	mock_reset();
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
 	uml_nt_mm_init(&mm);
-	CHECK(uml_nt_phys_alloc(&ph) == 0);
-	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, 0,
+	r0 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, r0,
 			     UML_NT_PAGE_EXECUTE_READWRITE, 0) == 0);
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x800, UML_NT_FAULT_EXEC,
 			      &plan) == 0);
@@ -353,9 +407,9 @@ static void test_fault(void)
 	      plan.ops[0].prot == UML_NT_PAGE_EXECUTE_READWRITE);
 
 	/* DEP fault on a non-exec VMA: kill */
-	CHECK(uml_nt_phys_alloc(&ph) == RUN);
+	r1 = uml_nt_phys_alloc(&ph);
 	uml_nt_mm_init(&mm);
-	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, RUN,
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, r1,
 			     UML_NT_PAGE_READWRITE, 0) == 0);
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x800, UML_NT_FAULT_EXEC,
 			      &plan) == -1);
@@ -363,11 +417,12 @@ static void test_fault(void)
 
 	/* read fault restores the EFFECTIVE (readonly while shared)
 	 * protection — reads never copy */
+	mock_reset();
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
 	uml_nt_mm_init(&mm);
-	CHECK(uml_nt_phys_alloc(&ph) == 0);
-	CHECK(uml_nt_phys_ref(&ph, 0) == 2);
-	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, 0,
+	r0 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_phys_ref(&ph, r0) == 2);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, r0,
 			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x800, UML_NT_FAULT_READ,
 			      &plan) == 0);
@@ -380,11 +435,17 @@ static void test_fault(void)
 	CHECK(plan.kill);
 
 	/* physmem exhaustion during COW: kill, no ops leak out */
-	CHECK(uml_nt_phys_init(&ph, 1 * RUN) == 0);
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
 	uml_nt_mm_init(&mm);
-	CHECK(uml_nt_phys_alloc(&ph) == 0);
-	CHECK(uml_nt_phys_ref(&ph, 0) == 2);
-	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, 0,
+	{
+		int i;
+
+		for (i = 0; i < MOCK_RUNS; i++)
+			CHECK(uml_nt_phys_alloc(&ph) >= 0);
+	}
+	CHECK(uml_nt_phys_ref(&ph, MOCK_BASE) == 2);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, MOCK_BASE,
 			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x8000, UML_NT_FAULT_WRITE,
 			      &plan) == -1);
@@ -393,27 +454,28 @@ static void test_fault(void)
 	/* INIT plan (M3.3): one MAP per VMA with the EFFECTIVE
 	 * protection — COW-shared runs map read-only so the first
 	 * write faults into the private copy. */
+	mock_reset();
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
 	uml_nt_mm_init(&mm);
-	CHECK(uml_nt_phys_alloc(&ph) == 0);
-	CHECK(uml_nt_phys_alloc(&ph) == RUN);
-	CHECK(uml_nt_phys_ref(&ph, 0) == 2);   /* a second context */
-	CHECK(uml_nt_phys_ref(&ph, RUN) == 2);
-	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, 0,
+	r0 = uml_nt_phys_alloc(&ph);
+	r1 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_phys_ref(&ph, r0) == 2);   /* a second context */
+	CHECK(uml_nt_phys_ref(&ph, r1) == 2);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, r0,
 			     UML_NT_PAGE_EXECUTE_READWRITE,
 			     UML_NT_VMA_COW) == 0);
-	CHECK(uml_nt_vma_add(&mm, RAM + RUN, RAM + 2 * RUN, RUN,
+	CHECK(uml_nt_vma_add(&mm, RAM + RUN, RAM + 2 * RUN, r1,
 			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
 	CHECK(uml_nt_mm_init_plan(&mm, &ph, &plan) == 0);
 	CHECK(!plan.kill && plan.n_ops == 2);
 	CHECK(plan.ops[0].op == UML_NT_FOP_MAP);
 	CHECK(plan.ops[0].prot == UML_NT_PAGE_EXECUTE_READ);
 	CHECK(plan.ops[0].va == RAM && plan.ops[0].len == RUN &&
-	      plan.ops[0].off == 0);
+	      plan.ops[0].off == r0);
 	CHECK(plan.ops[1].op == UML_NT_FOP_MAP);
 	CHECK(plan.ops[1].prot == UML_NT_PAGE_READONLY);
 	CHECK(plan.ops[1].va == RAM + RUN && plan.ops[1].len == RUN &&
-	      plan.ops[1].off == RUN);
+	      plan.ops[1].off == r1);
 
 	/* mirroring contract: plan ops == stub actions (drift breaks
 	 * both sides silently) */

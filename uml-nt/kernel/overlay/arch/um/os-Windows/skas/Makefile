@@ -6,5 +6,5 @@ ccflags-y += -I$(src)/../include
 ccflags-y += -I$(src)/..
 ccflags-y += -Wno-missing-prototypes
 
-obj-y := mem.o process.o fault.o vma.o physalloc.o scan_patch.o \
-	 stub_ctl.o init_blob.o
+obj-y := mem.o process.o fault.o vma.o physalloc.o physbackend.o \
+	 scan_patch.o stub_ctl.o init_blob.o

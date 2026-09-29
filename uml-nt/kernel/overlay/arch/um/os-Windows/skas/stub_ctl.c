@@ -50,10 +50,10 @@ extern const char nt_guest_init_slot0[], nt_guest_init_slot1[];
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 				    unsigned long entry_off);
 
-/* Guest stack: two runs above the text run (grows down); guards live
- * one run above the stack. All run-multiples (vma.h contract). */
-#define GUEST_STACK_RUNS 2
-#define GUARD_RUN_DELTA  0x10000ull
+/* The probe's guard-page guest VAs: the guard run is its OWN page-
+ * allocator run (D11 — dynamic offsets, no run-adjacency assumptions),
+ * so the INIT plan's NOACCESS ops can't derive them from entry_va. */
+static unsigned long long probe_guard_va0, probe_guard_va1;
 
 /* One guest process (stub side of the protocol). */
 struct uml_nt_stub_conn {
@@ -169,21 +169,22 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		}
 		if (c == &conn_parent && c->plan.n_ops + 2 <=
 					      UML_NT_FAULT_MAX_OPS) {
-			unsigned long long g0 = d->entry_va + GUARD_RUN_DELTA;
-			/* guard run = text+stack runs above entry */
+			/* The probe's own guard pages (the fault-probe
+			 * seed) — the guard run's guest VAs, recorded
+			 * at staging (dynamic run offsets, D11). */
 			struct uml_nt_fault_op *op;
 			int base = c->plan.n_ops;
 
 			op = &c->plan.ops[base];
 			op->op = UML_NT_FOP_PROTECT;
 			op->prot = UML_NT_PAGE_NOACCESS;
-			op->va = g0;
+			op->va = probe_guard_va0;
 			op->len = UML_NT_FAULT_PAGE_SIZE;
 			op->off = 0;
 			op = &c->plan.ops[base + 1];
 			op->op = UML_NT_FOP_PROTECT;
 			op->prot = UML_NT_PAGE_NOACCESS;
-			op->va = g0 + 0x1000;
+			op->va = probe_guard_va1;
 			op->len = UML_NT_FAULT_PAGE_SIZE;
 			op->off = 0;
 			c->plan.n_ops += 2;
@@ -437,33 +438,46 @@ static int pump_conn(struct uml_nt_stub_conn *c)
 
 static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 {
-	unsigned long long blob_len, entry_off, text_va, stack_va;
-	unsigned long long guard_va0, guard_va1, patched;
+	unsigned long long blob_len, entry_off;
+	unsigned long long text_off, stack_off, guard_off;
+	unsigned long long text_va, stack_va, patched;
 	struct uml_nt_gp_regs zero_regs;
 	HANDLE waits[2];
-	int i, nwaits;
+	int nwaits;
 
 	(void)arg;
 
-	blob_len = nt_guest_init_end - nt_guest_init_start;
-	entry_off = (uml_boot.image_size + 0xFFFFull) & ~0xFFFFull;
-	text_va = UML_STUB_RAM_BASE + entry_off;
-	/* Layout in runs above the image: text (1), stack (2), guard
-	 * (1). The guard run IS the run at text+3 — the guard VMA and
-	 * the guard VAs must name the SAME run. */
-	stack_va = text_va + (1 + GUEST_STACK_RUNS) * 0x10000ull;
-	guard_va0 = stack_va;
-	guard_va1 = guard_va0 + 0x1000;
-
-	/* Guest physical pool over the section (M3.2 allocator). */
+	/* Guest runs come from the KERNEL page allocator (D11): a
+	 * private allocator over the section double-allocated against
+	 * the kernel's buddy/slab (both own the pages past the image)
+	 * — guest writes trashed SLUB/maple data and the kernel died
+	 * after the fork probe. Offsets are DYNAMIC (pfn << PAGE_SHIFT,
+	 * whatever the buddy hands out); every VA and plan op follows.
+	 * No run-adjacency assumptions anywhere: the buddy does not
+	 * owe us neighbours, so text/stack/guard are INDEPENDENT runs,
+	 * one run per VMA (single-run VMAs are trivially contiguous —
+	 * the multi-run span design is M4). */
 	if (uml_nt_phys_init(&probe_phys, uml_boot.physmem_size) < 0) {
 		os_info("[stubtest] phys init failed (mem too big for "
 			"the run table)\n");
 		return 0;
 	}
+	text_off = uml_nt_phys_alloc(&probe_phys);
+	stack_off = uml_nt_phys_alloc(&probe_phys);
+	guard_off = uml_nt_phys_alloc(&probe_phys);
+	if (text_off < 0 || stack_off < 0 || guard_off < 0) {
+		os_info("[stubtest] run alloc failed\n");
+		return 0;
+	}
+	entry_off = text_off;
+	text_va = UML_STUB_RAM_BASE + text_off;
+	stack_va = UML_STUB_RAM_BASE + stack_off;
+	probe_guard_va0 = UML_STUB_RAM_BASE + guard_off;
+	probe_guard_va1 = probe_guard_va0 + 0x1000;
 
 	/* Stage the init image, fill the guard-VA slots, patch the
 	 * `syscall`s to ud2 — the central-patch contract §5.1. */
+	blob_len = nt_guest_init_end - nt_guest_init_start;
 	memcpy(uml_boot.physmem_base + entry_off, nt_guest_init_start,
 	       blob_len);
 	{
@@ -472,8 +486,8 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 
 		off0 = (unsigned long long)(uintptr_t)nt_guest_init_slot0;
 		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
-		va0 = guard_va0;
-		va1 = guard_va1;
+		va0 = probe_guard_va0;
+		va1 = probe_guard_va1;
 		memcpy(uml_boot.physmem_base + entry_off + off0, &va0, 8);
 		memcpy(uml_boot.physmem_base + entry_off + off1, &va1, 8);
 	}
@@ -489,7 +503,7 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
 		memcpy(&va0, uml_boot.physmem_base + entry_off + off0, 8);
 		memcpy(&va1, uml_boot.physmem_base + entry_off + off1, 8);
-		if (va0 != guard_va0 || va1 != guard_va1) {
+		if (va0 != probe_guard_va0 || va1 != probe_guard_va1) {
 			os_info("[stubtest] guard slot clobbered by patch "
 				"scan (va0=0x%llx va1=0x%llx)\n", va0, va1);
 			return 0;
@@ -497,55 +511,25 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	}
 	os_info("[stubtest] init staged at phys 0x%llx (%llu bytes, %lu "
 		"syscall(s) patched, guards 0x%llx/0x%llx)\n", entry_off,
-		blob_len, patched, guard_va0, guard_va1);
+		blob_len, patched, probe_guard_va0, probe_guard_va1);
 
 	/* Parent mm (M3 model): per-VMA views — text (1 run RWX), stack
-	 * (GUEST_STACK_RUNS runs RW), guard run (RW; the INIT plan
-	 * NOACCESS-protects the guard pages). The kernel image occupies
-	 * the section head: burn those runs first (the allocator must
-	 * never hand them out), then claim the exact probe runs. */
-	{
-		unsigned long long off;
-
-		for (off = 0; off < entry_off; off += 0x10000ull) {
-			if (uml_nt_phys_alloc_at(&probe_phys,
-						 (long long)off) < 0) {
-				os_info("[stubtest] image run burn failed "
-					"at 0x%llx\n", off);
-				return 0;
-			}
-		}
-	}
+	 * (1 run RW), guard run (RW; the INIT plan NOACCESS-protects
+	 * the guard pages). Each run allocated independently above. */
 	uml_nt_mm_init(&mm_parent);
-	if (uml_nt_phys_alloc_at(&probe_phys, (long long)entry_off) < 0 ||
-	    uml_nt_vma_add(&mm_parent, text_va, text_va + 0x10000ull,
-			   entry_off, UML_NT_PAGE_EXECUTE_READWRITE,
+	if (uml_nt_vma_add(&mm_parent, text_va, text_va + 0x10000ull,
+			   text_off, UML_NT_PAGE_EXECUTE_READWRITE,
 			   0) < 0) {
 		os_info("[stubtest] text vma failed\n");
 		return 0;
 	}
-	for (i = 0; i < GUEST_STACK_RUNS; i++) {
-		if (uml_nt_phys_alloc_at(&probe_phys,
-				(long long)(entry_off +
-				 (unsigned long long)(i + 1) * 0x10000ull)) < 0) {
-			os_info("[stubtest] stack run alloc failed\n");
-			return 0;
-		}
-	}
-	if (uml_nt_vma_add(&mm_parent, text_va + 0x10000ull, stack_va,
-			   entry_off + 0x10000ull, UML_NT_PAGE_READWRITE,
-			   0) < 0) {
+	if (uml_nt_vma_add(&mm_parent, stack_va, stack_va + 0x10000ull,
+			   stack_off, UML_NT_PAGE_READWRITE, 0) < 0) {
 		os_info("[stubtest] stack vma failed\n");
 		return 0;
 	}
-	if (uml_nt_phys_alloc_at(&probe_phys,
-			(long long)(entry_off +
-			 (GUEST_STACK_RUNS + 1) * 0x10000ull)) < 0) {
-		os_info("[stubtest] guard run alloc failed\n");
-		return 0;
-	}
-	if (uml_nt_vma_add(&mm_parent, stack_va, stack_va + 0x10000ull,
-			   entry_off + (GUEST_STACK_RUNS + 1) * 0x10000ull,
+	if (uml_nt_vma_add(&mm_parent, probe_guard_va0,
+			   probe_guard_va0 + 0x10000ull, guard_off,
 			   UML_NT_PAGE_READWRITE, 0) < 0) {
 		os_info("[stubtest] guard vma failed\n");
 		return 0;
@@ -553,7 +537,10 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	conn_parent.mm = &mm_parent;
 
 	memset(&zero_regs, 0, sizeof(zero_regs));
-	if (spawn_stub(&conn_parent, text_va, stack_va, &zero_regs) < 0)
+	/* Initial guest rsp = the TOP of the stack run (grows down);
+	 * the stack VMA itself owns [stack_va, stack_va + RUN). */
+	if (spawn_stub(&conn_parent, text_va, stack_va + 0x10000ull,
+		       &zero_regs) < 0)
 		return 0;
 	os_info("[stubtest] parent stub pid %lu — resuming\n",
 		(unsigned long)conn_parent.pid);
