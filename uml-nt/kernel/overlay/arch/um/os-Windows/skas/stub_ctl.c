@@ -72,8 +72,48 @@ __uml_setup("uml_nt_stubtest=", uml_nt_stubtest_setup,
 "    run the write/exit syscall round-trip.\n");
 
 /* Guard pages for the fault probe (phys offsets; computed in the
- * probe thread, VA table built from them per dispatch). */
+ * probe thread). Their VMAs are full runs — the VMA run-multiple
+ * contract (vma.h). */
 static unsigned long long guard_off0, guard_off1;
+
+/* M3.2: the probe's mm context — the embryonic per-process address
+ * space. The fault decider consults it; the M3.3 fork probe clones
+ * it. File-scope because the probe has exactly one stub (M3.3 moves
+ * this into the per-stub connection state). */
+static struct uml_nt_mm probe_mm;
+static struct uml_nt_phys probe_phys;
+static int mm_ready;
+
+/* Pending plan: ops stream to the stub one round-trip each (the slot
+ * is single-outstanding); the runner keeps the position across
+ * CMD_PROT_DONE round-trips. */
+static struct uml_nt_fault_plan pending_plan;
+static int plan_next, plan_left;
+
+/* Issue one plan op into the slot. */
+static void issue_plan_op(struct uml_nt_stub_data *d,
+			  const struct uml_nt_fault_op *op)
+{
+	switch (op->op) {
+	case UML_NT_FOP_PROTECT:
+		d->action = UML_STUB_ACTION_PROT;
+		d->prot = op->prot;
+		break;
+	case UML_NT_FOP_MAP:
+		d->action = UML_STUB_ACTION_MAP;
+		d->map_prot = op->prot;
+		d->map_va = op->va;
+		d->map_len = op->len;
+		d->map_off = op->off;
+		break;
+	default: /* UML_NT_FOP_UNMAP */
+		d->action = UML_STUB_ACTION_UNMAP;
+		d->map_va = op->va;
+		d->map_len = op->len;
+		break;
+	}
+	plan_next++;
+}
 
 /* Dispatch one published request. Returns 0 on success. */
 static int stub_ctl_dispatch(struct uml_nt_stub_data *d)
@@ -82,40 +122,63 @@ static int stub_ctl_dispatch(struct uml_nt_stub_data *d)
 	unsigned long long nr = g->rax;
 
 	if (d->cmd == UML_STUB_CMD_PROT_DONE) {
-		/* The stub reports its VirtualProtect result. Failure
-		 * here means the guest would re-fault forever — kill
-		 * it instead (loud, M1 pitfall 17). */
+		/* The stub reports its op result. Failure here means
+		 * the guest would re-fault forever — kill it instead
+		 * (loud, M1 pitfall 17). */
 		if (d->retval != 1) {
-			os_info("[stubtest] stub VirtualProtect FAILED "
+			os_info("[stubtest] stub op FAILED "
 				"(retval=%llu) — killing\n", d->retval);
 			d->action = UML_STUB_ACTION_KILL;
 			d->err = 1;
 			return -1;
 		}
+		if (plan_left > 1) {
+			plan_left--;
+			issue_plan_op(d, &pending_plan.ops[plan_next]);
+			return 0;
+		}
+		plan_left = 0;
 		d->action = UML_STUB_ACTION_NONE;
 		d->err = 0;
 		return 0;
 	}
 	if (d->cmd == UML_STUB_CMD_FAULT) {
-		struct uml_nt_fault_range allow[2];
-		unsigned action, prot;
-		unsigned long long page;
 		int rc;
 
-		allow[0].start = UML_STUB_RAM_BASE + guard_off0;
-		allow[0].end = allow[0].start + UML_NT_FAULT_PAGE_SIZE;
-		allow[1].start = UML_STUB_RAM_BASE + guard_off1;
-		allow[1].end = allow[1].start + UML_NT_FAULT_PAGE_SIZE;
-
-		rc = uml_nt_fault_decide(d->fault_addr, d->fault_type,
-					 allow, 2, &action, &prot, &page);
-		os_info("[stubtest] FAULT addr=0x%llx type=%u -> action=%u "
-			"prot=0x%x page=0x%llx\n",
-			d->fault_addr, d->fault_type, action, prot, page);
-		d->action = action;
-		d->prot = prot;
-		d->err = rc ? 1 : 0;
-		return rc;
+		if (!mm_ready) {
+			os_info("[stubtest] fault before mm ready\n");
+			d->action = UML_STUB_ACTION_KILL;
+			d->err = 1;
+			return -1;
+		}
+		rc = uml_nt_mm_fault(&probe_mm, &probe_phys,
+				     d->fault_addr, d->fault_type,
+				     &pending_plan);
+		if (rc < 0 || pending_plan.kill) {
+			os_info("[stubtest] FATAL fault addr=0x%llx "
+				"type=%u (wild pointer / bad class) — "
+				"killing\n", d->fault_addr, d->fault_type);
+			d->action = UML_STUB_ACTION_KILL;
+			d->err = 1;
+			return -1;
+		}
+		os_info("[stubtest] FAULT addr=0x%llx type=%u -> %d op(s)\n",
+			d->fault_addr, d->fault_type, pending_plan.n_ops);
+		/* COW copy directive: the kernel owns the physmem
+		 * content — memcpy the run through its own flat view
+		 * before the stub maps the new one. */
+		if (pending_plan.copy_src_off != 0 ||
+		    pending_plan.copy_dst_off != 0) {
+			memcpy(uml_boot.physmem_base +
+				       pending_plan.copy_dst_off,
+			       uml_boot.physmem_base +
+				       pending_plan.copy_src_off,
+			       UML_NT_PHYS_RUN_SIZE);
+		}
+		plan_next = 0;
+		plan_left = pending_plan.n_ops;
+		issue_plan_op(d, &pending_plan.ops[0]);
+		return 0;
 	}
 
 	/* Syscall trap: dispatch on the guest syscall number (rax). */
@@ -169,6 +232,30 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	 * stores their GUEST VAs through these slots. */
 	guard_off0 = (entry_off + blob_len + 0xFFF) & ~0xFFFull;
 	guard_off1 = guard_off0 + 0x1000;
+
+	/* M3.2: the probe's mm — ONE guard VMA spanning the run(s)
+	 * that hold both guard pages (the VMA run-multiple contract;
+	 * the two guards are 4K apart and can share or straddle a
+	 * run boundary). prot RW, no COW (single owner: faults
+	 * restore protection, no copies). */
+	if (uml_nt_phys_init(&probe_phys, uml_boot.physmem_size) < 0) {
+		os_info("[stubtest] phys init failed (mem too big for "
+			"the run table)\n");
+		goto fail;
+	}
+	uml_nt_mm_init(&probe_mm);
+	{
+		unsigned long long g0run = guard_off0 & ~(0xFFFFull);
+		unsigned long long g1run = guard_off1 & ~(0xFFFFull);
+
+		if (uml_nt_vma_add(&probe_mm, UML_STUB_RAM_BASE + g0run,
+				   UML_STUB_RAM_BASE + g1run + 0x10000ull,
+				   g0run, UML_NT_PAGE_READWRITE, 0) < 0) {
+			os_info("[stubtest] probe mm setup failed\n");
+			goto fail;
+		}
+	}
+	mm_ready = 1;
 
 	/* Stage the init image, fill the guard-VA slots, and turn its
 	 * `syscall`s into ud2 — the central-patch contract §5.1. */

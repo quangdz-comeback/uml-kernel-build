@@ -43,7 +43,7 @@ typedef long long s64_nt;
 
 /* "USTB". */
 #define UML_STUB_MAGIC   0x42545355u
-#define UML_STUB_VERSION 2u /* v2: fault round-trip + guard bootstrap (M3.1) */
+#define UML_STUB_VERSION 3u /* v3: MAP/UNMAP ops for per-VMA views (M3.2) */
 /* Section size (also the map granularity guard). */
 #define UML_STUB_SECTION_SIZE 0x10000u
 
@@ -67,6 +67,10 @@ typedef long long s64_nt;
 #define UML_STUB_ACTION_NONE 0u /* handled — resume the guest */
 #define UML_STUB_ACTION_PROT 1u /* stub: VirtualProtect(page, prot) */
 #define UML_STUB_ACTION_KILL 2u /* fatal: park, kernel terminates us */
+#define UML_STUB_ACTION_MAP  3u /* stub: map section view [map_va,
+				 * map_len) from offset map_off with
+				 * map_prot (per-VMA view, M3 model) */
+#define UML_STUB_ACTION_UNMAP 4u /* stub: unmap [map_va, map_len) */
 
 /* Guest virtual address space, M2 edition: the stub maps the whole
  * physmem section at ram_base and the static init runs in that view,
@@ -127,6 +131,17 @@ struct uml_nt_stub_data {
 	u32_nt action; /* UML_STUB_ACTION_* */
 	u32_nt prot;   /* ACTION_PROT: NT PAGE_* constant */
 	u32_nt _pad_fault;
+
+	/* -- v3: ACTION_MAP/UNMAP operands --------------------------- */
+	/* One op per round-trip (the slot is single-outstanding by
+	 * design — M3.2). MAP: [map_va, map_va+map_len) is a fresh
+	 * view of the physmem section from offset map_off (64K
+	 * aligned) with map_prot; UNMAP releases that range. */
+	u32_nt map_prot;
+	u32_nt _pad_map;
+	unsigned long long map_va;
+	unsigned long long map_len;
+	unsigned long long map_off;
 
 	/* -- bootstrap v2 (written by kernel pre-ResumeThread) ------- */
 	/* Phys offsets the stub makes PAGE_NOACCESS before the guest

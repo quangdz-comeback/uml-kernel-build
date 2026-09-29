@@ -50,6 +50,7 @@
 static struct uml_nt_stub_data *d;
 static unsigned char *ram; /* physmem view base == UML_STUB_RAM_BASE */
 static HANDLE evt_in, evt_out; /* stub->kernel, kernel->stub */
+static HANDLE phys_sec; /* physmem section (per-VMA views, do_action) */
 
 static void die(const char *what, DWORD err)
 {
@@ -112,6 +113,84 @@ static void park_forever(void)
 		Sleep(INFINITE);
 }
 
+/* FILE_MAP_* bits for a view with `prot` protection. FILE_MAP_EXECUTE
+ * (0x20) must ride along on every executable view (M2.1 pitfall 9:
+ * without it the first fetch dies with a DEP AV, info[0]=8). */
+static ULONG map_access(unsigned prot)
+{
+	switch (prot) {
+	case 0x02u: /* READONLY */
+		return 0x04u; /* FILE_MAP_READ */
+	case 0x04u: /* READWRITE */
+		return 0x06u; /* READ | WRITE */
+	case 0x10u: /* EXECUTE */
+		return 0x20u; /* FILE_MAP_EXECUTE */
+	case 0x20u: /* EXECUTE_READ */
+		return 0x24u; /* EXECUTE | READ */
+	case 0x40u: /* EXECUTE_READWRITE */
+		return 0x26u; /* EXECUTE | READ | WRITE */
+	default:   /* unknown: flat-view parity (RWX) — kernel never
+		    * asks for less by accident (fault.h contract) */
+		return 0x26u;
+	}
+}
+
+/* Execute one ACTION_* against this stub's views. Returns 1 = ok,
+ * 0 = failed (the kernel sees it and kills us loudly — a silent
+ * resume would loop the guest fault forever). */
+static int do_action(void)
+{
+	ULONG old_prot;
+
+	switch (d->action) {
+	case UML_STUB_ACTION_PROT: {
+		void *page = (void *)(uintptr_t)
+			(d->fault_addr & ~(uintptr_t)0xFFF);
+
+		if (!VirtualProtect(page, 4096, d->prot, &old_prot)) {
+			fprintf(stderr, "stub: VirtualProtect(%p, %#x) "
+				"failed (%lu)\n", page,
+				(unsigned)d->prot, GetLastError());
+			return 0;
+		}
+		return 1;
+	}
+	case UML_STUB_ACTION_MAP: {
+		void *base = MapViewOfFileEx(phys_sec,
+					     map_access(d->map_prot),
+					     (DWORD)((d->map_off >> 32) &
+						     0xFFFFFFFFu),
+					     (DWORD)(d->map_off &
+						     0xFFFFFFFFu),
+					     (SIZE_T)d->map_len,
+					     (PVOID)(uintptr_t)d->map_va);
+
+		if (base == NULL) {
+			fprintf(stderr, "stub: MapViewOfFileEx(va=%#llx "
+				"len=%#llx off=%#llx) failed (%lu)\n",
+				d->map_va, d->map_len, d->map_off,
+				GetLastError());
+			return 0;
+		}
+		return 1;
+	}
+	case UML_STUB_ACTION_UNMAP:
+		/* UnmapViewOfFile releases a WHOLE view — the kernel
+		 * plans exact view ranges only (fault.h geometry). */
+		if (!UnmapViewOfFile((PVOID)(uintptr_t)d->map_va)) {
+			fprintf(stderr, "stub: UnmapViewOfFile(%#llx) "
+				"failed (%lu)\n", d->map_va,
+				GetLastError());
+			return 0;
+		}
+		return 1;
+	default:
+		fprintf(stderr, "stub: unknown action %u\n",
+			(unsigned)d->action);
+		return 0;
+	}
+}
+
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	EXCEPTION_RECORD *er = ep->ExceptionRecord;
@@ -148,30 +227,20 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 
 	wait_answer();
 
-	/* Execute the kernel's action chain. PROTECT reports back
-	 * (a failed protect would re-fault forever — the kernel must
-	 * see it and kill us loudly instead, pitfall "loud fails"). */
+	/* Execute the kernel's action chain. Every op reports back (a
+	 * failed op would leave the guest faulting forever — the
+	 * kernel must see it and kill us loudly instead, pitfall "loud
+	 * fails"). */
 	for (;;) {
-		if (d->action == UML_STUB_ACTION_PROT) {
-			void *page = (void *)(uintptr_t)
-				(d->fault_addr & ~(uintptr_t)0xFFF);
-			ULONG old_prot;
-			BOOL ok;
-
-			ok = VirtualProtect(page, 4096, d->prot, &old_prot);
-			if (!ok)
-				fprintf(stderr,
-					"stub: VirtualProtect(%p, %#x) "
-					"failed (%lu)\n", page,
-					(unsigned)d->prot, GetLastError());
-			d->retval = ok ? 1 : 0;
-			d->err = ok ? 0 : 1;
-			publish(UML_STUB_CMD_PROT_DONE);
-			wait_answer();
-			continue; /* answer is NONE (resume) or KILL */
-		}
 		if (d->action == UML_STUB_ACTION_KILL)
 			park_forever();
+		if (d->action != UML_STUB_ACTION_NONE) {
+			d->retval = do_action() ? 1 : 0;
+			d->err = d->retval ? 0 : 1;
+			publish(UML_STUB_CMD_PROT_DONE);
+			wait_answer();
+			continue; /* answer: NONE (resume) or next op */
+		}
 		break; /* ACTION_NONE: handled — resume the guest */
 	}
 
@@ -203,7 +272,7 @@ int main(int argc, char **argv)
 {
 	unsigned long long data_h = 0, phys_h = 0, in_h = 0, out_h = 0;
 	int i;
-	HANDLE data_sec, phys_sec;
+	HANDLE data_sec;
 	MEMORY_BASIC_INFORMATION mbi;
 
 	for (i = 1; i + 1 < argc; i += 2) {
