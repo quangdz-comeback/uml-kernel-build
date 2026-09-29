@@ -23,8 +23,8 @@ int main(int argc, char **argv) {
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
     char exe[MAX_PATH], cmd[MAX_PATH * 2];
     GetModuleFileNameA(NULL, exe, sizeof(exe));
-    STARTUPINFOA si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
+    STARTUPINFOA si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
 
     /* --- spawn bench: suspended then killed (stub-pool model) --- */
     const int NS = 120, NF = 40;

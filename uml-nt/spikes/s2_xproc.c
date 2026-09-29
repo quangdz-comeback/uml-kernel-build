@@ -23,6 +23,21 @@ typedef struct {
 static shared_t *sh;
 static HANDLE ev_stub, ev_kern;
 
+/* WaitOnAddress family: Win8+ API-set. Resolved dynamically because the
+ * import library differs per toolchain (Debian cross-mingw: only in
+ * libsynchronization.a; MSYS2 mingw64: not linked from kernel32 stub).
+ * NULL => API unavailable; results are then reported as such. */
+static BOOL (WINAPI *pWaitOnAddress)(PVOID, PVOID, SIZE_T, DWORD);
+static VOID (WINAPI *pWakeByAddressSingle)(PVOID);
+
+static void resolve_woa(void) {
+    HMODULE h = GetModuleHandleA("api-ms-win-core-synch-l1-2-0.dll");
+    if (!h) h = GetModuleHandleA("kernel32.dll");
+    if (!h) return;
+    pWaitOnAddress       = (BOOL (WINAPI *)(PVOID, PVOID, SIZE_T, DWORD))(void *)GetProcAddress(h, "WaitOnAddress");
+    pWakeByAddressSingle = (VOID (WINAPI *)(PVOID))(void *)GetProcAddress(h, "WakeByAddressSingle");
+}
+
 static void child_loop(void) {
     LONG last = 0;
     for (;;) {
@@ -35,7 +50,7 @@ static void child_loop(void) {
         if (c == CMD_EXIT) { InterlockedExchange(&sh->ack, c); return; }
         switch (c) {
         case CMD_COHERENCE: for (int k = 0; k < 500000; k++) InterlockedIncrement64(&sh->counter); break;
-        case CMD_WAKE:      WakeByAddressSingle((volatile VOID *)&sh->waitslot); break;
+        case CMD_WAKE:      if (pWakeByAddressSingle) pWakeByAddressSingle((PVOID)&sh->waitslot); break;
         default:            break; /* CMD_ECHO + synthetic echo cmds (>=1000) */
         }
         InterlockedExchange(&sh->ack, c);
@@ -60,11 +75,13 @@ static void op_spin(LONG c) {
 }
 
 typedef struct { volatile LONG64 *addr; int result; } waiter_arg_t;
+/* result: 0 = API unavailable, 1 = wait returned w/o wake (timeout/fail), 2 = woke */
 
 static DWORD WINAPI waiter_thread(LPVOID p) {
     waiter_arg_t *a = (waiter_arg_t *)p;
     LONG64 expect = 1;
-    a->result = WaitOnAddress((volatile VOID *)a->addr, &expect, sizeof(LONG64), 700) ? 2 : 1;
+    if (!pWaitOnAddress) { a->result = 0; return 0; }
+    a->result = pWaitOnAddress((PVOID)a->addr, &expect, sizeof(LONG64), 700) ? 2 : 1;
     return 0;
 }
 
@@ -72,6 +89,7 @@ int main(int argc, char **argv) {
     FILE *f = fopen("results/s2_xproc.json", "w");
     if (!f) { perror("results/"); return 1; }
     sc_init();
+    resolve_woa();
 
     if (argc >= 5 && !strcmp(argv[1], "--stub")) {
         HANDLE sec = (HANDLE)(uintptr_t)strtoull(argv[2], NULL, 10);
@@ -97,8 +115,8 @@ int main(int argc, char **argv) {
              (unsigned long long)(uintptr_t)sec,
              (unsigned long long)(uintptr_t)ev_stub,
              (unsigned long long)(uintptr_t)ev_kern);
-    STARTUPINFOA si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
+    STARTUPINFOA si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
     if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
         fprintf(f, "{\"ok\": false, \"error\": \"CreateProcess %lu\"}\n", GetLastError());
         return 1;
@@ -132,7 +150,7 @@ int main(int argc, char **argv) {
     waiter_arg_t wa = { &local, 0 };
     HANDLE ht = CreateThread(NULL, 0, waiter_thread, &wa, 0, NULL);
     Sleep(50);
-    WakeByAddressSingle((volatile VOID *)&local);
+    if (pWakeByAddressSingle) pWakeByAddressSingle((PVOID)&local);
     WaitForSingleObject(ht, 2000); CloseHandle(ht);
     int inproc_woke = (wa.result == 2);
 
@@ -155,11 +173,13 @@ int main(int argc, char **argv) {
     TerminateProcess(pi.hProcess, 0);
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
 
-    fprintf(stderr, "[s2] magic=%d coherence=%d waitOnAddr inproc=%d cross=%d\n",
-            magic_ok, coherence_ok, inproc_woke, cross_woke);
+    fprintf(stderr, "[s2] magic=%d coherence=%d waitOnAddr api=%d inproc=%d cross=%d\n",
+            magic_ok, coherence_ok, !!pWaitOnAddress, inproc_woke, cross_woke);
     fprintf(f, "{\"ok\": true, \"magic_ok\": %s, \"interlocked_coherence\": %s, "
+               "\"waitonaddress_available\": %s, "
                "\"waitonaddress_inproc_wake\": %s, \"waitonaddress_crossproc_wake\": %s, ",
             magic_ok ? "true" : "false", coherence_ok ? "true" : "false",
+            pWaitOnAddress ? "true" : "false",
             inproc_woke ? "true" : "false", cross_woke ? "true" : "false");
     sc_stats(f, "rt_event", s1s, N_EV);          fprintf(f, ", ");
     sc_stats(f, "rt_parent_spin", s2s, N_SPIN1); fprintf(f, ", ");
