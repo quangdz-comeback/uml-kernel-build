@@ -54,7 +54,7 @@ jobs:
         shell: msys2 {0}
         run: |
           cd uml-nt/spikes
-          ./s6_scan.exe payload.elf && cat results/s6_scan.json
+          ./s6_scan.exe payload.elf > results/s6_scan.json && cat results/s6_scan.json
 
       - name: Upload results
         uses: actions/upload-artifact@v4
