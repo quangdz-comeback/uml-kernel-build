@@ -37,8 +37,16 @@ static LARGE_INTEGER qpc_to_li(long long nsecs)
 
 static unsigned long __attribute__((ms_abi)) nt_timer_thread(void *arg)
 {
+	int first = 1; /* TEMP M1.8 */
+
 	for (;;) {
-		nt->NtWaitForSingleObject(g_timer, 0, NULL);
+		NTSTATUS s = nt->NtWaitForSingleObject(g_timer, 0, NULL);
+
+		if (first) {
+			first = 0;
+			os_info("[probe] timer thread alive, wait=%08x\n",
+				s);
+		}
 		deliver_alarm();
 	}
 	return 0;
@@ -69,6 +77,8 @@ int os_timer_create(void)
 	if (thread == NULL)
 		return -1;
 	/* Thread handle leaked deliberately: it lives for the UML run. */
+	os_info("[probe] os_timer_create ok: timer=%p thread=%lu\n",
+		g_timer, (unsigned long)tid); /* TEMP M1.8 */
 	return 0;
 }
 
@@ -85,8 +95,10 @@ int os_timer_set_interval(unsigned long long nsecs)
 	period_ms = (LONG)(nsecs / 1000000ULL);
 	if (period_ms < 1)
 		period_ms = 1;
-	if (!nt->SetWaitableTimer(g_timer, &due, period_ms, NULL, NULL, 0))
+	if (!nt->SetWaitableTimer(g_timer, &due, period_ms, NULL, NULL, 0)) {
+		os_info("[probe] SetWaitableTimer FAILED\n"); /* TEMP */
 		return -1;
+	}
 	return 0;
 }
 
