@@ -10,6 +10,13 @@
 
 CC = clang   # command-line override wins (CC ?= loses to make's builtin)
 LD = ld.lld
+# Guest window link base: the loader shifts ET_EXECs linked below the
+# window, which breaks baked absolute pointers (init's argv array in
+# .data.rel.ro held link-VA pointers — the execve argv walk faulted,
+# EXEC-FAIL native). Link INSIDE the window: the image loads where its
+# pointers say. All guest binaries share it — execs replace each other
+# sequentially and never share the address space.
+IMAGE_BASE := 0x62000000
 IMG_BLOCKS ?= 2048   # 8 MiB at 4K blocks
 
 all: rootfs.ext4
@@ -17,7 +24,8 @@ all: rootfs.ext4
 staging/sbin/init: init.c
 	@mkdir -p staging/sbin
 	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
-		-Wall -o $@ $<
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "init must be a static ELF" >&2; exit 1; }
 

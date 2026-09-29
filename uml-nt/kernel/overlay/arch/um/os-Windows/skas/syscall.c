@@ -371,10 +371,16 @@ static unsigned long long sys_execve(struct uml_nt_stub_conn *c,
 	unsigned long long i, nav = 0, nev = 0;
 	int rc;
 
-	if (a[0] == 0 ||
-	    uml_nt_uacc_strncpy(path, c->mm, uml_boot.physmem_base, a[0],
-				UML_NT_EXEC_STRLEN) < 0)
+	if (a[0] == 0) {
+		os_info("[syscall] execve: NULL path (argv 0x%llx)\n",
+			a[1]);
 		return SC_RET(SC_EFAULT);
+	}
+	if (uml_nt_uacc_strncpy(path, c->mm, uml_boot.physmem_base, a[0],
+				UML_NT_EXEC_STRLEN) < 0) {
+		os_info("[syscall] execve: path 0x%llx unmapped\n", a[0]);
+		return SC_RET(SC_EFAULT);
+	}
 
 	strs = kvmalloc((UML_NT_EXEC_MAX_STR * 2) * sizeof(*strs),
 			GFP_KERNEL);
@@ -386,6 +392,7 @@ static unsigned long long sys_execve(struct uml_nt_stub_conn *c,
 		kvfree(strs);
 		kvfree(kargv);
 		kvfree(kenvp);
+		os_info("[syscall] execve(%s): kvmalloc failed\n", path);
 		return SC_RET(SC_ENOMEM);
 	}
 
@@ -428,6 +435,8 @@ static unsigned long long sys_execve(struct uml_nt_stub_conn *c,
 	}
 	kargv[nav] = NULL;
 	kenvp[nev] = NULL;
+	os_info("[syscall] execve(%s): %llu argv, %llu envp\n", path,
+		nav, nev);
 
 	rc = kernel_execve(path, kargv, kenvp);
 	kvfree(kargv);
@@ -444,6 +453,8 @@ efault:
 	kvfree(kargv);
 	kvfree(kenvp);
 	kvfree(strs);
+	os_info("[syscall] execve(%s): argv/envp walk faulted at "
+		"[%llu argv, %llu envp]\n", path, nav, nev);
 	return SC_RET(SC_EFAULT);
 }
 

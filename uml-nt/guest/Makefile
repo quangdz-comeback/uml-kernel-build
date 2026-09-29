@@ -26,9 +26,20 @@ guest-init.elf: init.S
 # S4c: the exec-chain proof binary — /sbin/init execve()s it through
 # the guest syscall path (freestanding static, no TLS: musl's
 # arch_prctl(ARCH_SET_FS) is the S4c2 slice).
+#
+# --image-base=$(IMAGE_BASE) matters for correctness, not just
+# convenience: the loader shifts ET_EXECs linked below the guest
+# window up to UML_NT_GUEST_VA_BASE (elf.c S3 note), which BREAKS
+# baked absolute pointers — init's argv array lived in
+# .data.rel.ro as link-VA pointers and the execve argv walk faulted
+# (EXEC-FAIL, native CI). Linked inside the window the image loads
+# exactly where its pointers say. Every guest binary we build gets
+# the same base: execs replace each other sequentially, so they
+# never share the address space.
 step2.elf: step2.c
 	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
-		-Wall -o $@ $<
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "step2 must be a static ELF" >&2; exit 1; }
 
