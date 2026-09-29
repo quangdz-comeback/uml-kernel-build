@@ -225,6 +225,7 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		kvfree(buf);
 		return -EIO;
 	}
+	os_info("binfmt_umlnt: read %llu bytes\n", len);
 	rc = uml_nt_elf_sniff(buf, len);
 	if (rc) {
 		kvfree(buf);
@@ -240,6 +241,7 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		return rc;
 	}
 	setup_new_exec(bprm);
+	os_info("binfmt_umlnt: exec committed (new conn live)\n");
 	rc = setup_arg_pages(bprm, STACK_TOP, 0 /* non-exec stack */);
 	if (rc)
 		return rc; /* bprm strings stay unwired — S4 */
@@ -274,6 +276,8 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	if (stk == NULL)
 		return -ENOEXEC;
 	get_random_bytes(rnd, sizeof(rnd));
+	os_info("binfmt_umlnt: wiring stack tables (run_off %#llx)\n",
+		stk->run_off);
 	rc = uml_nt_elf_wire_args(bprm, (char *)uml_boot.physmem_base +
 				  stk->run_off,
 				  stack_top - UML_NT_PHYS_RUN_SIZE,

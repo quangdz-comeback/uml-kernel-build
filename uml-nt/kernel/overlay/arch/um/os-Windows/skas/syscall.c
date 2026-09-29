@@ -474,14 +474,14 @@ static unsigned long long sys_arch_prctl(struct uml_nt_stub_conn *c,
 					 struct uml_nt_stub_data *d,
 					 const unsigned long long *a)
 {
-	char scratch[1];
-
 	switch (a[0]) {
 	case UML_NT_ARCH_SET_FS:
+		/* The TLS pointer is a plain pointer, NOT a string —
+		 * validate by VMA containment (the same lookup the
+		 * walker translates through). A strncpy here "faults"
+		 * on any tp whose first byte is not NUL. */
 		if (a[1] == 0 ||
-		    uml_nt_uacc_strncpy(scratch, c->mm,
-					uml_boot.physmem_base, a[1],
-					1) < 0) {
+		    uml_nt_vma_translate(c->mm, a[1], 1) < 0) {
 			os_info("[syscall] arch_prctl(SET_FS, 0x%llx): "
 				"tp unmapped\n", a[1]);
 			return SC_RET(SC_EFAULT);
