@@ -33,7 +33,12 @@ jobs:
           make -C uml-nt/guest CC=clang LD=ld.lld
           # M3.5 gate rootfs — static freestanding /sbin/init + ext4
           # image (mke2fs -d, no root). Same recipe the kernel job's
-          # mount gate consumes.
+          # mount gate consumes. S4c2: the image also carries busybox
+          # (built from source, musl-gcc) — install musl-tools first.
+          if ! command -v musl-gcc >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y musl-tools
+          fi
           make -C uml-nt/rootfs
           debugfs -R "ls -l /sbin" uml-nt/rootfs/rootfs.ext4
           debugfs -R "ls -l /bin" uml-nt/rootfs/rootfs.ext4
