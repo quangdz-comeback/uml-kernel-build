@@ -418,6 +418,39 @@ ULONG UML_NTABI_CC WaitForMultipleObjects(ULONG count, HANDLE *handles,
 /* M3.5 additions (appended; table members above stay frozen). Real
  * host-file I/O for ubd backing images. */
 BOOLEAN UML_NTABI_CC GetFileSizeEx(HANDLE file, LARGE_INTEGER *size);
+
+/* M3.8 additions (appended; table members above stay frozen). The
+ * kernel process owns NO exception handling yet — upstream UML
+ * installs a SIGSEGV handler that panics loudly on kernel faults;
+ * on NT a wild kernel-side deref died with a bare 139 (silent). The
+ * crash-reporter VEH restores the loudness: print rip + fault
+ * address, then terminate (os_dump_core parity). */
+PVOID UML_NTABI_CC AddVectoredExceptionHandler(ULONG first,
+					       PVOID handler);
+
+/* Minimal x64 exception surface for the reporter (documented
+ * winnt.h layouts; the full CONTEXT is 0x4d0 bytes — the reporter
+ * reads only the fault rip through the fixed offset below). */
+struct uml_nt_exception_record {
+	ULONG code;         /* 0x00 */
+	ULONG flags;        /* 0x04 */
+	PVOID record;       /* 0x08 */
+	PVOID address;      /* 0x10 */
+	ULONG nparams;      /* 0x18 */
+	ULONG _pad0;        /* 0x1c */
+	ULONG_PTR info[15]; /* 0x20 */
+}; /* 0x98 bytes */
+
+struct uml_nt_exception_pointers {
+	struct uml_nt_exception_record *record;
+	PVOID context; /* x64 CONTEXT */
+};
+
+/* x64 CONTEXT.Rip offset (P1Home..P6Home 0x00-0x2f, ContextFlags
+ * 0x30, MxCsr 0x34, segments 0x38, EFlags 0x44, Dr0-Dr7 0x48-0x77,
+ * Rax..R15 0x78-0xf0, Rip 0xf8). */
+#define UML_NT_X64_CTX_RIP(ctx) \
+	(*(unsigned long long *)((char *)(ctx) + 0xf8))
 #endif /* !_WIN64 */
 
 /*
@@ -528,6 +561,13 @@ struct uml_nt_api_table {
 	/* ---- appended for M3.5 (ubd host files) -------------------------- */
 	BOOLEAN (UML_NTABI_CC *GetFileSizeEx)(HANDLE file,
 			LARGE_INTEGER *size);
+
+	/* ---- appended for M3.8 (kernel crash reporter) ------------------- */
+	/* Handler param stays PVOID: PE mode has the real
+	 * PVECTORED_EXCEPTION_HANDLER typedef, the kernel casts its
+	 * freestanding handler — same signature either way. */
+	PVOID (UML_NTABI_CC *AddVectoredExceptionHandler)(ULONG first,
+			PVOID handler);
 };
 
 #endif /* __UML_NTABI_H */

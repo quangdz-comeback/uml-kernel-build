@@ -49,6 +49,10 @@ void nt_main(struct uml_boot_info *bi)
 	    nt->size < sizeof(*nt))
 		os_dump_core();
 
+	/* Table validated — from here every native fault is LOUD
+	 * (upstream: the UML process's SIGSEGV kernel-fault handler). */
+	uml_nt_install_crash_reporter();
+
 	/* Copy the handoff out of the launcher-controlled stack area. */
 	uml_boot = *bi;
 

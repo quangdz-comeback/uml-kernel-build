@@ -207,6 +207,12 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	if (bprm->mm == NULL || id->nt_conn == NULL)
 		return -ENOEXEC;
 	c = id->nt_conn;
+	/* S4c2: os_info is a DIRECT console write (reliable append
+	 * order, unlike the printk WARN batches) — this pins which
+	 * exec the following prints belong to when the log interleaves
+	 * three execs. */
+	os_info("binfmt_umlnt: load_binary %s (conn pid %d)\n",
+		bprm->filename, c->pid);
 
 	fsize = i_size_read(file_inode(bprm->file));
 	if (fsize <= 0 || fsize > UML_NT_BINFMT_MAX_FILE)

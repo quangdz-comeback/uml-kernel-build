@@ -131,6 +131,10 @@ static void resolve_api_table(void)
 	/* M3.5 additions (ubd host files) */
 	RESOLVE(GetFileSizeEx, k32, "GetFileSizeEx");
 
+	/* M3.8: kernel crash reporter (loud native faults) */
+	RESOLVE(AddVectoredExceptionHandler, k32,
+		"AddVectoredExceptionHandler");
+
 	fprintf(stderr, "[launcher] D9 table v%u: %u bytes, all exports "
 			"resolved\n", g_api.version, g_api.size);
 }

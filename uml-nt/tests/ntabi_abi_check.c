@@ -38,3 +38,11 @@ _Static_assert(__builtin_offsetof(struct uml_nt_api_table, heap) == 8,
 	       "table.heap at 8");
 _Static_assert(__builtin_offsetof(struct uml_nt_api_table, NtWriteFile) == 24,
 	       "table.NtWriteFile at 24");
+
+/* M3.8 crash-reporter surface (freestanding decls only). */
+#ifndef _WIN64
+_Static_assert(sizeof(struct uml_nt_exception_record) == 0x98,
+	       "EXCEPTION_RECORD x64");
+_Static_assert(sizeof(struct uml_nt_exception_pointers) == 16,
+	       "EXCEPTION_POINTERS x64");
+#endif

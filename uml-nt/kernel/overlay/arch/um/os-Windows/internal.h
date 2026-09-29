@@ -21,4 +21,10 @@ extern struct uml_nt_api_table *nt;
 /* Early console: NtWriteFile to boot.stdio_out (util.c). */
 void nt_console_write(const char *s, unsigned int n);
 
+/* M3.8: last-chance VEH — any native exception in the kernel process
+ * prints rip/fault-address (direct NtWriteFile, no console lock —
+ * the crashing thread may hold it) and terminates exit 1. Install
+ * from nt_main right after the D9 table check (start_up.c). */
+void uml_nt_install_crash_reporter(void);
+
 #endif
