@@ -84,7 +84,10 @@ void _start(void)
 
 	/* TLS through the D18 path: SET_FS round-trips to the kernel
 	 * (which records + republishes the base), the stub re-applies
-	 * it at resume, then we dereference through %fs. */
+	 * it at resume, then we dereference through %fs. %fs:0 reads
+	 * the MEMORY at the base (the musl self-pointer slot), not
+	 * the base itself — store the self pointer first. */
+	fs0[0] = (unsigned long)fs0;
 	if (sys_arch_prctl(0x1002 /* ARCH_SET_FS */, (long)fs0) == 0) {
 		__asm__ volatile ("movq %%fs:0, %0" : "=r" (got));
 		if (got == (unsigned long)fs0)

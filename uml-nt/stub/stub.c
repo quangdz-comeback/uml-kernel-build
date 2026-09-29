@@ -287,6 +287,9 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	    (uintptr_t)er->ExceptionInformation[1] <
 		    (uintptr_t)d->ram_base &&
 	    *(const unsigned char *)(uintptr_t)c->Rip == 0x64 /* fs: */) {
+		fprintf(stderr, "stub: fs fault repaired at rip %#llx "
+			"(base %#llx)\n", (unsigned long long)c->Rip,
+			d->fs_base);
 		fs_tramp_base = d->fs_base;
 		fs_tramp_target = c->Rip;
 		c->Rip = (DWORD64)(uintptr_t)&fs_trampoline;
@@ -319,6 +322,8 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	 * instruction re-executes on the now-fixed view. */
 	gp_to_context(c, &d->regs);
 	if (is_syscall) {
+		static int tramp_logged;
+
 		c->Rax = (DWORD64)d->retval;
 		/* D18: with a TLS base live, resume THROUGH the
 		 * trampoline — the context restore on the way out has
@@ -328,6 +333,12 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		 * verbatim). Without TLS this stays the plain rip+2
 		 * resume the M1.9–M3.7 gates have always run. */
 		if (d->fs_base != 0) {
+			if (!tramp_logged++) {
+				fprintf(stderr, "stub: syscall resumes go "
+					"through the fs trampoline "
+					"(base %#llx)\n", d->fs_base);
+				fflush(stderr);
+			}
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = d->regs.rip + 2; /* past ud2 */
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline;

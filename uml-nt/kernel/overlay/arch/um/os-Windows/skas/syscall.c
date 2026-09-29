@@ -488,6 +488,8 @@ static unsigned long long sys_arch_prctl(struct uml_nt_stub_conn *c,
 		}
 		c->fs_base = a[1];
 		d->fs_base = a[1];
+		os_info("[syscall] arch_prctl(SET_FS, 0x%llx): recorded\n",
+			a[1]);
 		return 0;
 	case UML_NT_ARCH_GET_FS:
 		return c->fs_base;

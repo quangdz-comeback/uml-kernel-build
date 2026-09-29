@@ -212,6 +212,8 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	if (fsize <= 0 || fsize > UML_NT_BINFMT_MAX_FILE)
 		return -ENOEXEC;
 	len = (unsigned long long)fsize;
+	os_info("binfmt_umlnt: loading %s (%llu bytes)\n", bprm->filename,
+		len);
 
 	buf = kvmalloc(len, GFP_KERNEL);
 	if (buf == NULL)
@@ -255,6 +257,8 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		os_info("binfmt_umlnt: load failed rc=%d\n", rc);
 		return -ENOEXEC;
 	}
+	os_info("binfmt_umlnt: elf mapped %d region(s), entry 0x%llx\n",
+		img.nseg, img.entry);
 	rc = uml_nt_elf_stack_place(&img, c->mm, c->ph, &stack_top);
 	if (rc != UML_NT_ELF_OK) {
 		os_info("binfmt_umlnt: stack place failed rc=%d\n", rc);

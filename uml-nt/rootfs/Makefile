@@ -47,9 +47,13 @@ staging/dev:
 
 # S4: the script /sbin/init reads back through the REAL VFS
 # (openat/read, M3.8 S4b gate) — and that busybox sh runs in S4c.
+# The second line is the unique acceptance marker: the file CONTENT
+# rides the OPENAT-READ-OK line, so the gate greps a line that has
+# BUSYBOX-SHELL-OK but NOT the read marker (only busybox's own echo
+# produces one).
 staging/hi.sh:
 	@mkdir -p staging
-	printf 'echo hi\n' > $@
+	printf 'echo hi\necho BUSYBOX-SHELL-OK\n' > $@
 
 # S4c: the exec-chain proof binary — /sbin/init execve()s it through
 # the guest syscall path (the STEP2-OK native gate). It then probes
