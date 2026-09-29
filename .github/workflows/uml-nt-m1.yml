@@ -47,6 +47,8 @@ jobs:
           ! readelf -d build/vmlinux | grep -q NEEDED
           # D2/D9: entry point is our _start (launcher jumps there).
           ENTRY=$(readelf -h build/vmlinux | awk '/Entry point/ {print $4}')
+          # nm prints bare hex, readelf prefixes 0x — normalize.
+          ENTRY=${ENTRY#0x}
           nm build/vmlinux | grep -q " $ENTRY T _start"
 
       - name: Upload vmlinux.elf

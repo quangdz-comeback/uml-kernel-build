@@ -20,8 +20,17 @@
  
  	return 0;
  }
-@@ -184,7 +184,7 @@
- 		printf("%s", *p);
+@@ -177,14 +177,14 @@
+ {
+ 	const char **p;
+ 
+-	printf(usage_string, init_utsname()->release);
++	printk(usage_string, init_utsname()->release);
+ 	p = &__uml_help_start;
+ 	/* Explicitly use printf() to show help in stdout */
+ 	while (p < &__uml_help_end) {
+-		printf("%s", *p);
++		printk("%s", *p);
  		p++;
  	}
 -	exit(0);
@@ -29,6 +38,19 @@
  	return 0;
  }
  
+@@ -345,7 +345,12 @@
+ 
+ 	get_host_cpu_features(parse_host_cpu_flags, parse_cache_line);
+ 
++#ifdef CONFIG_OS_WINDOWS
++	/* No host brk on NT (D1) — heap base = image end. */
++	brk_start = (unsigned long) &_end;
++#else
+ 	brk_start = (unsigned long) sbrk(0);
++#endif
+ 
+ 	/*
+ 	 * Increase physical memory size for exec-shield users
 --- a/arch/um/kernel/physmem.c
 +++ b/arch/um/kernel/physmem.c
 @@ -69,7 +69,7 @@
