@@ -172,7 +172,7 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		 * exception frame on the faulting thread's stack — a
 		 * COW-faulted STACK page kills the dispatch before the
 		 * handler runs. The VMA holding the fork rsp therefore
-		 * eager-copies into fresh private runs; everything
+		 * eager-copies into a fresh private span; everything
 		 * else keeps COW (its faults dispatch on the RW
 		 * stack). Contents are the caller's job. The stack
 		 * VMA owns [start, rsp): rsp itself = the first byte
@@ -180,23 +180,16 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		 * test rsp - 1 — the last stack byte. */
 		if (uml_nt_prot_writable(v->prot) && rsp != 0 &&
 		    rsp - 1 >= v->start && rsp - 1 < v->end) {
-			unsigned long long nruns = (v->end - v->start) /
-						   UML_NT_PHYS_RUN_SIZE;
-			unsigned long long k, off;
+			/* alloc_span: contiguous by construction (D12 —
+			 * the buddy hands a whole block; single-run
+			 * allocs owe no adjacency). */
+			long long off = uml_nt_phys_alloc_span(ph,
+				(int)((v->end - v->start) /
+				      UML_NT_PHYS_RUN_SIZE));
 
-			run_off = 0;
-			for (k = 0; k < nruns; k++) {
-				off = (unsigned long long)
-					uml_nt_phys_alloc(ph);
-				if (off == (unsigned long long)-1)
-					goto fail;
-				if (k == 0) {
-					run_off = off;
-				} else if (off != run_off +
-					   k * UML_NT_PHYS_RUN_SIZE) {
-					goto fail; /* contiguity */
-				}
-			}
+			if (off < 0)
+				goto fail;
+			run_off = (unsigned long long)off;
 			flags &= ~UML_NT_VMA_COW;
 		} else if (uml_nt_prot_writable(v->prot)) {
 			flags |= UML_NT_VMA_COW;
@@ -207,8 +200,8 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		if (rc < 0)
 			goto fail;
 
-		/* Eager runs: alloc() reffed them (the child owns).
-		 * Shared runs: ref the source span for this mm. */
+		/* Eager runs: alloc_span() reffed them (the child
+		 * owns). Shared runs: ref the source span for this mm. */
 		if (run_off == v->run_off && span_ref(ph, v) < 0)
 			goto fail;
 	}
@@ -290,6 +283,31 @@ int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			return -1;
 	}
 	return 0;
+}
+
+/* Guest VA buffer [va, va+len) → physmem section offset (D11: the
+ * identity va == RAM_BASE + off only holds for runs never COW-copied;
+ * the VMA tree is the truth — this is what every syscall buffer
+ * translate goes through). Returns -1 when any byte falls outside a
+ * VMA or the buffer crosses the VMA end (multi-VMA buffers: split at
+ * the caller, M3.7). len == 0 translates trivially. */
+long long uml_nt_vma_translate(const struct uml_nt_mm *mm,
+			       unsigned long long va, unsigned long long len)
+{
+	const struct uml_nt_vma *v = 0;
+	int i;
+
+	for (i = 0; i < mm->nvma; i++) {
+		if (va >= mm->vma[i].start && va < mm->vma[i].end) {
+			v = &mm->vma[i];
+			break;
+		}
+	}
+	if (v == 0)
+		return -1;
+	if (len != 0 && (len > v->end - va))
+		return -1;
+	return (long long)(v->run_off + (va - v->start));
 }
 
 /* NT PAGE_* classification (winnt.h values, D1: no windows.h here). */

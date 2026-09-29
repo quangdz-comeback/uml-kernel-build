@@ -75,16 +75,23 @@ int uml_nt_vma_del(struct uml_nt_mm *mm, unsigned long long start,
 int uml_nt_vma_chg(struct uml_nt_mm *mm, unsigned long long start,
 		   unsigned long long end, unsigned prot);
 
+/* Guest VA buffer [va, va+len) → physmem section offset, or -1 when
+ * any byte is unmapped or the buffer crosses the VMA end. D11: the
+ * syscall path (write/… buffers) MUST translate through this — the
+ * identity va == RAM_BASE + off only holds for runs never COW-copied. */
+long long uml_nt_vma_translate(const struct uml_nt_mm *mm,
+			       unsigned long long va, unsigned long long len);
+
 /* Fork analogue: deep-copy src into dst; writable VMAs become COW
  * (reads keep working off the shared run), refcounts bumped once per
  * distinct run — EXCEPT the VMA holding `rsp` (the guest stack): the
  * NT VEH dispatch pushes the exception frame on the faulting thread's
  * stack, so a COW-faulted stack page kills the dispatch before any
  * handler runs (Linux fixes the page pre-signal; NT has no such
- * step). That VMA eager-copies into fresh private runs (contents are
- * the CALLER's job, through its flat view) and carries no COW flag.
- * Returns 0, -1 on table full / refcount failure / run non-contiguity
- * (the allocator must hand the eager copies a contiguous span). */
+ * step). That VMA eager-copies into a fresh private span (contents
+ * are the CALLER's job, through its flat view) and carries no COW
+ * flag. Returns 0, -1 on table full / refcount failure (the eager
+ * span is contiguous by construction — phys alloc_span, D12). */
 int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		    struct uml_nt_phys *ph, unsigned long long rsp);
 

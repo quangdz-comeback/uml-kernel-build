@@ -35,6 +35,7 @@
 #include <init.h>
 #include <ntabi.h>
 #include <fault.h>
+#include <elf.h>
 #include <stub-panic.h>
 #include <stub_nt.h>
 
@@ -49,6 +50,14 @@ extern const char nt_guest_init_slot0[], nt_guest_init_slot1[];
 /* scan_patch.c */
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 				    unsigned long entry_off);
+
+/* M3.4: the kernel-side map of the launcher's exec section (the ELF
+ * the loader parses). Fixed VA BELOW the stub_data block
+ * (0x10000000..): same reasoning as the stub bootstrap — an unplaced
+ * map lets the NT allocator land inside the image/guest span (M3.3
+ * lesson, kernel side too). One view, mapped at probe time, unmapped
+ * after the load (the bytes live in physmem runs from then on). */
+#define UML_NT_EXEC_VIEW_VA 0x0C000000ULL
 
 /* The probe's guard-page guest VAs: the guard run is its OWN page-
  * allocator run (D11 — dynamic offsets, no run-adjacency assumptions),
@@ -238,18 +247,29 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		return 0;
 	}
 	if (nr == 1) { /* __NR_write */
-		unsigned long long off = d->args[1] - d->ram_base;
-		unsigned long long len = d->args[2];
+		/* D11: the buffer VA translates through the mm's VMA
+		 * tree — the identity (va - ram_base) only holds for
+		 * runs never COW-copied, and the ELF-loaded guest
+		 * lives at its own link VAs (M3.4). A buffer crossing
+		 * its VMA end or unmapped = -EFAULT (multi-VMA buffer
+		 * splitting is M3.7's syscall surface). */
+		long long off = uml_nt_vma_translate(c->mm, d->args[1],
+						     d->args[2]);
 
-		if (d->args[1] < d->ram_base || off >= d->ram_size ||
-		    len > d->ram_size - off)
-			goto bad;
+		if (off < 0) {
+			d->retval = (unsigned long long)-14LL; /* -EFAULT */
+			d->err = 1;
+			return -1;
+		}
 		/* fd 1 = console for now; others: -EBADF later. */
-		if (d->args[0] != 1 && d->args[0] != 2)
-			goto bad;
+		if (d->args[0] != 1 && d->args[0] != 2) {
+			d->retval = (unsigned long long)-9LL; /* -EBADF */
+			d->err = 1;
+			return -1;
+		}
 		nt_console_write((char *)uml_boot.physmem_base + off,
-				 (unsigned int)len);
-		d->retval = len;
+				 (unsigned int)d->args[2]);
+		d->retval = d->args[2];
 		d->err = 0;
 		return 0;
 	}
@@ -436,12 +456,29 @@ static int pump_conn(struct uml_nt_stub_conn *c)
 	return 0;
 }
 
+/* Any VMA overlap with [s, e)? (guard placement — the loader's own
+ * overlap checks live in elf.c). */
+static int span_overlaps_mm(const struct uml_nt_mm *mm,
+			    unsigned long long s, unsigned long long e)
+{
+	int i;
+
+	for (i = 0; i < mm->nvma; i++) {
+		if (s < mm->vma[i].end && e > mm->vma[i].start)
+			return 1;
+	}
+	return 0;
+}
+
 static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 {
 	unsigned long long blob_len, entry_off;
 	unsigned long long text_off, stack_off, guard_off;
 	unsigned long long text_va, stack_va, patched;
-	struct uml_nt_gp_regs zero_regs;
+	unsigned long long entry_va, stack_top;
+	struct uml_nt_elf_image img;
+	struct uml_nt_gp_regs init_regs;
+	int elf_mode, tries;
 	HANDLE waits[2];
 	int nwaits;
 
@@ -455,92 +492,210 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	 * whatever the buddy hands out); every VA and plan op follows.
 	 * No run-adjacency assumptions anywhere: the buddy does not
 	 * owe us neighbours, so text/stack/guard are INDEPENDENT runs,
-	 * one run per VMA (single-run VMAs are trivially contiguous —
-	 * the multi-run span design is M4). */
+	 * one run per VMA (multi-run spans now come from alloc_span —
+	 * D12, the loader/clone path). */
 	if (uml_nt_phys_init(&probe_phys, uml_boot.physmem_size) < 0) {
 		os_info("[stubtest] phys init failed (mem too big for "
 			"the run table)\n");
 		return 0;
 	}
-	text_off = uml_nt_phys_alloc(&probe_phys);
-	stack_off = uml_nt_phys_alloc(&probe_phys);
-	guard_off = uml_nt_phys_alloc(&probe_phys);
-	if (text_off < 0 || stack_off < 0 || guard_off < 0) {
-		os_info("[stubtest] run alloc failed\n");
-		return 0;
-	}
-	entry_off = text_off;
-	text_va = UML_STUB_RAM_BASE + text_off;
-	stack_va = UML_STUB_RAM_BASE + stack_off;
-	probe_guard_va0 = UML_STUB_RAM_BASE + guard_off;
-	probe_guard_va1 = probe_guard_va0 + 0x1000;
+	memset(&img, 0, sizeof(img));
+	memset(&init_regs, 0, sizeof(init_regs));
+	uml_nt_mm_init(&mm_parent);
+	elf_mode = uml_boot.exec_section != NULL &&
+		   uml_boot.exec_size != 0;
 
-	/* Stage the init image, fill the guard-VA slots, patch the
-	 * `syscall`s to ud2 — the central-patch contract §5.1. */
-	blob_len = nt_guest_init_end - nt_guest_init_start;
-	memcpy(uml_boot.physmem_base + entry_off, nt_guest_init_start,
-	       blob_len);
-	{
-		unsigned long long off0, off1;
-		unsigned long long va0, va1;
+	if (elf_mode) {
+		/* M3.4: the guest init is a REAL ELF image handed over
+		 * by the launcher (boot-info v2 exec section) — the
+		 * execveat(memfd) analogue. The loader hands every
+		 * load region its own span (D11/D12), copies bytes
+		 * through the flat view and builds the mm's VMAs. */
+		void *view = (void *)(uintptr_t)UML_NT_EXEC_VIEW_VA;
+		SIZE_T vs = 0;
+		NTSTATUS ms;
+		long long rc;
+		int si, gok;
 
-		off0 = (unsigned long long)(uintptr_t)nt_guest_init_slot0;
-		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
-		va0 = probe_guard_va0;
-		va1 = probe_guard_va1;
-		memcpy(uml_boot.physmem_base + entry_off + off0, &va0, 8);
-		memcpy(uml_boot.physmem_base + entry_off + off1, &va1, 8);
-	}
-	patched = uml_nt_patch_syscalls(uml_boot.physmem_base + entry_off,
-					blob_len, 0);
-	/* The linear sweep must never have eaten a slot byte as an
-	 * instruction (decoder false-positive = wild guest pointer).
-	 * Verify loud. */
-	{
-		unsigned long long off0, off1, va0, va1;
+		ms = nt->NtMapViewOfSection(uml_boot.exec_section,
+			UML_NT_CURRENT_PROCESS, &view, 0, 0, NULL, &vs,
+			1 /*ViewShare*/, 0, 0x02 /*PAGE_READONLY*/);
+		if (!NT_SUCCESS(ms) ||
+		    (unsigned long long)(uintptr_t)view !=
+			    UML_NT_EXEC_VIEW_VA) {
+			os_info("[stubtest] exec map failed %08x at %p\n",
+				(unsigned)ms, view);
+			return 0;
+		}
+		rc = uml_nt_elf_load(&img, &mm_parent, &probe_phys, view,
+				     uml_boot.exec_size,
+				     uml_boot.physmem_base);
+		if (rc != UML_NT_ELF_OK) {
+			os_info("[stubtest] exec load FAILED rc=%lld\n",
+				rc);
+			return 0;
+		}
+		rc = uml_nt_elf_stack_place(&img, &mm_parent, &probe_phys,
+					    &stack_top);
+		if (rc != UML_NT_ELF_OK) {
+			os_info("[stubtest] stack place FAILED rc=%lld\n",
+				rc);
+			return 0;
+		}
+		/* Central patch contract §5.1: every `syscall` in the
+		 * loaded image becomes ud2 before any stub maps the
+		 * page. Executable regions only — data bytes holding
+		 * 0F 05 are data, the decoder is for code. */
+		patched = 0;
+		for (si = 0; si < img.nseg; si++) {
+			if (!uml_nt_prot_execable(img.seg[si].prot))
+				continue;
+			patched += uml_nt_patch_syscalls(
+				uml_boot.physmem_base +
+					img.seg[si].run_off,
+				img.seg[si].end - img.seg[si].start, 0);
+		}
+		nt->NtUnmapViewOfSection(UML_NT_CURRENT_PROCESS, view);
+		entry_va = img.entry;
 
-		off0 = (unsigned long long)(uintptr_t)nt_guest_init_slot0;
-		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
-		memcpy(&va0, uml_boot.physmem_base + entry_off + off0, 8);
-		memcpy(&va1, uml_boot.physmem_base + entry_off + off1, 8);
-		if (va0 != probe_guard_va0 || va1 != probe_guard_va1) {
-			os_info("[stubtest] guard slot clobbered by patch "
-				"scan (va0=0x%llx va1=0x%llx)\n", va0, va1);
+		/* Guard run: a fresh run whose VA range misses every
+		 * VMA the loader placed (D11: the buddy owes no
+		 * position). Collisions LEAK the run instead of
+		 * freeing — a freed block comes straight back on LIFO
+		 * freelists, the retry would spin on it. */
+		gok = 0;
+		for (tries = 0; tries < 16 && !gok; tries++) {
+			long long off = uml_nt_phys_alloc(&probe_phys);
+
+			if (off < 0)
+				break;
+			probe_guard_va0 = UML_STUB_RAM_BASE + off;
+			probe_guard_va1 = probe_guard_va0 + 0x1000;
+			if (!span_overlaps_mm(&mm_parent,
+					      probe_guard_va0,
+					      probe_guard_va0 +
+					      UML_NT_PHYS_RUN_SIZE))
+				gok = 1;
+		}
+		if (!gok ||
+		    uml_nt_vma_add(&mm_parent, probe_guard_va0,
+				   probe_guard_va0 +
+				   UML_NT_PHYS_RUN_SIZE,
+				   probe_guard_va0 - UML_STUB_RAM_BASE,
+				   UML_NT_PAGE_READWRITE, 0) < 0) {
+			os_info("[stubtest] guard vma failed\n");
+			return 0;
+		}
+		/* Probe convention: the guest saves its guard VAs from
+		 * r12/r13 at entry (callee-saved — they survive the
+		 * write() round-trips); no slot patching, no symbol
+		 * lookups, no fixed VAs. */
+		init_regs.r12 = probe_guard_va0;
+		init_regs.r13 = probe_guard_va1;
+		os_info("[stubtest] exec loaded: %d region(s), entry "
+			"0x%llx, %llu syscall(s) patched, guards "
+			"0x%llx/0x%llx\n", img.nseg, entry_va, patched,
+			probe_guard_va0, probe_guard_va1);
+	} else {
+		/* Legacy M3.3 probe: raw embedded blob (init_blob.S)
+		 * staged into one text run, guard VAs patched into its
+		 * slots. Kept as the fallback gate; the ELF path above
+		 * is the M3.4 acceptance. */
+		text_off = uml_nt_phys_alloc(&probe_phys);
+		stack_off = uml_nt_phys_alloc(&probe_phys);
+		guard_off = uml_nt_phys_alloc(&probe_phys);
+		if (text_off < 0 || stack_off < 0 || guard_off < 0) {
+			os_info("[stubtest] run alloc failed\n");
+			return 0;
+		}
+		entry_off = text_off;
+		text_va = UML_STUB_RAM_BASE + text_off;
+		stack_va = UML_STUB_RAM_BASE + stack_off;
+		probe_guard_va0 = UML_STUB_RAM_BASE + guard_off;
+		probe_guard_va1 = probe_guard_va0 + 0x1000;
+		stack_top = stack_va + UML_NT_PHYS_RUN_SIZE;
+		entry_va = text_va;
+
+		/* Stage the init image, fill the guard-VA slots, patch
+		 * the `syscall`s to ud2 — central-patch contract §5.1. */
+		blob_len = nt_guest_init_end - nt_guest_init_start;
+		memcpy(uml_boot.physmem_base + entry_off,
+		       nt_guest_init_start, blob_len);
+		{
+			unsigned long long off0, off1;
+			unsigned long long va0, va1;
+
+			off0 = (unsigned long long)(uintptr_t)
+			       nt_guest_init_slot0;
+			off1 = (unsigned long long)(uintptr_t)
+			       nt_guest_init_slot1;
+			va0 = probe_guard_va0;
+			va1 = probe_guard_va1;
+			memcpy(uml_boot.physmem_base + entry_off + off0,
+			       &va0, 8);
+			memcpy(uml_boot.physmem_base + entry_off + off1,
+			       &va1, 8);
+		}
+		patched = uml_nt_patch_syscalls(
+			uml_boot.physmem_base + entry_off, blob_len, 0);
+		/* The linear sweep must never have eaten a slot byte as
+		 * an instruction (decoder false-positive = wild guest
+		 * pointer). Verify loud. */
+		{
+			unsigned long long off0, off1, va0, va1;
+
+			off0 = (unsigned long long)(uintptr_t)
+			       nt_guest_init_slot0;
+			off1 = (unsigned long long)(uintptr_t)
+			       nt_guest_init_slot1;
+			memcpy(&va0, uml_boot.physmem_base + entry_off +
+				      off0, 8);
+			memcpy(&va1, uml_boot.physmem_base + entry_off +
+				      off1, 8);
+			if (va0 != probe_guard_va0 ||
+			    va1 != probe_guard_va1) {
+				os_info("[stubtest] guard slot clobbered "
+					"by patch scan (va0=0x%llx "
+					"va1=0x%llx)\n", va0, va1);
+				return 0;
+			}
+		}
+		os_info("[stubtest] init staged at phys 0x%llx (%llu "
+			"bytes, %lu syscall(s) patched, guards "
+			"0x%llx/0x%llx)\n", entry_off, blob_len, patched,
+			probe_guard_va0, probe_guard_va1);
+
+		/* Parent mm (M3 model): per-VMA views — text (1 run
+		 * RWX), stack (1 run RW), guard run (RW; the INIT plan
+		 * NOACCESS-protects the guard pages). Each run
+		 * allocated independently above. */
+		if (uml_nt_vma_add(&mm_parent, text_va,
+				   text_va + 0x10000ull, text_off,
+				   UML_NT_PAGE_EXECUTE_READWRITE,
+				   0) < 0) {
+			os_info("[stubtest] text vma failed\n");
+			return 0;
+		}
+		if (uml_nt_vma_add(&mm_parent, stack_va,
+				   stack_va + 0x10000ull, stack_off,
+				   UML_NT_PAGE_READWRITE, 0) < 0) {
+			os_info("[stubtest] stack vma failed\n");
+			return 0;
+		}
+		if (uml_nt_vma_add(&mm_parent, probe_guard_va0,
+				   probe_guard_va0 + 0x10000ull,
+				   guard_off, UML_NT_PAGE_READWRITE,
+				   0) < 0) {
+			os_info("[stubtest] guard vma failed\n");
 			return 0;
 		}
 	}
-	os_info("[stubtest] init staged at phys 0x%llx (%llu bytes, %lu "
-		"syscall(s) patched, guards 0x%llx/0x%llx)\n", entry_off,
-		blob_len, patched, probe_guard_va0, probe_guard_va1);
-
-	/* Parent mm (M3 model): per-VMA views — text (1 run RWX), stack
-	 * (1 run RW), guard run (RW; the INIT plan NOACCESS-protects
-	 * the guard pages). Each run allocated independently above. */
-	uml_nt_mm_init(&mm_parent);
-	if (uml_nt_vma_add(&mm_parent, text_va, text_va + 0x10000ull,
-			   text_off, UML_NT_PAGE_EXECUTE_READWRITE,
-			   0) < 0) {
-		os_info("[stubtest] text vma failed\n");
-		return 0;
-	}
-	if (uml_nt_vma_add(&mm_parent, stack_va, stack_va + 0x10000ull,
-			   stack_off, UML_NT_PAGE_READWRITE, 0) < 0) {
-		os_info("[stubtest] stack vma failed\n");
-		return 0;
-	}
-	if (uml_nt_vma_add(&mm_parent, probe_guard_va0,
-			   probe_guard_va0 + 0x10000ull, guard_off,
-			   UML_NT_PAGE_READWRITE, 0) < 0) {
-		os_info("[stubtest] guard vma failed\n");
-		return 0;
-	}
 	conn_parent.mm = &mm_parent;
 
-	memset(&zero_regs, 0, sizeof(zero_regs));
 	/* Initial guest rsp = the TOP of the stack run (grows down);
-	 * the stack VMA itself owns [stack_va, stack_va + RUN). */
-	if (spawn_stub(&conn_parent, text_va, stack_va + 0x10000ull,
-		       &zero_regs) < 0)
+	 * the stack VMA itself owns [stack_va, stack_va + RUN) (ELF:
+	 * placed by the loader above the last region). */
+	if (spawn_stub(&conn_parent, entry_va, stack_top, &init_regs) < 0)
 		return 0;
 	os_info("[stubtest] parent stub pid %lu — resuming\n",
 		(unsigned long)conn_parent.pid);

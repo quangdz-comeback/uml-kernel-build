@@ -32,10 +32,23 @@
 #define UML_NT_PHYS_RUN_SIZE   (1ull << UML_NT_PHYS_RUN_SHIFT)
 #define UML_NT_PHYS_MAX_RUNS   4096  /* 4096 * 64K = 256 MiB POC ceiling */
 
+/* Guest VA span base (stub_nt.h UML_STUB_RAM_BASE — the unit tests
+ * assert the two agree; single physmem-geometry source lives here). */
+#define UML_NT_GUEST_VA_BASE   0x60000000ull
+
 struct uml_nt_phys {
 	unsigned long long size;      /* section bytes (rounded to runs) */
 	unsigned short refs[UML_NT_PHYS_MAX_RUNS]; /* 0 = run not in use */
-	void *pages[UML_NT_PHYS_MAX_RUNS]; /* backend page handle per run */
+	/* Block bookkeeping (D12): a span of n runs is ONE backend
+	 * allocation; the owner run (span_back == 0) holds the handle.
+	 * Every used run records its block's extent so the block is
+	 * freed exactly once — when ALL its runs drop to 0 (a COW
+	 * split leaves flank pieces referencing the old block: freeing
+	 * on the owner alone would pull live backing out from under
+	 * them). */
+	void *pages[UML_NT_PHYS_MAX_RUNS];        /* owner run only */
+	unsigned short span_len[UML_NT_PHYS_MAX_RUNS];  /* 0 = free run */
+	unsigned short span_back[UML_NT_PHYS_MAX_RUNS]; /* dist to owner */
 };
 
 /* Initialize the refcount layer over a section of `size` bytes.
@@ -43,20 +56,31 @@ struct uml_nt_phys {
 int uml_nt_phys_init(struct uml_nt_phys *p, unsigned long long size);
 
 /* Backend hooks (skas/physbackend.c kernel-side, mocked in tests):
- * hand out one 64 KiB run from the kernel page allocator — returns
- * the section offset (64K-aligned) or -1; *page_out receives the
- * opaque handle for the matching free. */
-long long uml_nt_phys_backend_alloc(void **page_out);
-void uml_nt_phys_backend_free(void *page);
+ * hand out ONE CONTIGUOUS block of `nruns` 64 KiB runs (kernel-side:
+ * alloc_pages(order 4 + ceil_log2(nruns)) — a buddy block is
+ * contiguous by construction) — returns the section offset of the
+ * first run (64K-aligned) or -1; *page_out receives the opaque
+ * handle for the matching free. */
+long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns);
+void uml_nt_phys_backend_free(void *page, int nruns);
 
 /* Allocate one run: section offset in bytes, or -1 when the backend
  * is exhausted. The run enters with refcount 1. */
 long long uml_nt_phys_alloc(struct uml_nt_phys *p);
 
+/* Allocate a CONTIGUOUS span of nruns (>= 1): section offset of the
+ * first run, or -1 when the backend is exhausted / hands garbage.
+ * Every run of the span enters with refcount 1. This is what
+ * multi-run VMAs (ELF segments, stacks) need — one MapViewOfFileEx
+ * must cover the whole VMA (vma.h geometry). */
+long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns);
+
 /* refcount helpers. unref returns the refcount AFTER the drop; when
- * it reaches 0 the backend frees the run's pages (the content was
- * copied out before the drop — the COW copy is kernel-side memcpy
- * through the flat view). -1 on bad offsets. */
+ * it reaches 0 the backend frees the run's pages — for a span block,
+ * only when EVERY run of the block is at 0 (D12: COW pieces may
+ * outlive the owner run; the block is one allocation). The content
+ * was copied out before the drop — the COW copy is kernel-side memcpy
+ * through the flat view. -1 on bad offsets. */
 int uml_nt_phys_ref(struct uml_nt_phys *p, long long off);
 int uml_nt_phys_unref(struct uml_nt_phys *p, long long off);
 int uml_nt_phys_refs(struct uml_nt_phys *p, long long off);

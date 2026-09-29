@@ -24,3 +24,10 @@ uml-nt/stub/stub.exe
 
 # kbuild output when building in-tree (uml-nt M1)
 /build/
+
+# M3.4 probe guest build artifacts (built in CI / tests, never committed)
+uml-nt/guest/init.o
+uml-nt/guest/guest-init.elf
+
+# local kernel build dir (this VM)
+/.kbuild/

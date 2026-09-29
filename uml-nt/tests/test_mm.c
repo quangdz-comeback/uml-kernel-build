@@ -33,7 +33,10 @@ static int fails;
 #define RUN  UML_NT_PHYS_RUN_SIZE
 #define RAM  0x60000000ull
 
-/* ---- backend mock (D11): a tiny "buddy" of MOCK_RUNS runs ---- */
+/* ---- backend mock (D11/D12): a tiny "buddy" of MOCK_RUNS runs ----
+ * Block-granular like the real one: an nrun span hands a whole
+ * 2^ceil(log2 n) block (contiguous), first-fit; the padding runs stay
+ * taken while the block lives (the buddy never rehands them). */
 
 #define MOCK_RUNS 16
 #define MOCK_BASE (1ull << 20) /* 1 MiB — deliberately not the head */
@@ -44,26 +47,47 @@ static void mock_reset(void)
 	memset(mock_taken, 0, sizeof(mock_taken));
 }
 
-long long uml_nt_phys_backend_alloc(void **page_out)
+static int mock_need(int nruns)
 {
-	int i;
+	int k;
 
-	for (i = 0; i < MOCK_RUNS; i++) {
-		if (!mock_taken[i]) {
-			mock_taken[i] = 1;
-			*page_out = &mock_taken[i];
-			return MOCK_BASE + (long long)i * RUN;
+	for (k = 0; (1 << k) < nruns; k++)
+		;
+	return 1 << k;
+}
+
+long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
+{
+	int i, j, need = mock_need(nruns);
+
+	for (i = 0; i + need <= MOCK_RUNS; i++) {
+		int ok = 1;
+
+		for (j = 0; j < need; j++) {
+			if (mock_taken[i + j]) {
+				ok = 0;
+				i += j; /* skip the busy run */
+				break;
+			}
 		}
+		if (!ok)
+			continue;
+		for (j = 0; j < need; j++)
+			mock_taken[i + j] = 1;
+		*page_out = &mock_taken[i];
+		return MOCK_BASE + (long long)i * RUN;
 	}
 	return -1;
 }
 
-void uml_nt_phys_backend_free(void *page)
+void uml_nt_phys_backend_free(void *page, int nruns)
 {
 	int i = (int)((char *)page - (char *)mock_taken);
+	int j, need = mock_need(nruns);
 
-	if (i >= 0 && i < MOCK_RUNS)
-		mock_taken[i] = 0;
+	for (j = 0; j < need; j++)
+		if (i + j >= 0 && i + j < MOCK_RUNS)
+			mock_taken[i + j] = 0;
 }
 
 static void test_phys(void)
@@ -104,6 +128,99 @@ static void test_phys(void)
 			CHECK((long long)uml_nt_phys_alloc(&p) >= 0);
 		CHECK((long long)uml_nt_phys_alloc(&p) == -1);
 	}
+}
+
+/* Span allocation (D12): one backend block for n runs, every run
+ * refs=1, block released exactly once — when the LAST run drops. */
+static void test_span(void)
+{
+	struct uml_nt_phys p;
+	unsigned long long s;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&p, 32 * RUN) == 0);
+
+	/* degenerate requests */
+	CHECK(uml_nt_phys_alloc_span(&p, 0) == -1);
+	CHECK(uml_nt_phys_alloc_span(&p, -3) == -1);
+	CHECK(uml_nt_phys_alloc_span(&p, UML_NT_PHYS_MAX_RUNS + 1) == -1);
+
+	/* 3-run span: block granularity 4 — runs 0..2 tracked, run 3
+	 * is block padding (taken at the backend, untracked here). */
+	s = uml_nt_phys_alloc_span(&p, 3);
+	CHECK(s == MOCK_BASE);
+	CHECK(uml_nt_phys_refs(&p, s) == 1);
+	CHECK(uml_nt_phys_refs(&p, s + RUN) == 1);
+	CHECK(uml_nt_phys_refs(&p, s + 2 * RUN) == 1);
+
+	/* pieces drop independently; the block survives until the
+	 * LAST tracked run drops (COW pieces outlive the owner run) */
+	CHECK(uml_nt_phys_unref(&p, s + RUN) == 0);
+	CHECK(uml_nt_phys_refs(&p, s) == 1);
+	/* padding run never rehanded while the block lives */
+	CHECK((unsigned long long)uml_nt_phys_alloc(&p) ==
+	      s + 4 * RUN);
+	CHECK(uml_nt_phys_unref(&p, s) == 0);
+	CHECK(uml_nt_phys_refs(&p, s + 2 * RUN) == 1);
+	CHECK(mock_taken[0] && mock_taken[3]); /* block still alive */
+
+	CHECK(uml_nt_phys_unref(&p, s + 2 * RUN) == 0);
+	CHECK(!mock_taken[0] && !mock_taken[3]); /* freed exactly once */
+
+	/* freed span is fully reusable */
+	CHECK((unsigned long long)uml_nt_phys_alloc(&p) == s);
+}
+
+/* D11 translate: syscall buffers go through the VMA tree, never the
+ * identity (va - ram_base). */
+static void test_translate(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm, child;
+	struct uml_nt_fault_plan plan;
+	unsigned long long r0, r1;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	r0 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + 2 * RUN, r0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+
+	/* inside → run_off + delta */
+	CHECK(uml_nt_vma_translate(&mm, RAM + 0x1234, 8) ==
+	      (long long)(r0 + 0x1234));
+	/* len 0 at the last byte: fine */
+	CHECK(uml_nt_vma_translate(&mm, RAM + 2 * RUN - 1, 0) ==
+	      (long long)(r0 + 2 * RUN - 1));
+	/* buffer crossing the VMA end: -EFAULT class */
+	CHECK(uml_nt_vma_translate(&mm, RAM + 2 * RUN - 4, 8) == -1);
+	/* unmapped */
+	CHECK(uml_nt_vma_translate(&mm, RAM + 2 * RUN, 1) == -1);
+	CHECK(uml_nt_vma_translate(&mm, RAM - 1, 1) == -1);
+
+	/* translate follows COW: after a split the same VA resolves
+	 * through the NEW run (this is the whole point of D11) */
+	r1 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_phys_ref(&ph, r0) == 2); /* a sharer joins */
+	CHECK(uml_nt_vma_chg(&mm, RAM, RAM + 2 * RUN,
+			     UML_NT_PAGE_READWRITE) == 0);
+	mm.vma[0].flags |= UML_NT_VMA_COW;
+	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x800, UML_NT_FAULT_WRITE,
+			      &plan) == 0);
+	CHECK(!plan.kill);
+	/* single-run VMA: UNMAP + MAP(private) — the fresh run is the
+	 * mock's next free one (r1 + RUN; the buddy owes nothing) */
+	CHECK(mm.vma[0].run_off == r1 + RUN);
+	CHECK(uml_nt_vma_translate(&mm, RAM + 0x1234, 8) ==
+	      (long long)(r1 + RUN + 0x1234));
+
+	/* clone keeps translating: the child shares the run (COW) so
+	 * the same VA resolves to the SAME offset in the child */
+	uml_nt_mm_init(&child);
+	CHECK(uml_nt_mm_clone(&child, &mm, &ph, RAM + 4 * RUN) == 0);
+	CHECK(uml_nt_vma_translate(&child, RAM + 0x1234, 8) ==
+	      (long long)(r1 + RUN + 0x1234));
 }
 
 static void test_vma(void)
@@ -176,9 +293,9 @@ static void test_vma(void)
 
 	/* clone with rsp INSIDE the VMA (rsp = one past the last stack
 	 * byte — the VMA owns [start, rsp)): eager-copy into a fresh
-	 * run pair, no COW flag, source refs untouched. (The mock is
-	 * sequential so the pair is contiguous; the real buddy makes
-	 * no such promise — the multi-run span design is open, M4.) */
+	 * run pair, no COW flag, source refs untouched. The pair is
+	 * contiguous by construction: alloc_span hands a whole block
+	 * (D12 — the mock mirrors the buddy's granularity). */
 	mock_reset();
 	uml_nt_mm_init(&a);
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
@@ -487,7 +604,9 @@ static void test_fault(void)
 int main(void)
 {
 	test_phys();
+	test_span();
 	test_vma();
+	test_translate();
 	test_fault();
 
 	if (fails) {

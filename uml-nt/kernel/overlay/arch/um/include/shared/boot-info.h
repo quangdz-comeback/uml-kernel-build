@@ -15,7 +15,7 @@
 
 /* "UMLB" little-endian. */
 #define UML_BOOT_MAGIC   0x424C4D55u
-#define UML_BOOT_VERSION 1u
+#define UML_BOOT_VERSION 2u /* v2: exec section (M3.4 ELF loader source) */
 
 struct uml_boot_info {
 	unsigned int magic;
@@ -44,6 +44,16 @@ struct uml_boot_info {
 	int argc;
 	char **argv;
 	char **envp;
+
+	/* ---- v2 (M3.4): guest exec image, launcher path ----------
+	 * The launcher scans the UML cmdline for `uml_nt_exec=<file>`,
+	 * reads the guest ELF and hands it over as a pagefile-backed
+	 * section (the execveat(memfd) source analogue — the kernel
+	 * maps it read-only and parses; real file sources arrive with
+	 * ubd, M3.5). NULL/0 = no exec image (legacy embedded-blob
+	 * probe mode). Append-only: fields above stay frozen. */
+	HANDLE exec_section;
+	unsigned long long exec_size;
 };
 
 #endif /* __UML_BOOT_INFO_H */

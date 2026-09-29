@@ -17,6 +17,13 @@ jobs:
           bash uml-nt/tests/test_os_windows_skeleton.sh
           bash uml-nt/tests/test_scan_patch.sh
           bash uml-nt/tests/test_mm.sh
+          # M3.4 guest ELF loader — the real-fixture build needs lld
+          # (same clang+lld recipe as the kernel job's guest build).
+          if ! command -v ld.lld >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y lld llvm
+          fi
+          bash uml-nt/tests/test_elf.sh
 
       - name: ntabi ABI checks (ELF freestanding + mingw PE)
         run: |
@@ -30,4 +37,4 @@ jobs:
         run: |
           shellcheck -x uml-nt/kernel/fetch.sh uml-nt/tests/test_fetch.sh \
             uml-nt/tests/test_os_windows_skeleton.sh uml-nt/tests/test_scan_patch.sh \
-            uml-nt/tests/test_mm.sh
+            uml-nt/tests/test_mm.sh uml-nt/tests/test_elf.sh

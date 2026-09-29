@@ -58,6 +58,21 @@ jobs:
           name: uml-nt-vmlinux-elf
           path: build/vmlinux
 
+      # M3.4: the probe guest — a real static ELF64 the kernel-side
+      # loader loads (execveat(memfd) analogue). Same toolchain as the
+      # kernel build; uploaded for the native launcher job.
+      - name: Build probe guest ELF
+        run: |
+          make -C uml-nt/guest CC=clang LD=ld.lld
+          readelf -lW uml-nt/guest/guest-init.elf
+          test -f uml-nt/guest/guest-init.elf
+
+      - name: Upload guest-init.elf
+        uses: actions/upload-artifact@v4
+        with:
+          name: uml-nt-guest-exec-elf
+          path: uml-nt/guest/guest-init.elf
+
       # M1.9 boot gate (wine): mingw-cross-build launcher.exe + boot the
       # just-built vmlinux.elf — must reach the "no rootfs" panic and
       # exit 1 (os_dump_core → NtTerminateProcess(1)). Fast regression
@@ -121,19 +136,27 @@ jobs:
           name: uml-nt-vmlinux-elf
           path: build
 
-      - name: NATIVE boot test (M1.9 acceptance + M2 round-trip)
+      - name: Download guest-init.elf (M3.4)
+        uses: actions/download-artifact@v4
+        with:
+          name: uml-nt-guest-exec-elf
+          path: guest
+
+      - name: NATIVE boot test (M1.9 acceptance + M2 round-trip + M3.1 faults + M3.3 fork + M3.4 ELF loader)
         shell: msys2 {0}
         run: |
           cd uml-nt/launcher
           set +e
           timeout 180 ./launcher.exe ../../build/vmlinux \
             "uml_nt_stubtest=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "uml_nt_exec=$(cygpath -w ../../guest/guest-init.elf)" \
             > boot.log 2>&1
           code=$?
           set -e
           cat boot.log
           [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code (124 = boot hang — see log)"; exit 1; }
           grep -q "No filesystem could mount root" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
+          grep -q "exec loaded: 3 region" boot.log || { echo "M3.4 ELF loader never ran (no exec image loaded)"; exit 1; }
           grep -q "ROUND-TRIP OK" boot.log || { echo "M2 syscall round-trip never completed"; exit 1; }
           grep -q "^hi" boot.log || { echo "guest write output missing"; exit 1; }
           grep -q "FAULT1-OK" boot.log || { echo "M3.1 fault #1 never recovered"; exit 1; }
@@ -142,4 +165,4 @@ jobs:
           grep -q "CHILD-ALIVE" boot.log || { echo "M3.3 fork: child never ran (COW stack fault?)"; exit 1; }
           grep -q "PARENT-RESUMED" boot.log || { echo "M3.3 fork: parent never resumed"; exit 1; }
           grep -q "FORK OK: parent exit 0, child exit 7" boot.log || { echo "M3.3 fork exit codes wrong"; exit 1; }
-          echo "M1.9 NATIVE WINDOWS BOOT OK + M2 ROUND-TRIP OK + M3.1 FAULT ROUND-TRIP OK + M3.3 FORK OK"
+          echo "M1.9 NATIVE BOOT OK + M2 ROUND-TRIP OK + M3.1 FAULTS OK + M3.3 FORK OK + M3.4 ELF LOADER OK"

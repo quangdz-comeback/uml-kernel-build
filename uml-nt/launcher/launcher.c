@@ -250,6 +250,53 @@ static void *map_elf(const char *path, uint64_t *entry_out,
 	return (void *)lo;
 }
 
+/* ---- guest exec image (M3.4): uml_nt_exec=<file> → section --------
+ * The launcher path is the M3.4 source for the kernel-side guest ELF
+ * loader (the execveat(memfd) source analogue): the kernel cannot
+ * open host files yet (file.c opens only the physmem pseudo-fd), so
+ * the launcher reads the file and hands a read-back section in the
+ * boot info. From M3.5 (ubd) real rootfs blobs take over. */
+static HANDLE load_exec_section(const char *path, unsigned long long *size_out)
+{
+	FILE *f = fopen(path, "rb");
+	unsigned long long size;
+	void *buf;
+	HANDLE sec;
+	void *view;
+
+	if (f == NULL) {
+		fprintf(stderr, "launcher: uml_nt_exec: cannot open %s\n",
+			path);
+		exit(2);
+	}
+	if (fseek(f, 0, SEEK_END) != 0 ||
+	    (size = (unsigned long long)ftell(f)) == 0 ||
+	    fseek(f, 0, SEEK_SET) != 0) {
+		fprintf(stderr, "launcher: uml_nt_exec: %s unreadable\n",
+			path);
+		exit(2);
+	}
+	buf = malloc(size);
+	if (buf == NULL || fread(buf, 1, size, f) != size)
+		die("read exec image", 0);
+	fclose(f);
+
+	sec = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL,
+				 PAGE_READWRITE, (DWORD)(size >> 32),
+				 (DWORD)size, NULL);
+	if (sec == NULL)
+		die("CreateFileMapping (exec image)", GetLastError());
+	view = MapViewOfFile(sec, FILE_MAP_WRITE, 0, 0, 0);
+	if (view == NULL)
+		die("MapViewOfFile (exec image)", GetLastError());
+	memcpy(view, buf, size);
+	UnmapViewOfFile(view);
+	free(buf);
+
+	*size_out = size;
+	return sec;
+}
+
 /* ---- kernel stack + boot info + jump ---------------------------------- */
 #define KERNEL_STACK_SIZE (4ULL << 20)
 
@@ -271,12 +318,29 @@ int main(int argc, char **argv)
 	char **kenv_p;
 	uintptr_t cur;
 	HANDLE std_out, std_err;
+	HANDLE exec_sec = NULL;
+	unsigned long long exec_size = 0;
 
 	if (argc < 2) {
 		fprintf(stderr, "usage: launcher.exe vmlinux.elf "
 				"[UML args...]\n");
 		return 2;
 	}
+
+	/* M3.4: uml_nt_exec=<file> names the guest ELF the kernel-side
+	 * loader will run (the launcher reads it, the kernel parses —
+	 * the file path itself never crosses into kernel code). */
+	for (int ai = 2; ai < argc; ai++) {
+		const char *a = argv[ai];
+		const char *pfx = "uml_nt_exec=";
+
+		if (strncmp(a, pfx, strlen(pfx)) == 0)
+			exec_sec = load_exec_section(a + strlen(pfx),
+						     &exec_size);
+	}
+	if (exec_sec != NULL)
+		fprintf(stderr, "[launcher] exec image: %llu bytes\n",
+			exec_size);
 
 	resolve_api_table();
 
@@ -358,6 +422,8 @@ int main(int argc, char **argv)
 	bi->argc = nargs + 1; /* argv[0] + args (earlyprintk included) */
 	bi->argv = kargv_p;
 	bi->envp = kenv_p;
+	bi->exec_section = exec_sec;
+	bi->exec_size = exec_size;
 
 	/* The slot _start reads: [rsp] = boot_info pointer. Keep rsp
 	 * 16-aligned here; _start bumps by 8 to mimic call alignment. */
