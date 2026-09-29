@@ -32,7 +32,8 @@ FIXTURE_SHA="$(make_fixture_tarball "$FIXTURE")"
 export UML_NT_CACHE_DIR="$TMP/cache"
 export UML_NT_PIN_SHA256="$FIXTURE_SHA"
 
-# shellcheck source=../kernel/fetch.sh
+# FETCH is computed from $HERE at runtime; shellcheck cannot follow it.
+# shellcheck disable=SC1091
 source "$FETCH"
 
 # 1. Pin is baked in and immutable via readonly version.
