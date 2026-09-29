@@ -27,4 +27,12 @@ void nt_console_write(const char *s, unsigned int n);
  * from nt_main right after the D9 table check (start_up.c). */
 void uml_nt_install_crash_reporter(void);
 
+/* D19 canary: verify uml_physmem/high_physmem still hold their boot
+ * values. A trashed page_offset makes every virt_to_page/kmem_cache_
+ * free fault far from the offending write (the S4c2 busybox crash:
+ * physmem read 0x400000001, high 0x62000200 — address-shaped values),
+ * so the os-I/O layer checks on every call and dies loud AT the
+ * corrupting window instead of three subsystems later. */
+void uml_nt_physmem_check(const char *where);
+
 #endif

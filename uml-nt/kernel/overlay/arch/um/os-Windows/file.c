@@ -313,6 +313,7 @@ int os_open_file(const char *file, struct openflags flags, int mode)
 	if (!NT_SUCCESS(s))
 		return nt_err_to_errno(s);
 
+	uml_nt_physmem_check("open");
 	fd = fd_alloc(h);
 	if (fd < 0) {
 		nt->NtClose(h); /* table full — don't leak the handle */
@@ -352,6 +353,7 @@ int os_pread_file(int fd, void *buf, int len, unsigned long long offset)
 		if (offset + (unsigned long long)len >
 		    uml_boot.physmem_size)
 			return 0; /* EOF, position untouched */
+		uml_nt_physmem_check("pread:memfd");
 		__builtin_memcpy(buf,
 				 (char *)uml_boot.physmem_base + offset,
 				 len);
@@ -359,6 +361,7 @@ int os_pread_file(int fd, void *buf, int len, unsigned long long offset)
 	}
 	if (fd_handle(fd) == NULL)
 		return -EBADF;
+	uml_nt_physmem_check("pread:host");
 	return host_pread(fd, buf, len, offset);
 }
 
@@ -368,12 +371,14 @@ int os_pwrite_file(int fd, const void *buf, int count, unsigned long long offset
 		if (offset + (unsigned long long)count >
 		    uml_boot.physmem_size)
 			return -1;
+		uml_nt_physmem_check("pwrite:memfd");
 		__builtin_memcpy((char *)uml_boot.physmem_base + offset,
 				 buf, count);
 		return count;
 	}
 	if (fd_handle(fd) == NULL)
 		return -EBADF;
+	uml_nt_physmem_check("pwrite:host");
 	return host_pwrite(fd, buf, count, offset);
 }
 

@@ -16,6 +16,11 @@
 #include <os.h>
 #include "internal.h"
 
+/* um_arch.c page-offset anchors (PAGE_OFFSET / RAM top) — the D19
+ * canary in uml_nt_physmem_check below compares against them. */
+extern unsigned long uml_physmem;
+extern unsigned long high_physmem;
+
 /* HANDOFF §4.1 #13: NtWriteFile to the same console handle from two
  * threads races output (printk from any thread vs tty writes vs
  * stub-ctl diagnostics). Every console write funnels here, so the
@@ -139,4 +144,37 @@ void os_flush_stdout(void)
 {
 	/* Console writes are synchronous NtWriteFile — nothing buffered
 	 * to flush (upstream: fflush(stdout)). */
+}
+
+/* ---- D19 physmem canary ------------------------------------------------
+ * uml_physmem IS page_offset (asm/page.h: PAGE_OFFSET) and high_physmem
+ * tops the guest RAM with it. The S4c2 busybox crash ran with
+ * uml_physmem = 0x400000001 and high_physmem = 0x62000200 (an
+ * address-shaped trash, guest-window flavored) while physmem_size
+ * stayed clean — every virt_to_page/kmem_cache_free after that
+ * computes a wild memmap index and faults far from the write that
+ * did it. The os-I/O funnel (pread/pwrite/open/close) checks on every
+ * call: the log names the last clean checkpoint, the corrupting step
+ * is the code between two adjacent lines. Snapshot at first use (the
+ * values are set in linux_main, before any host I/O). */
+void uml_nt_physmem_check(const char *where)
+{
+	static unsigned long want_phys, want_high;
+	static int snapped;
+
+	if (!snapped) {
+		want_phys = uml_physmem;
+		want_high = high_physmem;
+		snapped = 1;
+		return;
+	}
+	if (uml_physmem != want_phys || high_physmem != want_high) {
+		os_info("PHYSMEM TRASHED at %s: physmem=%llx (want %llx) "
+			"high=%llx (want %llx)\n", where,
+			(unsigned long long)uml_physmem,
+			(unsigned long long)want_phys,
+			(unsigned long long)high_physmem,
+			(unsigned long long)want_high);
+		os_dump_core();
+	}
 }
