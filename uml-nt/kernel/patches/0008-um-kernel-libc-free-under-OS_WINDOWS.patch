@@ -1,0 +1,66 @@
+--- a/arch/um/kernel/um_arch.c
++++ b/arch/um/kernel/um_arch.c
+@@ -45,7 +45,7 @@
+ {
+ 	if (strlen(command_line) + strlen(arg) + 1 > COMMAND_LINE_SIZE) {
+ 		os_warn("add_arg: Too many command line arguments!\n");
+-		exit(1);
++		os_dump_core();
+ 	}
+ 	if (strlen(command_line) > 0)
+ 		strcat(command_line, " ");
+@@ -136,8 +136,8 @@
+ static int __init uml_version_setup(char *line, int *add)
+ {
+ 	/* Explicitly use printf() to show version in stdout */
+-	printf("%s\n", init_utsname()->release);
+-	exit(0);
++	printk("%s\n", init_utsname()->release);
++	os_dump_core();
+ 
+ 	return 0;
+ }
+@@ -184,7 +184,7 @@
+ 		printf("%s", *p);
+ 		p++;
+ 	}
+-	exit(0);
++	os_dump_core();
+ 	return 0;
+ }
+ 
+--- a/arch/um/kernel/physmem.c
++++ b/arch/um/kernel/physmem.c
+@@ -69,7 +69,7 @@
+ 	if (len <= reserve) {
+ 		os_warn("Too few physical memory! Needed=%lu, given=%lu\n",
+ 			reserve, len);
+-		exit(1);
++		os_dump_core();
+ 	}
+ 
+ 	physmem_fd = create_mem_file(len);
+@@ -80,7 +80,7 @@
+ 		os_warn("setup_physmem - mapping %lu bytes of memory at 0x%p "
+ 			"failed - errno = %d\n", map_size,
+ 			(void *) reserve_end, err);
+-		exit(1);
++		os_dump_core();
+ 	}
+ 
+ 	/*
+--- a/arch/um/kernel/kmsg_dump.c
++++ b/arch/um/kernel/kmsg_dump.c
+@@ -44,10 +44,10 @@
+ 
+ 	kmsg_dump_rewind(&iter);
+ 
+-	printf("kmsg_dump:\n");
++	printk("kmsg_dump:\n");
+ 	while (kmsg_dump_get_line(&iter, true, line, sizeof(line), &len)) {
+ 		line[len] = '\0';
+-		printf("%s", line);
++		printk("%s", line);
+ 	}
+ 
+ 	spin_unlock_irqrestore(&lock, flags);

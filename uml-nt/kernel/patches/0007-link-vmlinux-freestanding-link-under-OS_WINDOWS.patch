@@ -1,0 +1,16 @@
+--- a/scripts/link-vmlinux.sh
++++ b/scripts/link-vmlinux.sh
+@@ -81,6 +81,13 @@
+ 		ld="${CC}"
+ 		ldflags="${CFLAGS_vmlinux}"
+ 		ldlibs="-lutil -lrt -lpthread"
++		if is_enabled CONFIG_OS_WINDOWS; then
++			# uml-nt D1/D2/D9: freestanding NT kernel — no host
++			# crt/libc/pthreads; NT API arrives via the launcher
++			# boot-info table, entry symbol comes from the lds.
++			ldlibs=
++			ldflags="${ldflags} -nostdlib"
++		fi
+ 	else
+ 		wl=
+ 		ld="${LD}"

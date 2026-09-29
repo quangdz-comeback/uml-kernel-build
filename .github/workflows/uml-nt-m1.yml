@@ -1,0 +1,56 @@
+name: uml-nt M1 kernel build (D5a cross)
+
+# Builds the freestanding vmlinux.elf (CONFIG_OS_WINDOWS) with clang+lld —
+# the D5a path: kernel is built on Linux, runs on Windows via launcher.exe.
+# Recipe adapted from lts_latest.yml; pins come from kernel/fetch.sh
+# (tarball sha256 verified against kernel.org official sums).
+
+on:
+  push:
+    branches: ["uml-nt/**"]
+  workflow_dispatch:
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential flex bison bc patch \
+            xz-utils clang lld llvm
+
+      - name: Fetch pinned v6.18.37 + apply uml-nt overlay
+        run: |
+          TREE=$(bash uml-nt/kernel/fetch.sh extract)
+          bash uml-nt/kernel/apply.sh "$TREE"
+          echo "TREE=$TREE" >> "$GITHUB_ENV"
+
+      - name: Configure (uml_nt_defconfig, clang+lld)
+        run: |
+          make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC=clang LD=ld.lld \
+            uml_nt_defconfig
+
+      - name: Build vmlinux (clang+lld)
+        run: |
+          make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC=clang LD=ld.lld \
+            -j"$(nproc)"
+
+      - name: Freestanding gates (D1/D2)
+        run: |
+          set -euxo pipefail
+          test -f build/vmlinux
+          # D1: zero host-libc references may remain undefined or dynamic.
+          [ "$(nm -u build/vmlinux | wc -l)" -eq 0 ]
+          ! readelf -d build/vmlinux | grep -q NEEDED
+          # D2/D9: entry point is our _start (launcher jumps there).
+          ENTRY=$(readelf -h build/vmlinux | awk '/Entry point/ {print $4}')
+          nm build/vmlinux | grep -q " $ENTRY T _start"
+
+      - name: Upload vmlinux.elf
+        uses: actions/upload-artifact@v4
+        with:
+          name: uml-nt-vmlinux-elf
+          path: build/vmlinux

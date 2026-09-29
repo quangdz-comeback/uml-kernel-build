@@ -11,6 +11,13 @@
  */
 #include <stub-impl.h>
 
+/*
+ * Kernel-side irqflags/longjmp read this (extern in asm/irqflags.h).
+ * Upstream keeps it in __thread TLS; D1 forbids ELF TLS — plain global
+ * for M1 boot, per-thread redesign lands with the VEH signal model (M2).
+ */
+int signals_enabled;
+
 void timer_set_signal_handler(void)
 {
 	stub_panic("signal.c: timer_set_signal_handler — NT: waitable HR timer thread (S2)");
@@ -79,24 +86,4 @@ void unblock_signals_hard(void)
 void mark_sigio_pending(void)
 {
 	stub_panic("signal.c: mark_sigio_pending");
-}
-
-void block_signals_trace(void)
-{
-	stub_panic("signal.c: block_signals_trace");
-}
-
-void unblock_signals_trace(void)
-{
-	stub_panic("signal.c: unblock_signals_trace");
-}
-
-void um_trace_signals_on(void)
-{
-	stub_panic("signal.c: um_trace_signals_on");
-}
-
-void um_trace_signals_off(void)
-{
-	stub_panic("signal.c: um_trace_signals_off");
 }

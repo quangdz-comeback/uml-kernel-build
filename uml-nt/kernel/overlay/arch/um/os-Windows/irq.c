@@ -8,6 +8,14 @@
  * (ARCHITECTURE §3). Status: M1.3 skeleton — PANICs.
  */
 #include <stub-impl.h>
+/*
+ * Upstream: drivers/chan_kern.c (excluded at M1 — see arch/um/Kbuild
+ * patch). With no channels registered there is nothing to free, so the
+ * no-op below is exact M1 semantics; replaced at M3.
+ */
+void free_irqs(void)
+{
+}
 
 int os_waiting_for_events_epoll(void)
 {
@@ -57,14 +65,4 @@ void os_set_ioignore(void)
 void os_close_epoll_fd(void)
 {
 	stub_panic("irq.c: os_close_epoll_fd");
-}
-
-void um_irqs_suspend(void)
-{
-	stub_panic("irq.c: um_irqs_suspend");
-}
-
-void um_irqs_resume(void)
-{
-	stub_panic("irq.c: um_irqs_resume");
 }

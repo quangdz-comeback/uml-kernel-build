@@ -3,9 +3,3 @@
 #include "stub-impl.h"
 
 unsigned long host_fp_size;
-
-void stub_panic(const char *why)
-{
-	for (;;)
-		;
-}

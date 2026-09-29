@@ -1,0 +1,21 @@
+--- a/arch/um/Kbuild
++++ b/arch/um/Kbuild
+@@ -1,3 +1,17 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
+-obj-y += kernel/ drivers/ os-Linux/
++# uml-nt: pick the os- backend dir at config time (D4). $(src)-style dir
++# Makefiles then own their objects.
++os-dir := os-Linux
++ifeq ($(CONFIG_OS_WINDOWS),y)
++os-dir := os-Windows
++endif
++
++ifeq ($(CONFIG_OS_WINDOWS),y)
++# M1: drivers/ (chan stack, ubd, net) is user-object code that links
++# against host libc on Linux — contradicts D1 until ported (console+ubd
++# return at M3). Boot reaches "no rootfs" panic without any of it.
++obj-y += kernel/ $(os-dir)/
++else
++obj-y += kernel/ drivers/ $(os-dir)/
++endif

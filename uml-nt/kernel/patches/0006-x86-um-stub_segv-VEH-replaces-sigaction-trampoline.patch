@@ -1,0 +1,28 @@
+--- a/arch/x86/um/stub_segv.c
++++ b/arch/x86/um/stub_segv.c
+@@ -6,6 +6,7 @@
+ #include <sysdep/stub.h>
+ #include <sysdep/faultinfo.h>
+ #include <sysdep/mcontext.h>
++#ifndef CONFIG_OS_WINDOWS
+ #include <sys/ucontext.h>
+ 
+ void __attribute__ ((__section__ (".__syscall_stub")))
+@@ -17,4 +18,17 @@
+ 	GET_FAULTINFO_FROM_MC(*f, &uc->uc_mcontext);
+ 	trap_myself();
+ }
++#else
++/*
++ * uml-nt (OS_WINDOWS): guest faults surface as VEH exceptions inside
++ * stub.exe (S1/S5), never through this Linux sigaction trampoline; the
++ * kernel still expects the symbol to exist in the .__syscall_stub
++ * section for section layout, so keep a defined-but-unreachable body.
++ */
++void __attribute__ ((__section__ (".__syscall_stub")))
++stub_segv_handler(int sig, siginfo_t *info, void *p)
++{
++	trap_myself();
++}
++#endif
+ 

@@ -1,0 +1,53 @@
+--- a/arch/um/kernel/um_arch.c
++++ b/arch/um/kernel/um_arch.c
+@@ -45,7 +45,7 @@
+ {
+ 	if (strlen(command_line) + strlen(arg) + 1 > COMMAND_LINE_SIZE) {
+ 		os_warn("add_arg: Too many command line arguments!\n");
+-		exit(1);
++		os_dump_core();
+ 	}
+ 	if (strlen(command_line) > 0)
+ 		strcat(command_line, " ");
+@@ -136,8 +136,8 @@
+ static int __init uml_version_setup(char *line, int *add)
+ {
+ 	/* Explicitly use printf() to show version in stdout */
+-	printf("%s\n", init_utsname()->release);
+-	exit(0);
++	printk("%s\n", init_utsname()->release);
++	os_dump_core();
+ 
+ 	return 0;
+ }
+@@ -177,14 +177,14 @@
+ {
+ 	const char **p;
+ 
+-	printf(usage_string, init_utsname()->release);
++	printk(usage_string, init_utsname()->release);
+ 	p = &__uml_help_start;
+ 	/* Explicitly use printf() to show help in stdout */
+ 	while (p < &__uml_help_end) {
+-		printf("%s", *p);
++		printk("%s", *p);
+ 		p++;
+ 	}
+-	exit(0);
++	os_dump_core();
+ 	return 0;
+ }
+ 
+@@ -345,7 +345,12 @@
+ 
+ 	get_host_cpu_features(parse_host_cpu_flags, parse_cache_line);
+ 
++#ifdef CONFIG_OS_WINDOWS
++	/* No host brk on NT (D1) — see arch/um/kernel/mem.c note. */
++	brk_start = (unsigned long) &_end;
++#else
+ 	brk_start = (unsigned long) sbrk(0);
++#endif
+ 
+ 	/*
+ 	 * Increase physical memory size for exec-shield users

@@ -19,13 +19,3 @@ void get_safe_registers(unsigned long *regs, unsigned long *fp_regs)
 {
 	stub_panic("registers.c: get_safe_registers — NT: copy from NT CONTEXT (VEH)");
 }
-
-int get_fp_registers(int pid, unsigned long *regs)
-{
-	stub_panic("registers.c: get_fp_registers");
-}
-
-int put_fp_registers(int pid, unsigned long *regs)
-{
-	stub_panic("registers.c: put_fp_registers");
-}

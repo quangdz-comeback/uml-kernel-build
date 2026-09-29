@@ -1,0 +1,56 @@
+--- a/arch/um/kernel/config.c.in
++++ b/arch/um/kernel/config.c.in
+@@ -3,9 +3,8 @@
+  * Copyright (C) 2002 Jeff Dike (jdike@karaya.com)
+  */
+ 
+-#include <stdio.h>
+-#include <stdlib.h>
+ #include <init.h>
++#include <os.h>
+ 
+ static __initdata const char *config[] = {
+ "CONFIG"
+@@ -15,8 +14,8 @@
+ {
+ 	int i;
+ 	for (i = 0; i < sizeof(config)/sizeof(config[0]); i++)
+-		printf("%s", config[i]);
+-	exit(0);
++		printk("%s", config[i]);
++	os_dump_core();
+ }
+ 
+ __uml_setup("--showconfig", print_config,
+--- a/arch/x86/um/ptrace_user.c
++++ b/arch/x86/um/ptrace_user.c
+@@ -1,21 +1,16 @@
+ /*
+- * Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
+- * Licensed under the GPL
++ * uml-nt (CONFIG_OS_WINDOWS): both functions are ptrace-mode seams (D6);
++ * the NT backend has no ptrace and no host errno — the kernel-side
++ * callers only exist on the ptrace path, so these PANIC if ever reached.
+  */
++void stub_panic(const char *why) __attribute__((noreturn));
+ 
+-#include <errno.h>
+-#include <ptrace_user.h>
+-
+-int ptrace_getregs(long pid, unsigned long *regs_out)
++int init_registers(int pid)
+ {
+-	if (ptrace(PTRACE_GETREGS, pid, 0, regs_out) < 0)
+-		return -errno;
+-	return 0;
++	stub_panic("ptrace_user.c: init_registers — no ptrace on NT (D6)");
+ }
+ 
+-int ptrace_setregs(long pid, unsigned long *regs)
++int ptrace_setregs(int pid, unsigned long *regs)
+ {
+-	if (ptrace(PTRACE_SETREGS, pid, 0, regs) < 0)
+-		return -errno;
+-	return 0;
++	stub_panic("ptrace_user.c: ptrace_setregs — no ptrace on NT (D6)");
+ }

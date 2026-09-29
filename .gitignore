@@ -19,3 +19,6 @@ uml-nt/spikes/*.exe
 uml-nt/spikes/s6_scan
 uml-nt/spikes/payload.elf
 uml-nt/spikes/results/
+
+# kbuild output when building in-tree (uml-nt M1)
+/build/

@@ -6,6 +6,13 @@
  */
 #include <stub-impl.h>
 
+/*
+ * os-Linux/elf_aux.c owns this upstream (host auxv scan); that file has
+ * no NT counterpart (no auxv, D1). binfmt_elf references it for the
+ * guest AT_HWCAP — stays 0 until the NT feature report (M2+).
+ */
+long elf_aux_hwcap;
+
 void stack_protections(unsigned long address)
 {
 	stub_panic("util.c: stack_protections");
