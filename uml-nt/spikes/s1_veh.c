@@ -15,8 +15,24 @@ static volatile uint64_t g_pf_addr, g_pf_rw;
 static volatile uint64_t g_r12_after, g_rax_after;
 
 static void after_redirect(void) { g_redirect_done = 1; }
-static void after_fault(void)    { }
-static void fault_site(void)     { *(volatile int *)0 = 1; }
+
+/* Resume point inside fault_site's own frame — landing on a label keeps
+ * RSP/frame valid (a bare-ret target gets inlined into main and unwinds it).
+ * The opaque condition stops GCC from proving the store always faults and
+ * dead-coding the label into a re-executing loop. */
+static void *g_fault_resume;
+static volatile int g_do_fault = 1;
+static volatile int g_fault_landed;
+
+static __attribute__((noinline)) void fault_site(void) {
+    g_fault_resume = &&fault_return;
+    if (g_do_fault)
+        *(volatile int *)0 = 1;
+    else
+        g_fault_landed = 2;             /* never taken; keeps fallthrough live */
+fault_return:
+    g_fault_landed = 1;
+}
 
 static LONG CALLBACK veh(PEXCEPTION_POINTERS ep) {
     PEXCEPTION_RECORD er = ep->ExceptionRecord;
@@ -24,15 +40,29 @@ static LONG CALLBACK veh(PEXCEPTION_POINTERS ep) {
     if (er->ExceptionCode == STATUS_ILLEGAL_INSTRUCTION) {
         InterlockedIncrement(&g_traps);
         c->Rax = 0x4142434445464748ULL;              /* prove reg writes stick */
-        if (g_do_redirect) { g_do_redirect = 0; c->Rip = (DWORD64)(uintptr_t)after_redirect; }
-        else               { c->Rip += 2; }          /* skip ud2 */
+        if (g_do_redirect) {
+            /* Redirect like a CALL: push the resume point (RIP+2) so the
+             * target can return normally — jumping bare would make its RET
+             * pop garbage and land in an unmapped/exec-fault loop. */
+            g_do_redirect = 0;
+            c->Rsp -= 8;
+            *(uint64_t *)(c->Rsp) = c->Rip + 2;
+            c->Rip = (DWORD64)(uintptr_t)after_redirect;
+        } else {
+            c->Rip += 2;                              /* skip ud2 */
+        }
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (er->ExceptionCode == STATUS_ACCESS_VIOLATION && er->NumberParameters >= 2) {
         g_pf_addr = er->ExceptionInformation[1];     /* faulting VA (CR2 analog) */
         g_pf_rw   = er->ExceptionInformation[0];     /* 0=read 1=write 8=DEP */
-        if (g_pf_addr == 0) { g_pf_ok = 1; c->Rip = (DWORD64)(uintptr_t)after_fault; }
-        return EXCEPTION_CONTINUE_EXECUTION;
+        if (g_pf_addr == 0) {
+            g_pf_ok = 1;
+            c->Rip = (DWORD64)(uintptr_t)g_fault_resume;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        /* unexpected fault: pass it on instead of re-faulting forever */
+        return EXCEPTION_CONTINUE_SEARCH;
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -69,7 +99,7 @@ int main(void) {
              (g_rax_after == 0x4142434445464748ULL);
 
     fault_site();
-    int a_pf = g_pf_ok && g_pf_addr == 0 && g_pf_rw == 1;
+    int a_pf = g_pf_ok && g_pf_addr == 0 && g_pf_rw == 1 && g_fault_landed == 1;
 
     const int S = 100000, B = 2000000, PFS = 20000;
     double *smp = malloc(S * sizeof(double));
