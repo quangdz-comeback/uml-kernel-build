@@ -214,6 +214,10 @@ jobs:
           grep -q "CHILD-ALIVE" boot.log || { echo "M3.3 fork: child never ran (COW stack fault?)"; exit 1; }
           grep -q "PARENT-RESUMED" boot.log || { echo "M3.3 fork: parent never resumed"; exit 1; }
           grep -q "FORK OK: parent exit 0, child exit 7" boot.log || { echo "M3.3 fork exit codes wrong"; exit 1; }
+          # M3.8 S1: the real mm-context lifecycle (init_new_context/
+          # destroy_context path) — spawn + destroy a bare suspended
+          # stub through uml_nt_mmctx_init/destroy.
+          grep -q "MMCTX OK" boot.log || { echo "M3.8 S1 mmctx lifecycle never ran"; exit 1; }
           # M3.6: the real console TTY registers (major 4 tty0) and
           # printk routes through it.
           grep -q "stdio console ready" boot.log || { echo "M3.6 console driver never registered"; exit 1; }

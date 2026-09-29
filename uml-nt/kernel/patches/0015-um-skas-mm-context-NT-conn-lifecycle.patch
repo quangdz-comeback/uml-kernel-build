@@ -1,0 +1,99 @@
+um: skas mm-context NT lifecycle (mm_id nt_conn + mmu.c OS_WINDOWS paths)
+
+uml-nt S1: under CONFIG_OS_WINDOWS the mm context carries a kzalloc'd
+conn (mm_id->nt_conn) with the whole stub-protocol state, and
+init_new_context/destroy_context route to uml_nt_mmctx_init/destroy
+(os-Windows/skas/mmctx.c) instead of the stub_data-page + host-clone
+machinery that has no NT equivalent. Upstream bodies stay verbatim
+under #else — the call ORDER (mm_init -> init_new_context, mmdrop ->
+destroy_context) is untouched, so exec/fork semantics do not move.
+
+Signed-off-by: uml-nt agent <droid@factory.ai>
+---
+ a/arch/um/include/shared/skas/mm_id.h | 21 ++++++++++++++++++
+ a/arch/um/kernel/skas/mmu.c           | 33 ++++++++++++++++++++++++--
+ 2 files changed, 52 insertions(+), 2 deletions(-)
+
+--- a/arch/um/include/shared/skas/mm_id.h
++++ b/arch/um/include/shared/skas/mm_id.h
+@@ -17,8 +17,29 @@
+ 	int sock;
+ 	int syscall_fd_num;
+ 	int syscall_fd_map[STUB_MAX_FDS];
++
++#ifdef CONFIG_OS_WINDOWS
++	/* uml-nt (S1): the NT stub-protocol conn for this address
++	 * space: one kzalloc'd struct uml_nt_stub_conn (os-Windows/
++	 * syscall.h) holding the stub_data view, the event pair, the
++	 * process/thread handles, the VMA manager and the plan runner
++	 * (the D10 state). Upstream fields keep their meaning for
++	 * parity; the lifecycle lives in uml_nt_mmctx_init/destroy.
++	 */
++	void *nt_conn;
++#endif
+ };
+ 
+ void notify_mm_kill(int pid);
+ 
++/* uml-nt (OS_WINDOWS, S1): the NT mm-context lifecycle that replaces
++ * the upstream init_new_context/destroy_context bodies (kernel/skas/
++ * mmu.c calls them under CONFIG_OS_WINDOWS). Declared here because
++ * mmu.c already sees this header.
++ */
++#ifdef CONFIG_OS_WINDOWS
++int uml_nt_mmctx_init(struct mm_id *id);
++void uml_nt_mmctx_destroy(struct mm_id *id);
++#endif
++
+ #endif
+--- a/arch/um/kernel/skas/mmu.c
++++ b/arch/um/kernel/skas/mmu.c
+@@ -26,6 +26,19 @@
+ int init_new_context(struct task_struct *task, struct mm_struct *mm)
+ {
+ 	struct mm_id *new_id = &mm->context.id;
++
++#ifdef CONFIG_OS_WINDOWS
++	/* uml-nt (S1): no stub_data page and no host clone here — the
++	 * conn (mm_id->nt_conn, kzalloc'd) carries the whole stub
++	 * protocol state and the stub.exe process spawns suspended
++	 * (spawn_stub, the S5 pattern). The lifecycle call order is
++	 * upstream's: mm_init() treats this exactly like the seccomp
++	 * start_userspace step, and destroy_context runs from mmdrop.
++	 * mm_list/SIGCHLD-irq reaping stays upstream-only (S4/M4: the
++	 * conn alive flag + explicit destroy cover the POC lifetime).
++	 */
++	return uml_nt_mmctx_init(new_id);
++#else
+ 	unsigned long stack = 0;
+ 	int ret = -ENOMEM;
+ 
+@@ -53,10 +66,20 @@
+ 	free_pages(new_id->stack, ilog2(STUB_DATA_PAGES));
+  out:
+ 	return ret;
++#endif
+ }
+ 
+ void destroy_context(struct mm_struct *mm)
+ {
++#ifdef CONFIG_OS_WINDOWS
++	/* uml-nt (S1): kill the stub process, drop the kernel-side
++	 * stub_data view, close the handles and free the conn.
++	 * nt_conn NULL = init_new_context never completed (upstream
++	 * covers the same case with the pid sanity check below).
++	 */
++	uml_nt_mmctx_destroy(&mm->context.id);
++	return;
++#else
+ 	struct mm_context *mmu = &mm->context;
+ 
+ 	/*
+@@ -86,6 +109,7 @@
+ 	guard(spinlock_irqsave)(&mm_list_lock);
+ 
+ 	list_del(&mm->context.list);
++#endif
+ }
+ 
+ static irqreturn_t mm_sigchld_irq(int irq, void* dev)

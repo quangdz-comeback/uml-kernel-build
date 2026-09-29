@@ -31,6 +31,10 @@ struct uml_nt_stub_conn {
 	struct uml_nt_stub_data *d;
 	HANDLE evt_in, evt_out;
 	HANDLE proc, thread;
+	/* the stub_data section handle (kernel-side owner record —
+	 * mmctx destroy closes it; spawn leaves it set as soon as it
+	 * exists so a failed spawn cleans up without leaking). */
+	HANDLE dsec;
 	struct uml_nt_mm *mm;
 	struct uml_nt_phys *ph; /* guest run refcount layer (mmap/brk) */
 	ULONG pid;
@@ -67,6 +71,20 @@ struct uml_nt_mm *uml_nt_syscall_mm(void);
 /* Install the uaccess mm (the dispatch calls this around each
  * handler; uaccess.c reads it through uml_nt_syscall_mm). */
 void uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
+
+/* Spawn one stub.exe process for this conn (S5 pattern, suspended,
+ * bootstrap via inherited handles + value cmdline). Used by the probe
+ * fork path AND the real mm-context lifecycle (mmctx.c) — one
+ * machinery, one protocol. Returns 0, -1 on failure; conn fields
+ * record handles as soon as they exist so a failed spawn cleans up
+ * without leaking. */
+int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
+		      unsigned long long stack_va,
+		      const struct uml_nt_gp_regs *init);
+
+/* The configured stub exe path (uml_nt_stub= / uml_nt_stubtest=
+ * param), or NULL when neither was given. */
+const char *uml_nt_stub_path(void);
 
 /* Hooks implemented next to the conn table (stub_ctl.c):
  *  - fork/clone(!CLONE_VM): spawn the child stub from the parent's

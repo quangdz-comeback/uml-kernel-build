@@ -41,6 +41,7 @@
 
 #include <os.h>
 #include <syscall.h>
+#include <mm_id.h>
 #include <uaccess_walk.h>
 #include "internal.h"
 
@@ -76,21 +77,38 @@ static struct uml_nt_phys probe_phys;
 static char stub_path[512];
 static int have_stub_path;
 
-static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
-		      unsigned long long stack_va,
-		      const struct uml_nt_gp_regs *init);
-
-static int __init uml_nt_stubtest_setup(char *str, int *add)
+static int __init uml_nt_stub_param_setup(char *str, int *add)
 {
 	*add = 0;
 	if (!str || !*str) {
-		os_warn("uml_nt_stubtest: missing path\n");
+		os_warn("uml_nt_stub: missing path\n");
 		return 0;
 	}
 	if (strlen(str) >= sizeof(stub_path))
 		return 0;
 	strcpy(stub_path, str);
 	have_stub_path = 1;
+	return 0;
+}
+__uml_setup("uml_nt_stub=", uml_nt_stub_param_setup,
+"uml_nt_stub=<path>\n"
+"    Path of stub.exe for the real mm-context lifecycle (S1:\n"
+"    init_new_context spawns one stub per guest address space).\n");
+
+/* The configured stub exe path, or NULL. mmctx.c asks before
+ * spawning; the probe param below implies the same path. */
+const char *uml_nt_stub_path(void)
+{
+	return have_stub_path ? stub_path : NULL;
+}
+
+static int __init uml_nt_stubtest_setup(char *str, int *add)
+{
+	/* The probe implies the stub path (its spawns are the same
+	 * machinery); it additionally arms the probe thread. The
+	 * shared setup consumes the param (add = 0: never leaks into
+	 * the guest-visible cmdline). */
+	uml_nt_stub_param_setup(str, add);
 	return 0;
 }
 __uml_setup("uml_nt_stubtest=", uml_nt_stubtest_setup,
@@ -294,7 +312,7 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	/* The child resumes at the same instruction with the parent's
 	 * registers and rax = 0 (fork semantics); the parent gets the
 	 * child pid. */
-	if (spawn_stub(k, g->rip + 2, g->rsp, g) < 0) {
+	if (uml_nt_spawn_stub(k, g->rip + 2, g->rsp, g) < 0) {
 		uml_nt_mm_drop(&mm_child, &probe_phys);
 		d->retval = (unsigned long long)-12LL;
 		d->err = 1;
@@ -349,8 +367,10 @@ void uml_nt_sys_wait4(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d,
 
 /* Spawn one stub.exe for `mm` (S5 pattern: inheritable handles, value
  * cmdline, CREATE_SUSPENDED). init_regs are applied by the stub right
- * before the jump (fork children need the parent snapshot). */
-static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
+ * before the jump (fork children need the parent snapshot).
+ * EXPORT (S1): the real mm-context lifecycle (mmctx.c) spawns through
+ * this too — same machinery as the probe, one protocol. */
+int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 		      unsigned long long stack_va,
 		      const struct uml_nt_gp_regs *init)
 {
@@ -381,6 +401,10 @@ static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				      UML_STUB_SECTION_SIZE, NULL);
 	if (dsec == NULL)
 		goto fail;
+	/* Record handles AS THEY EXIST (S1): a failed spawn must
+	 * clean up without leaking (mmctx destroy walks exactly
+	 * these). */
+	c->dsec = dsec;
 	c->evt_in = nt->CreateEventW(&sa, 0, 0, NULL);  /* stub→kern */
 	c->evt_out = nt->CreateEventW(&sa, 0, 0, NULL); /* kern→stub */
 	if (c->evt_in == NULL || c->evt_out == NULL)
@@ -392,6 +416,7 @@ static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	if (view == NULL)
 		goto fail;
 	d = view;
+	c->d = d;
 	memset(d, 0, sizeof(*d));
 	d->magic = UML_STUB_MAGIC;
 	d->version = UML_STUB_VERSION;
@@ -422,7 +447,6 @@ static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				&si, &pi))
 		goto fail;
 
-	c->d = d;
 	c->proc = pi.hProcess;
 	c->thread = pi.hThread;
 	c->pid = pi.dwProcessId;
@@ -433,7 +457,7 @@ static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	return 0;
 
 fail:
-	os_info("[stubtest] spawn failed win32=%lu\n",
+	os_info("[stub] spawn failed win32=%lu\n",
 		nt->RtlGetLastWin32Error());
 	return -1;
 }
@@ -731,7 +755,8 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	/* Initial guest rsp = the TOP of the stack run (grows down);
 	 * the stack VMA itself owns [stack_va, stack_va + RUN) (ELF:
 	 * placed by the loader above the last region). */
-	if (spawn_stub(&conn_parent, entry_va, stack_top, &init_regs) < 0)
+	if (uml_nt_spawn_stub(&conn_parent, entry_va, stack_top,
+			      &init_regs) < 0)
 		return 0;
 	os_info("[stubtest] parent stub pid %lu — resuming\n",
 		(unsigned long)conn_parent.pid);
@@ -826,6 +851,27 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	os_info("[stubtest] FORK OK: parent exit %lu, child exit %lu "
 		"(want 0 / 7)\n", (unsigned long)conn_parent.exit_code,
 		(unsigned long)conn_child.exit_code);
+
+	/* S1 gate: the real mm-context lifecycle (the init_new_context/
+	 * destroy_context path) — kzalloc conn, spawn a bare suspended
+	 * stub on the fat thread, then tear it down (kill + unmap +
+	 * close + kfree). No exec involved, so this exercises exactly
+	 * the S1 machinery end to end. */
+	{
+		struct mm_id probe_mm_id;
+		int rc, pid;
+
+		memset(&probe_mm_id, 0, sizeof(probe_mm_id));
+		rc = uml_nt_mmctx_init(&probe_mm_id);
+		if (rc == 0) {
+			pid = probe_mm_id.pid;
+			uml_nt_mmctx_destroy(&probe_mm_id);
+			os_info("[stubtest] MMCTX OK: conn spawn+destroy "
+				"(pid was %d)\n", pid);
+		} else {
+			os_info("[stubtest] MMCTX FAILED rc=%d\n", rc);
+		}
+	}
 	return 0;
 }
 
