@@ -39,6 +39,12 @@ int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 		     unsigned long long va, unsigned long long len,
 		     char *buf, int op)
 {
+	/* Fail-safe (review M3.8): outside a syscall handler no mm is
+	 * installed — every nonzero access faults (EFAULT class),
+	 * never a translate() NULL deref. Zero length touches nothing
+	 * (Linux: no-op). */
+	if (mm == (const struct uml_nt_mm *)0 && len > 0)
+		return -1;
 	while (len) {
 		unsigned long long chunk = UACC_PAGE - UACC_PAGE_OFF(va);
 		long long off;
@@ -73,6 +79,10 @@ static long long uacc_str_walk(char *dst, const struct uml_nt_mm *mm,
 {
 	unsigned long long done = 0;
 
+	/* No mm installed = fault class (strnlen_user → 0, strncpy →
+	 * -1), same as an unmapped byte (fail-safe, review M3.8). */
+	if (mm == (const struct uml_nt_mm *)0)
+		return want_nul_incl ? 0 : -1;
 	while (done < maxlen) {
 		unsigned long long chunk = UACC_PAGE - UACC_PAGE_OFF(va);
 		long long off, n;

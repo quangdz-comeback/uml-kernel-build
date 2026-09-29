@@ -106,6 +106,23 @@ int main(void)
 				       UML_NT_UACC_FROM_GUEST) < 0);
 	}
 
+	/* M3.8 review regression: mm == NULL (outside a syscall
+	 * handler) must fail SAFE — EFAULT class for copies, 0 for
+	 * strnlen — never a translate() NULL deref. Zero length
+	 * touches nothing (Linux: no-op). */
+	CHECK(uml_nt_uacc_walk((const struct uml_nt_mm *)0, (char *)flat,
+			       RAM, 4, buf, UML_NT_UACC_FROM_GUEST) < 0);
+	CHECK(uml_nt_uacc_walk((const struct uml_nt_mm *)0, (char *)flat,
+			       RAM, 0, buf, UML_NT_UACC_FROM_GUEST) == 0);
+	CHECK(uml_nt_uacc_walk((const struct uml_nt_mm *)0, (char *)flat,
+			       RAM, 4, buf, UML_NT_UACC_TO_GUEST) < 0);
+	CHECK(uml_nt_uacc_walk((const struct uml_nt_mm *)0, (char *)flat,
+			       RAM, 4, buf, UML_NT_UACC_ZERO_GUEST) < 0);
+	CHECK(uml_nt_uacc_strnlen((const struct uml_nt_mm *)0,
+				  (char *)flat, RAM, 64) == 0);
+	CHECK(uml_nt_uacc_strncpy(buf, (const struct uml_nt_mm *)0,
+				  (char *)flat, RAM, 64) < 0);
+
 	/* strncpy_from_user: NUL terminated inside the VMA. */
 	memcpy(flat + RUN, "hello", 6);
 	CHECK(uml_nt_uacc_strncpy(buf, &mm, (char *)flat, RAM + RUN,

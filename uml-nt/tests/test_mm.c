@@ -685,6 +685,60 @@ static void test_find_free(void)
 	}
 }
 
+/* M3.8 review regression: the munmap unref set must be each VMA's
+ * OWN span, deduped per physical run — looping len/RUN from every
+ * selected VMA's run_off unrefs unrelated backing (refcount
+ * underflow → premature free). */
+static void test_span_runs(void)
+{
+	struct uml_nt_mm mm;
+	unsigned long long runs[UML_NT_VMA_MAX];
+	int n;
+
+	uml_nt_mm_init(&mm);
+	/* VMA1: multi-run [RAM, +2R) on r0/r0+R; VMA2: [RAM+2R, +1R)
+	 * on r2; VMA3: [RAM+3R, +1R) SHARES r2 (adjacent, same run);
+	 * VMA4: [RAM+8R, +1R) on r3 — outside the probed range. */
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + 2 * RUN, 0x100000,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_vma_add(&mm, RAM + 2 * RUN, RAM + 3 * RUN, 0x300000,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_vma_add(&mm, RAM + 3 * RUN, RAM + 4 * RUN, 0x300000,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_vma_add(&mm, RAM + 8 * RUN, RAM + 9 * RUN, 0x500000,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+
+	/* whole 4-run range: VMA1's span (2 runs) + r2 (shared by
+	 * VMA2+VMA3, counted ONCE) = 3 physical runs, never the
+	 * neighbour run 0x500000 and never a duplicate 0x300000 */
+	n = uml_nt_vma_span_runs(&mm, RAM, RAM + 4 * RUN, runs,
+				 UML_NT_VMA_MAX);
+	CHECK(n == 3);
+	CHECK(runs[0] == 0x100000);
+	CHECK(runs[1] == 0x100000 + RUN);
+	CHECK(runs[2] == 0x300000);
+
+	/* single middle VMA (shared run) → just r2 */
+	n = uml_nt_vma_span_runs(&mm, RAM + 2 * RUN, RAM + 3 * RUN, runs,
+				 UML_NT_VMA_MAX);
+	CHECK(n == 1 && runs[0] == 0x300000);
+
+	/* nothing intersecting → 0 */
+	n = uml_nt_vma_span_runs(&mm, RAM + 4 * RUN, RAM + 6 * RUN, runs,
+				 UML_NT_VMA_MAX);
+	CHECK(n == 0);
+
+	/* disjoint VMA contributes nothing even when the range ends
+	 * flush against it */
+	n = uml_nt_vma_span_runs(&mm, RAM, RAM + 2 * RUN, runs,
+				 UML_NT_VMA_MAX);
+	CHECK(n == 2 && runs[0] == 0x100000 && runs[1] == 0x100000 + RUN);
+
+	/* overflow = -1 (tiny out buffer) */
+	n = uml_nt_vma_span_runs(&mm, RAM, RAM + 4 * RUN, runs, 2);
+	CHECK(n == -1);
+}
+
 int main(void)
 {
 	test_phys();
@@ -693,6 +747,7 @@ int main(void)
 	test_translate();
 	test_fault();
 	test_find_free();
+	test_span_runs();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);

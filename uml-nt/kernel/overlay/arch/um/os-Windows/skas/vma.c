@@ -157,6 +157,36 @@ unsigned long long uml_nt_vma_find_free(const struct uml_nt_mm *mm,
 	return 0;
 }
 
+int uml_nt_vma_span_runs(const struct uml_nt_mm *mm,
+			 unsigned long long start, unsigned long long end,
+			 unsigned long long *runs, int max)
+{
+	int i, j, n = 0;
+
+	for (i = 0; i < mm->nvma; i++) {
+		const struct uml_nt_vma *v = &mm->vma[i];
+		unsigned long long off, off_end;
+
+		if (v->start >= end || v->end <= start)
+			continue;
+		/* the VMA's OWN backing span — never derived from the
+		 * caller's range length (a multi-run VMA contributes
+		 * all its runs; a neighbour's run is not ours) */
+		for (off = v->run_off,
+		     off_end = v->run_off + (v->end - v->start);
+		     off < off_end; off += UML_NT_PHYS_RUN_SIZE) {
+			for (j = 0; j < n && runs[j] != off; j++)
+				;
+			if (j == n) {
+				if (n >= max)
+					return -1;
+				runs[n++] = off;
+			}
+		}
+	}
+	return n;
+}
+
 /* Ref/unref every run of a VMA's span (VMAs are run multiples —
  * vma.h). */
 static int span_ref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)

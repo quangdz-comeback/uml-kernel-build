@@ -219,7 +219,7 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 	unsigned long long addr = a[0], len = a[1];
 	struct uml_nt_mm *mm = c->mm;
 	unsigned long long runs[UML_NT_VMA_MAX]; /* section offsets */
-	int i, j, nruns = 0;
+	int i, nruns;
 
 	if (addr & (UML_NT_PHYS_RUN_SIZE - 1) || len == 0)
 		return SC_RET(SC_EINVAL);
@@ -228,7 +228,6 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 	for (i = 0; i < mm->nvma; i++) {
 		unsigned long long s = mm->vma[i].start;
 		unsigned long long e = mm->vma[i].end;
-		unsigned long long ro = mm->vma[i].run_off;
 
 		if (s >= addr + len || e <= addr)
 			continue;
@@ -238,25 +237,24 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 				"(whole views only)\n", addr, len, s, e);
 			return SC_RET(SC_EINVAL);
 		}
-		/* distinct backing runs only (adjacent VMAs may share
-		 * one run — refcounts track contexts, not pieces) */
-		for (j = 0; j < nruns && runs[j] != ro; j++)
-			;
-		if (j == nruns && nruns < UML_NT_VMA_MAX)
-			runs[nruns++] = ro;
+	}
+	/* The unref set: each selected VMA contributes ITS OWN backing
+	 * span, deduped per physical run (review M3.8: looping
+	 * len/RUN from every VMA's run_off unrefs unrelated backing —
+	 * underflows refcounts → premature frees). */
+	nruns = uml_nt_vma_span_runs(mm, addr, addr + len, runs,
+				     UML_NT_VMA_MAX);
+	if (nruns < 0) {
+		os_info("[syscall] munmap 0x%llx+%llu: unref set overflow\n",
+			addr, len);
+		return SC_RET(SC_ENOMEM);
 	}
 	if (nruns == 0)
 		return 0; /* unmapped range: Linux succeeds */
 	if (uml_nt_vma_del(mm, addr, addr + len) < 0)
 		return SC_RET(SC_ENOMEM);
-	for (j = 0; j < nruns; j++) {
-		int k;
-
-		for (k = 0; k < (int)(len / UML_NT_PHYS_RUN_SIZE); k++)
-			uml_nt_phys_unref(c->ph, (long long)runs[j] +
-					  (long long)k *
-					  UML_NT_PHYS_RUN_SIZE);
-	}
+	for (i = 0; i < nruns; i++)
+		uml_nt_phys_unref(c->ph, (long long)runs[i]);
 	sc_plan1(c, UML_NT_FOP_UNMAP, 0, addr, len, 0);
 	return 0;
 }

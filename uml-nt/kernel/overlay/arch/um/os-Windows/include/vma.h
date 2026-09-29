@@ -86,6 +86,16 @@ unsigned long long uml_nt_vma_find_free(const struct uml_nt_mm *mm,
 					unsigned long long base,
 					unsigned long long limit);
 
+/* Collect the DISTINCT physical runs backing the VMAs intersecting
+ * [start, end) — the munmap unref set. Each VMA contributes ITS OWN
+ * span (run_off .. run_off + size), deduped per physical run (two
+ * VMAs may share one run; a multi-run VMA contributes all of it).
+ * Fills runs[] (section offsets), returns the count or -1 when the
+ * set exceeds `max`. */
+int uml_nt_vma_span_runs(const struct uml_nt_mm *mm,
+			 unsigned long long start, unsigned long long end,
+			 unsigned long long *runs, int max);
+
 /* mprotect analogue over [start, end) (must be inside VMAs). */
 int uml_nt_vma_chg(struct uml_nt_mm *mm, unsigned long long start,
 		   unsigned long long end, unsigned prot);
