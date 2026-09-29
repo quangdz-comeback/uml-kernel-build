@@ -321,6 +321,16 @@ static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 		      unsigned long long stack_va,
 		      const struct uml_nt_gp_regs *init)
 {
+	/* Kernel-side stub_data views at a FIXED va (below the guest
+	 * span, same convention as the stub's own map — stub_nt.h
+	 * bootstrap comment): an UNPLACED MapViewOfFileEx lets the NT
+	 * allocator pick any 0x6x.. region it likes, which is exactly
+	 * where the UML kernel image, guest section and its own
+	 * allocations live — the second fork's map landed on live
+	 * SLUB pages and the kernel NULL-derefed in kmem_cache_alloc
+	 * on the next initcall (M3.3 CI, SIGSEGV 139 post-probe). One
+	 * 64K section window per stub ever spawned. */
+	static unsigned long long next_data_va = 0x10000000ULL;
 	SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, 1 };
 	STARTUPINFOA si;
 	PROCESS_INFORMATION pi;
@@ -328,7 +338,11 @@ static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	HANDLE dsec, view;
 	char cmd[1200];
 	unsigned long long dsec_h, phys_h, ein_h, eout_h;
+	unsigned long long data_va;
 	int i;
+
+	data_va = next_data_va;
+	next_data_va += UML_STUB_SECTION_SIZE;
 
 	dsec = nt->CreateFileMappingW((HANDLE)-1, &sa, 0x04 /*RW*/, 0,
 				      UML_STUB_SECTION_SIZE, NULL);
@@ -340,7 +354,8 @@ static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 		goto fail;
 
 	view = nt->MapViewOfFileEx(dsec, 0x000F001F /*FILE_MAP_ALL_ACCESS*/,
-				   0, 0, UML_STUB_SECTION_SIZE, NULL);
+				   0, 0, UML_STUB_SECTION_SIZE,
+				   (PVOID)(uintptr_t)data_va);
 	if (view == NULL)
 		goto fail;
 	d = view;
