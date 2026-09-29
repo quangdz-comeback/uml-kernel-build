@@ -358,6 +358,12 @@ BOOL UML_NTABI_CC CreateProcessA(char *app_name, char *cmd_line,
 				 PROCESS_INFORMATION *pi);
 ULONG UML_NTABI_CC ResumeThread(HANDLE thread);
 BOOL UML_NTABI_CC GetExitCodeProcess(HANDLE process, ULONG *exit_code);
+
+/* M3.3 additions (appended; table members above stay frozen). The
+ * kernel serves several stub processes: one wait on all their evt_in
+ * handles (timeout in ms, INFINITE = 0xFFFFFFFF). */
+ULONG UML_NTABI_CC WaitForMultipleObjects(ULONG count, HANDLE *handles,
+					  BOOL wait_all, ULONG timeout_ms);
 #endif /* !_WIN64 */
 
 /*
@@ -460,6 +466,10 @@ struct uml_nt_api_table {
 	ULONG (UML_NTABI_CC *ResumeThread)(HANDLE thread);
 	BOOL (UML_NTABI_CC *GetExitCodeProcess)(HANDLE process,
 			ULONG *exit_code);
+
+	/* ---- appended for M3.3 ------------------------------------------ */
+	ULONG (UML_NTABI_CC *WaitForMultipleObjects)(ULONG count,
+			HANDLE *handles, BOOL wait_all, ULONG timeout_ms);
 };
 
 #endif /* __UML_NTABI_H */

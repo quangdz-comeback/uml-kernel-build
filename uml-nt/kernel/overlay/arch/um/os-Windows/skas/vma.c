@@ -157,7 +157,7 @@ static void span_unref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)
 }
 
 int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
-		    struct uml_nt_phys *ph)
+		    struct uml_nt_phys *ph, unsigned long long rsp)
 {
 	int i;
 
@@ -165,20 +165,51 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 	for (i = 0; i < src->nvma; i++) {
 		const struct uml_nt_vma *v = &src->vma[i];
 		unsigned flags = v->flags;
+		unsigned long long run_off = v->run_off;
 		int rc;
 
-		/* Writable VMAs become COW: the child reads the shared
-		 * run, its first write faults into a private copy. */
-		if (uml_nt_prot_writable(v->prot))
-			flags |= UML_NT_VMA_COW;
+		/* NT constraint (M3.3): the VEH dispatch pushes the
+		 * exception frame on the faulting thread's stack — a
+		 * COW-faulted STACK page kills the dispatch before the
+		 * handler runs. The VMA holding the fork rsp therefore
+		 * eager-copies into fresh private runs; everything
+		 * else keeps COW (its faults dispatch on the RW
+		 * stack). Contents are the caller's job. The stack
+		 * VMA owns [start, rsp): rsp itself = the first byte
+		 * PAST the stack (the guard run's start, if any), so
+		 * test rsp - 1 — the last stack byte. */
+		if (uml_nt_prot_writable(v->prot) && rsp != 0 &&
+		    rsp - 1 >= v->start && rsp - 1 < v->end) {
+			unsigned long long nruns = (v->end - v->start) /
+						   UML_NT_PHYS_RUN_SIZE;
+			unsigned long long k, off;
 
-		rc = uml_nt_vma_add(dst, v->start, v->end, v->run_off,
+			run_off = 0;
+			for (k = 0; k < nruns; k++) {
+				off = (unsigned long long)
+					uml_nt_phys_alloc(ph);
+				if (off == (unsigned long long)-1)
+					goto fail;
+				if (k == 0) {
+					run_off = off;
+				} else if (off != run_off +
+					   k * UML_NT_PHYS_RUN_SIZE) {
+					goto fail; /* contiguity */
+				}
+			}
+			flags &= ~UML_NT_VMA_COW;
+		} else if (uml_nt_prot_writable(v->prot)) {
+			flags |= UML_NT_VMA_COW;
+		}
+
+		rc = uml_nt_vma_add(dst, v->start, v->end, run_off,
 				    v->prot, flags);
 		if (rc < 0)
 			goto fail;
 
-		/* The child now references every run of the span. */
-		if (span_ref(ph, v) < 0)
+		/* Eager runs: alloc() reffed them (the child owns).
+		 * Shared runs: ref the source span for this mm. */
+		if (run_off == v->run_off && span_ref(ph, v) < 0)
 			goto fail;
 	}
 	return 0;

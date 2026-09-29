@@ -43,7 +43,7 @@ typedef long long s64_nt;
 
 /* "USTB". */
 #define UML_STUB_MAGIC   0x42545355u
-#define UML_STUB_VERSION 3u /* v3: MAP/UNMAP ops for per-VMA views (M3.2) */
+#define UML_STUB_VERSION 4u /* v4: per-VMA views + INIT plan + fork (M3.3) */
 /* Section size (also the map granularity guard). */
 #define UML_STUB_SECTION_SIZE 0x10000u
 
@@ -61,7 +61,9 @@ typedef long long s64_nt;
 #define UML_STUB_CMD_EXIT      2u /* reserved numbering; the halt flag
 				   * is the real transport (M2.2) */
 #define UML_STUB_CMD_FAULT     3u /* AV in guest code → fault round-trip */
-#define UML_STUB_CMD_PROT_DONE 4u /* result of ACTION_PROT (retval) */
+#define UML_STUB_CMD_PROT_DONE 4u /* result of the last ACTION_* (retval) */
+#define UML_STUB_CMD_INIT      5u /* first request: stream the initial
+				   * per-VMA map plan before guest entry */
 
 /* Answers (kernel → stub, slot.action). */
 #define UML_STUB_ACTION_NONE 0u /* handled — resume the guest */
@@ -110,11 +112,20 @@ struct uml_nt_stub_data {
 	struct uml_nt_gp_regs regs; /* full GP snapshot at the trap */
 
 	/* -- bootstrap (written by kernel pre-ResumeThread) ---------- */
-	unsigned long long ram_base;  /* stub VA of the physmem view */
-	unsigned long long ram_size;  /* physmem section bytes */
-	unsigned long long entry_off; /* guest entry, phys offset */
-	unsigned long long stack_off; /* guest stack top, phys offset */
-	unsigned long long image_len; /* init image bytes at entry_off */
+	/* M3 model: the stub has NO flat physmem view — its address
+	 * space is built by per-VMA views streamed over CMD_INIT
+	 * before entry. entry_va/stack_va are real guest VAs (the
+	 * probe uses RAM_BASE + phys offset, identity by convention).
+	 * init_regs are applied before the jump — fork hands the
+	 * child the parent's register snapshot with rax = 0. The
+	 * stub_data section itself maps at the FIXED va 0x10000000
+	 * (below the guest span) so the NT allocator never lands
+	 * inside [ram_base, ram_base+ram_size). */
+	unsigned long long ram_base;  /* guest VA span base (fault filter) */
+	unsigned long long ram_size;  /* guest VA span bytes */
+	unsigned long long entry_va;  /* guest entry VA */
+	unsigned long long stack_va;  /* guest stack top VA */
+	struct uml_nt_gp_regs init_regs; /* applied pre-jump */
 
 	/* -- bookkeeping (kernel-only use, kept here for parity) ----- */
 	u32_nt exit_code; /* observed via GetExitCodeProcess */
@@ -132,23 +143,18 @@ struct uml_nt_stub_data {
 	u32_nt prot;   /* ACTION_PROT: NT PAGE_* constant */
 	u32_nt _pad_fault;
 
-	/* -- v3: ACTION_MAP/UNMAP operands --------------------------- */
+	/* -- v3: ACTION_MAP/UNMAP/PROT operands ---------------------- */
 	/* One op per round-trip (the slot is single-outstanding by
 	 * design — M3.2). MAP: [map_va, map_va+map_len) is a fresh
 	 * view of the physmem section from offset map_off (64K
-	 * aligned) with map_prot; UNMAP releases that range. */
+	 * aligned) with map_prot; UNMAP releases that range; PROT
+	 * protects [map_va, map_va+map_len) to prot (fault fix-ups
+	 * and INIT-plan guard pages alike — not only fault_addr). */
 	u32_nt map_prot;
 	u32_nt _pad_map;
 	unsigned long long map_va;
 	unsigned long long map_len;
 	unsigned long long map_off;
-
-	/* -- bootstrap v2 (written by kernel pre-ResumeThread) ------- */
-	/* Phys offsets the stub makes PAGE_NOACCESS before the guest
-	 * runs (fault-probe seed; the M3.2 VMA manager replaces this
-	 * with real per-VMA views). 0 = none — offset 0 is the kernel
-	 * image base and can never be a guard. */
-	unsigned long long guard_off[2];
 };
 
 #endif /* __UML_STUB_NT_H */

@@ -176,3 +176,26 @@ kill:
 	plan->copy_dst_off = 0;
 	return -1;
 }
+
+int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			struct uml_nt_fault_plan *plan)
+{
+	int i;
+
+	plan->kill = 0;
+	plan->n_ops = 0;
+	plan->copy_src_off = 0;
+	plan->copy_dst_off = 0;
+
+	if (mm->nvma > UML_NT_FAULT_MAX_OPS)
+		return -1;
+	for (i = 0; i < mm->nvma; i++) {
+		const struct uml_nt_vma *v = &mm->vma[i];
+
+		if (plan_op(plan, UML_NT_FOP_MAP,
+			    uml_nt_vma_effective_prot(v, ph),
+			    v->start, v->end - v->start, v->run_off) < 0)
+			return -1;
+	}
+	return 0;
+}

@@ -8,6 +8,8 @@
 
 #define RUNS(p) ((int)((p)->size >> UML_NT_PHYS_RUN_SHIFT))
 
+static int run_index(struct uml_nt_phys *p, long long off);
+
 int uml_nt_phys_init(struct uml_nt_phys *p, unsigned long long size)
 {
 	long long i, runs;
@@ -33,6 +35,16 @@ long long uml_nt_phys_alloc(struct uml_nt_phys *p)
 		}
 	}
 	return -1;
+}
+
+int uml_nt_phys_alloc_at(struct uml_nt_phys *p, long long off)
+{
+	int i = run_index(p, off);
+
+	if (i < 0 || p->refs[i] != 0)
+		return -1;
+	p->refs[i] = 1;
+	return 0;
 }
 
 static int run_index(struct uml_nt_phys *p, long long off)

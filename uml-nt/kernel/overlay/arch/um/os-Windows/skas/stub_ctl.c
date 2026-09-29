@@ -1,30 +1,33 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * os-Windows/skas/stub_ctl.c — stub.exe parent side (M2/M3).
+ * os-Windows/skas/stub_ctl.c — stub.exe parent side (M3).
  *
  * Upstream analogue: os-Linux/skas/process.c start_userspace()/
  * userspace() — the kernel side of the stub protocol (clone + ptrace
  * or futex/socket there; CreateProcess + events + shared section
  * here, per stub_nt.h).
  *
- * M2 scope (acceptance: guest write(1,"hi") round-trip on the console):
- *  - cmdline param `uml_nt_stubtest=<stub.exe path>` gates a late
- *    initcall probe; without it this module is inert.
- *  - The probe stages a static init image (init_blob.S) into guest
- *    RAM, patches its syscalls to ud2 (scan_patch.c), creates one
- *    stub process with inherited handles, and services its requests
- *    (write → console, exit → done) synchronously from the boot CPU.
- *  - Real fork/exec integration (mm_id per guest process, the
- *    userspace() loop, turnstile) is M3+; this module proves the
- *    round-trip mechanism end to end.
+ * M2 proved the single-stub round-trip (write/exit). M3.1/M3.2 added
+ * the page-fault round-trip and the per-mm VMA manager. M3.3 turns
+ * the probe into a two-process system:
  *
- * M3.1 extends the probe with the page-fault round-trip: the kernel
- * seeds two guard-page offsets in the stub bootstrap (stub-side
- * PAGE_NOACCESS before the guest runs), the guest blob faults on
- * them, and dispatch() answers via uml_nt_fault_decide() —
- * ACTION_PROT, then verifies the stub's PROT_DONE result. A failed
- * protect KILLs the stub instead of letting the guest re-fault
- * forever (every fail path loud — M1 pitfall 17).
+ *  - `struct uml_nt_stub_conn` — one guest process: its stub_data
+ *    mapping, event pair, process handle, mm and plan-runner state
+ *    (the embryonic per-connection userspace() loop state).
+ *  - Guest fork (__NR_fork): kernel clones the parent mm (M3.2 COW
+ *    machinery — the child shares every run, writable VMAs marked
+ *    COW), spawns a second stub.exe (S5 pattern, suspended), hands it
+ *    the parent's register snapshot with rax = 0, and resumes it; the
+ *    child streams its own INIT plan (per-VMA views, COW-shared runs
+ *    mapped read-only) before jumping. Parent gets the child pid in
+ *    rax, upstream fork semantics.
+ *  - The service loop waits on ALL live stubs' evt_in handles
+ *    (WaitForMultipleObjects — the D10 turnstile per stub: seq +
+ *    event pair in each stub's own section) and serves whichever
+ *    published.
+ *
+ * Real fork/exec syscall integration (wait4, the generic userspace()
+ * dispatcher) is M3.7; this module proves the mechanism end to end.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -47,11 +50,35 @@ extern const char nt_guest_init_slot0[], nt_guest_init_slot1[];
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 				    unsigned long entry_off);
 
-/* Guest stack sits this far above the init image (grows down). */
-#define GUEST_STACK_SLACK 0x20000ull
+/* Guest stack: two runs above the text run (grows down); guards live
+ * one run above the stack. All run-multiples (vma.h contract). */
+#define GUEST_STACK_RUNS 2
+#define GUARD_RUN_DELTA  0x10000ull
+
+/* One guest process (stub side of the protocol). */
+struct uml_nt_stub_conn {
+	struct uml_nt_stub_data *d;
+	HANDLE evt_in, evt_out;
+	HANDLE proc, thread;
+	struct uml_nt_mm *mm;
+	ULONG pid;
+	int alive;
+	ULONG exit_code;
+	/* plan runner: ops stream one round-trip each */
+	struct uml_nt_fault_plan plan;
+	int plan_next, plan_left;
+};
+
+static struct uml_nt_stub_conn conn_parent, conn_child;
+static struct uml_nt_mm mm_parent, mm_child;
+static struct uml_nt_phys probe_phys;
 
 static char stub_path[512];
 static int have_stub_path;
+
+static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
+		      unsigned long long stack_va,
+		      const struct uml_nt_gp_regs *init);
 
 static int __init uml_nt_stubtest_setup(char *str, int *add)
 {
@@ -68,36 +95,21 @@ static int __init uml_nt_stubtest_setup(char *str, int *add)
 }
 __uml_setup("uml_nt_stubtest=", uml_nt_stubtest_setup,
 "uml_nt_stubtest=<path>\n"
-"    M2 probe: boot a static guest init in one stub.exe process and\n"
-"    run the write/exit syscall round-trip.\n");
+"    M3 probe: boot a static guest init (fault round-trips + fork)\n"
+"    across stub.exe processes.\n");
 
-/* Guard pages for the fault probe (phys offsets; computed in the
- * probe thread). Their VMAs are full runs — the VMA run-multiple
- * contract (vma.h). */
-static unsigned long long guard_off0, guard_off1;
-
-/* M3.2: the probe's mm context — the embryonic per-process address
- * space. The fault decider consults it; the M3.3 fork probe clones
- * it. File-scope because the probe has exactly one stub (M3.3 moves
- * this into the per-stub connection state). */
-static struct uml_nt_mm probe_mm;
-static struct uml_nt_phys probe_phys;
-static int mm_ready;
-
-/* Pending plan: ops stream to the stub one round-trip each (the slot
- * is single-outstanding); the runner keeps the position across
- * CMD_PROT_DONE round-trips. */
-static struct uml_nt_fault_plan pending_plan;
-static int plan_next, plan_left;
-
-/* Issue one plan op into the slot. */
-static void issue_plan_op(struct uml_nt_stub_data *d,
+/* Push one plan op into the conn's slot. */
+static void issue_plan_op(struct uml_nt_stub_conn *c,
 			  const struct uml_nt_fault_op *op)
 {
+	struct uml_nt_stub_data *d = c->d;
+
 	switch (op->op) {
 	case UML_NT_FOP_PROTECT:
 		d->action = UML_STUB_ACTION_PROT;
 		d->prot = op->prot;
+		d->map_va = op->va;  /* PROTECT target page/range */
+		d->map_len = op->len;
 		break;
 	case UML_NT_FOP_MAP:
 		d->action = UML_STUB_ACTION_MAP;
@@ -112,12 +124,13 @@ static void issue_plan_op(struct uml_nt_stub_data *d,
 		d->map_len = op->len;
 		break;
 	}
-	plan_next++;
+	c->plan_next++;
 }
 
-/* Dispatch one published request. Returns 0 on success. */
-static int stub_ctl_dispatch(struct uml_nt_stub_data *d)
+/* Serve one published request on this conn. Returns 0 on success. */
+static int serve_conn(struct uml_nt_stub_conn *c)
 {
+	struct uml_nt_stub_data *d = c->d;
 	struct uml_nt_gp_regs *g = &d->regs;
 	unsigned long long nr = g->rax;
 
@@ -126,58 +139,93 @@ static int stub_ctl_dispatch(struct uml_nt_stub_data *d)
 		 * the guest would re-fault forever — kill it instead
 		 * (loud, M1 pitfall 17). */
 		if (d->retval != 1) {
-			os_info("[stubtest] stub op FAILED "
-				"(retval=%llu) — killing\n", d->retval);
+			os_info("[stubtest] stub op FAILED (pid %lu, "
+				"retval=%llu) — killing\n",
+				(unsigned long)c->pid, d->retval);
 			d->action = UML_STUB_ACTION_KILL;
 			d->err = 1;
 			return -1;
 		}
-		if (plan_left > 1) {
-			plan_left--;
-			issue_plan_op(d, &pending_plan.ops[plan_next]);
+		if (c->plan_left > 1) {
+			c->plan_left--;
+			issue_plan_op(c, &c->plan.ops[c->plan_next]);
 			return 0;
 		}
-		plan_left = 0;
+		c->plan_left = 0;
 		d->action = UML_STUB_ACTION_NONE;
 		d->err = 0;
+		return 0;
+	}
+	if (d->cmd == UML_STUB_CMD_INIT) {
+		/* Stream the conn's initial per-VMA map plan; the probe
+		 * appends NOACCESS protects for the parent's guard
+		 * pages (the fault-probe seed). */
+		if (uml_nt_mm_init_plan(c->mm, &probe_phys, &c->plan) < 0) {
+			os_info("[stubtest] INIT plan overflow (pid %lu)\n",
+				(unsigned long)c->pid);
+			d->action = UML_STUB_ACTION_KILL;
+			d->err = 1;
+			return -1;
+		}
+		if (c == &conn_parent && c->plan.n_ops + 2 <=
+					      UML_NT_FAULT_MAX_OPS) {
+			unsigned long long g0 = d->entry_va + GUARD_RUN_DELTA;
+			/* guard run = text+stack runs above entry */
+			struct uml_nt_fault_op *op;
+			int base = c->plan.n_ops;
+
+			op = &c->plan.ops[base];
+			op->op = UML_NT_FOP_PROTECT;
+			op->prot = UML_NT_PAGE_NOACCESS;
+			op->va = g0;
+			op->len = UML_NT_FAULT_PAGE_SIZE;
+			op->off = 0;
+			op = &c->plan.ops[base + 1];
+			op->op = UML_NT_FOP_PROTECT;
+			op->prot = UML_NT_PAGE_NOACCESS;
+			op->va = g0 + 0x1000;
+			op->len = UML_NT_FAULT_PAGE_SIZE;
+			op->off = 0;
+			c->plan.n_ops += 2;
+		}
+		c->plan_next = 0;
+		c->plan_left = c->plan.n_ops;
+		os_info("[stubtest] INIT pid %lu: %d map op(s)\n",
+			(unsigned long)c->pid, c->plan.n_ops);
+		issue_plan_op(c, &c->plan.ops[0]);
 		return 0;
 	}
 	if (d->cmd == UML_STUB_CMD_FAULT) {
 		int rc;
 
-		if (!mm_ready) {
-			os_info("[stubtest] fault before mm ready\n");
+		rc = uml_nt_mm_fault(c->mm, &probe_phys, d->fault_addr,
+				     d->fault_type, &c->plan);
+		if (rc < 0 || c->plan.kill) {
+			os_info("[stubtest] FATAL fault pid %lu "
+				"addr=0x%llx type=%u — killing\n",
+				(unsigned long)c->pid, d->fault_addr,
+				d->fault_type);
 			d->action = UML_STUB_ACTION_KILL;
 			d->err = 1;
 			return -1;
 		}
-		rc = uml_nt_mm_fault(&probe_mm, &probe_phys,
-				     d->fault_addr, d->fault_type,
-				     &pending_plan);
-		if (rc < 0 || pending_plan.kill) {
-			os_info("[stubtest] FATAL fault addr=0x%llx "
-				"type=%u (wild pointer / bad class) — "
-				"killing\n", d->fault_addr, d->fault_type);
-			d->action = UML_STUB_ACTION_KILL;
-			d->err = 1;
-			return -1;
-		}
-		os_info("[stubtest] FAULT addr=0x%llx type=%u -> %d op(s)\n",
-			d->fault_addr, d->fault_type, pending_plan.n_ops);
+		os_info("[stubtest] FAULT pid %lu addr=0x%llx type=%u -> "
+			"%d op(s)\n", (unsigned long)c->pid, d->fault_addr,
+			d->fault_type, c->plan.n_ops);
 		/* COW copy directive: the kernel owns the physmem
 		 * content — memcpy the run through its own flat view
 		 * before the stub maps the new one. */
-		if (pending_plan.copy_src_off != 0 ||
-		    pending_plan.copy_dst_off != 0) {
+		if (c->plan.copy_src_off != 0 ||
+		    c->plan.copy_dst_off != 0) {
 			memcpy(uml_boot.physmem_base +
-				       pending_plan.copy_dst_off,
+				       c->plan.copy_dst_off,
 			       uml_boot.physmem_base +
-				       pending_plan.copy_src_off,
+				       c->plan.copy_src_off,
 			       UML_NT_PHYS_RUN_SIZE);
 		}
-		plan_next = 0;
-		plan_left = pending_plan.n_ops;
-		issue_plan_op(d, &pending_plan.ops[0]);
+		c->plan_next = 0;
+		c->plan_left = c->plan.n_ops;
+		issue_plan_op(c, &c->plan.ops[0]);
 		return 0;
 	}
 
@@ -195,7 +243,7 @@ static int stub_ctl_dispatch(struct uml_nt_stub_data *d)
 		if (d->args[1] < d->ram_base || off >= d->ram_size ||
 		    len > d->ram_size - off)
 			goto bad;
-		/* fd 1 = console for M2; others: -EBADF later. */
+		/* fd 1 = console for now; others: -EBADF later. */
 		if (d->args[0] != 1 && d->args[0] != 2)
 			goto bad;
 		nt_console_write((char *)uml_boot.physmem_base + off,
@@ -204,149 +252,112 @@ static int stub_ctl_dispatch(struct uml_nt_stub_data *d)
 		d->err = 0;
 		return 0;
 	}
+	if (nr == 57) { /* __NR_fork */
+		struct uml_nt_stub_conn *k = &conn_child;
+
+		if (k->alive) {
+			os_info("[stubtest] fork: child already exists\n");
+			goto bad;
+		}
+		/* Clone the parent mm: writable VMAs become COW except
+		 * the stack VMA (holds rsp — the NT VEH dispatch cannot
+		 * run on a COW-faulted stack page), which eager-copies.
+		 * Copy the eager runs' contents parent→child through
+		 * the kernel's flat view (the clone is pure logic). */
+		if (uml_nt_mm_clone(&mm_child, c->mm, &probe_phys,
+				    g->rsp) < 0) {
+			os_info("[stubtest] fork: mm clone failed\n");
+			d->retval = (unsigned long long)-12LL; /* -ENOMEM */
+			d->err = 1;
+			return -1;
+		}
+		{
+			int vi;
+
+			for (vi = 0; vi < mm_child.nvma; vi++) {
+				const struct uml_nt_vma *pv =
+					&c->mm->vma[vi];
+				const struct uml_nt_vma *cv =
+					&mm_child.vma[vi];
+
+				if (cv->run_off == pv->run_off)
+					continue; /* shared run */
+				memcpy(uml_boot.physmem_base +
+					       cv->run_off,
+				       uml_boot.physmem_base +
+					       pv->run_off,
+				       cv->end - cv->start);
+			}
+		}
+		k->mm = &mm_child;
+		/* The child resumes at the same instruction with the
+		 * parent's registers and rax = 0 (fork semantics); the
+		 * parent gets the child pid. */
+		if (spawn_stub(k, g->rip + 2, g->rsp, g) < 0) {
+			uml_nt_mm_drop(&mm_child, &probe_phys);
+			d->retval = (unsigned long long)-12LL;
+			d->err = 1;
+			return -1;
+		}
+		k->d->init_regs = *g;
+		k->d->init_regs.rax = 0;
+		nt->ResumeThread(k->thread);
+		d->retval = k->pid;
+		d->err = 0;
+		os_info("[stubtest] fork: child pid %lu\n",
+			(unsigned long)k->pid);
+		return 0;
+	}
 bad:
 	d->retval = (unsigned long long)-9LL; /* -EBADF */
 	d->err = 1;
 	return -1;
 }
 
-static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
+/* Spawn one stub.exe for `mm` (S5 pattern: inheritable handles, value
+ * cmdline, CREATE_SUSPENDED). init_regs are applied by the stub right
+ * before the jump (fork children need the parent snapshot). */
+static int spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
+		      unsigned long long stack_va,
+		      const struct uml_nt_gp_regs *init)
 {
-	unsigned long long blob_len, entry_off, stack_off, patched;
-	struct uml_nt_stub_data *d;
-	unsigned long long dsec_h, phys_h, ein_h, eout_h;
-	HANDLE dsec, view, evt_in, evt_out;
-	char cmd[1200];
+	SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, 1 };
 	STARTUPINFOA si;
 	PROCESS_INFORMATION pi;
-	ULONG exit_code;
+	struct uml_nt_stub_data *d;
+	HANDLE dsec, view;
+	char cmd[1200];
+	unsigned long long dsec_h, phys_h, ein_h, eout_h;
 	int i;
 
-	(void)arg;
-
-	blob_len = nt_guest_init_end - nt_guest_init_start;
-	entry_off = (uml_boot.image_size + 0xFFFFull) & ~0xFFFFull;
-	stack_off = entry_off + GUEST_STACK_SLACK;
-
-	/* Guard pages live just past the blob image: the guest blob
-	 * stores their GUEST VAs through these slots. */
-	guard_off0 = (entry_off + blob_len + 0xFFF) & ~0xFFFull;
-	guard_off1 = guard_off0 + 0x1000;
-
-	/* M3.2: the probe's mm — ONE guard VMA spanning the run(s)
-	 * that hold both guard pages (the VMA run-multiple contract;
-	 * the two guards are 4K apart and can share or straddle a
-	 * run boundary). prot RW, no COW (single owner: faults
-	 * restore protection, no copies). */
-	if (uml_nt_phys_init(&probe_phys, uml_boot.physmem_size) < 0) {
-		os_info("[stubtest] phys init failed (mem too big for "
-			"the run table)\n");
+	dsec = nt->CreateFileMappingW((HANDLE)-1, &sa, 0x04 /*RW*/, 0,
+				      UML_STUB_SECTION_SIZE, NULL);
+	if (dsec == NULL)
 		goto fail;
-	}
-	uml_nt_mm_init(&probe_mm);
-	{
-		unsigned long long g0run = guard_off0 & ~(0xFFFFull);
-		unsigned long long g1run = guard_off1 & ~(0xFFFFull);
-
-		if (uml_nt_vma_add(&probe_mm, UML_STUB_RAM_BASE + g0run,
-				   UML_STUB_RAM_BASE + g1run + 0x10000ull,
-				   g0run, UML_NT_PAGE_READWRITE, 0) < 0) {
-			os_info("[stubtest] probe mm setup failed\n");
-			goto fail;
-		}
-	}
-	mm_ready = 1;
-
-	/* Stage the init image, fill the guard-VA slots, and turn its
-	 * `syscall`s into ud2 — the central-patch contract §5.1. */
-	memcpy(uml_boot.physmem_base + entry_off, nt_guest_init_start,
-	       blob_len);
-	{
-		unsigned long long off0, off1;
-		unsigned long long va0, va1;
-
-		off0 = (unsigned long long)(uintptr_t)nt_guest_init_slot0;
-		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
-		va0 = UML_STUB_RAM_BASE + guard_off0;
-		va1 = UML_STUB_RAM_BASE + guard_off1;
-		memcpy(uml_boot.physmem_base + entry_off + off0, &va0, 8);
-		memcpy(uml_boot.physmem_base + entry_off + off1, &va1, 8);
-	}
-	patched = uml_nt_patch_syscalls(uml_boot.physmem_base + entry_off,
-					blob_len, 0);
-	/* The linear sweep must never have eaten a slot byte as an
-	 * instruction (decoder false-positive = wild guest pointer =
-	 * fault outside the allow table). Verify loud. */
-	{
-		unsigned long long off0, off1, va0, va1;
-
-		off0 = (unsigned long long)(uintptr_t)nt_guest_init_slot0;
-		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
-		memcpy(&va0, uml_boot.physmem_base + entry_off + off0, 8);
-		memcpy(&va1, uml_boot.physmem_base + entry_off + off1, 8);
-		if (va0 != UML_STUB_RAM_BASE + guard_off0 ||
-		    va1 != UML_STUB_RAM_BASE + guard_off1) {
-			os_info("[stubtest] guard slot clobbered by patch "
-				"scan (va0=0x%llx va1=0x%llx)\n", va0, va1);
-			goto fail;
-		}
-	}
-	os_info("[stubtest] init staged at phys 0x%llx (%llu bytes, %lu "
-		"syscall(s) patched, guards 0x%llx/0x%llx)\n", entry_off,
-		blob_len, patched, guard_off0, guard_off1);
-
-	/* stub_data section + events — all inheritable, so the handle
-	 * VALUES stay valid in the stub (S5 bootstrap pattern). */
-	{
-		SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, 1 };
-
-		dsec = nt->CreateFileMappingW((HANDLE)-1, &sa, 0x04 /*RW*/,
-					      0, UML_STUB_SECTION_SIZE, NULL);
-		if (dsec == NULL) {
-			os_info("[stubtest] CreateFileMappingW failed "
-				"win32=%lu\n", nt->RtlGetLastWin32Error());
-			goto fail;
-		}
-		evt_in = nt->CreateEventW(&sa, 0, 0, NULL);  /* stub→kern */
-		evt_out = nt->CreateEventW(&sa, 0, 0, NULL); /* kern→stub */
-		if (evt_in == NULL || evt_out == NULL) {
-			os_info("[stubtest] CreateEventW failed win32=%lu\n",
-				nt->RtlGetLastWin32Error());
-			goto fail;
-		}
-		os_info("[stubtest] dsec=%p evt_in=%p evt_out=%p\n",
-			dsec, evt_in, evt_out);
-	}
+	c->evt_in = nt->CreateEventW(&sa, 0, 0, NULL);  /* stub→kern */
+	c->evt_out = nt->CreateEventW(&sa, 0, 0, NULL); /* kern→stub */
+	if (c->evt_in == NULL || c->evt_out == NULL)
+		goto fail;
 
 	view = nt->MapViewOfFileEx(dsec, 0x000F001F /*FILE_MAP_ALL_ACCESS*/,
 				   0, 0, UML_STUB_SECTION_SIZE, NULL);
-	if (view == NULL) {
-		os_info("[stubtest] MapViewOfFileEx failed win32=%lu\n",
-			nt->RtlGetLastWin32Error());
+	if (view == NULL)
 		goto fail;
-	}
 	d = view;
+	memset(d, 0, sizeof(*d));
 	d->magic = UML_STUB_MAGIC;
 	d->version = UML_STUB_VERSION;
-	d->req_seq = 0;
-	d->done_seq = 0;
 	d->ram_base = UML_STUB_RAM_BASE;
 	d->ram_size = uml_boot.physmem_size;
-	d->entry_off = entry_off;
-	d->stack_off = stack_off;
-	d->image_len = blob_len;
+	d->entry_va = entry_va;
+	d->stack_va = stack_va;
+	d->init_regs = *init;
 	d->halt = 0;
-	d->fault_addr = 0;
-	d->fault_type = 0;
-	d->action = UML_STUB_ACTION_NONE;
-	d->prot = 0;
-	d->guard_off[0] = guard_off0;
-	d->guard_off[1] = guard_off1;
 
 	phys_h = (unsigned long long)(uintptr_t)uml_boot.physmem_section;
 	dsec_h = (unsigned long long)(uintptr_t)dsec;
-	ein_h = (unsigned long long)(uintptr_t)evt_in;
-	eout_h = (unsigned long long)(uintptr_t)evt_out;
+	ein_h = (unsigned long long)(uintptr_t)c->evt_in;
+	eout_h = (unsigned long long)(uintptr_t)c->evt_out;
 
 	i = snprintf(cmd, sizeof(cmd),
 		     "\"%s\" --data %llu --phys %llu --evt-in %llu "
@@ -356,72 +367,266 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		goto fail;
 
 	memset(&si, 0, sizeof(si));
-	si.cb = sizeof(si);
+	si.cb = sizeof(si); /* 104 on x64 — pitfall 10 */
 	memset(&pi, 0, sizeof(pi));
-	os_info("[stubtest] spawning: %s\n", cmd);
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
 				0x4 /*CREATE_SUSPENDED*/, NULL, NULL,
-				&si, &pi)) {
-		os_info("[stubtest] CreateProcess failed win32=%lu\n",
-			nt->RtlGetLastWin32Error());
+				&si, &pi))
 		goto fail;
-	}
-	os_info("[stubtest] CreateProcess ok\n");
-	d->pid = pi.dwProcessId;
-	os_info("[stubtest] stub pid %lu — resuming\n",
-		(unsigned long)pi.dwProcessId);
 
-	/* Handshake is published; let it run. Bootstrap failures die in
-	 * the stub with exit 111+ (read via GetExitCodeProcess below). */
-	nt->ResumeThread(pi.hThread);
-
-	/* Service requests. Auto-reset event = one signal per publish;
-	 * the seq guards reuse (M0 pitfall 4.4). Wait with a timeout so
-	 * a dead/hung stub is reported instead of hanging the boot. */
-	for (i = 0; i < 100; i++) {
-		LARGE_INTEGER to;
-		long st;
-
-		to.QuadPart = -10000000LL; /* 1s */
-		st = nt->NtWaitForSingleObject(evt_in, 0, &to);
-		if (st == 0x102 /*STATUS_TIMEOUT*/) {
-			ULONG code = 0;
-
-			nt->GetExitCodeProcess(pi.hProcess, &code);
-			os_info("[stubtest] stub did not signal in 1s "
-				"(exit code so far: %lu)\n",
-				(unsigned long)code);
-			goto fail;
-		}
-		mb();
-		if (d->req_seq != d->done_seq + 1) {
-			os_info("[stubtest] seq desync req=%llu done=%llu\n",
-				d->req_seq, d->done_seq);
-			goto fail;
-		}
-		stub_ctl_dispatch(d);
-		mb();
-		nt->NtSetEvent(evt_out, NULL);
-		if (d->halt) {
-			/* Kernel owns the kill (upstream parity): exit
-			 * code = guest retval, observed via
-			 * GetExitCodeProcess below. */
-			nt->NtTerminateProcess(pi.hProcess,
-					       (NTSTATUS)d->retval);
-			break;
-		}
-	}
-
-	nt->NtWaitForSingleObject(pi.hProcess, 0, UML_NT_INFINITE);
-	if (!nt->GetExitCodeProcess(pi.hProcess, &exit_code))
-		exit_code = 0xFFFFFFFFu;
-
-	os_info("[stubtest] ROUND-TRIP OK: write delivered, guest exit "
-		"code %lu (want 0)\n", (unsigned long)exit_code);
+	c->d = d;
+	c->proc = pi.hProcess;
+	c->thread = pi.hThread;
+	c->pid = pi.dwProcessId;
+	c->alive = 1;
+	c->exit_code = 0;
+	c->plan_next = 0;
+	c->plan_left = 0;
 	return 0;
 
 fail:
-	os_info("[stubtest] FAILED (see messages above)\n");
+	os_info("[stubtest] spawn failed win32=%lu\n",
+		nt->RtlGetLastWin32Error());
+	return -1;
+}
+
+/* Serve one signaled conn: seq-check, dispatch, release. Returns 1
+ * when the conn halted (kernel terminated it), -1 on protocol error. */
+static int pump_conn(struct uml_nt_stub_conn *c)
+{
+	mb();
+	if (c->d->req_seq != c->d->done_seq + 1) {
+		os_info("[stubtest] seq desync pid %lu req=%llu done=%llu\n",
+			(unsigned long)c->pid, c->d->req_seq,
+			c->d->done_seq);
+		return -1;
+	}
+	serve_conn(c);
+	mb();
+	nt->NtSetEvent(c->evt_out, NULL);
+	if (c->d->halt || c->d->action == UML_STUB_ACTION_KILL) {
+		/* Kernel owns the kill (upstream parity, M2.2): halt =
+		 * guest exit; KILL = the stub parked on a fatal fault/
+		 * failed op — terminate it now, never wait it out. */
+		nt->NtTerminateProcess(c->proc,
+				       (NTSTATUS)c->d->retval);
+		c->exit_code = c->d->retval;
+		c->alive = 0;
+		os_info("[stubtest] pid %lu halt (exit %lu)\n",
+			(unsigned long)c->pid,
+			(unsigned long)c->exit_code);
+		return 1;
+	}
+	return 0;
+}
+
+static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
+{
+	unsigned long long blob_len, entry_off, text_va, stack_va;
+	unsigned long long guard_va0, guard_va1, patched;
+	struct uml_nt_gp_regs zero_regs;
+	HANDLE waits[2];
+	int i, nwaits;
+
+	(void)arg;
+
+	blob_len = nt_guest_init_end - nt_guest_init_start;
+	entry_off = (uml_boot.image_size + 0xFFFFull) & ~0xFFFFull;
+	text_va = UML_STUB_RAM_BASE + entry_off;
+	/* Layout in runs above the image: text (1), stack (2), guard
+	 * (1). The guard run IS the run at text+3 — the guard VMA and
+	 * the guard VAs must name the SAME run. */
+	stack_va = text_va + (1 + GUEST_STACK_RUNS) * 0x10000ull;
+	guard_va0 = stack_va;
+	guard_va1 = guard_va0 + 0x1000;
+
+	/* Guest physical pool over the section (M3.2 allocator). */
+	if (uml_nt_phys_init(&probe_phys, uml_boot.physmem_size) < 0) {
+		os_info("[stubtest] phys init failed (mem too big for "
+			"the run table)\n");
+		return 0;
+	}
+
+	/* Stage the init image, fill the guard-VA slots, patch the
+	 * `syscall`s to ud2 — the central-patch contract §5.1. */
+	memcpy(uml_boot.physmem_base + entry_off, nt_guest_init_start,
+	       blob_len);
+	{
+		unsigned long long off0, off1;
+		unsigned long long va0, va1;
+
+		off0 = (unsigned long long)(uintptr_t)nt_guest_init_slot0;
+		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
+		va0 = guard_va0;
+		va1 = guard_va1;
+		memcpy(uml_boot.physmem_base + entry_off + off0, &va0, 8);
+		memcpy(uml_boot.physmem_base + entry_off + off1, &va1, 8);
+	}
+	patched = uml_nt_patch_syscalls(uml_boot.physmem_base + entry_off,
+					blob_len, 0);
+	/* The linear sweep must never have eaten a slot byte as an
+	 * instruction (decoder false-positive = wild guest pointer).
+	 * Verify loud. */
+	{
+		unsigned long long off0, off1, va0, va1;
+
+		off0 = (unsigned long long)(uintptr_t)nt_guest_init_slot0;
+		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
+		memcpy(&va0, uml_boot.physmem_base + entry_off + off0, 8);
+		memcpy(&va1, uml_boot.physmem_base + entry_off + off1, 8);
+		if (va0 != guard_va0 || va1 != guard_va1) {
+			os_info("[stubtest] guard slot clobbered by patch "
+				"scan (va0=0x%llx va1=0x%llx)\n", va0, va1);
+			return 0;
+		}
+	}
+	os_info("[stubtest] init staged at phys 0x%llx (%llu bytes, %lu "
+		"syscall(s) patched, guards 0x%llx/0x%llx)\n", entry_off,
+		blob_len, patched, guard_va0, guard_va1);
+
+	/* Parent mm (M3 model): per-VMA views — text (1 run RWX), stack
+	 * (GUEST_STACK_RUNS runs RW), guard run (RW; the INIT plan
+	 * NOACCESS-protects the guard pages). The kernel image occupies
+	 * the section head: burn those runs first (the allocator must
+	 * never hand them out), then claim the exact probe runs. */
+	{
+		unsigned long long off;
+
+		for (off = 0; off < entry_off; off += 0x10000ull) {
+			if (uml_nt_phys_alloc_at(&probe_phys,
+						 (long long)off) < 0) {
+				os_info("[stubtest] image run burn failed "
+					"at 0x%llx\n", off);
+				return 0;
+			}
+		}
+	}
+	uml_nt_mm_init(&mm_parent);
+	if (uml_nt_phys_alloc_at(&probe_phys, (long long)entry_off) < 0 ||
+	    uml_nt_vma_add(&mm_parent, text_va, text_va + 0x10000ull,
+			   entry_off, UML_NT_PAGE_EXECUTE_READWRITE,
+			   0) < 0) {
+		os_info("[stubtest] text vma failed\n");
+		return 0;
+	}
+	for (i = 0; i < GUEST_STACK_RUNS; i++) {
+		if (uml_nt_phys_alloc_at(&probe_phys,
+				(long long)(entry_off +
+				 (unsigned long long)(i + 1) * 0x10000ull)) < 0) {
+			os_info("[stubtest] stack run alloc failed\n");
+			return 0;
+		}
+	}
+	if (uml_nt_vma_add(&mm_parent, text_va + 0x10000ull, stack_va,
+			   entry_off + 0x10000ull, UML_NT_PAGE_READWRITE,
+			   0) < 0) {
+		os_info("[stubtest] stack vma failed\n");
+		return 0;
+	}
+	if (uml_nt_phys_alloc_at(&probe_phys,
+			(long long)(entry_off +
+			 (GUEST_STACK_RUNS + 1) * 0x10000ull)) < 0) {
+		os_info("[stubtest] guard run alloc failed\n");
+		return 0;
+	}
+	if (uml_nt_vma_add(&mm_parent, stack_va, stack_va + 0x10000ull,
+			   entry_off + (GUEST_STACK_RUNS + 1) * 0x10000ull,
+			   UML_NT_PAGE_READWRITE, 0) < 0) {
+		os_info("[stubtest] guard vma failed\n");
+		return 0;
+	}
+	conn_parent.mm = &mm_parent;
+
+	memset(&zero_regs, 0, sizeof(zero_regs));
+	if (spawn_stub(&conn_parent, text_va, stack_va, &zero_regs) < 0)
+		return 0;
+	os_info("[stubtest] parent stub pid %lu — resuming\n",
+		(unsigned long)conn_parent.pid);
+	nt->ResumeThread(conn_parent.thread);
+
+	/* Service loop: wait on ALL live stubs' evt_in (the per-stub
+	 * D10 turnstile), serve the publisher. 1s timeout = a dead or
+	 * hung stub is reported, not hung (M1.9 lesson). A halt keeps
+	 * the loop running while other conns live. */
+	for (;;) {
+		LARGE_INTEGER to;
+		DWORD w;
+		ULONG code;
+		int any, rc;
+
+		nwaits = 0;
+		waits[nwaits++] = conn_parent.evt_in;
+		if (conn_child.alive)
+			waits[nwaits++] = conn_child.evt_in;
+
+		w = nt->WaitForMultipleObjects((ULONG)nwaits, waits, 0,
+					       1000);
+		if (w == 0xFFFFFFFFu /*WAIT_FAILED*/) {
+			os_info("[stubtest] wait failed win32=%lu\n",
+				nt->RtlGetLastWin32Error());
+			break;
+		}
+		if (w == 258u /*WAIT_TIMEOUT*/) {
+			any = 0;
+			if (conn_parent.alive) {
+				code = 0;
+				nt->GetExitCodeProcess(conn_parent.proc,
+						       &code);
+				if (code != 259u /*STILL_ACTIVE*/) {
+					conn_parent.exit_code = code;
+					conn_parent.alive = 0;
+					os_info("[stubtest] parent died "
+						"silently: %lu\n",
+						(unsigned long)code);
+				} else {
+					any = 1;
+				}
+			}
+			if (conn_child.alive) {
+				code = 0;
+				nt->GetExitCodeProcess(conn_child.proc,
+						       &code);
+				if (code != 259u) {
+					conn_child.exit_code = code;
+					conn_child.alive = 0;
+					os_info("[stubtest] child died "
+						"silently: %lu\n",
+						(unsigned long)code);
+				} else {
+					any = 1;
+				}
+			}
+			if (!any)
+				break;
+			continue;
+		}
+		/* WAIT_OBJECT_0 == 0: w = signaled index */
+		if (w == 0)
+			rc = pump_conn(&conn_parent);
+		else if (conn_child.alive)
+			rc = pump_conn(&conn_child);
+		else
+			rc = 0;
+		if (rc < 0)
+			break;
+	}
+
+	/* The child (if forked) runs to its own exit: wait, then
+	 * collect both codes. The blob orders child exit before parent
+	 * exit, so no child request is left unanswered here. */
+	if (conn_child.pid && conn_child.alive) {
+		nt->NtWaitForSingleObject(conn_child.proc, 0,
+					  UML_NT_INFINITE);
+		nt->GetExitCodeProcess(conn_child.proc,
+				       &conn_child.exit_code);
+		conn_child.alive = 0;
+	}
+	nt->NtWaitForSingleObject(conn_parent.proc, 0, UML_NT_INFINITE);
+	nt->GetExitCodeProcess(conn_parent.proc, &conn_parent.exit_code);
+
+	os_info("[stubtest] FORK OK: parent exit %lu, child exit %lu "
+		"(want 0 / 7)\n", (unsigned long)conn_parent.exit_code,
+		(unsigned long)conn_child.exit_code);
 	return 0;
 }
 

@@ -37,8 +37,9 @@
 #define UML_NT_FOP_MAP     3u
 #define UML_NT_FOP_UNMAP   4u
 
-/* UNMAP + up to 3 MAP pieces (COW split). */
-#define UML_NT_FAULT_MAX_OPS 4
+/* UNMAP + up to 3 MAP pieces (COW split), or an INIT plan: one MAP
+ * per VMA + guard NOACCESS protects. */
+#define UML_NT_FAULT_MAX_OPS 8
 
 struct uml_nt_fault_op {
 	unsigned op;   /* UML_NT_FOP_* */
@@ -70,6 +71,16 @@ struct uml_nt_fault_plan {
 int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		    unsigned long long addr, unsigned type,
 		    struct uml_nt_fault_plan *plan);
+
+/*
+ * Build the INIT plan for a (fresh or forked) stub: MAP every VMA
+ * with its EFFECTIVE protection (COW-shared VMAs map read-only — the
+ * first write faults into the private copy). The caller may append
+ * extra ops (e.g. guard pages NOACCESS) — up to MAX_OPS total.
+ * Returns 0, -1 when the mm does not fit the plan.
+ */
+int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			struct uml_nt_fault_plan *plan);
 
 /* The protection a VMA is mapped with RIGHT NOW: COW-shared writable
  * VMAs map read-only (writes must fault to reach the COW logic). */

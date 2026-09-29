@@ -126,6 +126,7 @@ static void resolve_api_table(void)
 	RESOLVE(CreateProcessA, k32, "CreateProcessA");
 	RESOLVE(ResumeThread, k32, "ResumeThread");
 	RESOLVE(GetExitCodeProcess, k32, "GetExitCodeProcess");
+	RESOLVE(WaitForMultipleObjects, k32, "WaitForMultipleObjects");
 
 	fprintf(stderr, "[launcher] D9 table v%u: %u bytes, all exports "
 			"resolved\n", g_api.version, g_api.size);

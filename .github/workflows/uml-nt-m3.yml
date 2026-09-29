@@ -139,4 +139,7 @@ jobs:
           grep -q "FAULT1-OK" boot.log || { echo "M3.1 fault #1 never recovered"; exit 1; }
           grep -q "FAULT2-OK" boot.log || { echo "M3.1 fault #2 never recovered"; exit 1; }
           grep -q "GUARD0-OK" boot.log || { echo "M3.1 protect did not stick (read-back failed)"; exit 1; }
-          echo "M1.9 NATIVE WINDOWS BOOT OK + M2 ROUND-TRIP OK + M3.1 FAULT ROUND-TRIP OK"
+          grep -q "CHILD-ALIVE" boot.log || { echo "M3.3 fork: child never ran (COW stack fault?)"; exit 1; }
+          grep -q "PARENT-RESUMED" boot.log || { echo "M3.3 fork: parent never resumed"; exit 1; }
+          grep -q "FORK OK: parent exit 0, child exit 7" boot.log || { echo "M3.3 fork exit codes wrong"; exit 1; }
+          echo "M1.9 NATIVE WINDOWS BOOT OK + M2 ROUND-TRIP OK + M3.1 FAULT ROUND-TRIP OK + M3.3 FORK OK"

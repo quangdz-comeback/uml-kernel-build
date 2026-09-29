@@ -37,6 +37,12 @@ int uml_nt_phys_init(struct uml_nt_phys *p, unsigned long long size);
 /* Allocate one run: offset in bytes, or -1 when exhausted. */
 long long uml_nt_phys_alloc(struct uml_nt_phys *p);
 
+/* Claim a SPECIFIC free run (the kernel image occupies the section
+ * head — the claimer burns [0, image_end) at init; VMAs then pin
+ * their exact runs). Returns 0, -1 when the run is out of range or
+ * already taken. */
+int uml_nt_phys_alloc_at(struct uml_nt_phys *p, long long off);
+
 /* refcount helpers. unref returns the refcount AFTER the drop (the
  * caller frees the content when it reaches 0 — pages read back zero
  * in a pagefile section, no scrubbing needed). -1 on bad offsets. */

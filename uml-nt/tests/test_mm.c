@@ -60,6 +60,18 @@ static void test_phys(void)
 			CHECK(uml_nt_phys_alloc(&p) >= 0);
 		CHECK(uml_nt_phys_alloc(&p) == -1);
 	}
+
+	/* alloc_at: claim a specific free run; double-claim fails */
+	{
+		struct uml_nt_phys p2;
+
+		CHECK(uml_nt_phys_init(&p2, 8 * RUN) == 0);
+		CHECK(uml_nt_phys_alloc_at(&p2, 3 * RUN) == 0);
+		CHECK(uml_nt_phys_alloc_at(&p2, 3 * RUN) == -1);
+		CHECK(uml_nt_phys_alloc(&p2) == 0); /* lowest free */
+		CHECK(uml_nt_phys_alloc_at(&p2, 0x1000) == -1);
+		CHECK(uml_nt_phys_alloc_at(&p2, 8 * RUN) == -1);
+	}
 }
 
 static void test_vma(void)
@@ -110,14 +122,15 @@ static void test_vma(void)
 	CHECK(uml_nt_vma_del(&a, RAM + 0x00000, RAM + 0x10000) == -1);
 
 	/* clone: writable VMAs become COW; every run of the span is
-	 * reffed (owner alloc'd them); drop releases. */
+	 * reffed (owner alloc'd them); drop releases. rsp outside the
+	 * VMA = nothing eager-copies. */
 	uml_nt_mm_init(&a);
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0); /* fresh pool */
 	CHECK(uml_nt_phys_alloc(&ph) == 0);          /* run 0 */
 	CHECK(uml_nt_phys_alloc(&ph) == RUN);        /* run 1 */
 	CHECK(uml_nt_vma_add(&a, RAM, RAM + 2 * RUN, 0,
 			     UML_NT_PAGE_READWRITE, 0) == 0);
-	CHECK(uml_nt_mm_clone(&b, &a, &ph) == 0);
+	CHECK(uml_nt_mm_clone(&b, &a, &ph, RAM + 8 * RUN) == 0);
 	CHECK(b.nvma == 1);
 	CHECK((b.vma[0].flags & UML_NT_VMA_COW) != 0);
 	CHECK(uml_nt_phys_refs(&ph, 0) == 2);
@@ -126,13 +139,34 @@ static void test_vma(void)
 	CHECK(uml_nt_phys_refs(&ph, 0) == 1);
 	CHECK(uml_nt_phys_refs(&ph, RUN) == 1);
 
+	/* clone with rsp INSIDE the VMA (rsp = one past the last stack
+	 * byte — the VMA owns [start, rsp)): eager-copy into fresh
+	 * contiguous runs, no COW flag, source refs untouched. */
+	uml_nt_mm_init(&a);
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	CHECK(uml_nt_phys_alloc(&ph) == 0);
+	CHECK(uml_nt_phys_alloc(&ph) == RUN);
+	CHECK(uml_nt_vma_add(&a, RAM, RAM + 2 * RUN, 0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_mm_clone(&b, &a, &ph, RAM + 2 * RUN) == 0);
+	CHECK(b.nvma == 1);
+	CHECK((b.vma[0].flags & UML_NT_VMA_COW) == 0);
+	CHECK(b.vma[0].run_off == 2 * RUN); /* next free pair */
+	CHECK(uml_nt_phys_refs(&ph, 0) == 1);   /* parent-only now */
+	CHECK(uml_nt_phys_refs(&ph, RUN) == 1);
+	CHECK(uml_nt_phys_refs(&ph, 2 * RUN) == 1);
+	CHECK(uml_nt_phys_refs(&ph, 3 * RUN) == 1);
+	uml_nt_mm_drop(&b, &ph);
+	CHECK(uml_nt_phys_refs(&ph, 2 * RUN) == 0);
+	CHECK(uml_nt_phys_refs(&ph, 3 * RUN) == 0);
+
 	/* read-only VMAs do NOT become COW */
 	uml_nt_mm_init(&a);
 	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0); /* fresh pool */
 	CHECK(uml_nt_phys_alloc(&ph) == 0);
 	CHECK(uml_nt_vma_add(&a, RAM, RAM + RUN, 0,
 			     UML_NT_PAGE_READONLY, 0) == 0);
-	CHECK(uml_nt_mm_clone(&c, &a, &ph) == 0);
+	CHECK(uml_nt_mm_clone(&c, &a, &ph, RAM + 8 * RUN) == 0);
 	CHECK((c.vma[0].flags & UML_NT_VMA_COW) == 0);
 	CHECK(uml_nt_phys_refs(&ph, 0) == 2);
 	uml_nt_mm_drop(&c, &ph);
@@ -355,6 +389,31 @@ static void test_fault(void)
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x8000, UML_NT_FAULT_WRITE,
 			      &plan) == -1);
 	CHECK(plan.kill && plan.n_ops == 0);
+
+	/* INIT plan (M3.3): one MAP per VMA with the EFFECTIVE
+	 * protection — COW-shared runs map read-only so the first
+	 * write faults into the private copy. */
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	CHECK(uml_nt_phys_alloc(&ph) == 0);
+	CHECK(uml_nt_phys_alloc(&ph) == RUN);
+	CHECK(uml_nt_phys_ref(&ph, 0) == 2);   /* a second context */
+	CHECK(uml_nt_phys_ref(&ph, RUN) == 2);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, 0,
+			     UML_NT_PAGE_EXECUTE_READWRITE,
+			     UML_NT_VMA_COW) == 0);
+	CHECK(uml_nt_vma_add(&mm, RAM + RUN, RAM + 2 * RUN, RUN,
+			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
+	CHECK(uml_nt_mm_init_plan(&mm, &ph, &plan) == 0);
+	CHECK(!plan.kill && plan.n_ops == 2);
+	CHECK(plan.ops[0].op == UML_NT_FOP_MAP);
+	CHECK(plan.ops[0].prot == UML_NT_PAGE_EXECUTE_READ);
+	CHECK(plan.ops[0].va == RAM && plan.ops[0].len == RUN &&
+	      plan.ops[0].off == 0);
+	CHECK(plan.ops[1].op == UML_NT_FOP_MAP);
+	CHECK(plan.ops[1].prot == UML_NT_PAGE_READONLY);
+	CHECK(plan.ops[1].va == RAM + RUN && plan.ops[1].len == RUN &&
+	      plan.ops[1].off == RUN);
 
 	/* mirroring contract: plan ops == stub actions (drift breaks
 	 * both sides silently) */
