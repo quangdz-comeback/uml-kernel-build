@@ -90,4 +90,23 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
 			   struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			   unsigned long long *top_out);
 
+/*
+ * Build the SysV x86-64 process-start block at the TOP of the stack
+ * run (S3, the create_elf_tables analogue): argc, argv/envp pointer
+ * vectors (NULL-terminated), auxv {AT_RANDOM, AT_PAGESZ, AT_NULL} and
+ * the strings + 16 random bytes above them; rsp lands 16-aligned.
+ * `dst` = the stack run through the flat view, `va_base` = the guest
+ * VA of dst[0], `cap` = the run size, `rand16` = the AT_RANDOM bytes.
+ * argv/envp are main()-style NULL-terminated (counted by walking to
+ * the NULL). Returns the bytes used (rsp = stack_top - used) or -1
+ * on overflow.
+ * Pure logic — unit-tested (the binfmt passes bprm's argv/envp;
+ * S3 passes argc=0).
+ */
+long long uml_nt_elf_stack_tables(void *dst, unsigned long long va_base,
+				  unsigned long long cap, int argc,
+				  const char *const *argv,
+				  const char *const *envp,
+				  const unsigned char *rand16);
+
 #endif /* __UM_OS_WINDOWS_ELF_H */

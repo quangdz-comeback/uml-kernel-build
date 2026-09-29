@@ -196,7 +196,16 @@ merged:
 	/* ---- base: ET_EXEC loads as linked; ET_DYN picks first-fit
 	 * above the mm's existing VMAs (PIE analogue) -------------- */
 	if (eh->e_type == ET_EXEC) {
-		base = 0;
+		/* S3: real static binaries link at 0x400000 — BELOW the
+		 * guest window (the stub can only back VAs inside
+		 * [UML_NT_GUEST_VA_BASE, base+size): per-VMA views of
+		 * the section). Shift the whole image into the window
+		 * instead of failing the VA check — same arithmetic as
+		 * the ET_DYN base, just a fixed one. Images already
+		 * linked inside the window (the M3.4 probe guest) load
+		 * exactly as before. */
+		base = (regs[0].rs < UML_NT_GUEST_VA_BASE) ?
+		       UML_NT_GUEST_VA_BASE : 0;
 	} else {
 		unsigned long long rel = regs[0].rs;
 		unsigned long long size = regs[nreg - 1].re - rel;
@@ -327,4 +336,111 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
 	*top_out = va + RUN;
 	img->stack_top = va + RUN;
 	return UML_NT_ELF_OK;
+}
+
+/* ---- S3: the SysV x86-64 process-start stack ----------------------- */
+
+/* auxv tags (asm-generic/auxvec.h / the x86-64 ABI). */
+#define AT_NULL   0
+#define AT_PAGESZ 6
+#define AT_RANDOM 25
+
+#define UML_NT_ELF_MAX_STR 64 /* argv+envp entries the block can hold */
+
+/* Build the initial user stack block at the TOP of the stack run —
+ * the exact layout _start expects at rsp (SysV x86-64 ABI / binfmt_elf
+ * create_elf_tables analogue):
+ *
+ *   rsp+0       argc
+ *   rsp+8..     argv[0..argc-1] pointers, NULL
+ *               envp[0..n-1] pointers, NULL
+ *               auxv: {AT_RANDOM, ptr} {AT_PAGESZ, 4096} {AT_NULL, 0}
+ *   ...pad 16-align...
+ *   strings: argv bytes, envp bytes, 16 AT_RANDOM bytes
+ *   top
+ *
+ * `dst` is the stack run through the kernel's flat view, `va_base`
+ * the guest VA of dst[0], `cap` the run size. rand16 is the 16
+ * AT_RANDOM bytes (get_random_bytes at the caller; the tables stay
+ * pure for unit tests). Returns the bytes used — rsp = stack_top -
+ * used, 16-aligned — or -1 on overflow (loud, never truncate).
+ *
+ * The S3 init reads none of this (argc=0 is passed); the layout is
+ * the real ABI from day one so S4 (busybox argv) only wires bprm
+ * strings in. */
+long long uml_nt_elf_stack_tables(void *dst, unsigned long long va_base,
+				  unsigned long long cap, int argc,
+				  const char *const *argv,
+				  const char *const *envp,
+				  const unsigned char *rand16)
+{
+	unsigned long long o = cap; /* top-down cursor in dst[] */
+	unsigned long long str_va[UML_NT_ELF_MAX_STR];
+	unsigned long long rnd_va, vec, i;
+	int nenv = 0, n;
+
+	if (argc < 0 || argc > UML_NT_ELF_MAX_STR)
+		return -1;
+	while (envp != 0 && envp[nenv] != 0) {
+		if (nenv >= UML_NT_ELF_MAX_STR - argc)
+			return -1;
+		nenv++;
+	}
+
+	/* strings, top-down */
+	for (i = 0; i < (unsigned)argc; i++) {
+		n = __builtin_strlen(argv[i]) + 1;
+		if ((unsigned long long)n > o)
+			return -1;
+		o -= n;
+		__builtin_memcpy((char *)dst + o, argv[i], n);
+		str_va[i] = va_base + o;
+	}
+	for (i = 0; i < (unsigned)nenv; i++) {
+		n = __builtin_strlen(envp[i]) + 1;
+		if ((unsigned long long)n > o)
+			return -1;
+		o -= n;
+		__builtin_memcpy((char *)dst + o, envp[i], n);
+		str_va[argc + i] = va_base + o;
+	}
+	if (o < 16)
+		return -1;
+	o -= 16;
+	if (rand16 != 0)
+		__builtin_memcpy((char *)dst + o, rand16, 16);
+	else
+		__builtin_memset((char *)dst + o, 0, 16);
+	rnd_va = va_base + o;
+
+	/* vectors: argc + (argc+1 argv) + (nenv+1 envp) + 3 auxv pairs */
+	vec = (1 + (unsigned)argc + 1 + (unsigned)nenv + 1 + 6) * 8;
+	if (vec > o)
+		return -1;
+	o -= vec;
+	/* rsp must be 16-aligned — vec is slot-count*8, NOT always a
+	 * 16-multiple (argc=0: 9 slots = 72), so align AFTER. */
+	o &= ~(unsigned long long)15;
+
+	{
+		unsigned long long *v = (unsigned long long *)
+			((char *)dst + o);
+
+		i = 0;
+		v[i++] = (unsigned long long)argc;
+		for (n = 0; n < argc; n++)
+			v[i++] = str_va[n];
+		v[i++] = 0; /* argv NULL */
+		for (n = 0; n < nenv; n++)
+			v[i++] = str_va[argc + n];
+		v[i++] = 0; /* envp NULL */
+		v[i++] = AT_RANDOM;
+		v[i++] = rnd_va;
+		v[i++] = AT_PAGESZ;
+		v[i++] = 4096;
+		v[i++] = AT_NULL;
+		v[i++] = 0;
+	}
+
+	return (long long)(cap - o);
 }

@@ -21,7 +21,13 @@ staging/sbin/init: init.c
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "init must be a static ELF" >&2; exit 1; }
 
-rootfs.ext4: staging/sbin/init
+# /dev must exist for devtmpfs_mount (M3.5 saw error -2 without it);
+# devtmpfs then provides /dev/console for console_on_rootfs (init's
+# fds 0/1/2) and the device nodes busybox needs (M3.8 S4).
+staging/dev:
+	@mkdir -p staging/dev
+
+rootfs.ext4: staging/sbin/init staging/dev
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 

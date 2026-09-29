@@ -26,13 +26,20 @@ fi
 	"$OS_DIR/skas/elf.c" "$OS_DIR/skas/vma.c" \
 	"$OS_DIR/skas/physalloc.c" "$OS_DIR/skas/scan_patch.c"
 
+# the REAL S3 init fixture — the rootfs recipe verbatim (rootfs/
+# Makefile): -static -nostdlib -no-pie links at 0x400000, so this
+# exercises the low-link shift on real linker output
+INIT_FIXTURE=""
 if [ -n "$LD" ]; then
 	"$CC" --target=x86_64-linux-gnu -c "$GUEST_DIR/init.S" \
 		-o "$TMP/init.o"
 	"$LD" -static -nostdlib -e _start -z max-page-size=0x10000 \
 		--image-base=0x62000000 -o "$TMP/guest-init.elf" \
 		"$TMP/init.o"
-	"$TMP/test" "$TMP/guest-init.elf"
+	"$CC" --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
+		-Wall -o "$TMP/rootfs-init" "$HERE/../rootfs/init.c"
+	INIT_FIXTURE="$TMP/rootfs-init"
+	"$TMP/test" "$TMP/guest-init.elf" "$INIT_FIXTURE"
 else
 	"$TMP/test"
 fi

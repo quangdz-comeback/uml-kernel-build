@@ -3,6 +3,9 @@ CONFIG_HIGH_RES_TIMERS=y
 CONFIG_LOG_BUF_SHIFT=14
 CONFIG_CC_OPTIMIZE_FOR_SIZE=y
 CONFIG_OS_WINDOWS=y
+# binfmt_umlnt (D17) replaces the ELF loader: the pte-backed
+# binfmt_elf path has no stub backing (guest VA = per-VMA views).
+# CONFIG_BINFMT_ELF is not set
 # CONFIG_MCONSOLE is not set
 CONFIG_MAGIC_SYSRQ=y
 CONFIG_DEVTMPFS=y

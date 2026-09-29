@@ -267,3 +267,30 @@ jobs:
           grep -q "Run /sbin/init as init process" mount.log || { echo "/sbin/init never found in the mounted image"; exit 1; }
           grep -q "stdio console ready" mount.log || { echo "M3.6 console driver never registered"; exit 1; }
           echo "M3.5 NATIVE MOUNT OK: ubd sync I/O + ext4 + /sbin/init"
+
+      # M3.8 S3 — binfmt_umlnt (D17): the ext4 /sbin/init (static,
+      # freestanding) execs through do_execve → binfmt_umlnt → the S1
+      # conn (VMA/spans) → the S2 userspace() loop serves it; the
+      # guest init's write(2) reaches the console via the D16 dispatch
+      # and exit(0) halts (panic → exit 1). Same rootfs image as the
+      # mount gates — the marker proves the FULL exec chain.
+      - name: NATIVE init-exec gate (M3.8 S3 binfmt_umlnt)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$ROOTFS" "root=98:0" > initexec.log 2>&1
+          code=$?
+          set -e
+          cat initexec.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code"; exit 1; }
+          grep -q "EXT4-fs (ubda): mounted filesystem" initexec.log || { echo "ext4 never mounted (ubd sync I/O broken?)"; exit 1; }
+          grep -q "Run /sbin/init as init process" initexec.log || { echo "/sbin/init never found"; exit 1; }
+          grep -q "stdio console ready" initexec.log || { echo "M3.6 console driver never registered"; exit 1; }
+          grep -q "binfmt_umlnt: init loaded" initexec.log || { echo "binfmt_umlnt load_binary never ran (exec failed earlier? see log)"; exit 1; }
+          grep -q "INIT-SYSCALL-OK" initexec.log || { echo "guest init never wrote through the exec + userspace() path"; exit 1; }
+          echo "M3.8 S3 NATIVE INIT-EXEC OK: binfmt_umlnt + userspace() + write(2) + exit"

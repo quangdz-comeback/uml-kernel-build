@@ -423,6 +423,188 @@ static void test_stack(void)
 	CHECK(top == 0x62030000ull);
 }
 
+/* ET_EXEC linked BELOW the guest window (S3: real static binaries
+ * live at 0x400000) — the whole image shifts into the window; entry/
+ * brk follow. The backing runs stay backend offsets (D11: VA and
+ * run_off are independent). */
+static void test_exec_lowlink(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	struct uml_nt_elf_image out;
+	elf_ehdr *eh;
+	int rc;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, SPAN) == 0);
+	uml_nt_mm_init(&mm);
+	eh = mk_ehdr(2, 0x400010ull);
+	add_phdr(5 /* R|X */, 0x400, 0x400000ull, 0x1000, 0x1000);
+	add_phdr(6 /* R|W */, 0x1400, 0x410000ull, 0x10, 0x100);
+	eh->e_entry = 0x400010ull;
+
+	rc = uml_nt_elf_load(&out, &mm, &ph, img, 0x2000, sec);
+	CHECK(rc == UML_NT_ELF_OK);
+	CHECK(out.nseg == 2);
+	CHECK(out.seg[0].start == RAM + 0x400000ull);
+	CHECK(out.seg[1].start == RAM + 0x410000ull);
+	CHECK(out.entry == RAM + 0x400010ull);
+	CHECK(out.brk == RAM + 0x420000ull);
+	/* bytes at the run offsets (VA-shift must not touch backing) */
+	CHECK(sec[MOCK_BASE + 0x10] == 0x10);
+	/* the VMAs see the shifted VAs */
+	CHECK(uml_nt_vma_find(&mm, RAM + 0x400010ull) == &mm.vma[0]);
+
+	/* an image ALREADY linked in the window keeps base 0 — the
+	 * M3.4 probe contract is untouched */
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, SPAN) == 0);
+	uml_nt_mm_init(&mm);
+	eh = mk_ehdr(2, 0x62000010ull);
+	add_phdr(5, 0x400, 0x62000000ull, 0x1000, 0x1000);
+	eh->e_entry = 0x62000010ull;
+	CHECK(uml_nt_elf_load(&out, &mm, &ph, img, 0x2000, sec) ==
+	      UML_NT_ELF_OK);
+	CHECK(out.seg[0].start == 0x62000000ull);
+}
+
+/* SysV process-start stack block (S3): argc/argv/envp/auxv + strings
+ * at the top, rsp 16-aligned, pointers are guest VAs into the block. */
+static void test_stack_tables(void)
+{
+	static unsigned char stackbuf[UML_NT_PHYS_RUN_SIZE];
+	static const unsigned char rnd[16] = {
+		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+	};
+	/* main()-style: BOTH vectors NULL-terminated (the function's
+	 * contract — it counts envp by walking to the NULL). */
+	const char *argv[] = { "/sbin/init", "-flag", NULL };
+	const char *envp[] = { "A=B", NULL };
+	unsigned long long va_base = 0x62020000ull; /* run base VA */
+	unsigned long long top = va_base + RUN, rsp, *v;
+	long long used, i;
+
+	memset(stackbuf, 0xCC, sizeof(stackbuf));
+	used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 2, argv,
+				       envp, rnd);
+	CHECK(used > 0);
+	rsp = top - (unsigned long long)used;
+	CHECK(rsp % 16 == 0);
+	CHECK((unsigned long long)used < RUN);
+
+	v = (unsigned long long *)((char *)stackbuf + (top - va_base -
+						     used));
+	CHECK(v[0] == 2); /* argc */
+	CHECK(v[1] > rsp && v[1] < top); /* argv[0] = the top string */
+	{
+		const char *s = (const char *)(stackbuf +
+			(v[1] - va_base));
+
+		CHECK(strcmp(s, "/sbin/init") == 0);
+	}
+	{
+		const char *s = (const char *)(stackbuf +
+			(v[2] - va_base));
+
+		CHECK(strcmp(s, "-flag") == 0);
+	}
+	CHECK(v[3] == 0); /* argv NULL */
+	{
+		const char *s = (const char *)(stackbuf +
+			(v[4] - va_base));
+
+		CHECK(strcmp(s, "A=B") == 0);
+	}
+	CHECK(v[5] == 0); /* envp NULL */
+	/* auxv: AT_RANDOM → the 16 bytes, AT_PAGESZ → 4096, AT_NULL */
+	CHECK(v[6] == 25 /*AT_RANDOM*/ && v[7] > rsp);
+	CHECK(v[8] == 6 /*AT_PAGESZ*/ && v[9] == 4096);
+	CHECK(v[10] == 0 && v[11] == 0);
+	{
+		const unsigned char *r = (const unsigned char *)(stackbuf +
+			(v[7] - va_base));
+
+		CHECK(v[7] >= rsp && v[7] < top);
+		CHECK(memcmp(r, rnd, 16) == 0);
+	}
+
+	/* argc=0/envp=NULL — the S3 init shape: still a valid block */
+	memset(stackbuf, 0xCC, sizeof(stackbuf));
+	used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 0, NULL,
+				       NULL, rnd);
+	CHECK(used > 0);
+	rsp = top - (unsigned long long)used;
+	CHECK(rsp % 16 == 0);
+	v = (unsigned long long *)((char *)stackbuf + (top - va_base -
+						       used));
+	CHECK(v[0] == 0 && v[1] == 0); /* argc, argv NULL */
+
+	/* overflow: 1-byte run cannot hold the tables — fail loud */
+	CHECK(uml_nt_elf_stack_tables(stackbuf, va_base, 8, 2, argv,
+				      envp, rnd) == -1);
+	/* deterministic without rand16 (zeroed AT_RANDOM bytes) */
+	memset(stackbuf, 0xCC, sizeof(stackbuf));
+	used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 0, NULL,
+				       NULL, NULL);
+	CHECK(used > 0);
+	(void)i;
+}
+
+/* The REAL S3 init (rootfs/init.c — built by test_elf.sh with the
+ * rootfs recipe: -static -nostdlib -no-pie → linked at 0x400000, so
+ * this also exercises the low-link shift on a real linker output).
+ * Asserts: shifted into the window, entry translated, bytes intact,
+ * both syscall sites patched (write + exit). */
+static void test_real_init(const char *path)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	struct uml_nt_elf_image out;
+	FILE *f;
+	unsigned long len, patched;
+	unsigned long long entry_linked;
+	int rc;
+
+	f = fopen(path, "rb");
+	if (f == NULL) {
+		printf("SKIP real init (%s)\n", path);
+		return;
+	}
+	len = fread(img, 1, sizeof(img), f);
+	fclose(f);
+	if (len == 0 || len == sizeof(img)) {
+		CHECK(!"real init unreadable");
+		return;
+	}
+	entry_linked = ((const elf_ehdr *)img)->e_entry;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, SPAN) == 0);
+	uml_nt_mm_init(&mm);
+	memset(sec, 0xAA, sizeof(sec));
+	rc = uml_nt_elf_load(&out, &mm, &ph, img, len, sec);
+	CHECK(rc == UML_NT_ELF_OK);
+	CHECK(out.nseg >= 1);
+	CHECK(out.seg[0].start == RAM + (entry_linked &
+					 ~(RUN - 1)));
+	CHECK(out.entry == RAM + entry_linked);
+	CHECK(out.entry >= out.seg[0].start &&
+	      out.entry < out.seg[0].end);
+
+	patched = 0;
+	for (rc = 0; rc < out.nseg; rc++) {
+		if (!uml_nt_prot_execable(out.seg[rc].prot))
+			continue;
+		patched += uml_nt_patch_syscalls(
+			sec + out.seg[rc].run_off,
+			out.seg[rc].end - out.seg[rc].start, 0);
+	}
+	CHECK(patched >= 2); /* write + exit at minimum */
+	printf("real init: %d region(s), entry 0x%llx (linked 0x%llx), "
+	       "%lu patched\n", out.nseg, out.entry, entry_linked,
+	       patched);
+}
+
 /* The REAL probe guest (built by test_elf.sh with clang+lld, same
  * recipe as the CI kernel job): layout as linked, bytes intact, and
  * the patch scan finds EVERY syscall site — a lost one is a guest
@@ -509,13 +691,17 @@ static void test_real_guest(const char *path)
 int main(int argc, char **argv)
 {
 	test_exec_basic();
+	test_exec_lowlink();
 	test_merge();
 	test_dyn();
 	test_errors();
 	test_rollback();
 	test_stack();
+	test_stack_tables();
 	if (argc > 1)
 		test_real_guest(argv[1]);
+	if (argc > 2)
+		test_real_init(argv[2]);
 
 	if (fails) {
 		printf("test_elf: %d failure(s)\n", fails);
