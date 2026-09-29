@@ -32,6 +32,8 @@ uml-nt/guest/guest-init.elf
 # M3.5 gate rootfs (built in CI, never committed)
 uml-nt/rootfs/staging/
 uml-nt/rootfs/rootfs.ext4
+# S4c2 busybox source tree + tarball (pinned download, built in CI)
+uml-nt/rootfs/build/
 
 # local kernel build dir (this VM)
 /.kbuild/

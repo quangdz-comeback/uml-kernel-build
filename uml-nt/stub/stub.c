@@ -122,21 +122,34 @@ static void park_forever(void)
 		Sleep(INFINITE);
 }
 
-/* D18 (S4c2): apply the guest TLS base. Windows scheduling does not
- * preserve a user-set FS base (probes/fsgsbase, S4c evidence:
- * wrfsbase ok, VEH round-trip preserves, scheduling loses) — so the
- * base published by arch_prctl(ARCH_SET_FS) is re-applied at every
- * resume into guest code, and an fs-prefixed fault mid-run (base
- * wiped while the guest was running) is repaired in the VEH fast
- * path below. Upstream never does this: Linux keeps the base in the
- * task regs across the ptrace round-trip. */
-static void apply_fs_base(void)
-{
-	unsigned long long base = d->fs_base;
+/* D18 (S4c2): guest TLS base. Windows does not preserve a user-set
+ * FS base across ANY kernel transition — scheduling AND the
+ * EXCEPTION_CONTINUE_EXECUTION context restore (the x64 CONTEXT
+ * carries the FS selector, not the base; KeContextToKernelMode
+ * reloads it from the flat GDT → 0. The FSGSBASE probe's
+ * "VEH-preserved yes" only measured INSIDE the handler; the first
+ * S4c2a CI run printed TLS-BAD exactly because the base applied in
+ * the handler died at the restore). So the base published by
+ * arch_prctl(ARCH_SET_FS) is applied by a TRAMPOLINE that runs AFTER
+ * the restore: the VEH redirects rip to fs_trampoline (native stub
+ * code), which wrfsbase's and jumps to the real target. Upstream
+ * never does this: Linux keeps the base in the task regs across the
+ * ptrace round-trip. */
+static volatile unsigned long long fs_tramp_base, fs_tramp_target;
 
-	if (base == 0)
-		return;
-	__asm__ volatile ("wrfsbase %0" :: "r" (base) : "memory");
+__attribute__((naked)) static void fs_trampoline(void)
+{
+	__asm__ volatile (
+		"pushq	%rcx\n\t"	/* guest red zone: written and
+					 * restored before any guest
+					 * instruction runs */
+		"pushq	%r11\n\t"
+		"movq	fs_tramp_base(%rip), %r11\n\t"
+		"wrfsbase %r11\n\t"
+		"popq	%r11\n\t"
+		"popq	%rcx\n\t"
+		"jmp	*fs_tramp_target(%rip)\n\t"
+	);
 }
 
 /* FILE_MAP_* bits for a view with `prot` protection. FILE_MAP_EXECUTE
@@ -264,16 +277,19 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		return EXCEPTION_CONTINUE_SEARCH;
 
 	/* D18 fast path: an fs-prefixed guest access that faults below
-	 * the guest span means scheduling wiped the TLS base while the
-	 * guest was running. Re-apply it and let the instruction
-	 * re-execute (rip untouched — same contract as the fault
-	 * replay). A genuine guest null/low deref is NOT fs-prefixed
-	 * and keeps its normal SIGSEGV round-trip. */
+	 * the guest span means the TLS base was wiped while the guest
+	 * ran. Redirect through the trampoline (which re-applies the
+	 * base AFTER the context restore) back to the SAME rip — the
+	 * instruction re-executes with the base live. A genuine guest
+	 * null/low deref is not fs-prefixed and keeps its SIGSEGV
+	 * round-trip. */
 	if (is_fault && d->fs_base != 0 &&
 	    (uintptr_t)er->ExceptionInformation[1] <
 		    (uintptr_t)d->ram_base &&
 	    *(const unsigned char *)(uintptr_t)c->Rip == 0x64 /* fs: */) {
-		apply_fs_base();
+		fs_tramp_base = d->fs_base;
+		fs_tramp_target = c->Rip;
+		c->Rip = (DWORD64)(uintptr_t)&fs_trampoline;
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
@@ -304,12 +320,21 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	gp_to_context(c, &d->regs);
 	if (is_syscall) {
 		c->Rax = (DWORD64)d->retval;
-		c->Rip = d->regs.rip + 2; /* past 0F 0B (ud2) */
+		/* D18: with a TLS base live, resume THROUGH the
+		 * trampoline — the context restore on the way out has
+		 * already zeroed the base, and rcx/r11 are clobbered
+		 * by the syscall contract anyway (the trampoline uses
+		 * them as scratch, plus the guest red zone it restores
+		 * verbatim). Without TLS this stays the plain rip+2
+		 * resume the M1.9–M3.7 gates have always run. */
+		if (d->fs_base != 0) {
+			fs_tramp_base = d->fs_base;
+			fs_tramp_target = d->regs.rip + 2; /* past ud2 */
+			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline;
+		} else {
+			c->Rip = d->regs.rip + 2; /* past 0F 0B (ud2) */
+		}
 	}
-	/* D18: the wait in the action chain may have wiped the FS base
-	 * (the CONTEXT Windows restores here carries the selector, not
-	 * the base) — re-apply before guest code runs again. */
-	apply_fs_base();
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);
 

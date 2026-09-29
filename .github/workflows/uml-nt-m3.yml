@@ -78,6 +78,8 @@ jobs:
       # root, no loop device). Uploaded for the native mount gate.
       - name: Build gate rootfs (M3.5)
         run: |
+          # musl-gcc builds the busybox that lands in the image (S4c2)
+          sudo apt-get install -y musl-tools
           make -C uml-nt/rootfs
           file uml-nt/rootfs/rootfs.ext4
 
@@ -327,4 +329,11 @@ jobs:
           # anonymous mmap check is the musl malloc floor.
           grep -q "TLS-OK" initexec.log || { echo "S4c2: arch_prctl/D18 FS base never survived a syscall round-trip"; exit 1; }
           grep -q "MMAP-OK" initexec.log || { echo "S4c2: anonymous mmap (musl malloc floor) failed"; exit 1; }
-          echo "M3.8 S3+S4b+S4c NATIVE INIT-EXEC OK: binfmt_umlnt + userspace() + write(2) + openat/read VFS + execve chain"
+          # M3.8 S4c2 acceptance POC: busybox sh (musl, linked in-window)
+          # runs /hi.sh and its echo reaches the console — a bare "hi"
+          # line, distinct from the OPENAT-READ-OK marker (which only
+          # shows the SCRIPT bytes). EXEC2-FAIL would mean step2's
+          # execve of /bin/busybox failed.
+          grep -q "EXEC2-FAIL" initexec.log && { echo "step2: execve /bin/busybox failed"; exit 1; }
+          grep -E "hi[[:space:]]*$" initexec.log | grep -qv "OPENAT-READ-OK: echo hi" || { echo "busybox sh never echoed hi (acceptance)"; exit 1; }
+          echo "M3.8 S3+S4b+S4c NATIVE INIT-EXEC OK: binfmt_umlnt + userspace() + write(2) + openat/read VFS + execve chain + TLS + busybox sh echo hi"

@@ -73,9 +73,12 @@ static long sys_mmap_anon_rw(unsigned long len)
 
 void _start(void)
 {
+	static const char path[] = "/bin/busybox";
+	static const char *const argv[] = { "/bin/busybox", "sh", "/hi.sh",
+					    (void *)0 };
 	char tp[64];
 	unsigned long got, *fs0 = (unsigned long *)tp;
-	long mm;
+	long mm, rc;
 
 	sys_write(1, "STEP2-OK\n", 9);
 
@@ -103,5 +106,16 @@ void _start(void)
 		sys_write(1, "MMAP-FAIL\n", 10);
 	}
 
-	sys_exit(0);
+	/* S4c2: hand the task to the REAL third-party userspace —
+	 * busybox sh (musl TLS via arch_prctl, malloc via brk/mmap,
+	 * the script through the real VFS). argv/envp are baked
+	 * absolute pointers: valid because this image links INSIDE
+	 * the guest window (see Makefile). execve returns only on
+	 * failure — loud, then a distinctive exit code. */
+	__asm__ volatile ("syscall"
+			  : "=a" (rc)
+			  : "a" (59L), "D" (path), "S" (argv), "d" (0L)
+			  : "rcx", "r11", "memory");
+	sys_write(1, "EXEC2-FAIL\n", 11);
+	sys_exit(7);
 }

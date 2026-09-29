@@ -19,6 +19,16 @@ LD = ld.lld
 IMAGE_BASE := 0x62000000
 IMG_BLOCKS ?= 2048   # 8 MiB at 4K blocks
 
+# S4c2: busybox FROM SOURCE, not the Alpine prebuilt — the prebuilt
+# links at 0x400000 and the load shift would break every baked pointer
+# (the exact S4c EXEC-FAIL bug). allnoconfig + ash keeps musl off the
+# raw linux/ headers it doesn't ship (console tools need linux/kd.h).
+# musl's crt1.o carries a .interp section, so the binary has a
+# PT_INTERP — our loader only walks PT_LOADs and ignores it; guests
+# never look at it either. Build needs musl-tools (musl-gcc) + lld.
+BUSYBOX_VER := 1.36.1
+BUSYBOX_SHA := b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
+
 all: rootfs.ext4
 
 staging/sbin/init: init.c
@@ -42,16 +52,42 @@ staging/hi.sh:
 	printf 'echo hi\n' > $@
 
 # S4c: the exec-chain proof binary — /sbin/init execve()s it through
-# the guest syscall path (the STEP2-OK native gate).
+# the guest syscall path (the STEP2-OK native gate). It then probes
+# TLS/mmap (S4c2a gates) and execve()s busybox (below).
 staging/bin/step2: ../guest/step2.elf
 	@mkdir -p staging/bin
 	cp $< $@
 
-rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh staging/bin/step2
+build/busybox-$(BUSYBOX_VER)/busybox:
+	@mkdir -p build
+	curl -sSL -o build/$(BUSYBOX_VER).tar.bz2 \
+		https://busybox.net/downloads/busybox-$(BUSYBOX_VER).tar.bz2
+	echo "$(BUSYBOX_SHA)  build/$(BUSYBOX_VER).tar.bz2" | sha256sum -c
+	tar -xjf build/$(BUSYBOX_VER).tar.bz2 -C build
+	make -C build/busybox-$(BUSYBOX_VER) allnoconfig >/dev/null
+	sed -i -e 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' \
+	       -e 's/^# CONFIG_ASH is not set/CONFIG_ASH=y/' \
+	       -e 's/^# CONFIG_ECHO is not set/CONFIG_ECHO=y/' \
+	       -e 's/^CONFIG_EXTRA_LDFLAGS=.*/CONFIG_EXTRA_LDFLAGS="-fuse-ld=lld -static -Wl,--image-base=$(IMAGE_BASE)"/' \
+	       build/busybox-$(BUSYBOX_VER)/.config
+	make -C build/busybox-$(BUSYBOX_VER) -j$(shell nproc) \
+		CC=musl-gcc >/dev/null
+
+# busybox sh runs /hi.sh (the acceptance POC): argv[1] = applet name,
+# the script comes back through openat/read (S4b), "hi" goes out
+# through write(2) → the console hand-path.
+staging/bin/busybox: build/busybox-$(BUSYBOX_VER)/busybox
+	@mkdir -p staging/bin
+	cp $< $@
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "busybox must be a static ELF" >&2; exit 1; }
+
+rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
+	     staging/bin/step2 staging/bin/busybox
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 
 clean:
-	rm -rf staging rootfs.ext4
+	rm -rf staging build rootfs.ext4
 
 .PHONY: all clean
