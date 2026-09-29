@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * stub.c — uml-nt stub process (M2).
+ * stub.c — uml-nt stub process (M3).
  *
  * Upstream analogue: arch/um/kernel/skas/stub.c (+ stub_exe.c loader) —
  * the code that runs "on behalf of" guest userland inside a process the
@@ -20,12 +20,22 @@
  *      resulting STATUS_ILLEGAL_INSTRUCTION, snapshots the GP regs,
  *      publishes the request, waits for the kernel answer, folds the
  *      return value in, and resumes past the ud2.
- *   3. Guest exit: same round-trip with cmd=EXIT, then ExitProcess —
- *      the kernel reads the exit code from the process handle.
+ *   3. Guest page faults (M3.1): the same VEH catches
+ *      STATUS_ACCESS_VIOLATION from guest code, publishes the fault
+ *      (address + access class), and the kernel answers with an
+ *      ACTION: PROTECT (the stub VirtualProtects the page in its own
+ *      view — upstream lets the stub run mmap ops the same way) or
+ *      KILL (wild pointer; the stub parks and the kernel terminates
+ *      it — M2.2 parity, ExitProcess from a VEH frame lies about the
+ *      exit code). The guest then re-executes the faulting
+ *      instruction: rip stays UNCHANGED and every register is
+ *      restored verbatim — the faulting instruction's live state
+ *      (e.g. rax) must survive the round-trip.
  *
  * VEH resume semantics (M0/S1 4/4): modify the CONTEXT Windows hands
  * us and return EXCEPTION_CONTINUE_EXECUTION; RIP redirect + reg
- * writes stick. Here resume is the trivial in-frame case (rip += 2).
+ * writes stick. Syscall resume advances rip past the ud2; fault
+ * resume replays the faulting instruction verbatim.
  *
  * This is PE-land code: windows.h + ntdll imports are fine (D9 keeps
  * only the kernel ELF free of that).
@@ -61,30 +71,55 @@ static int gp_from_context(const CONTEXT *c, struct uml_nt_gp_regs *g)
 	return 0;
 }
 
-static void gp_to_context(CONTEXT *c, const struct uml_nt_gp_regs *g,
-			  unsigned long long retval, int advance_rip)
+/* Apply the (kernel-audited) register snapshot verbatim; the caller
+ * fixes rax/rip per trap class. Fault resume depends on rax being
+ * restored exactly — the faulting instruction's live state. */
+static void gp_to_context(CONTEXT *c, const struct uml_nt_gp_regs *g)
 {
-	c->Rax = (DWORD64)retval; /* syscall return */
-	/* rcx/r11 are syscall-clobbered by contract; kernel may have
-	 * written them via regs — apply the full set to be honest. */
+	c->Rax = g->rax;
+	/* rcx/r11 are syscall-clobbered by contract; the kernel may
+	 * have written them via regs — apply the full set to be honest. */
 	c->Rcx = g->rcx; c->Rdx = g->rdx; c->Rbx = g->rbx;
 	c->Rsp = g->rsp; c->Rbp = g->rbp; c->Rsi = g->rsi; c->Rdi = g->rdi;
 	c->R8 = g->r8; c->R9 = g->r9; c->R10 = g->r10; c->R11 = g->r11;
 	c->R12 = g->r12; c->R13 = g->r13; c->R14 = g->r14; c->R15 = g->r15;
 	c->EFlags = (DWORD)g->rflags;
-	if (advance_rip)
-		c->Rip = g->rip + 2; /* past 0F 0B (ud2) */
-	else
-		c->Rip = g->rip;
+	c->Rip = g->rip;
+}
+
+static void publish(unsigned cmd)
+{
+	d->cmd = cmd;
+	MemoryBarrier();
+	InterlockedExchange64((volatile LONG64 *)&d->req_seq,
+			      d->done_seq + 1);
+	SetEvent(evt_in);
+}
+
+static void wait_answer(void)
+{
+	if (WaitForSingleObject(evt_out, INFINITE) != WAIT_OBJECT_0)
+		ExitProcess(121);
+}
+
+static void park_forever(void)
+{
+	/* The kernel owns the kill (upstream parity: it terminates the
+	 * stub after reading the exit code). ExitProcess from inside a
+	 * VEH frame produced a bogus native exit code (0xC000013D,
+	 * M2.1 CI) — never call it from here on the normal path. */
+	for (;;)
+		Sleep(INFINITE);
 }
 
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	EXCEPTION_RECORD *er = ep->ExceptionRecord;
 	CONTEXT *c = ep->ContextRecord;
+	int is_syscall = (er->ExceptionCode == STATUS_ILLEGAL_INSTRUCTION);
+	int is_fault = (er->ExceptionCode == STATUS_ACCESS_VIOLATION);
 
-	if (er->ExceptionCode != STATUS_ILLEGAL_INSTRUCTION &&
-	    er->ExceptionCode != STATUS_ACCESS_VIOLATION)
+	if (!is_syscall && !is_fault)
 		return EXCEPTION_CONTINUE_SEARCH;
 
 	/* Only traps from the guest RAM view belong to us. */
@@ -93,40 +128,67 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		return EXCEPTION_CONTINUE_SEARCH;
 
 	gp_from_context(c, &d->regs);
-	d->args[0] = d->regs.rdi; /* guest syscall ABI */
-	d->args[1] = d->regs.rsi;
-	d->args[2] = d->regs.rdx;
-	d->args[3] = d->regs.r10;
-	d->args[4] = d->regs.r8;
-	d->args[5] = d->regs.r9;
-	/* syscall nr in rax: let the kernel see it via regs. */
-	d->cmd = UML_STUB_CMD_WRITE; /* provisional; kernel dispatches on rax */
+	if (is_syscall) {
+		d->args[0] = d->regs.rdi; /* guest syscall ABI */
+		d->args[1] = d->regs.rsi;
+		d->args[2] = d->regs.rdx;
+		d->args[3] = d->regs.r10;
+		d->args[4] = d->regs.r8;
+		d->args[5] = d->regs.r9;
+		/* syscall nr in rax: the kernel dispatches on regs.rax. */
+		publish(UML_STUB_CMD_SYSCALL);
+	} else {
+		/* M3.1 fault round-trip: ExceptionInformation[0] =
+		 * access class (0 read / 1 write / 8 DEP-execute),
+		 * [1] = faulting VA. */
+		d->fault_addr = (unsigned long long)er->ExceptionInformation[1];
+		d->fault_type = (u32_nt)er->ExceptionInformation[0];
+		publish(UML_STUB_CMD_FAULT);
+	}
 
-	/* Publish + wait (auto-reset events, monotonic seq — see
-	 * stub_nt.h; pitfall 4.4: the seq IS the dedupe). */
-	MemoryBarrier();
-	InterlockedExchange64((volatile LONG64 *)&d->req_seq,
-			      d->done_seq + 1);
-	SetEvent(evt_in);
-	if (WaitForSingleObject(evt_out, INFINITE) != WAIT_OBJECT_0)
-		ExitProcess(121);
+	wait_answer();
 
-	/* Kernel answered. Fold retval in and resume past the ud2. */
-	gp_to_context(c, &d->regs, d->retval, 1);
+	/* Execute the kernel's action chain. PROTECT reports back
+	 * (a failed protect would re-fault forever — the kernel must
+	 * see it and kill us loudly instead, pitfall "loud fails"). */
+	for (;;) {
+		if (d->action == UML_STUB_ACTION_PROT) {
+			void *page = (void *)(uintptr_t)
+				(d->fault_addr & ~(uintptr_t)0xFFF);
+			ULONG old_prot;
+			BOOL ok;
+
+			ok = VirtualProtect(page, 4096, d->prot, &old_prot);
+			if (!ok)
+				fprintf(stderr,
+					"stub: VirtualProtect(%p, %#x) "
+					"failed (%lu)\n", page,
+					(unsigned)d->prot, GetLastError());
+			d->retval = ok ? 1 : 0;
+			d->err = ok ? 0 : 1;
+			publish(UML_STUB_CMD_PROT_DONE);
+			wait_answer();
+			continue; /* answer is NONE (resume) or KILL */
+		}
+		if (d->action == UML_STUB_ACTION_KILL)
+			park_forever();
+		break; /* ACTION_NONE: handled — resume the guest */
+	}
+
+	/* Kernel answered. Syscall: retval in rax, resume past the ud2.
+	 * Fault: every register verbatim, rip unchanged — the faulting
+	 * instruction re-executes on the now-fixed page. */
+	gp_to_context(c, &d->regs);
+	if (is_syscall) {
+		c->Rax = (DWORD64)d->retval;
+		c->Rip = d->regs.rip + 2; /* past 0F 0B (ud2) */
+	}
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);
 
-	if (d->halt) {
-		/* Guest exit(): the KERNEL owns the kill (upstream parity:
-		 * kernel terminates the stub). Park forever — ExitProcess
-		 * from inside a VEH frame gave a bogus native exit code
-		 * (0xC000013D, M2.1 CI). */
-		for (;;)
-			Sleep(INFINITE);
-	}
+	if (is_syscall && d->halt)
+		park_forever(); /* guest exit(): kernel terminates us */
 
-	if (er->ExceptionCode == STATUS_ACCESS_VIOLATION)
-		return EXCEPTION_CONTINUE_SEARCH; /* M3: fault round-trip */
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
 
@@ -187,6 +249,20 @@ int main(int argc, char **argv)
 
 	if (!AddVectoredExceptionHandler(1, veh_handler))
 		die("AddVectoredExceptionHandler", GetLastError());
+
+	/* Bootstrap v2 (M3.1): seed guard pages NOACCESS before the
+	 * guest runs — the kernel picks the offsets and answers the
+	 * resulting faults. In the M3.2 VMA model this grows into real
+	 * demand mapping (guest VA starts unmapped, not NOACCESS). */
+	for (i = 0; i < 2; i++) {
+		ULONG old_prot;
+
+		if (d->guard_off[i] == 0)
+			continue;
+		if (!VirtualProtect(ram + d->guard_off[i], 4096,
+				    PAGE_NOACCESS, &old_prot))
+			die("VirtualProtect(guard page)", GetLastError());
+	}
 
 	/* Guest stack lives in the physmem view (below the init image);
 	 * rsp/entry from the bootstrap block. No argv — the static init

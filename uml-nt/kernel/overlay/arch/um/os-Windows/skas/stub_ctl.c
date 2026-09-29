@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * os-Windows/skas/stub_ctl.c — stub.exe parent side (M2).
+ * os-Windows/skas/stub_ctl.c — stub.exe parent side (M2/M3).
  *
  * Upstream analogue: os-Linux/skas/process.c start_userspace()/
  * userspace() — the kernel side of the stub protocol (clone + ptrace
@@ -17,12 +17,21 @@
  *  - Real fork/exec integration (mm_id per guest process, the
  *    userspace() loop, turnstile) is M3+; this module proves the
  *    round-trip mechanism end to end.
+ *
+ * M3.1 extends the probe with the page-fault round-trip: the kernel
+ * seeds two guard-page offsets in the stub bootstrap (stub-side
+ * PAGE_NOACCESS before the guest runs), the guest blob faults on
+ * them, and dispatch() answers via uml_nt_fault_decide() —
+ * ACTION_PROT, then verifies the stub's PROT_DONE result. A failed
+ * protect KILLs the stub instead of letting the guest re-fault
+ * forever (every fail path loud — M1 pitfall 17).
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <init.h>
 #include <ntabi.h>
+#include <fault.h>
 #include <stub-panic.h>
 #include <stub_nt.h>
 
@@ -30,6 +39,9 @@
 #include "internal.h"
 
 extern const char nt_guest_init_start[], nt_guest_init_end[];
+/* Absolute symbols (init_blob.S .set): byte offsets of the guard
+ * address slots inside the blob. */
+extern const char nt_guest_init_slot0[], nt_guest_init_slot1[];
 
 /* scan_patch.c */
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
@@ -59,12 +71,55 @@ __uml_setup("uml_nt_stubtest=", uml_nt_stubtest_setup,
 "    M2 probe: boot a static guest init in one stub.exe process and\n"
 "    run the write/exit syscall round-trip.\n");
 
+/* Guard pages for the fault probe (phys offsets; computed in the
+ * probe thread, VA table built from them per dispatch). */
+static unsigned long long guard_off0, guard_off1;
+
 /* Dispatch one published request. Returns 0 on success. */
 static int stub_ctl_dispatch(struct uml_nt_stub_data *d)
 {
 	struct uml_nt_gp_regs *g = &d->regs;
 	unsigned long long nr = g->rax;
 
+	if (d->cmd == UML_STUB_CMD_PROT_DONE) {
+		/* The stub reports its VirtualProtect result. Failure
+		 * here means the guest would re-fault forever — kill
+		 * it instead (loud, M1 pitfall 17). */
+		if (d->retval != 1) {
+			os_info("[stubtest] stub VirtualProtect FAILED "
+				"(retval=%llu) — killing\n", d->retval);
+			d->action = UML_STUB_ACTION_KILL;
+			d->err = 1;
+			return -1;
+		}
+		d->action = UML_STUB_ACTION_NONE;
+		d->err = 0;
+		return 0;
+	}
+	if (d->cmd == UML_STUB_CMD_FAULT) {
+		struct uml_nt_fault_range allow[2];
+		unsigned action, prot;
+		unsigned long long page;
+		int rc;
+
+		allow[0].start = UML_STUB_RAM_BASE + guard_off0;
+		allow[0].end = allow[0].start + UML_NT_FAULT_PAGE_SIZE;
+		allow[1].start = UML_STUB_RAM_BASE + guard_off1;
+		allow[1].end = allow[1].start + UML_NT_FAULT_PAGE_SIZE;
+
+		rc = uml_nt_fault_decide(d->fault_addr, d->fault_type,
+					 allow, 2, &action, &prot, &page);
+		os_info("[stubtest] FAULT addr=0x%llx type=%u -> action=%u "
+			"prot=0x%x page=0x%llx\n",
+			d->fault_addr, d->fault_type, action, prot, page);
+		d->action = action;
+		d->prot = prot;
+		d->err = rc ? 1 : 0;
+		return rc;
+	}
+
+	/* Syscall trap: dispatch on the guest syscall number (rax). */
+	d->action = UML_STUB_ACTION_NONE;
 	if (nr == 60) { /* __NR_exit */
 		d->retval = g->rdi;
 		d->halt = 1;
@@ -110,14 +165,48 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	entry_off = (uml_boot.image_size + 0xFFFFull) & ~0xFFFFull;
 	stack_off = entry_off + GUEST_STACK_SLACK;
 
-	/* Stage the init image into guest RAM (identity view) and turn
-	 * its `syscall`s into ud2 — the central-patch contract §5.1. */
+	/* Guard pages live just past the blob image: the guest blob
+	 * stores their GUEST VAs through these slots. */
+	guard_off0 = (entry_off + blob_len + 0xFFF) & ~0xFFFull;
+	guard_off1 = guard_off0 + 0x1000;
+
+	/* Stage the init image, fill the guard-VA slots, and turn its
+	 * `syscall`s into ud2 — the central-patch contract §5.1. */
 	memcpy(uml_boot.physmem_base + entry_off, nt_guest_init_start,
 	       blob_len);
+	{
+		unsigned long long off0, off1;
+		unsigned long long va0, va1;
+
+		off0 = (unsigned long long)(uintptr_t)nt_guest_init_slot0;
+		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
+		va0 = UML_STUB_RAM_BASE + guard_off0;
+		va1 = UML_STUB_RAM_BASE + guard_off1;
+		memcpy(uml_boot.physmem_base + entry_off + off0, &va0, 8);
+		memcpy(uml_boot.physmem_base + entry_off + off1, &va1, 8);
+	}
 	patched = uml_nt_patch_syscalls(uml_boot.physmem_base + entry_off,
 					blob_len, 0);
+	/* The linear sweep must never have eaten a slot byte as an
+	 * instruction (decoder false-positive = wild guest pointer =
+	 * fault outside the allow table). Verify loud. */
+	{
+		unsigned long long off0, off1, va0, va1;
+
+		off0 = (unsigned long long)(uintptr_t)nt_guest_init_slot0;
+		off1 = (unsigned long long)(uintptr_t)nt_guest_init_slot1;
+		memcpy(&va0, uml_boot.physmem_base + entry_off + off0, 8);
+		memcpy(&va1, uml_boot.physmem_base + entry_off + off1, 8);
+		if (va0 != UML_STUB_RAM_BASE + guard_off0 ||
+		    va1 != UML_STUB_RAM_BASE + guard_off1) {
+			os_info("[stubtest] guard slot clobbered by patch "
+				"scan (va0=0x%llx va1=0x%llx)\n", va0, va1);
+			goto fail;
+		}
+	}
 	os_info("[stubtest] init staged at phys 0x%llx (%llu bytes, %lu "
-		"syscall(s) patched)\n", entry_off, blob_len, patched);
+		"syscall(s) patched, guards 0x%llx/0x%llx)\n", entry_off,
+		blob_len, patched, guard_off0, guard_off1);
 
 	/* stub_data section + events — all inheritable, so the handle
 	 * VALUES stay valid in the stub (S5 bootstrap pattern). */
@@ -160,6 +249,12 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	d->stack_off = stack_off;
 	d->image_len = blob_len;
 	d->halt = 0;
+	d->fault_addr = 0;
+	d->fault_type = 0;
+	d->action = UML_STUB_ACTION_NONE;
+	d->prot = 0;
+	d->guard_off[0] = guard_off0;
+	d->guard_off[1] = guard_off1;
 
 	phys_h = (unsigned long long)(uintptr_t)uml_boot.physmem_section;
 	dsec_h = (unsigned long long)(uintptr_t)dsec;

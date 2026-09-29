@@ -43,7 +43,7 @@ typedef long long s64_nt;
 
 /* "USTB". */
 #define UML_STUB_MAGIC   0x42545355u
-#define UML_STUB_VERSION 1u
+#define UML_STUB_VERSION 2u /* v2: fault round-trip + guard bootstrap (M3.1) */
 /* Section size (also the map granularity guard). */
 #define UML_STUB_SECTION_SIZE 0x10000u
 
@@ -52,9 +52,21 @@ typedef long long s64_nt;
  * validates it before doing anything else. */
 #define UML_STUB_BOOT_OFFSET 0
 
-/* Commands (stub → kernel request in slot.cmd). */
-#define UML_STUB_CMD_WRITE 1u /* write(fd, buf, len) — guest syscall 1 */
-#define UML_STUB_CMD_EXIT  2u /* exit(code)        — guest syscall 60 */
+/* Requests (stub → kernel, slot.cmd). The kernel dispatches syscalls
+ * on regs.rax (upstream parity — the cmd only classifies the trap);
+ * faults carry their own fault_addr/fault_type fields. */
+#define UML_STUB_CMD_SYSCALL   1u /* ud2 trap: guest syscall (v1 name
+				   * was WRITE — misleading, the kernel
+				   * never dispatched on it) */
+#define UML_STUB_CMD_EXIT      2u /* reserved numbering; the halt flag
+				   * is the real transport (M2.2) */
+#define UML_STUB_CMD_FAULT     3u /* AV in guest code → fault round-trip */
+#define UML_STUB_CMD_PROT_DONE 4u /* result of ACTION_PROT (retval) */
+
+/* Answers (kernel → stub, slot.action). */
+#define UML_STUB_ACTION_NONE 0u /* handled — resume the guest */
+#define UML_STUB_ACTION_PROT 1u /* stub: VirtualProtect(page, prot) */
+#define UML_STUB_ACTION_KILL 2u /* fatal: park, kernel terminates us */
 
 /* Guest virtual address space, M2 edition: the stub maps the whole
  * physmem section at ram_base and the static init runs in that view,
@@ -103,6 +115,25 @@ struct uml_nt_stub_data {
 	/* -- bookkeeping (kernel-only use, kept here for parity) ----- */
 	u32_nt exit_code; /* observed via GetExitCodeProcess */
 	u32_nt pid;       /* stub process id (kernel-side record) */
+
+	/* -- v2: page-fault round-trip (M3.1) ------------------------ */
+	/* Filled by the stub for CMD_FAULT: ExceptionInformation[0] is
+	 * the access class (0=read, 1=write, 8=DEP execute),
+	 * [1] the faulting guest VA. The kernel answers with an
+	 * action; the stub executes it and reports via CMD_PROT_DONE
+	 * (retval = 1 ok / 0 failed), then resumes on ACTION_NONE. */
+	unsigned long long fault_addr;
+	u32_nt fault_type;
+	u32_nt action; /* UML_STUB_ACTION_* */
+	u32_nt prot;   /* ACTION_PROT: NT PAGE_* constant */
+	u32_nt _pad_fault;
+
+	/* -- bootstrap v2 (written by kernel pre-ResumeThread) ------- */
+	/* Phys offsets the stub makes PAGE_NOACCESS before the guest
+	 * runs (fault-probe seed; the M3.2 VMA manager replaces this
+	 * with real per-VMA views). 0 = none — offset 0 is the kernel
+	 * image base and can never be a guard. */
+	unsigned long long guard_off[2];
 };
 
 #endif /* __UML_STUB_NT_H */

@@ -16,6 +16,7 @@ jobs:
           bash uml-nt/tests/test_fetch.sh
           bash uml-nt/tests/test_os_windows_skeleton.sh
           bash uml-nt/tests/test_scan_patch.sh
+          bash uml-nt/tests/test_fault.sh
 
       - name: ntabi ABI checks (ELF freestanding + mingw PE)
         run: |
@@ -28,4 +29,5 @@ jobs:
       - name: Lint shell
         run: |
           shellcheck -x uml-nt/kernel/fetch.sh uml-nt/tests/test_fetch.sh \
-            uml-nt/tests/test_os_windows_skeleton.sh uml-nt/tests/test_scan_patch.sh
+            uml-nt/tests/test_os_windows_skeleton.sh uml-nt/tests/test_scan_patch.sh \
+            uml-nt/tests/test_fault.sh

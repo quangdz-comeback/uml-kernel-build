@@ -22,7 +22,7 @@ command -v "$CC" >/dev/null 2>&1 || { echo "clang not found"; exit 1; }
 EXPECTED=(file.c start_up.c mem.c process.c execvp.c helper.c umid.c \
 signal.c util.c time.c irq.c sigio.c tty.c registers.c main.c \
 user_syms.c stub-impl.c skas/mem.c skas/process.c skas/scan_patch.c \
-skas/stub_ctl.c)
+skas/stub_ctl.c skas/fault.c)
 ACTUAL="$(cd "$SRC" && find . -name '*.c' | sed 's|^\./||' | sort | tr '\n' ' ')"
 EXPECTED_SORTED="$(printf '%s\n' "${EXPECTED[@]}" | sort | tr '\n' ' ')"
 if [[ "$ACTUAL" != "$EXPECTED_SORTED" ]]; then
@@ -35,7 +35,7 @@ echo "ok  - file set mirrors os-Linux map (elf_aux.c excluded, stub-impl.c added
 
 # --- REAL modules: kernel-header based, no scaffolding type mirrors -----
 REAL=(main.c util.c time.c mem.c signal.c irq.c start_up.c process.c \
-file.c skas/process.c registers.c skas/stub_ctl.c)
+file.c skas/process.c registers.c skas/stub_ctl.c skas/fault.c)
 for f in "${REAL[@]}"; do
   if grep -qE '^\s*#\s*include\s+"stub-impl\.h"' "$SRC/$f"; then
     echo "FAIL- real module $f still includes stub-impl.h (type-mirror collision)"
