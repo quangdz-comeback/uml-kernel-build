@@ -99,7 +99,9 @@ jobs:
         shell: msys2 {0}
         run: |
           cd uml-nt/launcher
+          set +e
           ./launcher.exe; code=$?
+          set -e
           [ "$code" -eq 2 ] || { echo "expected exit 2, got $code"; exit 1; }
           echo "launcher usage gate ok"
 
