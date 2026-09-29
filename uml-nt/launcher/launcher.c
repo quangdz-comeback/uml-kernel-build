@@ -307,6 +307,14 @@ static HANDLE load_exec_section(const char *path, unsigned long long *size_out)
 /* ---- kernel stack + boot info + jump ---------------------------------- */
 #define KERNEL_STACK_SIZE (4ULL << 20)
 
+/* D19: pending-only alarms mean no async tick can interrupt a tight
+ * IRQ-enabled loop — calibrate_delay's jiffies wait would hang the
+ * boot. Pin the loops_per_jiffy the native runner measured
+ * (8252.62 BogoMIPS → lpj=41263104, run 36642510991 boot log); the
+ * kernel prints it and skips calibration. Revisit with M4's real
+ * preemption work. */
+#define UML_NT_LPJ "lpj=41263104"
+
 int main(int argc, char **argv)
 {
 	uint64_t entry;
@@ -382,20 +390,26 @@ int main(int argc, char **argv)
 
 	/* kernel argv: argv[0]="vmlinux", earlyprintk (boot console →
 	 * um_early_printk → NtWriteFile — the only console until the
-	 * channel drivers return at M3), then the UML args; env is a
-	 * minimal PATH (get_top_address scans env strings upstream). */
+	 * channel drivers return at M3), lpj= (D19: the alarm is
+	 * pending-only — no async tick interrupts a tight loop, so
+	 * calibrate_delay would hang forever waiting for jiffies; pin
+	 * the native-measured value and skip calibration), then the
+	 * UML args; env is a minimal PATH (get_top_address scans env
+	 * strings upstream). */
 	{
-		int n = nargs > 61 ? 61 : nargs;
+		int n = nargs > 60 ? 60 : nargs;
 		size_t need = strlen("vmlinux") + 1 +
 			      strlen("earlyprintk") + 1 +
+			      strlen(UML_NT_LPJ) + 1 +
 			      strlen("PATH=C:\\Windows\\System32") + 1;
 		char *strs2;
 
 		kargv[0] = "vmlinux";
 		kargv[1] = "earlyprintk";
+		kargv[2] = UML_NT_LPJ;
 		for (i = 0; i < (size_t)n; i++)
-			kargv[2 + i] = argv[2 + i];
-		kargv[2 + n] = NULL;
+			kargv[3 + i] = argv[2 + i];
+		kargv[3 + n] = NULL;
 		kenv[0] = "PATH=C:\\Windows\\System32";
 		kenv[1] = NULL;
 
@@ -403,12 +417,14 @@ int main(int argc, char **argv)
 		strcpy(strs2, kargv[0]);
 		strcpy(strs2 + strlen(kargv[0]) + 1, kargv[1]);
 		strcpy(strs2 + strlen(kargv[0]) + 1 + strlen(kargv[1]) + 1,
-		       kenv[0]);
+		       kargv[2]);
+		strcpy(strs2 + strlen(kargv[0]) + 1 + strlen(kargv[1]) + 1 +
+		       strlen(kargv[2]) + 1, kenv[0]);
 		kargv[0] = strs2;
 		kargv[1] = strs2 + strlen(strs2) + 1;
-		kenv[0] = strs2 + strlen(strs2) + 1 +
-			  strlen(kargv[1]) + 1;
-		nargs = n + 1; /* earlyprintk joins the count */
+		kargv[2] = kargv[1] + strlen(kargv[1]) + 1;
+		kenv[0] = kargv[2] + strlen(kargv[2]) + 1;
+		nargs = n + 2; /* earlyprintk + lpj join the count */
 	}
 
 	kargv_p = (char **)PUSH_PTR(63 + 1);

@@ -58,27 +58,26 @@ static void timer_real_alarm_handler(void *mc)
 	timer_handler(SIGALRM, NULL, &regs);
 }
 
-static void timer_alarm_handler(int sig, struct siginfo *si, void *mc)
-{
-	int enabled = signals_enabled;
-
-	if (!signals_enabled) {
-		signals_pending |= SIGALRM_MASK;
-		return;
-	}
-
-	block_signals_trace();
-	signals_active |= SIGALRM_MASK;
-
-	timer_real_alarm_handler(mc);
-
-	signals_active &= ~SIGALRM_MASK;
-	um_set_signals_trace(enabled);
-}
-
+/* D19: the timer thread owns NO kernel context. Upstream delivers
+ * SIGALRM into the vCPU thread, where the OS signal mask serializes
+ * delivery against every IRQ-disabled region (block_signals IS
+ * sigprocmask there). The NT flag machine has no such force: a tick
+ * running on the timer thread races the vCPU thread inside the SAME
+ * per-cpu SLUB/IRQ state (two host threads, one "cpu"), which is the
+ * S4c2 busybox heap corruption — the first long alloc/free window
+ * (the 131KB execve read through the sync ubd path) gave the tick a
+ * wide window and kmem_cache_free died on a trashed pointer
+ * (c0000005, reporter v2 run 36643648747).
+ *
+ * So the alarm is PENDING-ONLY here; the vCPU thread flushes it at
+ * exactly the points upstream flushes signals (unblock_signals —
+ * every spin_unlock_irqrestore pair and the userspace() round-trip).
+ * Ticks coalesce under load, which upstream TT_MODE_BASIC already
+ * tolerates; real guest preemption stays M4. The vCPU-side flush
+ * machine below is otherwise upstream-verbatim. */
 void deliver_alarm(void)
 {
-	timer_alarm_handler(SIGALRM, NULL, NULL);
+	__sync_fetch_and_or(&signals_pending, SIGALRM_MASK);
 }
 
 void block_signals(void)
