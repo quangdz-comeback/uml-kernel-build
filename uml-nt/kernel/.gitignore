@@ -1,0 +1,4 @@
+# Kernel source cache must never land in the repo (HANDOFF hard-rule 1).
+# Default cache lives outside the repo ($HOME/.cache/uml-nt); this guards
+# against someone pointing UML_NT_CACHE_DIR inside the checkout.
+/.cache/

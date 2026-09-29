@@ -1,0 +1,22 @@
+name: uml-nt tests (linux)
+
+on:
+  push:
+    branches: ["uml-nt/**"]
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unit tests (pure logic, no network)
+        run: bash uml-nt/tests/test_fetch.sh
+
+      - name: Pin check (network, cheap — validates tarball + file URLs + sha256 pin)
+        run: bash uml-nt/kernel/fetch.sh check
+
+      - name: Lint shell
+        run: |
+          shellcheck uml-nt/kernel/fetch.sh uml-nt/tests/test_fetch.sh
