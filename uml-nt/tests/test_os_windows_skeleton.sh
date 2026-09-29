@@ -19,11 +19,11 @@ CC="${CC:-clang}"
 
 command -v "$CC" >/dev/null 2>&1 || { echo "clang not found"; exit 1; }
 
-EXPECTED="file.c start_up.c mem.c process.c execvp.c helper.c umid.c \
+EXPECTED=(file.c start_up.c mem.c process.c execvp.c helper.c umid.c \
 signal.c util.c time.c irq.c sigio.c tty.c registers.c main.c \
-user_syms.c stub-impl.c skas/mem.c skas/process.c"
+user_syms.c stub-impl.c skas/mem.c skas/process.c)
 ACTUAL="$(cd "$SRC" && find . -name '*.c' | sed 's|^\./||' | sort | tr '\n' ' ')"
-EXPECTED_SORTED="$(printf '%s\n' $EXPECTED | sort | tr '\n' ' ')"
+EXPECTED_SORTED="$(printf '%s\n' "${EXPECTED[@]}" | sort | tr '\n' ' ')"
 if [[ "$ACTUAL" != "$EXPECTED_SORTED" ]]; then
   echo "FAIL- file set drifted"
   echo "  expected: $EXPECTED_SORTED"
@@ -49,10 +49,10 @@ grep -q 'UML_NT_MEMFD_PHYS' "$SRC/process.c" || {
 echo "ok  - real modules: no stub-impl.h, D9 handoff validated in main.c"
 
 # --- SKELETON modules: freestanding compile + PANIC-style enforced ------
-SKELETON="file.c execvp.c helper.c umid.c sigio.c tty.c registers.c \
-skas/mem.c skas/process.c"
+SKELETON=(file.c execvp.c helper.c umid.c sigio.c tty.c registers.c \
+skas/mem.c skas/process.c)
 FAIL=0
-for f in $SKELETON; do
+for f in "${SKELETON[@]}"; do
   obj="$TMP/$(echo "$f" | tr '/' '_').o"
   if ! "$CC" --target=x86_64-linux-gnu -c -ffreestanding -nostdinc \
        -Wall -Werror -I "$SRC/include" \
