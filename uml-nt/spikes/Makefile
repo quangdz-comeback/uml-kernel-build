@@ -5,6 +5,8 @@ MINGW_CC ?= gcc
 CLANG    ?= clang
 CFLAGS   ?= -O2 -Wall -Wextra
 
+$(shell mkdir -p results 2>/dev/null)
+
 all: s1_veh.exe s2_xproc.exe s5_spawn.exe s3_launcher.exe payload.elf s6_scan.exe
 
 s1_veh.exe s2_xproc.exe s5_spawn.exe s3_launcher.exe: spike_common.h
