@@ -12,11 +12,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Unit tests (pure logic, no network)
-        run: bash uml-nt/tests/test_fetch.sh
+        run: |
+          bash uml-nt/tests/test_fetch.sh
+          bash uml-nt/tests/test_os_windows_skeleton.sh
+
+      - name: ntabi ABI checks (ELF freestanding + mingw PE)
+        run: |
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+          bash uml-nt/tests/test_ntabi.sh
 
       - name: Pin check (network, cheap — validates tarball + file URLs + sha256 pin)
         run: bash uml-nt/kernel/fetch.sh check
 
       - name: Lint shell
         run: |
-          shellcheck -x uml-nt/kernel/fetch.sh uml-nt/tests/test_fetch.sh
+          shellcheck -x uml-nt/kernel/fetch.sh uml-nt/tests/test_fetch.sh \
+            uml-nt/tests/test_os_windows_skeleton.sh
