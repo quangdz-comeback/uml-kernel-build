@@ -43,7 +43,7 @@ typedef long long s64_nt;
 
 /* "USTB". */
 #define UML_STUB_MAGIC   0x42545355u
-#define UML_STUB_VERSION 4u /* v4: per-VMA views + INIT plan + fork (M3.3) */
+#define UML_STUB_VERSION 5u /* v5: + fs_base (guest TLS, D18, S4c2) */
 /* Section size (also the map granularity guard). */
 #define UML_STUB_SECTION_SIZE 0x10000u
 
@@ -155,6 +155,17 @@ struct uml_nt_stub_data {
 	unsigned long long map_va;
 	unsigned long long map_len;
 	unsigned long long map_off;
+
+	/* -- v5: guest TLS base (D18, S4c2) -------------------------- */
+	/* arch_prctl(ARCH_SET_FS) records the pointer kernel-side (conn
+	 * fs_base) and publishes it here; the stub re-applies it with
+	 * wrfsbase at every resume into guest code and repairs
+	 * fs-prefixed faults mid-run. Windows scheduling does not
+	 * preserve a user-set FS base (probes/fsgsbase, S4c evidence:
+	 * wrfsbase ok, VEH round-trip preserves, scheduling loses) —
+	 * upstream never re-applies because Linux/Ptrace keeps the
+	 * base in the task regs. */
+	unsigned long long fs_base;
 };
 
 #endif /* __UML_STUB_NT_H */

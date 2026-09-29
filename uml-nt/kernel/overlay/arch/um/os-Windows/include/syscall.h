@@ -55,6 +55,13 @@ struct uml_nt_stub_conn {
 	unsigned long long ppid;
 	/* set_tid_address(2) target (clear-on-exit is M4 signals). */
 	unsigned long long clear_tid_va;
+	/* arch_prctl(ARCH_SET_FS) — the guest TLS pointer (S4c2/D18).
+	 * Published to the stub via d->fs_base at the syscall and
+	 * re-applied by the stub at every resume (Windows scheduling
+	 * loses a user FS base). Fork copies it: the child shares the
+	 * TLS block COW and musl never re-runs arch_prctl after
+	 * fork. */
+	unsigned long long fs_base;
 	/* S2: the owning task's userspace() loop resumed the thread
 	 * once (bootstrap: entry state + INIT plan streamed). A forked
 	 * conn is resumed by its spawn (fork hook sets this too). */

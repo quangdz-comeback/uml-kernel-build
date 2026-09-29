@@ -122,6 +122,23 @@ static void park_forever(void)
 		Sleep(INFINITE);
 }
 
+/* D18 (S4c2): apply the guest TLS base. Windows scheduling does not
+ * preserve a user-set FS base (probes/fsgsbase, S4c evidence:
+ * wrfsbase ok, VEH round-trip preserves, scheduling loses) — so the
+ * base published by arch_prctl(ARCH_SET_FS) is re-applied at every
+ * resume into guest code, and an fs-prefixed fault mid-run (base
+ * wiped while the guest was running) is repaired in the VEH fast
+ * path below. Upstream never does this: Linux keeps the base in the
+ * task regs across the ptrace round-trip. */
+static void apply_fs_base(void)
+{
+	unsigned long long base = d->fs_base;
+
+	if (base == 0)
+		return;
+	__asm__ volatile ("wrfsbase %0" :: "r" (base) : "memory");
+}
+
 /* FILE_MAP_* bits for a view with `prot` protection. FILE_MAP_EXECUTE
  * (0x20) must ride along on every executable view (M2.1 pitfall 9:
  * without it the first fetch dies with a DEP AV, info[0]=8).
@@ -246,6 +263,20 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		    (uintptr_t)d->ram_base + d->ram_size)
 		return EXCEPTION_CONTINUE_SEARCH;
 
+	/* D18 fast path: an fs-prefixed guest access that faults below
+	 * the guest span means scheduling wiped the TLS base while the
+	 * guest was running. Re-apply it and let the instruction
+	 * re-execute (rip untouched — same contract as the fault
+	 * replay). A genuine guest null/low deref is NOT fs-prefixed
+	 * and keeps its normal SIGSEGV round-trip. */
+	if (is_fault && d->fs_base != 0 &&
+	    (uintptr_t)er->ExceptionInformation[1] <
+		    (uintptr_t)d->ram_base &&
+	    *(const unsigned char *)(uintptr_t)c->Rip == 0x64 /* fs: */) {
+		apply_fs_base();
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+
 	gp_from_context(c, &d->regs);
 	if (is_syscall) {
 		d->args[0] = d->regs.rdi; /* guest syscall ABI */
@@ -275,6 +306,10 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		c->Rax = (DWORD64)d->retval;
 		c->Rip = d->regs.rip + 2; /* past 0F 0B (ud2) */
 	}
+	/* D18: the wait in the action chain may have wiped the FS base
+	 * (the CONTEXT Windows restores here carries the selector, not
+	 * the base) — re-apply before guest code runs again. */
+	apply_fs_base();
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);
 

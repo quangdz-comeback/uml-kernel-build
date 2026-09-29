@@ -339,6 +339,11 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	}
 	k->d->init_regs = *g;
 	k->d->init_regs.rax = 0;
+	/* S4c2/D18: the child shares the TLS block COW and musl never
+	 * re-runs arch_prctl after fork — inherit the base so the
+	 * child's stub re-applies it like the parent's does. */
+	k->fs_base = c->fs_base;
+	k->d->fs_base = c->fs_base;
 	child_reaped = 0;
 	k->resumed = 1; /* the fork spawn resumes the child directly */
 	nt->ResumeThread(k->thread);

@@ -458,6 +458,46 @@ efault:
 	return SC_RET(SC_EFAULT);
 }
 
+/* arch_prctl — musl TLS (S4c2). ARCH_SET_FS records the guest TLS
+ * pointer in the conn and publishes it to the stub (d->fs_base); the
+ * stub re-applies it at every resume into guest code (D18 — Windows
+ * scheduling does not preserve a user FS base, probes/fsgsbase S4c
+ * evidence; upstream keeps the base in the task regs, Linux-side).
+ * The pointer must be guest-mapped: validated through the same
+ * uaccess walk every other handler uses. ARCH_GET_FS returns it —
+ * the *addr writeback is deferred until a caller needs it (musl
+ * never queries). */
+#define UML_NT_ARCH_SET_FS 0x1002ull
+#define UML_NT_ARCH_GET_FS 0x1003ull
+
+static unsigned long long sys_arch_prctl(struct uml_nt_stub_conn *c,
+					 struct uml_nt_stub_data *d,
+					 const unsigned long long *a)
+{
+	char scratch[1];
+
+	switch (a[0]) {
+	case UML_NT_ARCH_SET_FS:
+		if (a[1] == 0 ||
+		    uml_nt_uacc_strncpy(scratch, c->mm,
+					uml_boot.physmem_base, a[1],
+					1) < 0) {
+			os_info("[syscall] arch_prctl(SET_FS, 0x%llx): "
+				"tp unmapped\n", a[1]);
+			return SC_RET(SC_EFAULT);
+		}
+		c->fs_base = a[1];
+		d->fs_base = a[1];
+		return 0;
+	case UML_NT_ARCH_GET_FS:
+		return c->fs_base;
+	default:
+		os_info("[syscall] arch_prctl(cmd=0x%llx): unsupported\n",
+			a[0]);
+		return SC_RET(SC_EINVAL);
+	}
+}
+
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			   struct uml_nt_stub_data *d)
 {
@@ -562,6 +602,9 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 218: /* set_tid_address */
 		c->clear_tid_va = a[0];
 		ret = c->pid;
+		break;
+	case 158: /* arch_prctl — musl TLS (ARCH_SET_FS → D18) */
+		ret = sys_arch_prctl(c, d, a);
 		break;
 	default:
 		os_info("[syscall] nr=%llu not implemented → ENOSYS "

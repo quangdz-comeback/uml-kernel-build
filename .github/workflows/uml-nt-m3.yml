@@ -320,4 +320,11 @@ jobs:
           # destroys the old conn mid-round, the loop bootstraps the
           # new one from current_pt_regs).
           grep -q "STEP2-OK" initexec.log || { echo "S4c: guest execve never completed the conn switch (see [syscall] execve lines)"; exit 1; }
+          # M3.8 S4c2: arch_prctl(ARCH_SET_FS) through the dispatch +
+          # the stub's D18 re-apply — the %fs:0 read-back rides one
+          # full syscall round-trip and only prints on a live TLS
+          # base (Windows scheduling does not preserve one). The
+          # anonymous mmap check is the musl malloc floor.
+          grep -q "TLS-OK" initexec.log || { echo "S4c2: arch_prctl/D18 FS base never survived a syscall round-trip"; exit 1; }
+          grep -q "MMAP-OK" initexec.log || { echo "S4c2: anonymous mmap (musl malloc floor) failed"; exit 1; }
           echo "M3.8 S3+S4b+S4c NATIVE INIT-EXEC OK: binfmt_umlnt + userspace() + write(2) + openat/read VFS + execve chain"
