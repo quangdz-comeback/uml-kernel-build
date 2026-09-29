@@ -106,7 +106,6 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 
 	(void)arg;
 
-	os_info("[stubtest] probe thread running\n"); /* TEMP M2.1 */
 	blob_len = nt_guest_init_end - nt_guest_init_start;
 	entry_off = (uml_boot.image_size + 0xFFFFull) & ~0xFFFFull;
 	stack_off = entry_off + GUEST_STACK_SLACK;

@@ -169,7 +169,6 @@ int main(int argc, char **argv)
 			  UML_STUB_SECTION_SIZE);
 	if (d == NULL)
 		die("MapViewOfFile(stub_data)", GetLastError());
-	fprintf(stderr, "[stub] data view %p\n", d);
 	if (d->magic != UML_STUB_MAGIC || d->version != UML_STUB_VERSION) {
 		fprintf(stderr, "stub: bad handshake magic=%08x ver=%u\n",
 			d->magic, d->version);
@@ -183,10 +182,6 @@ int main(int argc, char **argv)
 			      (PVOID)(uintptr_t)UML_STUB_RAM_BASE);
 	if (ram == NULL)
 		die("MapViewOfFileEx(physmem @fixed base)", GetLastError());
-	fprintf(stderr, "[stub] ram view %p (want 0x%llx), entry=0x%llx "
-		"sp=0x%llx\n", ram, UML_STUB_RAM_BASE,
-		UML_STUB_RAM_BASE + d->entry_off,
-		UML_STUB_RAM_BASE + d->stack_off);
 	if (!VirtualQuery(ram, &mbi, sizeof(mbi)))
 		die("VirtualQuery", GetLastError());
 
