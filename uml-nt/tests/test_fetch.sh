@@ -33,7 +33,7 @@ export UML_NT_CACHE_DIR="$TMP/cache"
 export UML_NT_PIN_SHA256="$FIXTURE_SHA"
 
 # FETCH is computed from $HERE at runtime; shellcheck cannot follow it.
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$FETCH"
 
 # 1. Pin is baked in and immutable via readonly version.
