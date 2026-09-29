@@ -108,3 +108,9 @@ void os_fix_helper_signals(void)
 {
 	/* helper threads use NT threads, no signals to fix (D7). */
 }
+
+void os_flush_stdout(void)
+{
+	/* Console writes are synchronous NtWriteFile — nothing buffered
+	 * to flush (upstream: fflush(stdout)). */
+}

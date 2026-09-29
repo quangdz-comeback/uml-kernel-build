@@ -25,9 +25,12 @@ extern int linux_main(int argc, char **argv, char **envp);
 __attribute__((naked)) void _start(void)
 {
 	/* [rsp] = boot-info pointer; nt_main is SysV (kernel ELF, D2):
-	 * first arg travels in %rdi. */
+	 * first arg travels in %rdi. sub $8 mimics call-alignment
+	 * (rsp%16==8 at a normal function entry) — nt_main is compiled
+	 * with standard SysV assumptions. */
 	__asm__ volatile(
 		"movq (%rsp), %rdi\n\t"
+		"subq $8, %rsp\n\t"
 		"jmp nt_main\n\t");
 }
 

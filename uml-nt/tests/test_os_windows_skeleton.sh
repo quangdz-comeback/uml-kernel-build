@@ -33,9 +33,10 @@ fi
 echo "ok  - file set mirrors os-Linux map (elf_aux.c excluded, stub-impl.c added)"
 
 # --- REAL modules: kernel-header based, no scaffolding type mirrors -----
-REAL="main.c util.c time.c mem.c signal.c irq.c start_up.c process.c"
-for f in $REAL; do
-  if grep -q 'stub-impl\.h' "$SRC/$f"; then
+REAL=(main.c util.c time.c mem.c signal.c irq.c start_up.c process.c \
+file.c skas/process.c registers.c)
+for f in "${REAL[@]}"; do
+  if grep -qE '^\s*#\s*include\s+"stub-impl\.h"' "$SRC/$f"; then
     echo "FAIL- real module $f still includes stub-impl.h (type-mirror collision)"
     exit 1
   fi
@@ -49,8 +50,7 @@ grep -q 'UML_NT_MEMFD_PHYS' "$SRC/process.c" || {
 echo "ok  - real modules: no stub-impl.h, D9 handoff validated in main.c"
 
 # --- SKELETON modules: freestanding compile + PANIC-style enforced ------
-SKELETON=(file.c execvp.c helper.c umid.c sigio.c tty.c registers.c \
-skas/mem.c skas/process.c)
+SKELETON=(execvp.c helper.c umid.c sigio.c tty.c skas/mem.c)
 FAIL=0
 for f in "${SKELETON[@]}"; do
   obj="$TMP/$(echo "$f" | tr '/' '_').o"

@@ -3,12 +3,19 @@
  * os-Windows/file.c — file/fd abstraction for the NT backend.
  * Upstream: linux v6.18.37 arch/um/os-Linux/file.c
  *
- * Why a mirror of the os.h surface: the rest of the 6.18.37 kernel calls
- * only these names; the NT implementation (handles, overlapped IO,
- * named pipes) lands behind the same names in M1.7+.
- * Status: M1.3 skeleton — every entry point PANICs.
+ * M1.8: the physmem pseudo-fd is real (seek/read/write through the
+ * launcher's shadow mapping of the guest-RAM section — the memfd
+ * analogue). Real host-file handles land with the channel port (M3);
+ * everything else keeps the M1.3 PANIC scaffolding via stub-panic.h
+ * (stub-impl.h's type mirrors collide with os.h — M1.7 lesson).
  */
-#include <stub-impl.h>
+#include <os.h>
+#include <stub-panic.h>
+#include "internal.h"
+
+/* fd offset state for the physmem pseudo-fd (upstream: the memfd's own
+ * file position). */
+static unsigned long long memfd_offset;
 
 int os_stat_file(const char *file_name, struct uml_stat *buf)
 {
@@ -47,7 +54,58 @@ int os_mode_fd(int fd, int mode)
 
 int os_seek_file(int fd, unsigned long long offset)
 {
-	stub_panic("file.c: os_seek_file");
+	/* The pseudo-fd (guest RAM section) tracks an offset like the
+	 * upstream tmpfs memfd; seeks/writes go through the launcher's
+	 * full shadow mapping of the section (boot.physmem_base). */
+	if (fd == UML_NT_MEMFD_PHYS) {
+		memfd_offset = offset;
+		return 0;
+	}
+	stub_panic("file.c: os_seek_file — non-physmem fd (M3)");
+}
+
+static int memfd_write(const void *buf, int count)
+{
+	char *dst = (char *)uml_boot.physmem_base + memfd_offset;
+
+	if (memfd_offset + (unsigned long long)count >
+	    uml_boot.physmem_size) {
+		os_info("memfd write past end: off=%llu+%d\n",
+			memfd_offset, count);
+		return -1;
+	}
+	__builtin_memcpy(dst, buf, count);
+	memfd_offset += count;
+	return count;
+}
+
+static int memfd_read(void *buf, int count)
+{
+	char *src = (char *)uml_boot.physmem_base + memfd_offset;
+
+	if (memfd_offset + (unsigned long long)count >
+	    uml_boot.physmem_size) {
+		os_info("memfd read past end: off=%llu+%d\n",
+			memfd_offset, count);
+		return -1;
+	}
+	__builtin_memcpy(buf, src, count);
+	memfd_offset += count;
+	return count;
+}
+
+int os_write_file(int fd, const void *buf, int count)
+{
+	if (fd == UML_NT_MEMFD_PHYS)
+		return memfd_write(buf, count);
+	stub_panic("file.c: os_write_file — non-physmem fd (M3)");
+}
+
+int os_read_file(int fd, void *buf, int count)
+{
+	if (fd == UML_NT_MEMFD_PHYS)
+		return memfd_read(buf, count);
+	stub_panic("file.c: os_read_file — non-physmem fd (M3)");
 }
 
 int os_open_file(const char *file, struct openflags flags, int mode)
@@ -55,15 +113,7 @@ int os_open_file(const char *file, struct openflags flags, int mode)
 	stub_panic("file.c: os_open_file");
 }
 
-int os_read_file(int fd, void *buf, int len)
-{
-	stub_panic("file.c: os_read_file");
-}
-
-int os_write_file(int fd, const void *buf, int count)
-{
-	stub_panic("file.c: os_write_file");
-}
+/* os_read_file/os_write_file: real for the physmem pseudo-fd (M1.8). */
 
 int os_sync_file(int fd)
 {
@@ -161,10 +211,7 @@ int os_lock_file(int fd, int excl)
 	stub_panic("file.c: os_lock_file");
 }
 
-void os_flush_stdout(void)
-{
-	stub_panic("file.c: os_flush_stdout");
-}
+/* os_flush_stdout moved to util.c (real, synchronous console) at M1.8. */
 
 unsigned os_major(unsigned long long dev)
 {

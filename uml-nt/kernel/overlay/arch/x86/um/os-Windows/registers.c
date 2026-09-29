@@ -4,9 +4,11 @@
  * Upstream: linux v6.18.37 arch/x86/um/os-Linux/registers.c (ptrace
  * PTRACE_GETREGSET + xstate). NT: regs live in the VEH CONTEXT of the
  * stub thread; pid-based ptrace APIs have no meaning (D6 seccomp path).
- * Status: M1.4 skeleton — PANICs.
+ * Status: M1.4 skeleton — PANICs (get_safe_registers is UM-level:
+ * arch/um/os-Windows/registers.c).
  */
-#include "stub-impl.h"
+#include <stub-panic.h>
+#include <longjmp.h>
 
 int get_fp_registers(int pid, unsigned long *regs)
 {

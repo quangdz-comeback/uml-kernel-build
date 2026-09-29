@@ -24,10 +24,17 @@ struct uml_boot_info {
 	/* D9: resolved NT API (launcher-owned). */
 	struct uml_nt_api_table *api;
 
-	/* Guest physical memory: pagefile-backed section, mapped on demand
-	 * by os_map_memory (upstream memfd equivalent). */
+	/* Guest physical memory: pagefile-backed section mapped as ONE
+	 * view at physmem_base (== guest RAM base, the memfd analogue):
+	 * guest physical X lives at physmem_base + X. The kernel image
+	 * itself was loaded into this view by the launcher (image_base
+	 * = physmem_base for an ET_EXEC at the RAM base; size kept for
+	 * logging/parity). */
 	HANDLE physmem_section;
+	void *physmem_base;
 	unsigned long long physmem_size; /* bytes (mem=) */
+	void *image_base;
+	unsigned long long image_size;
 
 	/* Early console targets (inherited handles). */
 	HANDLE stdio_out;

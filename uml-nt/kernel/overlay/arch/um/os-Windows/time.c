@@ -75,12 +75,17 @@ int os_timer_create(void)
 int os_timer_set_interval(unsigned long long nsecs)
 {
 	LARGE_INTEGER due;
+	LONG period_ms;
 
-	/* One-shot armed for the first interval, period = interval ms
-	 * thereafter (0 = one-shot; periodic re-arms in deliver path).
-	 * M1: the kernel re-arms via set_interval each tick. */
+	/* PERIODIC: due = first interval (relative), then repeats every
+	 * period_ms forever. A one-shot (period=0) fires exactly once —
+	 * calibrate_delay then waits for a second jiffies tick forever
+	 * (found at M1.8 under wine). */
 	due = qpc_to_li((long long)nsecs);
-	if (!nt->SetWaitableTimer(g_timer, &due, 0, NULL, NULL, 0))
+	period_ms = (LONG)(nsecs / 1000000ULL);
+	if (period_ms < 1)
+		period_ms = 1;
+	if (!nt->SetWaitableTimer(g_timer, &due, period_ms, NULL, NULL, 0))
 		return -1;
 	return 0;
 }

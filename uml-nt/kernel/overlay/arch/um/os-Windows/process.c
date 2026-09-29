@@ -59,20 +59,35 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 	LARGE_INTEGER li;
 	NTSTATUS s;
 	ULONG protect;
+	unsigned long long v = (unsigned long long)(uintptr_t)virt;
 
 	if (fd != UML_NT_MEMFD_PHYS) {
 		os_info("os_map_memory: unknown fd %d\n", fd);
 		return -1;
 	}
 
-	base = virt;
+	/* Guest RAM = ONE launcher-mapped view at boot.physmem_base
+	 * covering [base, base+physmem_size) — the memfd analogue. Every
+	 * guest-phys VA is already resident (upstream map_memory re-maps
+	 * the memfd over these VAs; on NT the view is already there).
+	 * Out-of-range requests have no backing until M2 (stub areas). */
+	if (v >= (unsigned long long)(uintptr_t)uml_boot.physmem_base &&
+	    v + len <= (unsigned long long)(uintptr_t)uml_boot.physmem_base +
+		       uml_boot.physmem_size)
+		return 0;
+
+	base = (PVOID)v;
 	view = 0;
 	li.LowPart = (unsigned int)(off & 0xffffffffu);
 	li.HighPart = (int)((unsigned long long)off >> 32);
 
 	/* PAGE_* from rwx bits (section views round to 64K — same as
-	 * mmap MAP_FIXED semantics the kernel expects). */
-	if (x)
+	 * mmap MAP_FIXED semantics the kernel expects). Guest RAM maps
+	 * RWX (guest code lives in it); every rwx combination below is
+	 * a valid NT protection. */
+	if (r && w && x)
+		protect = 0x40;              /* PAGE_EXECUTE_READWRITE */
+	else if (r && x)
 		protect = 0x20;              /* PAGE_EXECUTE_READ */
 	else if (w)
 		protect = 0x04;              /* PAGE_READWRITE */
@@ -86,11 +101,11 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 				   &li, &view, 1 /* ViewShare */,
 				   0, protect);
 	if (s < 0) {
-		os_info("os_map_memory: map @%p+%lu failed %08x\n",
+		os_info("os_map_memory: map @%px+%lu failed %08x\n",
 			virt, len, s);
 		return -1;
 	}
-	if (base != virt) {
+	if (base != (PVOID)v) {
 		/* The kernel picked this address; refuse drift. */
 		os_info("os_map_memory: got %p want %p\n", base, virt);
 		nt->NtUnmapViewOfSection(UML_NT_CURRENT_PROCESS, base);

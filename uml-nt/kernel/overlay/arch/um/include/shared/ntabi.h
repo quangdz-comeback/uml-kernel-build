@@ -23,11 +23,24 @@
 #ifndef __UML_NTABI_H
 #define __UML_NTABI_H
 
+/*
+ * Two consumer classes:
+ *  - Kernel ELF (freestanding, D1): define the whole NT type surface
+ *    here (no windows.h exists).
+ *  - Host PE (launcher, mingw): windows.h is already included — REUSE
+ *    its types instead of redefining them (typedef conflicts, and the
+ *    widths agree on LLP64 x64 anyway). ntabi.h then contributes only
+ *    the prototypes + macros both sides share.
+ */
 #if defined(_WIN64)
+/* Host-PE mode: adopt the windows.h types. Include them here so this
+ * header stays self-contained on both build sides (D9: one header
+ * source for launcher and kernel — drift fails to compile). */
+#include <windows.h>
+#include <winternl.h>
 #define UML_NTABI_CC /* ms ABI is the default under mingw/PE */
 #else
 #define UML_NTABI_CC __attribute__((ms_abi))
-#endif
 
 typedef int NTSTATUS; /* LONG */
 typedef unsigned int ACCESS_MASK;
@@ -92,50 +105,109 @@ typedef struct {
 	ULONG Protect;
 	ULONG Type;
 } MEMORY_BASIC_INFORMATION; /* 48 bytes on x64 */
+#endif /* !_WIN64 */
 
 /* Status codes (subset used by uml-nt). */
+#ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS               ((NTSTATUS)0x00000000)
+#endif
+#ifndef STATUS_PENDING
 #define STATUS_PENDING               ((NTSTATUS)0x00000103)
+#endif
+#ifndef STATUS_INVALID_PARAMETER
 #define STATUS_INVALID_PARAMETER     ((NTSTATUS)0xC000000D)
+#endif
+#ifndef STATUS_ILLEGAL_INSTRUCTION
 #define STATUS_ILLEGAL_INSTRUCTION   ((NTSTATUS)0xC000001D)
+#endif
+#ifndef STATUS_ACCESS_VIOLATION
 #define STATUS_ACCESS_VIOLATION      ((NTSTATUS)0xC0000005)
+#endif
+#ifndef STATUS_OBJECT_NAME_NOT_FOUND
 #define STATUS_OBJECT_NAME_NOT_FOUND ((NTSTATUS)0xC0000034)
+#endif
 
 /* OBJECT_ATTRIBUTES.Attributes */
+#ifndef OBJ_CASE_INSENSITIVE
 #define OBJ_CASE_INSENSITIVE 0x00000040UL
+#endif
 /* NtCreateFile DesiredAccess / CreateDisposition / CreateOptions subset */
+#ifndef FILE_GENERIC_READ
 #define FILE_GENERIC_READ    0x00120089UL
+#endif
+#ifndef FILE_GENERIC_WRITE
 #define FILE_GENERIC_WRITE   0x00120116UL
+#endif
+#ifndef FILE_SHARE_READ
 #define FILE_SHARE_READ      0x00000001UL
+#endif
+#ifndef FILE_SHARE_WRITE
 #define FILE_SHARE_WRITE     0x00000002UL
+#endif
+#ifndef FILE_OPEN
 #define FILE_OPEN            0x00000001UL
+#endif
+#ifndef FILE_CREATE
 #define FILE_CREATE          0x00000002UL
+#endif
+#ifndef FILE_OPEN_IF
 #define FILE_OPEN_IF         0x00000003UL
+#endif
+#ifndef FILE_OVERWRITE_IF
 #define FILE_OVERWRITE_IF    0x00000005UL
+#endif
+#ifndef FILE_SYNCHRONOUS_IO_NONALERT
 #define FILE_SYNCHRONOUS_IO_NONALERT 0x00000020UL
+#endif
+#ifndef FILE_SKIP_SET_EVENTS_ON_HANDLE
 #define FILE_SKIP_SET_EVENTS_ON_HANDLE 0x00000800UL
+#endif
 /* VirtualAlloc/VirtualProtect */
+#ifndef MEM_COMMIT
 #define MEM_COMMIT   0x00001000UL
+#endif
+#ifndef MEM_RESERVE
 #define MEM_RESERVE  0x00002000UL
+#endif
+#ifndef MEM_RELEASE
 #define MEM_RELEASE  0x00008000UL
+#endif
+#ifndef PAGE_READWRITE
 #define PAGE_READWRITE           0x00000004UL
+#endif
+#ifndef PAGE_EXECUTE_READWRITE
 #define PAGE_EXECUTE_READWRITE   0x00000040UL
+#endif
+#ifndef PAGE_NOACCESS
 #define PAGE_NOACCESS            0x00000001UL
+#endif
 /* CreateWaitableTimerExW flags */
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002UL
+#endif
 /* NtCreateEvent.EventType */
+#ifndef NotificationEvent
 #define NotificationEvent    0
+#endif
+#ifndef SynchronizationEvent
 #define SynchronizationEvent 1
+#endif
 /* RtlAllocateHeap flags */
+#ifndef HEAP_ZERO_MEMORY
 #define HEAP_ZERO_MEMORY 0x00000008UL
+#endif
 
 /* Wait: timeout == NULL means infinite. */
+#undef UML_NT_INFINITE
 #define UML_NT_INFINITE ((LARGE_INTEGER *)0)
 
+#undef NT_SUCCESS
 #define NT_SUCCESS(s) ((NTSTATUS)(s) >= 0)
 
 /* Pseudo-handles (x64). */
+#undef UML_NT_CURRENT_PROCESS
 #define UML_NT_CURRENT_PROCESS ((HANDLE)(long long)-1)
+#undef UML_NT_CURRENT_THREAD
 #define UML_NT_CURRENT_THREAD  ((HANDLE)(long long)-2)
 
 /*
@@ -145,7 +217,13 @@ typedef struct {
  */
 #define UML_NT_API_VERSION 1u
 
-/* ---- function prototypes (ms_abi) — the launcher resolves these ------ */
+/* ---- function prototypes (ms_abi) — the launcher resolves these ------
+ * Kernel-ELF consumers need them declared here (nothing else will).
+ * Host-PE consumers get the same functions from winbase.h/winternl.h —
+ * redeclaring them here collides with the real (dllimport) prototypes,
+ * and the launcher never calls them by name anyway (it resolves into
+ * the table below). */
+#ifndef _WIN64
 
 NTSTATUS UML_NTABI_CC NtCreateFile(HANDLE *file, ACCESS_MASK desired_access,
 				   OBJECT_ATTRIBUTES *obj_attr,
@@ -233,6 +311,7 @@ NTSTATUS UML_NTABI_CC NtUnmapViewOfSection(HANDLE process, PVOID base);
 NTSTATUS UML_NTABI_CC NtProtectVirtualMemory(HANDLE process, PVOID *base,
 					     SIZE_T *size, ULONG protect,
 					     ULONG *old_protect);
+#endif /* !_WIN64 */
 
 /*
  * The D9 contract itself. Launcher fills every member; kernel validates
