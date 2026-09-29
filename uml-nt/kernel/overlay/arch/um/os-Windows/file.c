@@ -275,6 +275,7 @@ int os_open_file(const char *file, struct openflags flags, int mode)
 	NTSTATUS s;
 	HANDLE h;
 	long long len;
+	int fd;
 
 	(void)mode; /* created images get default ACLs (POC) */
 
@@ -312,7 +313,12 @@ int os_open_file(const char *file, struct openflags flags, int mode)
 	if (!NT_SUCCESS(s))
 		return nt_err_to_errno(s);
 
-	return fd_alloc(h);
+	fd = fd_alloc(h);
+	if (fd < 0) {
+		nt->NtClose(h); /* table full — don't leak the handle */
+		return fd;
+	}
+	return fd;
 }
 
 /* os_read_file/os_write_file: real for the physmem pseudo-fd (M1.8)
