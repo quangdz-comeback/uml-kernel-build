@@ -127,27 +127,39 @@ static void park_forever(void)
  * EXCEPTION_CONTINUE_EXECUTION context restore (the x64 CONTEXT
  * carries the FS selector, not the base; KeContextToKernelMode
  * reloads it from the flat GDT → 0. The FSGSBASE probe's
- * "VEH-preserved yes" only measured INSIDE the handler; the first
- * S4c2a CI run printed TLS-BAD exactly because the base applied in
- * the handler died at the restore). So the base published by
- * arch_prctl(ARCH_SET_FS) is applied by a TRAMPOLINE that runs AFTER
- * the restore: the VEH redirects rip to fs_trampoline (native stub
- * code), which wrfsbase's and jumps to the real target. Upstream
- * never does this: Linux keeps the base in the task regs across the
- * ptrace round-trip. */
-static volatile unsigned long long fs_tramp_base, fs_tramp_target;
+ * "VEH-preserved yes" only measured INSIDE the handler). So the base
+ * published by arch_prctl(ARCH_SET_FS) is applied by a TRAMPOLINE
+ * that runs AFTER the restore: the VEH redirects rip to it, it
+ * wrfsbase's and jumps to the real target. The trampolines touch
+ * NOTHING but r11 (and globals): the first S4c2a version pushed the
+ * scratch on the guest stack and the stub died STATUS_STACK_OVERFLOW
+ * (0xC00000FD) before the guest ran a single instruction. Upstream
+ * never does any of this: Linux keeps the base in the task regs
+ * across the ptrace round-trip. */
+static volatile unsigned long long fs_tramp_base, fs_tramp_target,
+	fs_save_r11;
 
-__attribute__((naked)) static void fs_trampoline(void)
+/* syscall resume: rcx/r11 are clobbered by the syscall contract —
+ * r11 is free scratch, no register restoration needed. */
+__attribute__((naked)) static void fs_trampoline_sys(void)
 {
 	__asm__ volatile (
-		"pushq	%rcx\n\t"	/* guest red zone: written and
-					 * restored before any guest
-					 * instruction runs */
-		"pushq	%r11\n\t"
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
-		"popq	%r11\n\t"
-		"popq	%rcx\n\t"
+		"movq	fs_tramp_target(%rip), %r11\n\t"
+		"jmp	*%r11\n\t"
+	);
+}
+
+/* fault repair: every guest register is live mid-instruction — r11
+ * serves as scratch and is restored from the snapshot the VEH took;
+ * the jump target is memory-indirect so no other register is used. */
+__attribute__((naked)) static void fs_trampoline_fault(void)
+{
+	__asm__ volatile (
+		"movq	fs_tramp_base(%rip), %r11\n\t"
+		"wrfsbase %r11\n\t"
+		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
 }
@@ -278,21 +290,19 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 
 	/* D18 fast path: an fs-prefixed guest access that faults below
 	 * the guest span means the TLS base was wiped while the guest
-	 * ran. Redirect through the trampoline (which re-applies the
-	 * base AFTER the context restore) back to the SAME rip — the
-	 * instruction re-executes with the base live. A genuine guest
-	 * null/low deref is not fs-prefixed and keeps its SIGSEGV
-	 * round-trip. */
+	 * ran. Redirect through the fault trampoline (which re-applies
+	 * the base AFTER the context restore) back to the SAME rip —
+	 * the instruction re-executes with the base live. A genuine
+	 * guest null/low deref is not fs-prefixed and keeps its
+	 * SIGSEGV round-trip. */
 	if (is_fault && d->fs_base != 0 &&
 	    (uintptr_t)er->ExceptionInformation[1] <
 		    (uintptr_t)d->ram_base &&
 	    *(const unsigned char *)(uintptr_t)c->Rip == 0x64 /* fs: */) {
-		fprintf(stderr, "stub: fs fault repaired at rip %#llx "
-			"(base %#llx)\n", (unsigned long long)c->Rip,
-			d->fs_base);
 		fs_tramp_base = d->fs_base;
+		fs_save_r11 = c->R11;
 		fs_tramp_target = c->Rip;
-		c->Rip = (DWORD64)(uintptr_t)&fs_trampoline;
+		c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
@@ -322,26 +332,18 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	 * instruction re-executes on the now-fixed view. */
 	gp_to_context(c, &d->regs);
 	if (is_syscall) {
-		static int tramp_logged;
-
 		c->Rax = (DWORD64)d->retval;
 		/* D18: with a TLS base live, resume THROUGH the
 		 * trampoline — the context restore on the way out has
 		 * already zeroed the base, and rcx/r11 are clobbered
 		 * by the syscall contract anyway (the trampoline uses
-		 * them as scratch, plus the guest red zone it restores
-		 * verbatim). Without TLS this stays the plain rip+2
-		 * resume the M1.9–M3.7 gates have always run. */
+		 * r11 as scratch and touches nothing else). Without
+		 * TLS this stays the plain rip+2 resume the
+		 * M1.9–M3.7 gates have always run. */
 		if (d->fs_base != 0) {
-			if (!tramp_logged++) {
-				fprintf(stderr, "stub: syscall resumes go "
-					"through the fs trampoline "
-					"(base %#llx)\n", d->fs_base);
-				fflush(stderr);
-			}
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = d->regs.rip + 2; /* past ud2 */
-			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline;
+			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_sys;
 		} else {
 			c->Rip = d->regs.rip + 2; /* past 0F 0B (ud2) */
 		}
