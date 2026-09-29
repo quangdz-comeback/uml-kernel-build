@@ -55,3 +55,69 @@ jobs:
         with:
           name: uml-nt-vmlinux-elf
           path: build/vmlinux
+
+      # M1.9 boot gate (wine): mingw-cross-build launcher.exe + boot the
+      # just-built vmlinux.elf — must reach the "no rootfs" panic and
+      # exit 1 (os_dump_core → NtTerminateProcess(1)). Fast regression
+      # gate; the REAL Windows boot runs in the launcher job below.
+      - name: Boot test under wine (M1.9 gate)
+        run: |
+          sudo apt-get install -y gcc-mingw-w64-x86-64 wine64
+          make -C uml-nt/launcher MINGW_CC=x86_64-w64-mingw32-gcc all
+          cd uml-nt/launcher
+          set +e
+          timeout 120 wine ./launcher.exe ../../build/vmlinux > boot.log 2>&1
+          code=$?
+          set -e
+          cat boot.log
+          [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code"; exit 1; }
+          grep -q "No filesystem could mount root" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
+          echo "M1.9 wine boot gate ok: dmesg reached the no-rootfs panic"
+
+  launcher:
+    # M1.9: NATIVE Windows boot — build launcher.exe with the MSYS2
+    # mingw toolchain, download the vmlinux artifact from the kernel
+    # job, boot it for real (no wine) and assert the no-rootfs panic.
+    needs: kernel
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make
+            mingw-w64-x86_64-toolchain
+
+      - name: Build launcher.exe
+        shell: msys2 {0}
+        run: make -C uml-nt/launcher all
+
+      - name: Usage gate (no args → exit 2)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ./launcher.exe; code=$?
+          [ "$code" -eq 2 ] || { echo "expected exit 2, got $code"; exit 1; }
+          echo "launcher usage gate ok"
+
+      - name: Download vmlinux.elf
+        uses: actions/download-artifact@v4
+        with:
+          name: uml-nt-vmlinux-elf
+          path: build
+
+      - name: NATIVE boot test (M1.9 acceptance)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          set +e
+          ./launcher.exe ../../build/vmlinux > boot.log 2>&1
+          code=$?
+          set -e
+          cat boot.log
+          [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code"; exit 1; }
+          grep -q "No filesystem could mount root" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
+          echo "M1.9 NATIVE WINDOWS BOOT OK"
