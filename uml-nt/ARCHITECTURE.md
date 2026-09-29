@@ -245,3 +245,25 @@ guest — KHÔNG patch binfmt_elf ép align 64K (hướng b, loại).
   giao thức, hai đường.
 - Hazard (3) COW write-back trong uaccess to_user còn mở — fix SAU S3,
   trước S4 (sketch đã có trong relay archive).
+
+## D18 — FS base của guest thread: state per-conn + wrfsbase khi resume (2026-09-29, Shelley duyệt)
+
+**Quyết định:** FS base là state per-conn lưu trong regs của stub_data.
+`arch_prctl(ARCH_SET_FS)` (syscall 158) chỉ GHI giá trị vào regs — không NT
+call nào. Stub apply bằng `wrfsbase` ngay trước khi resume guest (FSGSBASE
+gate bằng CPUID — probe S4c đã xác nhận native runner có; CPU không hỗ trợ →
+boot loud-fail, chấp nhận yêu cầu phần cứng hiện đại).
+
+**Lý do:**
+- x86_64 TLS (musl/glibc) dùng FS base, không phải SegFs 32-bit legacy —
+  không có đường NT nào set FS base cho thread khác; wrfsbase là đường
+  chuẩn và rẻ (một lệnh, không syscall).
+- Parity upstream: ptrace-mode cũng chỉ GETREGS/SETREGS gp regs — FS base
+  đi qua regs của stub data, kernel không cần biết chi tiết.
+- VEH resume đã viết CONTEXT trước khi trả — wrfsbase trong stub ngay trước
+  jump-back không bị VEH dispatch phá (RIP filter đã có từ S3).
+
+**Phạm vi S4d (tách khỏi S4c2):** xmm/xstate fidelity cho FAULT path —
+syscall boundary không cần FP (caller-saved ABI), nhưng SIGSEGV/sigreturn
+cần fpstate. Giữ CONTEXT_FULL (XSAVE) trong VEH path, stub_data mở rộng
+khối fp khi làm S4d.
