@@ -108,7 +108,11 @@ jobs:
           set -e
           cat boot.log
           [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code"; exit 1; }
-          grep -q "No filesystem could mount root" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
+          # M3.5 note: with ext4 + ubd in the build, UML's default
+          # root=98:0 now resolves to a REGISTERED fs list, so the
+          # no-image boot panics with "Unable to mount root fs"
+          # instead of the old "No filesystem could mount root".
+          grep -q "Unable to mount root fs" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
           echo "M1.9 wine boot gate ok"
 
       # M3.5 mount gate (wine): same vmlinux + the ext4 root image via
@@ -197,7 +201,9 @@ jobs:
           set -e
           cat boot.log
           [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code (124 = boot hang — see log)"; exit 1; }
-          grep -q "No filesystem could mount root" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
+          # M3.5 note: see the wine gate — the no-image panic is now
+          # "Unable to mount root fs" (ext4 present, root=98:0 default).
+          grep -q "Unable to mount root fs" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
           grep -q "exec loaded: 3 region" boot.log || { echo "M3.4 ELF loader never ran (no exec image loaded)"; exit 1; }
           grep -q "ROUND-TRIP OK" boot.log || { echo "M2 syscall round-trip never completed"; exit 1; }
           grep -q "^hi" boot.log || { echo "guest write output missing"; exit 1; }
