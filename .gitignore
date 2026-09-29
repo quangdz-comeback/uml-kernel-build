@@ -35,3 +35,4 @@ uml-nt/rootfs/rootfs.ext4
 
 # local kernel build dir (this VM)
 /.kbuild/
+uml-nt/probes/*.exe

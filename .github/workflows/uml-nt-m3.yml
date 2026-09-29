@@ -164,6 +164,17 @@ jobs:
           make -C uml-nt/launcher all
           make -C uml-nt/stub all
 
+      # M3.8 S4c evidence: musl TLS needs arch_prctl(ARCH_SET_FS) —
+      # can a user-written FS base exist on native Windows (FSGSBASE
+      # enabled, survives VEH round-trips / scheduling)? Evidence
+      # probe, not a gate: exit 0 with markers either way; D18 reads
+      # the log.
+      - name: FSGSBASE probe (S4c evidence)
+        shell: msys2 {0}
+        run: |
+          make -C uml-nt/probes
+          ./uml-nt/probes/fsgsbase.exe
+
       - name: Usage gate (no args → exit 2)
         shell: msys2 {0}
         run: |
