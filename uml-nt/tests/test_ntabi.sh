@@ -65,3 +65,53 @@ printf '#include <ntabi.h>\nint probe(void){return STATUS_SUCCESS;}\n' \
 "$CC" --target=x86_64-linux-gnu -c -ffreestanding -nostdinc -I "$INC" \
 	-o "$TMP/self.o" "$TMP/self.c"
 echo "ok  - ntabi.h is self-contained (no windows.h, no libc)"
+
+# --- 4. uml_nt_ntpath (M3.5): pure path logic, runnable host test --------
+# glibc host runtime + the freestanding types: no name collisions (the
+# typedefs above are all NT-isms), so this compiles and RUNS.
+cat > "$TMP/ntpath.c" <<'EOF'
+#include <stdio.h>
+#include <ntabi.h>
+static int fails;
+static void expect(long long got, long long want, const char *what)
+{
+	if (got != want) {
+		printf("FAIL- %s: got %lld want %lld\n", what, got, want);
+		fails++;
+	}
+}
+int main(void)
+{
+	WCHAR buf[64];
+
+	expect(uml_nt_ntpath("C:\\base.img", buf, 64), 15, "len basic");
+	if (buf[0] != '\\' || buf[1] != '?' || buf[2] != '?' ||
+	    buf[3] != '\\') { puts("FAIL- prefix"); fails++; }
+	if (buf[4] != 'C' || buf[14] != 'g') { puts("FAIL- body"); fails++; }
+	if (buf[15] != 0) { puts("FAIL- NUL"); fails++; }
+
+	expect(uml_nt_ntpath(NULL, buf, 64), -3, "NULL path");
+	expect(uml_nt_ntpath("", buf, 64), -3, "empty path");
+	expect(uml_nt_ntpath("caf\xc3\xa9", buf, 64), -1, "non-ascii");
+	expect(uml_nt_ntpath("12345678901234567890", buf, 8), -2,
+	       "output too small");
+	{
+		char big[60];
+		int i;
+		for (i = 0; i < 59; i++)
+			big[i] = 'x';
+		big[59] = 0;
+		/* 4 prefix + 59 chars = 63 WCHARs, NUL at [63] fits */
+		expect(uml_nt_ntpath(big, buf, 64), 63, "max fit");
+	}
+	expect(uml_nt_ntpath("xxxxxxxxxx", buf, 64), 14, "short fit");
+
+	if (fails)
+		return 1;
+	puts("ok  - uml_nt_ntpath: \\??\\ prefix, widening, bounds, errors");
+	return 0;
+}
+EOF
+"$CC" --target=x86_64-linux-gnu -I "$INC" -o "$TMP/ntpath" \
+	"$TMP/ntpath.c"
+"$TMP/ntpath"

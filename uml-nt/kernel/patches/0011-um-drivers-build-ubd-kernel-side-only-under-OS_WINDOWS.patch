@@ -1,0 +1,26 @@
+--- a/arch/um/drivers/Makefile
++++ b/arch/um/drivers/Makefile
+@@ -23,6 +23,16 @@
+ # When the above is fixed, don't forget to add this too!
+ #targets += $(obj)/pcap.o
+ 
++ifeq ($(CONFIG_OS_WINDOWS),y)
++# uml-nt (M3.5): freestanding kernel (D1) — only ubd's kernel side
++# builds (user side = os-Windows/ubd_user.c stub: no io thread,
++# requests run synchronously). The chan/console + mconsole + net
++# stacks are libc-host code; they return driver-by-driver (console at
++# M3.6). CONFIG_MCONSOLE/CONFIG_STDERR_CONSOLE default to y — they
++# must not leak into this branch.
++ubd-objs := ubd_kern.o
++obj-$(CONFIG_BLK_DEV_UBD) += ubd.o
++else
+ obj-y := stdio_console.o fd.o chan_kern.o chan_user.o line.o
+ obj-$(CONFIG_SSL) += ssl.o
+ obj-$(CONFIG_STDERR_CONSOLE) += stderr_console.o
+@@ -52,5 +62,6 @@
+ CFLAGS_null.o = -DDEV_NULL=$(DEV_NULL_PATH)
+ 
+ CFLAGS_xterm.o += '-DCONFIG_XTERM_CHAN_DEFAULT_EMULATOR="$(CONFIG_XTERM_CHAN_DEFAULT_EMULATOR)"'
++endif
+ 
+ include $(srctree)/arch/um/scripts/Makefile.rules

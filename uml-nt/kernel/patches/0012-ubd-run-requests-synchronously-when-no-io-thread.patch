@@ -1,0 +1,40 @@
+--- a/arch/um/drivers/ubd_kern.c
++++ b/arch/um/drivers/ubd_kern.c
+@@ -1258,5 +1258,9 @@
+ }
+ 
++/* uml-nt (M3.5): forward declaration — the synchronous submit path
++ * below runs before the "hypervisor" section defines do_io. */
++static void do_io(struct io_thread_req *req, struct io_desc *desc);
++
+ static int ubd_submit_request(struct ubd *dev, struct request *req)
+ {
+ 	int segs = 0;
+@@ -1282,7 +1286,27 @@ static int ubd_submit_request(struct ubd *dev, struct request *req)
+ 	io_req->desc_cnt = segs;
+ 	if (segs)
+ 		ubd_map_req(dev, io_req, req);
+ 
++	/* uml-nt (M3.5): os-Windows has no io thread — start_io_thread
++	 * failed with -ENOSYS (os-Windows/ubd_user.c) and thread_fd is
++	 * still -1. Upstream would then retry this os_write_file
++	 * forever (BLK_STS_DEV_RESOURCE), so run the request
++	 * synchronously here in queue_rq context instead: do_io()'s
++	 * NtReadFile/NtWriteFile may block, which is fine — the alarm
++	 * timer lives on its own NT thread and the vCPU waits on this
++	 * request anyway. Errors map through map_error(); -EOPNOTSUPP
++	 * from falloc cleanly disables discard/write-zeroes.
++	 */
++	if (thread_fd < 0) {
++		int i;
++
++		for (i = 0; !io_req->error && i < io_req->desc_cnt; i++)
++			do_io(io_req, &io_req->io_desc[i]);
++		blk_mq_end_request(io_req->req, io_req->error);
++		kfree(io_req);
++		return 0;
++	}
++
+ 	ret = os_write_file(thread_fd, &io_req, sizeof(io_req));
+ 	if (ret != sizeof(io_req)) {
+ 		if (ret != -EAGAIN)

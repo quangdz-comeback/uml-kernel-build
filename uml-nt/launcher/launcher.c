@@ -128,6 +128,9 @@ static void resolve_api_table(void)
 	RESOLVE(GetExitCodeProcess, k32, "GetExitCodeProcess");
 	RESOLVE(WaitForMultipleObjects, k32, "WaitForMultipleObjects");
 
+	/* M3.5 additions (ubd host files) */
+	RESOLVE(GetFileSizeEx, k32, "GetFileSizeEx");
+
 	fprintf(stderr, "[launcher] D9 table v%u: %u bytes, all exports "
 			"resolved\n", g_api.version, g_api.size);
 }

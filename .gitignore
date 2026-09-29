@@ -29,5 +29,9 @@ uml-nt/stub/stub.exe
 uml-nt/guest/init.o
 uml-nt/guest/guest-init.elf
 
+# M3.5 gate rootfs (built in CI, never committed)
+uml-nt/rootfs/staging/
+uml-nt/rootfs/rootfs.ext4
+
 # local kernel build dir (this VM)
 /.kbuild/

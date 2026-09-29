@@ -13,4 +13,9 @@ obj-y := file.o start_up.o mem.o process.o execvp.o helper.o umid.o \
 	signal.o util.o time.o irq.o sigio.o tty.o registers.o main.o \
 	user_syms.o stub-impl.o
 
+# M3.5: ubd's user side — no io thread on NT (pipes/poll are the M4
+# overlapped-IO redesign); start_io_thread reports -ENOSYS so the
+# driver falls back to synchronous request execution (drivers patch).
+obj-y += ubd_user.o
+
 obj-y += skas/

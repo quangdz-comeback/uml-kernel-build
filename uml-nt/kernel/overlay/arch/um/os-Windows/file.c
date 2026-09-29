@@ -3,12 +3,28 @@
  * os-Windows/file.c — file/fd abstraction for the NT backend.
  * Upstream: linux v6.18.37 arch/um/os-Linux/file.c
  *
- * M1.8: the physmem pseudo-fd is real (seek/read/write through the
- * launcher's shadow mapping of the guest-RAM section — the memfd
- * analogue). Real host-file handles land with the channel port (M3);
- * everything else keeps the M1.3 PANIC scaffolding via stub-panic.h
- * (stub-impl.h's type mirrors collide with os.h — M1.7 lesson).
+ * M1.8: the physmem pseudo-fd (seek/read/write through the launcher's
+ * shadow mapping of the guest-RAM section — the memfd analogue).
+ *
+ * M3.5: real host files for ubd backing images. fds are indices into a
+ * small table of NtCreateFile handles; all I/O is synchronous
+ * (FILE_SYNCHRONOUS_IO_NONALERT) with explicit offsets — no overlapped
+ * I/O, no completion ports (that is the M4 optimization). Positional
+ * I/O (os_pread_file/os_pwrite_file, what ubd's do_io uses) passes the
+ * offset straight to NtReadFile/NtWriteFile; stream I/O keeps the
+ * position in the table so os_seek_file stays a bookkeeping write.
+ * Consequences, on purpose:
+ *   - os_sync_file is a no-op (buffered cache; a machine crash may
+ *     lose the tail of guest writes — acceptable for the POC),
+ *   - os_lock_file is a no-op (single-instance; upstream's flock
+ *     analogue lands with real multi-instance work),
+ *   - os_falloc_punch/zeroes return -EOPNOTSUPP, which upstream ubd
+ *     turns into BLK_STS_NOTSUPP and permanently disables
+ *     discard/write-zeroes on the queue (graceful degradation through
+ *     upstream's own path, no fork of the queue setup).
  */
+#include <linux/errno.h>
+#include <linux/stat.h> /* S_IFREG */
 #include <os.h>
 #include <stub-panic.h>
 #include "internal.h"
@@ -17,9 +33,105 @@
  * file position). */
 static unsigned long long memfd_offset;
 
+/* ---- host fd table (M3.5) --------------------------------------------- */
+#define UML_NT_FD_MAX 16
+static struct {
+	HANDLE h;                 /* NtCreateFile handle; NULL = free */
+	unsigned long long pos;   /* stream position for read/write */
+} fds[UML_NT_FD_MAX];
+
+static int fd_alloc(HANDLE h)
+{
+	int i;
+
+	for (i = 1; i < UML_NT_FD_MAX; i++) {
+		if (fds[i].h == NULL) {
+			fds[i].h = h;
+			fds[i].pos = 0;
+			return i;
+		}
+	}
+	return -EMFILE;
+}
+
+static HANDLE fd_handle(int fd)
+{
+	if (fd <= 0 || fd >= UML_NT_FD_MAX)
+		return NULL;
+	return fds[fd].h;
+}
+
+/* NTSTATUS -> -errno for the file paths (subset; ubd's open path
+ * special-cases -ENOENT/-EROFS/-EACCES, so those must be exact). */
+static int nt_err_to_errno(NTSTATUS s)
+{
+	switch (s) {
+	case STATUS_OBJECT_NAME_NOT_FOUND:
+		return -ENOENT;
+	case STATUS_END_OF_FILE:
+		return 0; /* read at/after EOF */
+	case 0xC0000022: /* STATUS_ACCESS_DENIED */
+		return -EACCES;
+	case 0xC0000043: /* STATUS_SHARING_VIOLATION */
+		return -EBUSY;
+	case 0xC0000047: /* STATUS_DISK_FULL */
+		return -ENOSPC;
+	default:
+		os_info("file.c: unmapped NTSTATUS 0x%08x\n", s);
+		return -EIO;
+	}
+}
+
 int os_stat_file(const char *file_name, struct uml_stat *buf)
 {
-	stub_panic("file.c: os_stat_file");
+	WCHAR wpath[512];
+	UNICODE_STRING uni;
+	OBJECT_ATTRIBUTES oa;
+	IO_STATUS_BLOCK iosb;
+	LARGE_INTEGER size;
+	NTSTATUS s;
+	HANDLE h;
+	long long len;
+
+	__builtin_memset(buf, 0, sizeof(*buf));
+	len = uml_nt_ntpath(file_name, wpath, 512);
+	if (len < 0)
+		return -ENOENT;
+
+	uni.Length = (unsigned short)(len * 2);
+	uni.MaximumLength = (unsigned short)(len * 2 + 2);
+	uni.Buffer = wpath;
+	oa.Length = sizeof(oa);
+	oa.RootDirectory = NULL;
+	oa.ObjectName = &uni;
+	oa.Attributes = OBJ_CASE_INSENSITIVE;
+	oa.SecurityDescriptor = NULL;
+	oa.SecurityQualityOfService = NULL;
+
+	s = nt->NtCreateFile(&h, FILE_GENERIC_READ, &oa, &iosb, NULL,
+			     FILE_ATTRIBUTE_NORMAL,
+			     FILE_SHARE_READ | FILE_SHARE_WRITE,
+			     FILE_OPEN, FILE_SYNCHRONOUS_IO_NONALERT,
+			     NULL, 0);
+	if (!NT_SUCCESS(s)) {
+		os_info("stat_file: NtCreateFile(%s) failed %08x\n",
+			file_name, s);
+		return nt_err_to_errno(s);
+	}
+
+	/* NT data files are regular files; nobody in the ubd path needs
+	 * richer mode bits (ust_dev/ust_ino fudges only feed the COW
+	 * path, which we never take). */
+	buf->ust_mode = S_IFREG | 0644;
+
+	if (!nt->GetFileSizeEx(h, &size)) {
+		os_info("stat_file: GetFileSizeEx(%s) failed\n", file_name);
+		nt->NtClose(h);
+		return -EIO;
+	}
+	buf->ust_size = (unsigned long long)size.QuadPart;
+	nt->NtClose(h);
+	return 0;
 }
 
 int os_stat_fd(const int fd, struct uml_stat *buf)
@@ -54,14 +166,14 @@ int os_mode_fd(int fd, int mode)
 
 int os_seek_file(int fd, unsigned long long offset)
 {
-	/* The pseudo-fd (guest RAM section) tracks an offset like the
-	 * upstream tmpfs memfd; seeks/writes go through the launcher's
-	 * full shadow mapping of the section (boot.physmem_base). */
 	if (fd == UML_NT_MEMFD_PHYS) {
 		memfd_offset = offset;
 		return 0;
 	}
-	stub_panic("file.c: os_seek_file — non-physmem fd (M3)");
+	if (fd_handle(fd) == NULL)
+		return -EBADF;
+	fds[fd].pos = offset;
+	return 0;
 }
 
 static int memfd_write(const void *buf, int count)
@@ -94,50 +206,174 @@ static int memfd_read(void *buf, int count)
 	return count;
 }
 
+/* Positional I/O against a host fd. len/count is an int by upstream
+ * ABI; NtReadFile/NtWriteFile take ULONG. */
+static int host_pread(int fd, void *buf, int len, unsigned long long offset)
+{
+	LARGE_INTEGER off;
+	IO_STATUS_BLOCK iosb;
+	NTSTATUS s;
+
+	if (len <= 0)
+		return 0;
+	off.QuadPart = (long long)offset;
+	s = nt->NtReadFile(fds[fd].h, NULL, NULL, NULL, &iosb, buf,
+			   (ULONG)len, &off, NULL);
+	if (!NT_SUCCESS(s))
+		return nt_err_to_errno(s);
+	return (int)iosb.Information;
+}
+
+static int host_pwrite(int fd, const void *buf, int count,
+		       unsigned long long offset)
+{
+	LARGE_INTEGER off;
+	IO_STATUS_BLOCK iosb;
+	NTSTATUS s;
+
+	if (count <= 0)
+		return 0;
+	off.QuadPart = (long long)offset;
+	s = nt->NtWriteFile(fds[fd].h, NULL, NULL, NULL, &iosb, (PVOID)buf,
+			    (ULONG)count, &off, NULL);
+	if (!NT_SUCCESS(s))
+		return nt_err_to_errno(s);
+	return (int)iosb.Information;
+}
+
 int os_write_file(int fd, const void *buf, int count)
 {
 	if (fd == UML_NT_MEMFD_PHYS)
 		return memfd_write(buf, count);
-	stub_panic("file.c: os_write_file — non-physmem fd (M3)");
+	if (fd_handle(fd) == NULL)
+		return -EBADF;
+	return host_pwrite(fd, buf, count, fds[fd].pos);
 }
 
 int os_read_file(int fd, void *buf, int count)
 {
+	int n;
+
 	if (fd == UML_NT_MEMFD_PHYS)
 		return memfd_read(buf, count);
-	stub_panic("file.c: os_read_file — non-physmem fd (M3)");
+	if (fd_handle(fd) == NULL)
+		return -EBADF;
+	n = host_pread(fd, buf, count, fds[fd].pos);
+	if (n > 0)
+		fds[fd].pos += (unsigned long long)n;
+	return n;
 }
 
 int os_open_file(const char *file, struct openflags flags, int mode)
 {
-	stub_panic("file.c: os_open_file");
+	WCHAR wpath[512];
+	UNICODE_STRING uni;
+	OBJECT_ATTRIBUTES oa;
+	IO_STATUS_BLOCK iosb;
+	ACCESS_MASK desired;
+	ULONG disposition;
+	NTSTATUS s;
+	HANDLE h;
+	long long len;
+
+	(void)mode; /* created images get default ACLs (POC) */
+
+	len = uml_nt_ntpath(file, wpath, 512);
+	if (len == -3 || len == -1)
+		return -ENOENT;
+	if (len < 0)
+		return -ENAMETOOLONG;
+
+	uni.Length = (unsigned short)(len * 2);
+	uni.MaximumLength = (unsigned short)(len * 2 + 2);
+	uni.Buffer = wpath;
+	oa.Length = sizeof(oa);
+	oa.RootDirectory = NULL;
+	oa.ObjectName = &uni;
+	oa.Attributes = OBJ_CASE_INSENSITIVE;
+	oa.SecurityDescriptor = NULL;
+	oa.SecurityQualityOfService = NULL;
+
+	desired = 0;
+	if (flags.r)
+		desired |= FILE_GENERIC_READ;
+	if (flags.w)
+		desired |= FILE_GENERIC_WRITE;
+	if (desired == 0)
+		desired = FILE_GENERIC_READ;
+
+	disposition = flags.c ? FILE_OPEN_IF : FILE_OPEN;
+
+	s = nt->NtCreateFile(&h, desired, &oa, &iosb, NULL,
+			     FILE_ATTRIBUTE_NORMAL,
+			     FILE_SHARE_READ | FILE_SHARE_WRITE,
+			     disposition, FILE_SYNCHRONOUS_IO_NONALERT,
+			     NULL, 0);
+	if (!NT_SUCCESS(s))
+		return nt_err_to_errno(s);
+
+	return fd_alloc(h);
 }
 
-/* os_read_file/os_write_file: real for the physmem pseudo-fd (M1.8). */
+/* os_read_file/os_write_file: real for the physmem pseudo-fd (M1.8)
+ * and for host files (M3.5). */
 
 int os_sync_file(int fd)
 {
-	stub_panic("file.c: os_sync_file");
+	if (fd == UML_NT_MEMFD_PHYS)
+		return 0;
+	if (fd_handle(fd) == NULL)
+		return -EBADF;
+	/* POC: no NtFlushBuffersFile yet — see the header comment. */
+	return 0;
 }
 
 int os_file_size(const char *file, unsigned long long *size_out)
 {
-	stub_panic("file.c: os_file_size");
+	struct uml_stat buf;
+	int err;
+
+	err = os_stat_file(file, &buf);
+	if (err < 0)
+		return err;
+	*size_out = buf.ust_size;
+	return 0;
 }
 
 int os_pread_file(int fd, void *buf, int len, unsigned long long offset)
 {
-	stub_panic("file.c: os_pread_file");
+	if (fd == UML_NT_MEMFD_PHYS) {
+		if (offset + (unsigned long long)len >
+		    uml_boot.physmem_size)
+			return 0; /* EOF, position untouched */
+		__builtin_memcpy(buf,
+				 (char *)uml_boot.physmem_base + offset,
+				 len);
+		return len;
+	}
+	if (fd_handle(fd) == NULL)
+		return -EBADF;
+	return host_pread(fd, buf, len, offset);
 }
 
 int os_pwrite_file(int fd, const void *buf, int count, unsigned long long offset)
 {
-	stub_panic("file.c: os_pwrite_file");
+	if (fd == UML_NT_MEMFD_PHYS) {
+		if (offset + (unsigned long long)count >
+		    uml_boot.physmem_size)
+			return -1;
+		__builtin_memcpy((char *)uml_boot.physmem_base + offset,
+				 buf, count);
+		return count;
+	}
+	if (fd_handle(fd) == NULL)
+		return -EBADF;
+	return host_pwrite(fd, buf, count, offset);
 }
 
 int os_file_modtime(const char *file, long long *modtime)
 {
-	stub_panic("file.c: os_file_modtime");
+	stub_panic("file.c: os_file_modtime (COW-only upstream)");
 }
 
 int os_pipe(int *fd, int stream, int close_on_exec)
@@ -182,7 +418,15 @@ int os_dup_file(int fd)
 
 void os_close_file(int fd)
 {
-	stub_panic("file.c: os_close_file");
+	HANDLE h;
+
+	if (fd == UML_NT_MEMFD_PHYS)
+		return; /* pseudo-fd: nothing to close */
+	h = fd_handle(fd);
+	if (h == NULL)
+		return;
+	fds[fd].h = NULL;
+	nt->NtClose(h);
 }
 
 ssize_t os_rcv_fd_msg(int fd, int *fds, unsigned int n_fds,
@@ -208,7 +452,11 @@ int os_file_mode(const char *file, struct openflags *mode_out)
 
 int os_lock_file(int fd, int excl)
 {
-	stub_panic("file.c: os_lock_file");
+	/* POC: no cross-instance locking (upstream flocks the image so
+	 * two UMLs cannot share it). Single-instance boot only. */
+	(void)fd;
+	(void)excl;
+	return 0;
 }
 
 /* os_flush_stdout moved to util.c (real, synchronous console) at M1.8. */
@@ -230,12 +478,22 @@ unsigned long long os_makedev(unsigned major, unsigned minor)
 
 int os_falloc_punch(int fd, unsigned long long offset, int count)
 {
-	stub_panic("file.c: os_falloc_punch — NT: DiscardVirtualMemory / FSCTL_ZERO_DATA");
+	/* Report unsupported: upstream ubd maps this to
+	 * BLK_STS_NOTSUPP and calls blk_queue_disable_discard, so the
+	 * queue never tries discard again. FSCTL_ZERO_DATA is the M4
+	 * real implementation. */
+	(void)fd;
+	(void)offset;
+	(void)count;
+	return -EOPNOTSUPP;
 }
 
 int os_falloc_zeroes(int fd, unsigned long long offset, int count)
 {
-	stub_panic("file.c: os_falloc_zeroes");
+	(void)fd;
+	(void)offset;
+	(void)count;
+	return -EOPNOTSUPP;
 }
 
 int os_eventfd(unsigned int initval, int flags)

@@ -24,6 +24,11 @@ jobs:
             sudo apt-get install -y lld llvm
           fi
           bash uml-nt/tests/test_elf.sh
+          # M3.5 gate rootfs — static freestanding /sbin/init + ext4
+          # image (mke2fs -d, no root). Same recipe the kernel job's
+          # mount gate consumes.
+          make -C uml-nt/rootfs
+          debugfs -R "ls -l /sbin" uml-nt/rootfs/rootfs.ext4
 
       - name: ntabi ABI checks (ELF freestanding + mingw PE)
         run: |

@@ -1,0 +1,24 @@
+--- a/arch/um/drivers/ubd_kern.c
++++ b/arch/um/drivers/ubd_kern.c
+@@ -301,15 +301,18 @@
+ 	goto out;
+ 
+ break_loop:
+-	file = strsep(&str, ",:");
++	/* uml-nt (M3.5): NT paths carry a drive colon ("C:\..."), which
++	 * upstream treats as the COW-layer separator. Split on ',' only
++	 * — COW layers are unsupported on this backend anyway. */
++	file = strsep(&str, ",");
+ 	if (*file == '\0')
+ 		file = NULL;
+ 
+-	backing_file = strsep(&str, ",:");
++	backing_file = strsep(&str, ",");
+ 	if (backing_file && *backing_file == '\0')
+ 		backing_file = NULL;
+ 
+-	serial = strsep(&str, ",:");
++	serial = strsep(&str, ",");
+ 	if (serial && *serial == '\0')
+ 		serial = NULL;
+ 

@@ -1,6 +1,6 @@
 --- a/arch/um/Kbuild
 +++ b/arch/um/Kbuild
-@@ -1,3 +1,17 @@
+@@ -1,3 +1,13 @@
  # SPDX-License-Identifier: GPL-2.0-only
  
 -obj-y += kernel/ drivers/ os-Linux/
@@ -11,11 +11,7 @@
 +os-dir := os-Windows
 +endif
 +
-+ifeq ($(CONFIG_OS_WINDOWS),y)
-+# M1: drivers/ (chan stack, ubd, net) is user-object code that links
-+# against host libc on Linux — contradicts D1 until ported (console+ubd
-+# return at M3). Boot reaches "no rootfs" panic without any of it.
-+obj-y += kernel/ $(os-dir)/
-+else
++# M3.5: drivers/ builds under OS_WINDOWS too — arch/um/drivers/Makefile
++# self-filters to ubd's kernel side only (D1: the chan/console stack is
++# libc-host code; its port is the M3.6 console work).
 +obj-y += kernel/ drivers/ $(os-dir)/
-+endif

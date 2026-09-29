@@ -42,6 +42,12 @@
 #else
 #define UML_NTABI_CC __attribute__((ms_abi))
 
+/* Freestanding ELF mode has no <stddef.h>; PE mode gets NULL from
+ * windows.h — the guard keeps one definition either way. */
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
 typedef int NTSTATUS; /* LONG */
 typedef unsigned int ACCESS_MASK;
 typedef void *PVOID;
@@ -151,6 +157,13 @@ typedef struct {
 #ifndef STATUS_OBJECT_NAME_NOT_FOUND
 #define STATUS_OBJECT_NAME_NOT_FOUND ((NTSTATUS)0xC0000034)
 #endif
+/* M3.5: NtReadFile at/after EOF (plain data files). */
+#ifndef STATUS_END_OF_FILE
+#define STATUS_END_OF_FILE           ((NTSTATUS)0xC0000011)
+#endif
+#ifndef STATUS_DISK_FULL
+#define STATUS_DISK_FULL             ((NTSTATUS)0xC0000047)
+#endif
 
 /* OBJECT_ATTRIBUTES.Attributes */
 #ifndef OBJ_CASE_INSENSITIVE
@@ -186,6 +199,10 @@ typedef struct {
 #endif
 #ifndef FILE_SKIP_SET_EVENTS_ON_HANDLE
 #define FILE_SKIP_SET_EVENTS_ON_HANDLE 0x00000800UL
+#endif
+/* M3.5: NtCreateFile for plain data files (ubd backing images). */
+#ifndef FILE_ATTRIBUTE_NORMAL
+#define FILE_ATTRIBUTE_NORMAL 0x00000080UL
 #endif
 /* VirtualAlloc/VirtualProtect */
 #ifndef MEM_COMMIT
@@ -234,6 +251,40 @@ typedef struct {
 #define UML_NT_CURRENT_PROCESS ((HANDLE)(long long)-1)
 #undef UML_NT_CURRENT_THREAD
 #define UML_NT_CURRENT_THREAD  ((HANDLE)(long long)-2)
+
+/*
+ * M3.5: build an NT object path from a host-style path (ASCII POC) by
+ * prepending the \??\ root and widening to UTF-16. Pure string logic —
+ * no syscalls — so test_ntabi.sh exercises it in both build modes.
+ *
+ * Returns the number of WCHARs written (NUL excluded, prefix included),
+ * or a negative code: -1 = non-ASCII byte (M4 will do UTF-8), -2 =
+ * output too small, -3 = NULL/empty input.
+ */
+static inline long long uml_nt_ntpath(const char *path, WCHAR *out,
+				      unsigned long long out_wchars)
+{
+	const char *p = path;
+	WCHAR *w = out;
+
+	if (path == NULL || path[0] == 0)
+		return -3;
+	if (out == NULL || out_wchars < 6)
+		return -2;
+	*w++ = '\\';
+	*w++ = '?';
+	*w++ = '?';
+	*w++ = '\\';
+	for (; *p; p++) {
+		if ((unsigned char)*p > 0x7f)
+			return -1;
+		if ((unsigned long long)(w - out) >= out_wchars - 1)
+			return -2;
+		*w++ = (WCHAR)(unsigned char)*p;
+	}
+	*w = 0;
+	return (long long)(w - out);
+}
 
 /*
  * The D9 contract. Version bumps must append only (never reorder); the
@@ -364,6 +415,9 @@ BOOL UML_NTABI_CC GetExitCodeProcess(HANDLE process, ULONG *exit_code);
  * handles (timeout in ms, INFINITE = 0xFFFFFFFF). */
 ULONG UML_NTABI_CC WaitForMultipleObjects(ULONG count, HANDLE *handles,
 					  BOOL wait_all, ULONG timeout_ms);
+/* M3.5 additions (appended; table members above stay frozen). Real
+ * host-file I/O for ubd backing images. */
+BOOLEAN UML_NTABI_CC GetFileSizeEx(HANDLE file, LARGE_INTEGER *size);
 #endif /* !_WIN64 */
 
 /*
@@ -470,6 +524,10 @@ struct uml_nt_api_table {
 	/* ---- appended for M3.3 ------------------------------------------ */
 	ULONG (UML_NTABI_CC *WaitForMultipleObjects)(ULONG count,
 			HANDLE *handles, BOOL wait_all, ULONG timeout_ms);
+
+	/* ---- appended for M3.5 (ubd host files) -------------------------- */
+	BOOLEAN (UML_NTABI_CC *GetFileSizeEx)(HANDLE file,
+			LARGE_INTEGER *size);
 };
 
 #endif /* __UML_NTABI_H */

@@ -76,3 +76,54 @@ child đã copy-out một run). Scan-all-runs trước khi free là điều ki�
 - Guard-VA cho probe truyền qua r12/r13 (callee-saved, init_regs) —
   hết slot-patch theo offset tuyệt đối trong blob (D11: không có VA
   cố định nào để patch cả).
+
+## D13 — ubd đồng bộ, không io thread; fd table NT cho host files (2026-09-29)
+
+**ubd trên os-Windows chạy đồng bộ, không io thread.** Upstream 6.18
+ubd chạy mọi I/O qua helper thread + pipe (`start_io_thread` → os_pipe
++ poll). NT backend không có pipe poll-able (`os_pipe` PANIC), và
+overlapped I/O là bài toán M4 — nên `os-Windows/ubd_user.c` trả
+`-ENOSYS` từ `start_io_thread`; upstream `ubd_driver_init` tiếp nhận
+gracefully ("falling back to synchronous I/O") nhưng 6.18 submit path
+LUÔN ghi request vào thread_fd — với thread_fd=-1 request bị retry mãi
+(BLK_STS_DEV_RESOURCE → mount treo). Patch 0012 thêm nhánh
+`thread_fd < 0` chạy `do_io()` ngay trong queue_rq +
+`blk_mq_end_request` (chấp nhận được: vCPU đang chờ request này, timer
+alarm là NT thread riêng vẫn tick). Patch 0013 bỏ `:` khỏi separator
+của ubd cmdline — "Z:\..." bị upstream tách nhầm thành COW layer (kẻ
+địch là dấu hai chấm của drive DOS).
+
+**os_file cho host files = fd table NT nhỏ (16 slot), I/O đồng bộ
+explicit-offset.** `os_open_file` → NtCreateFile
+(FILE_SYNCHRONOUS_IO_NONALERT), fd = index vào table {handle, pos};
+pread/pwrite truyền LARGE_INTEGER offset thẳng vào
+NtReadFile/NtWriteFile; stream read/write giữ pos trong table
+(os_seek_file = ghi bookkeeping). Giá trị POC, ghi rõ trong file.c:
+`os_sync_file` = no-op (crash có thể mất đuôi write), `os_lock_file` =
+no-op (single-instance), falloc_punch/zeroes trả `-EOPNOTSUPP` —
+upstream tự `blk_queue_disable_discard` qua map_error (degrade đúng
+đường có sẵn, không fork code).
+
+**COW: khai unsupported.** `CONFIG_BLK_DEV_COW_COMMON` default =y theo
+UBD, nhưng cow_user.c upstream là libc-host code (unistd/arpa/inet) —
+không thể build dưới D1. Năm symbol COW được stub trong
+`os-Windows/ubd_user.c`: `read_cow_header` trả `-EINVAL` (đúng
+semantics "plain file" upstream), phần còn lại stub_panic (không
+reachable).
+
+**drivers/ build chọn lọc.** Patch 0004 cho `drivers/` vào build lại
+dưới OS_WINDOWS; patch 0011 viết lại drivers/Makefile: nhánh
+OS_WINDOWS chỉ build `ubd.o = ubd_kern.o` (user side từ os-Windows/),
+nhánh còn lại giữ nguyên upstream. Lưu ý: CONFIG_MCONSOLE và
+CONFIG_STDERR_CONSOLE mặc định =y — phải tắt MCONSOLE trong defconfig
+(mconsole_kern.h có sẵn no-op cho !CONFIG_MCONSOLE) và nhánh
+OS_WINDOWS không được phép leak các obj-$ đó.
+
+**Gate M3.5** (không cần console/tty): rootfs.ext4 8MB chứa
+/sbin/init static freestanding (viết syscall thẳng, exit 42), build
+bằng `mke2fs -d` (không cần root/loop). Boot grep hợp đồng:
+`EXT4-fs (ubda): mounted filesystem` + `VFS: Mounted root (ext4
+filesystem)` + `Run /sbin/init as init process`; boot sau đó park
+trong stub_panic start_userspace (việc M3.7/M3.8) → timeout 124 =
+"đã tới cuối đường". devtmpfs mount báo `error mounting -2` — ghi
+nhận, xử lý cùng M3.8 (busybox cần /dev).
