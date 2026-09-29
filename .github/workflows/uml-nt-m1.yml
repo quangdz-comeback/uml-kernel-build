@@ -116,10 +116,10 @@ jobs:
         run: |
           cd uml-nt/launcher
           set +e
-          ./launcher.exe ../../build/vmlinux > boot.log 2>&1
+          timeout 180 ./launcher.exe ../../build/vmlinux > boot.log 2>&1
           code=$?
           set -e
           cat boot.log
-          [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code"; exit 1; }
+          [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code (124 = boot hang — see log)"; exit 1; }
           grep -q "No filesystem could mount root" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
           echo "M1.9 NATIVE WINDOWS BOOT OK"
