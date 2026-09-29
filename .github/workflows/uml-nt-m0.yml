@@ -1,0 +1,57 @@
+name: uml-nt M0 spikes
+
+on:
+  push:
+    branches: ["uml-nt/**"]
+  workflow_dispatch:
+
+jobs:
+  spikes:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-lld
+
+      - name: Build spikes
+        shell: msys2 {0}
+        run: make -C uml-nt/spikes all
+
+      - name: Run S1 — VEH trap/resume
+        shell: msys2 {0}
+        run: |
+          mkdir -p uml-nt/spikes/results
+          ./uml-nt/spikes/s1_veh.exe | tee uml-nt/spikes/results/s1_veh.json
+
+      - name: Run S2 — cross-process sync
+        shell: msys2 {0}
+        run: ./uml-nt/spikes/s2_xproc.exe | tee uml-nt/spikes/results/s2_xproc.json
+
+      - name: Run S5 — spawn/discard/fixed-map
+        shell: msys2 {0}
+        run: ./uml-nt/spikes/s5_spawn.exe | tee uml-nt/spikes/results/s5_spawn.json
+
+      - name: Run S3+S4 — ELF launcher
+        shell: msys2 {0}
+        run: ./uml-nt/spikes/s3_launcher.exe uml-nt/spikes/payload.elf | tee uml-nt/spikes/results/s3_launcher.json
+
+      - name: Run S6 — ud2 scanner (no objdump ground truth on Windows)
+        shell: msys2 {0}
+        run: ./uml-nt/spikes/s6_scan.exe uml-nt/spikes/payload.elf | tee uml-nt/spikes/results/s6_scan.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m0-spike-results
+          path: |
+            uml-nt/spikes/results/*.json
+          if-no-files-found: warn

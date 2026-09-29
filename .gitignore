@@ -15,3 +15,7 @@ vde_plug/vde_plug
 __pycache__/
 *.py[cod]
 .pytest_cache/
+uml-nt/spikes/*.exe
+uml-nt/spikes/s6_scan
+uml-nt/spikes/payload.elf
+uml-nt/spikes/results/
