@@ -146,6 +146,7 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 		nt->NtTerminateProcess(c->proc, 0);
 		c->alive = 0;
 	}
+	os_info("mmctx: destroy pid %d: stub terminated\n", id->pid);
 	if (c->d != NULL)
 		nt->UnmapViewOfFile(c->d);
 	if (c->dsec != NULL)
@@ -154,6 +155,8 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 		nt->CloseHandle(c->evt_in);
 	if (c->evt_out != NULL)
 		nt->CloseHandle(c->evt_out);
+	os_info("mmctx: destroy pid %d: section + events closed\n",
+		id->pid);
 	if (c->proc != NULL)
 		nt->CloseHandle(c->proc);
 	if (c->thread != NULL)
