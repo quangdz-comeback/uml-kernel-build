@@ -38,16 +38,8 @@ static LARGE_INTEGER qpc_to_li(long long nsecs)
 
 static unsigned long __attribute__((ms_abi)) nt_timer_thread(void *arg)
 {
-	int first = 1; /* TEMP M1.8 */
-
 	for (;;) {
-		NTSTATUS s = nt->NtWaitForSingleObject(g_timer, 0, NULL);
-
-		if (first) {
-			first = 0;
-			os_info("[probe] timer thread alive, wait=%08x\n",
-				s);
-		}
+		nt->NtWaitForSingleObject(g_timer, 0, NULL);
 		deliver_alarm();
 	}
 	return 0;
@@ -83,8 +75,6 @@ int os_timer_create(void)
 	if (thread == NULL)
 		return -1;
 	/* Thread handle leaked deliberately: it lives for the UML run. */
-	os_info("[probe] os_timer_create ok: hr=%d err=%lu\n",
-		g_timer_hr, nt->RtlGetLastWin32Error()); /* TEMP M1.9 */
 	return 0;
 }
 
