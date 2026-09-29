@@ -167,6 +167,24 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 		     (r != NULL && r->nparams > 1) ? r->info[1] : 0);
 	if (n > 0)
 		uml_nt_crash_write(buf, (unsigned int)n);
+	/* Page-offset anchors: uml_physmem IS page_offset/PAGE_OFFSET —
+	 * if it got trashed, every virt_to_page/kmem_cache_free faults
+	 * far from the write that trashed it. Print them so a
+	 * corruption signature is readable from the log alone
+	 * (expected: physmem 0x60000000, high = physmem + mem= size). */
+	{
+		extern unsigned long uml_physmem;
+		extern unsigned long high_physmem;
+		extern unsigned long long physmem_size;
+
+		n = snprintf(buf, sizeof(buf),
+			     "  physmem=%llx high=%llx size=%llx\n",
+			     (unsigned long long)uml_physmem,
+			     (unsigned long long)high_physmem,
+			     physmem_size);
+		if (n > 0)
+			uml_nt_crash_write(buf, (unsigned int)n);
+	}
 	if (e != NULL && e->context != NULL) {
 		n = snprintf(buf, sizeof(buf),
 			     "  rax=%llx rcx=%llx rdx=%llx rsi=%llx "
