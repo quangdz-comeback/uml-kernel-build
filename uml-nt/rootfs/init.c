@@ -121,8 +121,25 @@ void _start(void)
 		sys_write(1, "CLOSE-FAIL\n", 11);
 		sys_exit(5);
 	}
-	sys_write(1, "OPENAT-READ-OK: ", 16);
-	sys_write(1, buf, (unsigned long)n);
+	/* Print the content ESCAPED on one line. A raw multi-line
+	 * write leaked the script's own lines into the log ("echo
+	 * BUSYBOX-SHELL-OK" as a standalone line) — the S4c2
+	 * acceptance grep matched the LEAK once, not busybox's echo. */
+	{
+		unsigned long i;
+
+		sys_write(1, "OPENAT-READ-OK: ", 16);
+		for (i = 0; i < (unsigned long)n; i++) {
+			if (buf[i] == '\n') {
+				sys_write(1, "\\n", 2);
+			} else if (buf[i] == 0) {
+				sys_write(1, "\\0", 2);
+			} else {
+				sys_write(1, &buf[i], 1);
+			}
+		}
+		sys_write(1, "\n", 1);
+	}
 
 	/* S4c: chain the exec — the dispatch's kernel_execve swaps this
 	 * task to /bin/step2 (STEP2-OK, exit 0); a failure returns

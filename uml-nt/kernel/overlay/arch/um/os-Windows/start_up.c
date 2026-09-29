@@ -81,6 +81,61 @@ static void uml_nt_crash_write(const char *s, unsigned int n)
 			(void *)s, n, NULL, NULL);
 }
 
+/* Heuristic stack scan (the dump_trace recipe): walk [rsp, rsp+16K),
+ * print every value that lands in the kernel image VA range — the
+ * survivors near the top are the call chain. The reporter must not
+ * assume WHICH thread faulted (dispatch vs timer host thread have
+ * different stacks — rsp tells, the text hits tell why). VirtualQuery
+ * first: a guard/reserved page in the scan window must skip, not
+ * re-fault. */
+#define UML_NT_PAGE_GUARD 0x100UL
+
+static int uml_nt_page_readable(unsigned long long va)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+
+	if (nt->VirtualQuery((PVOID)(ULONG_PTR)va, &mbi, sizeof(mbi)) !=
+	    sizeof(mbi))
+		return 0;
+	return mbi.State == MEM_COMMIT &&
+	       mbi.Protect != PAGE_NOACCESS &&
+	       !(mbi.Protect & UML_NT_PAGE_GUARD);
+}
+
+static void uml_nt_crash_scan_stack(unsigned long long rsp)
+{
+	unsigned long long va, pg = -1;
+	int n = 0;
+	char buf[96];
+
+	for (va = rsp & ~(unsigned long long)7;
+	     n < 12 && va < rsp + 0x4000; va += 8) {
+		unsigned long long v;
+
+		if ((va & ~0xfffULL) != pg) {
+			pg = va & ~0xfffULL;
+			if (!uml_nt_page_readable(pg))
+				break;
+		}
+		v = *(unsigned long long *)va;
+		/* kernel image text/rodata zone (image < 8 MiB at
+		 * UML base + entry 0x60001000) — text hits only */
+		if (v < 0x60001000ull || v >= 0x60400000ull)
+			continue;
+		n++;
+		{
+			int m = snprintf(buf, sizeof(buf),
+					 "  stack %llx: %llx\n",
+					 va, v);
+
+			if (m > 0)
+				uml_nt_crash_write(buf, (unsigned int)m);
+		}
+	}
+}
+
+static volatile int in_crash_report;
+
 static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 {
 	const struct uml_nt_exception_pointers *e = ep;
@@ -88,19 +143,43 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 		(e != NULL) ? e->record : NULL;
 	unsigned long long rip = (e != NULL && e->context != NULL) ?
 				 UML_NT_X64_CTX_RIP(e->context) : 0;
-	char buf[192];
+	char buf[224];
 	int n;
+
+	/* A fault inside this handler (dead console handle, trashed
+	 * stack) must terminate, never recurse. */
+	if (in_crash_report) {
+		if (nt != NULL)
+			nt->NtTerminateProcess(UML_NT_CURRENT_PROCESS, 1);
+		for (;;)
+			;
+	}
+	in_crash_report = 1;
 
 	n = snprintf(buf, sizeof(buf),
 		     "\numl-nt: KERNEL NATIVE FAULT code=%08x rip=%llx "
-		     "addr=%llx op=%d info1=%llx — terminating\n",
+		     "rsp=%llx op=%d info1=%llx — terminating\n",
 		     r != NULL ? (unsigned int)r->code : 0, rip,
-		     r != NULL ? (unsigned long long)r->address : 0,
+		     (e != NULL && e->context != NULL) ?
+			     UML_NT_X64_CTX_RSP(e->context) : 0,
 		     (r != NULL && r->nparams > 1) ?
 			     (int)r->info[0] : -1,
 		     (r != NULL && r->nparams > 1) ? r->info[1] : 0);
 	if (n > 0)
 		uml_nt_crash_write(buf, (unsigned int)n);
+	if (e != NULL && e->context != NULL) {
+		n = snprintf(buf, sizeof(buf),
+			     "  rax=%llx rcx=%llx rdx=%llx rsi=%llx "
+			     "rdi=%llx\n",
+			     UML_NT_X64_CTX_RAX(e->context),
+			     UML_NT_X64_CTX_RCX(e->context),
+			     UML_NT_X64_CTX_RDX(e->context),
+			     UML_NT_X64_CTX_RSI(e->context),
+			     UML_NT_X64_CTX_RDI(e->context));
+		if (n > 0)
+			uml_nt_crash_write(buf, (unsigned int)n);
+		uml_nt_crash_scan_stack(UML_NT_X64_CTX_RSP(e->context));
+	}
 	if (nt != NULL)
 		nt->NtTerminateProcess(UML_NT_CURRENT_PROCESS, 1);
 	for (;;)
@@ -114,7 +193,7 @@ void uml_nt_install_crash_reporter(void)
 	 * outside) does not go through VEH — the process just exits. */
 	if (nt->AddVectoredExceptionHandler(1,
 			(PVOID)uml_nt_crash_report) == NULL)
-		os_warn("crash reporter: VEH install failed win32=%lu\n",
+		os_warn("crash reporter: VEH install failed win32=%u\n",
 			nt->RtlGetLastWin32Error());
 }
 

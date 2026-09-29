@@ -449,8 +449,16 @@ struct uml_nt_exception_pointers {
 /* x64 CONTEXT.Rip offset (P1Home..P6Home 0x00-0x2f, ContextFlags
  * 0x30, MxCsr 0x34, segments 0x38, EFlags 0x44, Dr0-Dr7 0x48-0x77,
  * Rax..R15 0x78-0xf0, Rip 0xf8). */
-#define UML_NT_X64_CTX_RIP(ctx) \
-	(*(unsigned long long *)((char *)(ctx) + 0xf8))
+#define UML_NT_X64_CTX_REG(ctx, off) \
+	(*(unsigned long long *)((char *)(ctx) + (off)))
+#define UML_NT_X64_CTX_RIP(ctx) UML_NT_X64_CTX_REG(ctx, 0xf8)
+#define UML_NT_X64_CTX_RAX(ctx) UML_NT_X64_CTX_REG(ctx, 0x78)
+#define UML_NT_X64_CTX_RCX(ctx) UML_NT_X64_CTX_REG(ctx, 0x80)
+#define UML_NT_X64_CTX_RDX(ctx) UML_NT_X64_CTX_REG(ctx, 0x88)
+#define UML_NT_X64_CTX_RSP(ctx) UML_NT_X64_CTX_REG(ctx, 0x98)
+#define UML_NT_X64_CTX_RBP(ctx) UML_NT_X64_CTX_REG(ctx, 0xa0)
+#define UML_NT_X64_CTX_RSI(ctx) UML_NT_X64_CTX_REG(ctx, 0xa8)
+#define UML_NT_X64_CTX_RDI(ctx) UML_NT_X64_CTX_REG(ctx, 0xb0)
 #endif /* !_WIN64 */
 
 /*
