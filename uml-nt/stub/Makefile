@@ -9,10 +9,12 @@ KERNELDIR := $(CURDIR)/../kernel/overlay/arch/um
 CFLAGS  := -O2 -Wall -Wextra -static
 CFLAGS  += -I$(KERNELDIR)/include/shared
 
+all: stub.exe
+
 stub.exe: stub.c $(KERNELDIR)/include/shared/stub_nt.h
 	$(MINGW_CC) $(CFLAGS) -o $@ stub.c
 
 clean:
 	rm -f stub.exe
 
-.PHONY: clean
+.PHONY: all clean
