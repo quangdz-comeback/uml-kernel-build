@@ -216,6 +216,24 @@ SIZE_T UML_NTABI_CC VirtualQuery(PVOID address,
 /* S5 lesson: returns an ERROR CODE (0 = ERROR_SUCCESS), not a BOOL. */
 unsigned int UML_NTABI_CC DiscardVirtualMemory(PVOID address, SIZE_T size);
 
+/* M1.7 additions (appended; table members above stay frozen). */
+HANDLE UML_NTABI_CC CreateThread(PVOID sec_attr, SIZE_T stack_size,
+				 unsigned long (UML_NTABI_CC *start)(PVOID arg),
+				 PVOID arg, ULONG create_flags, ULONG *thread_id);
+unsigned int UML_NTABI_CC GetCurrentProcessId(void);
+NTSTATUS UML_NTABI_CC NtTerminateProcess(HANDLE process, NTSTATUS exit_status);
+NTSTATUS UML_NTABI_CC NtMapViewOfSection(HANDLE section, HANDLE process,
+					 PVOID *base, ULONG_PTR zero_bits,
+					 SIZE_T commit_size,
+					 LARGE_INTEGER *section_offset,
+					 SIZE_T *view_size,
+					 int inherit_disposition,
+					 ULONG allocation_type, ULONG protect);
+NTSTATUS UML_NTABI_CC NtUnmapViewOfSection(HANDLE process, PVOID base);
+NTSTATUS UML_NTABI_CC NtProtectVirtualMemory(HANDLE process, PVOID *base,
+					     SIZE_T *size, ULONG protect,
+					     ULONG *old_protect);
+
 /*
  * The D9 contract itself. Launcher fills every member; kernel validates
  * version + size before any use. Append-only evolution.
@@ -278,6 +296,24 @@ struct uml_nt_api_table {
 			MEMORY_BASIC_INFORMATION *buffer, SIZE_T length);
 	unsigned int (UML_NTABI_CC *DiscardVirtualMemory)(PVOID address,
 			SIZE_T size);
+
+	/* ---- appended for M1.7 (append-only evolution of v1) ------------ */
+	HANDLE (UML_NTABI_CC *CreateThread)(PVOID sec_attr, SIZE_T stack_size,
+			unsigned long (UML_NTABI_CC *start)(PVOID arg),
+			PVOID arg, ULONG create_flags, ULONG *thread_id);
+	unsigned int (UML_NTABI_CC *GetCurrentProcessId)(void);
+	NTSTATUS (UML_NTABI_CC *NtTerminateProcess)(HANDLE process,
+			NTSTATUS exit_status);
+	NTSTATUS (UML_NTABI_CC *NtMapViewOfSection)(HANDLE section,
+			HANDLE process, PVOID *base, ULONG_PTR zero_bits,
+			SIZE_T commit_size, LARGE_INTEGER *section_offset,
+			SIZE_T *view_size, int inherit_disposition,
+			ULONG allocation_type, ULONG protect);
+	NTSTATUS (UML_NTABI_CC *NtUnmapViewOfSection)(HANDLE process,
+			PVOID base);
+	NTSTATUS (UML_NTABI_CC *NtProtectVirtualMemory)(HANDLE process,
+			PVOID *base, SIZE_T *size, ULONG protect,
+			ULONG *old_protect);
 };
 
 #endif /* __UML_NTABI_H */

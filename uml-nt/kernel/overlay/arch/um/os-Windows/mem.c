@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * os-Windows/mem.c — guest physical memory backing store.
- * Upstream: linux v6.18.37 arch/um/os-Linux/mem.c (IDENTICAL to the old
- * snapshot — see research/v6.18.37-diff-notes.md).
- * The NT backend replaces the memfd/physfd with the pagefile-backed
- * section created by launcher.exe (ARCHITECTURE §2); this file keeps the
- * kernel-side seam. Status: M1.3 skeleton — PANICs.
+ * os-Windows/mem.c — physical-memory backing for the guest.
+ * Upstream: linux v6.18.37 arch/um/os-Linux/mem.c
+ *
+ * Upstream: tmpfs memfd + ftruncate; os_map_memory (process.c) mmaps
+ * pieces at fixed addresses. NT: launcher created a pagefile-backed
+ * SECTION (boot.physmem_section, D9) — create_mem_file validates the
+ * size and hands back a pseudo-fd; mapping happens on demand.
  */
-#include <stub-impl.h>
+#include <ntabi.h>
+#include <os.h>
+#include "internal.h"
 
-int create_mem_file(unsigned long long len)
+int create_mem_file(unsigned long long size)
 {
-	stub_panic("mem.c: create_mem_file — NT: pagefile section, 64KB allocation granularity (S5)");
+	if (uml_boot.physmem_section == NULL ||
+	    size > uml_boot.physmem_size) {
+		os_info("mem: requested %llu bytes exceeds launcher "
+			"physmem section (%llu)\n", size,
+			(unsigned long long)uml_boot.physmem_size);
+		return -1;
+	}
+	return UML_NT_MEMFD_PHYS;
 }

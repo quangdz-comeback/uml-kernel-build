@@ -1,22 +1,24 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * os-Windows/internal.h — decls shared between os-Windows modules only.
- * Upstream: linux v6.18.37 arch/um/os-Linux/internal.h
- * Status: M1.3 skeleton — filled in as modules gain implementations.
+ * os-Windows/internal.h — state + helpers shared between os-Windows
+ * modules. Upstream: arch/um/os-Linux/internal.h.
  */
 #ifndef __UM_OS_WINDOWS_INTERNAL_H
 #define __UM_OS_WINDOWS_INTERNAL_H
 
-/* elf_aux.c does not exist on NT: no host auxv to scan (D1). */
+#include <ntabi.h>
+#include <boot-info.h>
 
-/*
- * mem.c
- */
-void check_tmpexec(void);
+/* Validated copy of the launcher handoff (main.c, before any os_* call). */
+extern struct uml_boot_info uml_boot;
 
-/*
- * skas/process.c
- */
-void maybe_sigio_broken(int fd); /* moved to sigio.c upstream parity */
+/* Shorthand: the D9 table. main.c has validated version/size first. */
+extern struct uml_nt_api_table *nt;
+
+/* Pseudo-fd create_mem_file hands back (M1: single guest RAM bank). */
+#define UML_NT_MEMFD_PHYS 0
+
+/* Early console: NtWriteFile to boot.stdio_out (util.c). */
+void nt_console_write(const char *s, unsigned int n);
 
 #endif

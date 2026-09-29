@@ -37,7 +37,7 @@ enum um_irq_type {
 };
 
 /* PANIC-style placeholder — every skeleton entry point lands here. */
-void stub_panic(const char *why) __attribute__((noreturn));
+#include "stub-panic.h"
 
 /* Forward decls: only ever used by pointer in os.h signatures. */
 struct uml_stat;

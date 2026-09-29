@@ -1,68 +1,64 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * os-Windows/irq.c — IRQ wait loop: IOCP/overlapped replaces epoll+sigio.
+ * os-Windows/irq.c — IRQ availability.
  * Upstream: linux v6.18.37 arch/um/os-Linux/irq.c
  *
- * Names keep the epoll spelling for os.h parity even though the NT
- * backend has no epoll; the wait loop itself becomes IOCP
- * (ARCHITECTURE §3). Status: M1.3 skeleton — PANICs.
+ * Upstream multiplexes IRQ readiness via epoll over host fds. The NT
+ * handle-based IOCP event loop is M3+ (drivers return). M1 boots with
+ * no external IRQ sources: the timer runs on its own waitable-timer
+ * thread (time.c) and never touches this layer. Surface mirrors os.h.
  */
-#include <stub-impl.h>
-/*
- * Upstream: drivers/chan_kern.c (excluded at M1 — see arch/um/Kbuild
- * patch). With no channels registered there is nothing to free, so the
- * no-op below is exact M1 semantics; replaced at M3.
- */
-void free_irqs(void)
-{
-}
-
-int os_waiting_for_events_epoll(void)
-{
-	stub_panic("irq.c: os_waiting_for_events_epoll — NT: GetQueuedCompletionStatus loop");
-}
-
-void *os_epoll_get_data_pointer(int index)
-{
-	stub_panic("irq.c: os_epoll_get_data_pointer");
-}
-
-int os_epoll_triggered(int index, int events)
-{
-	stub_panic("irq.c: os_epoll_triggered");
-}
-
-int os_event_mask(enum um_irq_type irq_type)
-{
-	stub_panic("irq.c: os_event_mask");
-}
+#include <ntabi.h>
+#include <os.h>
+#include "internal.h"
 
 int os_setup_epoll(void)
 {
-	stub_panic("irq.c: os_setup_epoll — NT: CreateIoCompletionPort");
+	/* M1: no epfd — kernel glue registers nothing before panic. */
+	return 0;
 }
 
 int os_add_epoll_fd(int events, int fd, void *data)
 {
-	stub_panic("irq.c: os_add_epoll_fd");
+	return -1; /* unreachable until drivers return (M3) */
 }
 
 int os_mod_epoll_fd(int events, int fd, void *data)
 {
-	stub_panic("irq.c: os_mod_epoll_fd");
+	return -1;
 }
 
 int os_del_epoll_fd(int fd)
 {
-	stub_panic("irq.c: os_del_epoll_fd");
+	return 0;
 }
 
-void os_set_ioignore(void)
+void os_set_ioignore(void) { }
+
+void os_close_epoll_fd(void) { }
+
+int os_waiting_for_events_epoll(void)
 {
-	stub_panic("irq.c: os_set_ioignore");
+	/* M1: kernel panics before the first wait would ever run. */
+	return 0;
 }
 
-void os_close_epoll_fd(void)
+void *os_epoll_get_data_pointer(int index)
 {
-	stub_panic("irq.c: os_close_epoll_fd");
+	return NULL;
+}
+
+int os_epoll_triggered(int index, int events)
+{
+	return 0;
+}
+
+int os_event_mask(enum um_irq_type irq_type)
+{
+	return 0;
+}
+
+void free_irqs(void)
+{
+	/* M1: nothing registered. M3 walks the IOCP handle table. */
 }
