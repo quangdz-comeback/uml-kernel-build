@@ -50,14 +50,21 @@ int main(int argc, char **argv) {
         ff[i] = ok ? sc_ns(t1 - t0) / 1e6 : -1.0;
     }
 
-    /* --- DiscardVirtualMemory: private alloc + pagefile-section view --- */
+    /* --- DiscardVirtualMemory: private alloc + pagefile-section view ---
+     * NOTE: returns the error code itself (ERROR_SUCCESS == 0) — not a
+     * BOOL; !ret used to be read as failure, inverting the result. */
     DWORD derr1 = 0, derr2 = 0;
-    int disc_priv = 0, disc_view = 0;
+    int disc_priv = 0, disc_view = 0, disc_priv_zero = 0, disc_view_zero = 0;
     BYTE *big = VirtualAlloc(NULL, 16 << 20, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (big) {
         memset(big, 0xAA, 16 << 20);
-        if (!DiscardVirtualMemory(big, 16 << 20)) derr1 = GetLastError();
-        else { disc_priv = (big[0] == 0xAA || big[0] != 0xAA); /* still usable */ memset(big, 0x55, 16); }
+        DWORD r1 = DiscardVirtualMemory(big, 16 << 20);
+        if (r1 != ERROR_SUCCESS) derr1 = r1;
+        else {
+            disc_priv = 1;
+            disc_priv_zero = (big[0] == 0);   /* discarded pages read as zero */
+            memset(big, 0x55, 16);
+        }
         VirtualFree(big, 0, MEM_RELEASE);
     }
     HANDLE sec2 = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 8 << 20, NULL);
@@ -65,8 +72,9 @@ int main(int argc, char **argv) {
         BYTE *v = MapViewOfFile(sec2, FILE_MAP_ALL_ACCESS, 0, 0, 0);
         if (v) {
             memset(v, 0xBB, 8 << 20);
-            if (!DiscardVirtualMemory(v, 8 << 20)) derr2 = GetLastError();
-            else disc_view = 1;
+            DWORD r2 = DiscardVirtualMemory(v, 8 << 20);
+            if (r2 != ERROR_SUCCESS) derr2 = r2;
+            else { disc_view = 1; disc_view_zero = (v[0] == 0); }
             UnmapViewOfFile(v);
         }
         CloseHandle(sec2);
@@ -86,13 +94,15 @@ int main(int argc, char **argv) {
         if (p) parent_sees_magic = (*(volatile LONG64 *)p == CHILD_MAGIC);
     }
 
-    fprintf(stderr, "[s5] done. spawn_susp p50=%.1fms full=%.1fms disc(priv=%d view=%d e1=%lu e2=%lu) mapfix=%d/%d\n",
-            ss[NS / 2], ff[NF / 2], disc_priv, disc_view,
+    fprintf(stderr, "[s5] done. spawn_susp p50=%.1fms full=%.1fms disc(priv=%d/zero=%d view=%d/zero=%d e1=%lu e2=%lu) mapfix=%d/%d\n",
+            ss[NS / 2], ff[NF / 2], disc_priv, disc_priv_zero, disc_view, disc_view_zero,
             (unsigned long)derr1, (unsigned long)derr2, child_mapfix_ok, parent_sees_magic);
     fprintf(f, "{\"ok\": true, \"discard_private_ok\": %s, \"discard_view_ok\": %s, "
+               "\"discard_priv_zeroed\": %s, \"discard_view_zeroed\": %s, "
                "\"discard_err_priv\": %lu, \"discard_err_view\": %lu, "
                "\"child_mapfix_ok\": %s, \"parent_sees_magic\": %s, ",
             disc_priv ? "true" : "false", disc_view ? "true" : "false",
+            disc_priv_zero ? "true" : "false", disc_view_zero ? "true" : "false",
             (unsigned long)derr1, (unsigned long)derr2,
             child_mapfix_ok ? "true" : "false", parent_sees_magic ? "true" : "false");
     sc_stats(f, "createprocess_suspended_ms", ss, NS); fprintf(f, ", ");

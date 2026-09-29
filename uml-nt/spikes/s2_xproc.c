@@ -45,7 +45,14 @@ static void child_loop(void) {
             if (WaitForSingleObject(ev_stub, 15000) != WAIT_OBJECT_0) return;
         }
         LONG c = sh->cmd;
-        if (!sh->spin_mode && c == last) continue; /* spurious wakeup */
+        if (c == last) {                       /* duplicate observation:
+                                                   spin mode must dedupe too,
+                                                   else a command is executed
+                                                   several times (coherence
+                                                   failed on real Windows) */
+            if (sh->spin_mode) YieldProcessor();
+            continue;
+        }
         last = c;
         if (c == CMD_EXIT) { InterlockedExchange(&sh->ack, c); return; }
         switch (c) {

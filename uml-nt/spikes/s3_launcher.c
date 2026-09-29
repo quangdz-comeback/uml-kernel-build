@@ -37,15 +37,40 @@ int main(int argc, char **argv) {
     fseek(ef, (long)eh.e_phoff, SEEK_SET);
     if (fread(ph, eh.e_phentsize, eh.e_phnum, ef) != eh.e_phnum) { fprintf(f, "{\"ok\": false}\n"); return 1; }
 
+    /* NT reserves memory in 64KB allocation-granularity blocks: two separate
+     * VirtualAllocs inside the same 64KB block collide (ERROR_INVALID_ADDRESS
+     * 487) — ELF segments routinely share a block. So: ONE reservation over
+     * the whole image (rounded to 64KB), then per-segment commit+protect. */
+    const uintptr_t GRAN = 0x10000ULL;
+    uintptr_t lo = ~0ULL, hi = 0;
+    for (int i = 0; i < eh.e_phnum; i++) {
+        elf64_phdr *p = (elf64_phdr *)((char *)ph + (size_t)i * eh.e_phentsize);
+        if (p->p_type != 1 || p->p_memsz == 0) continue;
+        uintptr_t s = p->p_vaddr & ~0xFFFULL;
+        uintptr_t e = (p->p_vaddr + p->p_memsz + 0xFFFULL) & ~0xFFFULL;
+        if (s < lo) lo = s;
+        if (e > hi) hi = e;
+    }
+    lo &= ~(GRAN - 1);
+    hi = (hi + GRAN - 1) & ~(GRAN - 1);
+    if (lo >= hi) { fprintf(f, "{\"ok\": false, \"error\": \"no PT_LOAD\"}\n"); return 1; }
+    LPVOID base = VirtualAlloc((LPVOID)lo, hi - lo, MEM_RESERVE, PAGE_READWRITE);
+    if ((uintptr_t)base != lo) {
+        fprintf(f, "{\"ok\": false, \"error\": \"reserve at fixed VA %llu\", \"gle\": %lu}\n",
+                (unsigned long long)lo, GetLastError());
+        return 1;
+    }
+
     int segs = 0;
     for (int i = 0; i < eh.e_phnum; i++) {
         elf64_phdr *p = (elf64_phdr *)((char *)ph + (size_t)i * eh.e_phentsize);
         if (p->p_type != 1 /* PT_LOAD */ || p->p_memsz == 0) continue;
-        LPVOID base = VirtualAlloc((LPVOID)(uintptr_t)p->p_vaddr, p->p_memsz,
-                                   MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if ((uintptr_t)base != p->p_vaddr) {
-            fprintf(f, "{\"ok\": false, \"error\": \"VirtualAlloc at fixed VA %llu\", \"gle\": %lu}\n",
-                    (unsigned long long)p->p_vaddr, GetLastError());
+        uintptr_t va   = p->p_vaddr & ~0xFFFULL;
+        uintptr_t end  = (p->p_vaddr + p->p_memsz + 0xFFFULL) & ~0xFFFULL;
+        size_t    span = end - va;
+        if (!VirtualAlloc((LPVOID)va, span, MEM_COMMIT, PAGE_READWRITE)) {
+            fprintf(f, "{\"ok\": false, \"error\": \"commit at %llu\", \"gle\": %lu}\n",
+                    (unsigned long long)va, GetLastError());
             return 1;
         }
         fseek(ef, (long)p->p_offset, SEEK_SET);
@@ -55,13 +80,17 @@ int main(int argc, char **argv) {
         DWORD prot = (p->p_flags & 1) ? PAGE_EXECUTE_READ : PAGE_READONLY;
         if (p->p_flags & 2) prot = (p->p_flags & 1) ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
         DWORD old;
-        VirtualProtect((LPVOID)(uintptr_t)p->p_vaddr, p->p_memsz, prot, &old);
+        VirtualProtect((LPVOID)va, span, prot, &old);
         segs++;
+        fprintf(stderr, "[s3] seg %d: vaddr=0x%llx..0x%llx filesz=%llu prot=%lu\n",
+                i, (unsigned long long)va, (unsigned long long)end,
+                (unsigned long long)p->p_filesz, prot);
     }
     fclose(ef);
 
     fprintf(stderr, "[s3] mapped %d PT_LOAD segs, entry=0x%llx, calling...\n",
             segs, (unsigned long long)eh.e_entry);
+    fflush(stderr);
     ((void (*)(void))(uintptr_t)eh.e_entry)();
 
     uint32_t got = *(volatile uint32_t *)WIN_ADDR;
