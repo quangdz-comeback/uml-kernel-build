@@ -626,6 +626,12 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	nt->NtWaitForSingleObject(conn_parent.proc, 0, UML_NT_INFINITE);
 	nt->GetExitCodeProcess(conn_parent.proc, &conn_parent.exit_code);
 
+	/* M2 gate: the ROOT stub delivered write(1, "hi") through the
+	 * full round-trip and its guest exited 0. (Printed only on the
+	 * honest path — silent child deaths were reported above.) */
+	if (conn_parent.exit_code == 0)
+		os_info("[stubtest] ROUND-TRIP OK: write delivered, guest "
+			"exit code 0\n");
 	os_info("[stubtest] FORK OK: parent exit %lu, child exit %lu "
 		"(want 0 / 7)\n", (unsigned long)conn_parent.exit_code,
 		(unsigned long)conn_child.exit_code);
