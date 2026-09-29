@@ -221,3 +221,27 @@ process), shape giống `handle_syscall` upstream: `d->regs.rax` = nr,
   bytes nằm trong ext4 trên ubda, chỉ VFS của guest đọc được —
   cần kernel task thật chạy userspace() loop (M3.8); mô phỏng
   tắt đường VFS = phá khoá kiến trúc M3.5.
+
+## D17 — Guest exec qua binfmt_umlnt riêng (2026-09-29, Shelley duyệt chốt)
+
+**Quyết định:** thêm binfmt handler riêng `binfmt_umlnt` (hướng a) cho execve
+guest — KHÔNG patch binfmt_elf ép align 64K (hướng b, loại).
+
+**Lý do:**
+- binfmt_elf upstream giả định ptes/guest-VA = kernel-VA — không tồn tại trên
+  backend này. Patch nó = mượn code nhưng đánh cắp semantics, churn rebase lớn.
+- Module song song đúng triết lý D-series (os-Windows song song os-Linux,
+  không fork core): backing guest VA = section views (D10/D11), uaccess đi
+  VMA tree (D15), không ptes.
+- Loader kernel-side M3.4 (skas/elf.c) tái sử dụng làm phần nạp của handler.
+
+**Hệ quả (đã chốt trong audit M3.8):**
+- `mm_id` thêm `void *nt_conn` (patch 0015, #ifdef OS_WINDOWS) — conn chứa
+  state D10 (events/proc/mm/plan); init_new_context/destroy_context →
+  uml_nt_mmctx_init/destroy (spawn/kill stub thật, bỏ park).
+- userspace() per-task: interrupt_end → sync plan → set regs → wait evt_in
+  (turnstile per-conn) → serve (syscall qua D16 handle_syscall, fault qua
+  uml_nt_mm_fault, halt → kill+reap) → lặp. Probe M3.7 và boot dùng chung
+  giao thức, hai đường.
+- Hazard (3) COW write-back trong uaccess to_user còn mở — fix SAU S3,
+  trước S4 (sketch đã có trong relay archive).
