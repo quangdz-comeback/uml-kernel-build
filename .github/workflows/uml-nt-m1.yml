@@ -59,30 +59,26 @@ jobs:
       # M1.9 boot gate (wine): mingw-cross-build launcher.exe + boot the
       # just-built vmlinux.elf — must reach the "no rootfs" panic and
       # exit 1 (os_dump_core → NtTerminateProcess(1)). Fast regression
-      # gate; the REAL Windows boot runs in the launcher job below.
-      #
-      # M2 gate in the same boot: uml_nt_stubtest=<stub.exe> runs the
-      # syscall round-trip probe (static init → ud2 → VEH → stub_data
-      # → kernel → console) BEFORE the panic; both must hold.
-      - name: Boot test under wine (M1.9 gate + M2 round-trip)
+      # gate; the REAL Windows boot + M2 round-trip run natively below.
+      # NOTE: the M2 stub probe canNOT run under wine — wine implements
+      # CreateProcess as fork() of a multithreaded parent, and the UML
+      # kernel is always multithreaded (timer + longjmp-jumped threads);
+      # the forked child breaks in wine's own setup (stack overflow in
+      # the exec path) nondeterministically. Native runner = source of
+      # truth (verified M2.1: wine sometimes forks fine, sometimes not).
+      - name: Boot test under wine (M1.9 gate)
         run: |
           sudo apt-get install -y gcc-mingw-w64-x86-64 wine64
           make -C uml-nt/launcher MINGW_CC=x86_64-w64-mingw32-gcc all
-          make -C uml-nt/stub all
           cd uml-nt/launcher
-          STUBW=$(winepath -w "$(pwd)/../stub/stub.exe")
           set +e
-          timeout 120 wine ./launcher.exe ../../build/vmlinux \
-            "uml_nt_stubtest=$STUBW" \
-            > boot.log 2>&1
+          timeout 120 wine ./launcher.exe ../../build/vmlinux > boot.log 2>&1
           code=$?
           set -e
           cat boot.log
           [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code"; exit 1; }
           grep -q "No filesystem could mount root" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
-          grep -q "ROUND-TRIP OK" boot.log || { echo "M2 syscall round-trip never completed"; exit 1; }
-          grep -q "^hi" boot.log || { echo "guest write output missing"; exit 1; }
-          echo "M1.9 wine boot gate ok + M2 round-trip ok"
+          echo "M1.9 wine boot gate ok"
 
   launcher:
     # M1.9: NATIVE Windows boot — build launcher.exe with the MSYS2

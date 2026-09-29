@@ -177,12 +177,6 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	memset(&si, 0, sizeof(si));
 	si.cb = sizeof(si);
 	memset(&pi, 0, sizeof(pi));
-	{ /* TEMP M2.1 bisect: does a minimal call return at all? */
-		BOOL r = nt->CreateProcessA(NULL, NULL, NULL, NULL, 0, 0,
-					    NULL, NULL, &si, &pi);
-		os_info("[stubtest] selftest CreateProcessA -> %d "
-			"win32=%lu\n", r, nt->RtlGetLastWin32Error());
-	}
 	os_info("[stubtest] spawning: %s\n", cmd);
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
 				0x4 /*CREATE_SUSPENDED*/, NULL, NULL,
