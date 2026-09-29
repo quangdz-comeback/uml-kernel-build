@@ -56,6 +56,30 @@ typedef unsigned char BOOLEAN;
 typedef unsigned long long SIZE_T;
 typedef unsigned long long ULONG_PTR;
 typedef long long LONG64;
+typedef int BOOL; /* win32 BOOL (4 bytes) — NOT the 1-byte BOOLEAN */
+
+/* CreateProcessW / CreateFileMappingW / CreateEventW plumbing. */
+typedef struct {
+	ULONG nLength; /* DWORD */
+	PVOID lpSecurityDescriptor;
+	BOOL bInheritHandle;
+} SECURITY_ATTRIBUTES; /* 16 bytes on x64 */
+
+typedef struct {
+	ULONG cb; /* DWORD */
+	char *lpDesktop;
+	char *lpTitle;
+	ULONG dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars,
+	      dwFillAttribute, dwFlags;
+	USHORT wShowWindow, cbReserved2;
+	unsigned char *lpReserved2;
+	HANDLE hStdInput, hStdOutput, hStdError;
+} STARTUPINFOA; /* 104 bytes on x64 */
+
+typedef struct {
+	HANDLE hProcess, hThread;
+	ULONG dwProcessId, dwThreadId;
+} PROCESS_INFORMATION; /* 24 bytes on x64 */
 
 typedef union {
 	struct {
@@ -313,6 +337,26 @@ NTSTATUS UML_NTABI_CC NtProtectVirtualMemory(HANDLE process, PVOID *base,
 					     ULONG *old_protect);
 ULONG UML_NTABI_CC RtlGetLastWin32Error(void);
 BOOLEAN UML_NTABI_CC CloseHandle(HANDLE handle);
+
+/* M2 additions (appended; table members above stay frozen). Kernel is
+ * the parent of every stub process: it creates the stub_data section
+ * + events itself (inheritable) and spawns stub.exe suspended. */
+HANDLE UML_NTABI_CC CreateFileMappingW(HANDLE file,
+		SECURITY_ATTRIBUTES *sa, ULONG protect, ULONG size_hi,
+		ULONG size_lo, WCHAR *name);
+HANDLE UML_NTABI_CC CreateEventW(SECURITY_ATTRIBUTES *sa, BOOL manual_reset,
+				 BOOL initial_state, WCHAR *name);
+PVOID UML_NTABI_CC MapViewOfFileEx(HANDLE mapping, ULONG desired_access,
+				   ULONG file_offset_hi, ULONG file_offset_lo,
+				   SIZE_T bytes, PVOID base);
+BOOLEAN UML_NTABI_CC UnmapViewOfFile(PVOID base);
+BOOL UML_NTABI_CC CreateProcessA(char *app_name, char *cmd_line,
+				 SECURITY_ATTRIBUTES *pa, SECURITY_ATTRIBUTES *ta,
+				 BOOL inherit_handles, ULONG create_flags,
+				 PVOID env, char *cwd, STARTUPINFOA *si,
+				 PROCESS_INFORMATION *pi);
+ULONG UML_NTABI_CC ResumeThread(HANDLE thread);
+BOOL UML_NTABI_CC GetExitCodeProcess(HANDLE process, ULONG *exit_code);
 #endif /* !_WIN64 */
 
 /*
@@ -397,6 +441,24 @@ struct uml_nt_api_table {
 			ULONG *old_protect);
 	ULONG (UML_NTABI_CC *RtlGetLastWin32Error)(void);
 	BOOLEAN (UML_NTABI_CC *CloseHandle)(HANDLE handle);
+
+	/* ---- appended for M2 -------------------------------------------- */
+	HANDLE (UML_NTABI_CC *CreateFileMappingW)(HANDLE file,
+			SECURITY_ATTRIBUTES *sa, ULONG protect,
+			ULONG size_hi, ULONG size_lo, WCHAR *name);
+	HANDLE (UML_NTABI_CC *CreateEventW)(SECURITY_ATTRIBUTES *sa,
+			BOOL manual_reset, BOOL initial_state, WCHAR *name);
+	PVOID (UML_NTABI_CC *MapViewOfFileEx)(HANDLE mapping,
+			ULONG desired_access, ULONG file_offset_hi,
+			ULONG file_offset_lo, SIZE_T bytes, PVOID base);
+	BOOLEAN (UML_NTABI_CC *UnmapViewOfFile)(PVOID base);
+	BOOL (UML_NTABI_CC *CreateProcessA)(char *app_name, char *cmd_line,
+			SECURITY_ATTRIBUTES *pa, SECURITY_ATTRIBUTES *ta,
+			BOOL inherit_handles, ULONG create_flags, PVOID env,
+			char *cwd, STARTUPINFOA *si, PROCESS_INFORMATION *pi);
+	ULONG (UML_NTABI_CC *ResumeThread)(HANDLE thread);
+	BOOL (UML_NTABI_CC *GetExitCodeProcess)(HANDLE process,
+			ULONG *exit_code);
 };
 
 #endif /* __UML_NTABI_H */

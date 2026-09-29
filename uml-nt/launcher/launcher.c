@@ -119,6 +119,13 @@ static void resolve_api_table(void)
 	RESOLVE(NtProtectVirtualMemory, ntdll, "NtProtectVirtualMemory");
 	RESOLVE(RtlGetLastWin32Error, ntdll, "RtlGetLastWin32Error");
 	RESOLVE(CloseHandle, k32, "CloseHandle");
+	RESOLVE(CreateFileMappingW, k32, "CreateFileMappingW");
+	RESOLVE(CreateEventW, k32, "CreateEventW");
+	RESOLVE(MapViewOfFileEx, k32, "MapViewOfFileEx");
+	RESOLVE(UnmapViewOfFile, k32, "UnmapViewOfFile");
+	RESOLVE(CreateProcessA, k32, "CreateProcessA");
+	RESOLVE(ResumeThread, k32, "ResumeThread");
+	RESOLVE(GetExitCodeProcess, k32, "GetExitCodeProcess");
 
 	fprintf(stderr, "[launcher] D9 table v%u: %u bytes, all exports "
 			"resolved\n", g_api.version, g_api.size);
@@ -139,8 +146,12 @@ static HANDLE create_physmem_section(unsigned long long size, void **base)
 	/* PAGE_EXECUTE_READWRITE on the section: guest RAM is mapped
 	 * RWX (guest code lives in it) — a PAGE_READWRITE section makes
 	 * execute views fail with STATUS_ACCESS_DENIED (c0000022,
-	 * verified under wine at M1.8). */
-	HANDLE sec = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL,
+	 * verified under wine at M1.8).
+	 *
+	 * M2: inheritable — the kernel passes the handle value on the
+	 * stub.exe command line (S5 bootstrap pattern). */
+	SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+	HANDLE sec = CreateFileMappingA(INVALID_HANDLE_VALUE, &sa,
 					PAGE_EXECUTE_READWRITE,
 					(DWORD)(size >> 32), (DWORD)size,
 					NULL);
