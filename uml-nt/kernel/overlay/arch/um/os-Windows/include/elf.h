@@ -109,4 +109,23 @@ long long uml_nt_elf_stack_tables(void *dst, unsigned long long va_base,
 				  const char *const *envp,
 				  const unsigned char *rand16);
 
+/* argv+envp entries the stack block can hold (the tables' cap; shared
+ * with the splitter's bounds check). */
+#define UML_NT_ELF_MAX_STR 64
+
+/*
+ * Split the packed exec-string blob copy_strings left in the bprm
+ * mm's stack pages (S4): argv[0..argc-1], envp[0..envc-1], then the
+ * filename, all NUL-terminated with no gaps (copy_strings walks
+ * backward from the stack top, so argv[0] is the lowest string and
+ * the filename the highest). `blob`/`len` = the raw bytes; the out
+ * arrays (caller-allocated, argc/envc entries at least) point INTO
+ * the blob. 0 on success, -1 when the counts do not line up with the
+ * blob (wrong argc/envc, truncated string) — fail loud, never guess.
+ * Pure logic — unit-tested.
+ */
+int uml_nt_elf_split_args(unsigned char *blob, unsigned long long len,
+			  int argc, int envc, const char **out_argv,
+			  const char **out_envp);
+
 #endif /* __UM_OS_WINDOWS_ELF_H */

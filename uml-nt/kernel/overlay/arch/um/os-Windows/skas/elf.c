@@ -345,7 +345,6 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
 #define AT_PAGESZ 6
 #define AT_RANDOM 25
 
-#define UML_NT_ELF_MAX_STR 64 /* argv+envp entries the block can hold */
 
 /* Build the initial user stack block at the TOP of the stack run —
  * the exact layout _start expects at rsp (SysV x86-64 ABI / binfmt_elf

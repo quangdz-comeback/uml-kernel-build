@@ -20,12 +20,15 @@
  * stub applies init_regs — written by start_thread below — and
  * jumps).
  *
- * Deliberate S3 scope: argv/envp strings are NOT copied onto the
- * guest stack yet (argc=0 — the static init reads nothing; the
- * tables are the real ABI so S4/busybox only wires bprm strings).
- * CONFIG_BINFMT_ELF is OFF under OS_WINDOWS (defconfig): its
- * pte-backed load path has no stub backing — the image it "loaded"
- * would fault as soon as the stub jumped there.
+ * The S3 scope (argc=0) grew up in S4: the exec strings —
+ * copy_strings packs them into the bprm mm's stack pages (generic:
+ * the kernel-side page machinery works, it is the STUB views that
+ * needed the D17 parallel) — are read back through the new mm
+ * (upstream create_elf_tables reads the same pages post-switch),
+ * split (elf_split.c) and re-placed on OUR stack run with the real
+ * argv/envp vectors. CONFIG_BINFMT_ELF is OFF under OS_WINDOWS
+ * (defconfig): its pte-backed load path has no stub backing — the
+ * image it "loaded" would fault as soon as the stub jumped there.
  *
  * D1: freestanding — HANDLE = void*, NT only through the D9 table.
  */
@@ -33,6 +36,7 @@
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/highmem.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/ptrace.h>
@@ -52,6 +56,104 @@
  * header yet) */
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 				    unsigned long entry_off);
+
+/* Sanity cap for the packed exec-string blob (copy_strings already
+ * enforced RLIMIT_STACK + MAX_ARG_STRLEN per string; this only stops
+ * a bogus layout from kvmalloc'ing wild). */
+#define UML_NT_ELF_ARG_BLOB_MAX (1ull << 20)
+
+/* S4: read the packed exec-string blob through the new mm's pages
+ * (the same generic GUP access copy_strings wrote them with — the
+ * stub views never see the bprm stack), split it (elf_split.c) and
+ * build the SysV block on OUR stack run. *used_out = bytes consumed
+ * (rsp = stack_top - used_out). */
+static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
+				unsigned long long va_base,
+				unsigned long long cap,
+				const unsigned char *rand16,
+				long long *used_out)
+{
+	unsigned long long blob_len, fn_len, done = 0, npages;
+	struct page **pages;
+	const char **argv;
+	const char **envp;
+	unsigned char *blob;
+	int locked = 1; /* the GUP external contract: locked starts 1 */
+	int rc;
+
+	fn_len = strlen(bprm->filename) + 1;
+	/* The blob = [bprm->p, bprm->exec + fn_len): argv strings
+	 * lowest, then envp, the filename highest (copy_strings packs
+	 * backward from the stack top). exec >= p always; the splitter
+	 * validates the string counts against the bytes. */
+	if ((unsigned long long)bprm->exec < (unsigned long long)bprm->p)
+		return -EINVAL; /* layout changed upstream — fail loud */
+	blob_len = (unsigned long long)bprm->exec + fn_len -
+		   (unsigned long long)bprm->p;
+	if (blob_len > UML_NT_ELF_ARG_BLOB_MAX ||
+	    bprm->argc + bprm->envc + 1 > UML_NT_ELF_MAX_STR)
+		return -E2BIG;
+
+	pages = kvmalloc_array((blob_len >> PAGE_SHIFT) + 2,
+			       sizeof(*pages), GFP_KERNEL);
+	blob = kvmalloc(blob_len, GFP_KERNEL);
+	argv = kvmalloc_array((unsigned long)bprm->argc + 1,
+			      sizeof(*argv), GFP_KERNEL);
+	envp = kvmalloc_array((unsigned long)bprm->envc + 1,
+			      sizeof(*envp), GFP_KERNEL);
+	if (pages == NULL || blob == NULL || argv == NULL || envp == NULL) {
+		rc = -ENOMEM;
+		goto out;
+	}
+
+	while (done < blob_len) {
+		unsigned long long pg_va =
+			((unsigned long long)bprm->p + done) & PAGE_MASK;
+		unsigned long long pg_len = PAGE_SIZE;
+		char *kaddr;
+		struct page *page;
+		long long got;
+
+		if (blob_len - done < pg_len)
+			pg_len = blob_len - done;
+		got = get_user_pages_remote(current->mm, pg_va, 1,
+					    FOLL_FORCE, &page, &locked);
+		if (got != 1) {
+			os_info("binfmt_umlnt: arg gup va=0x%llx got=%d "
+				"(p=0x%lx exec=0x%lx len=%llu)\n", pg_va,
+				(int)got, bprm->p, bprm->exec, blob_len);
+			rc = -EFAULT;
+			goto out;
+		}
+		/* UML: pages live in the one flat kernel mapping —
+		 * page_address() IS the host-mapped bytes (no highmem
+		 * window to set up). */
+		memcpy(blob + done, page_address(page) +
+		       (((unsigned long long)bprm->p + done) & ~PAGE_MASK),
+		       pg_len);
+		put_page(page);
+		done += pg_len;
+	}
+
+	rc = uml_nt_elf_split_args(blob, blob_len, bprm->argc, bprm->envc,
+				   argv, envp);
+	if (rc) {
+		rc = -EINVAL; /* counts disagree with the blob */
+		goto out;
+	}
+	argv[bprm->argc] = NULL;
+	envp[bprm->envc] = NULL;
+
+	*used_out = uml_nt_elf_stack_tables(dst, va_base, cap, bprm->argc,
+					    argv, envp, rand16);
+	rc = *used_out < 0 ? -E2BIG : 0;
+out:
+	kvfree(envp);
+	kvfree(argv);
+	kvfree(blob);
+	kvfree(pages);
+	return rc;
+}
 
 static int uml_nt_load_binary(struct linux_binprm *bprm);
 
@@ -159,19 +261,22 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		return -ENOMEM;
 	}
 
-	/* Initial stack block (argc=0 for the S3 init; S4 wires bprm's
-	 * argv/envp strings — the layout is final ABI either way). */
+	/* Initial stack block with the REAL argv/envp (S4): read the
+	 * packed string blob copy_strings left in the bprm mm's stack
+	 * pages, split it, and let the tables re-place it on OUR run
+	 * with the guest-VA vectors (the create_elf_tables analogue —
+	 * upstream reads these same pages post-switch). */
 	stk = uml_nt_vma_find(c->mm, stack_top - 1);
 	if (stk == NULL)
 		return -ENOEXEC;
 	get_random_bytes(rnd, sizeof(rnd));
-	used = uml_nt_elf_stack_tables(
-		(char *)uml_boot.physmem_base + stk->run_off,
-		stack_top - UML_NT_PHYS_RUN_SIZE, UML_NT_PHYS_RUN_SIZE,
-		0, NULL, NULL, rnd);
-	if (used < 0) {
-		os_info("binfmt_umlnt: stack tables overflow\n");
-		return -E2BIG;
+	rc = uml_nt_elf_wire_args(bprm, (char *)uml_boot.physmem_base +
+				  stk->run_off,
+				  stack_top - UML_NT_PHYS_RUN_SIZE,
+				  UML_NT_PHYS_RUN_SIZE, rnd, &used);
+	if (rc) {
+		os_info("binfmt_umlnt: stack tables failed rc=%d\n", rc);
+		return rc;
 	}
 
 	/* Central patch contract §5.1: every `syscall` in exec-only

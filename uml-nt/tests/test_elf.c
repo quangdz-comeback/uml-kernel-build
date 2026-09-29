@@ -529,8 +529,7 @@ static void test_stack_tables(void)
 	}
 
 	/* argc=0/envp=NULL — the S3 init shape: still a valid block */
-	memset(stackbuf, 0xCC, sizeof(stackbuf));
-	used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 0, NULL,
+	memset(stackbuf, 0xCC, sizeof(stackbuf));	used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 0, NULL,
 				       NULL, rnd);
 	CHECK(used > 0);
 	rsp = top - (unsigned long long)used;
@@ -548,6 +547,86 @@ static void test_stack_tables(void)
 				       NULL, NULL);
 	CHECK(used > 0);
 	(void)i;
+}
+
+/* S4: the copy_strings blob splitter — argv[0..] lowest, envp next,
+ * the filename highest (copy_strings packs backward from the stack
+ * top). The binfmt reads this blob from the bprm mm's pages and
+ * hands the pointers to uml_nt_elf_stack_tables. */
+static void test_split_args(void)
+{
+	/* the layout do_execveat_common leaves: argv[0], argv[1],
+	 * envp[0], envp[1], filename — one packed blob */
+	static unsigned char blob[] = "sh\0-c\0PATH=/bin\0HOME=/\0"
+				      "/bin/busybox\0";
+	const char *argv[8];
+	const char *envp[8];
+	int rc;
+
+	rc = uml_nt_elf_split_args(blob, sizeof(blob) - 1, 2, 2, argv,
+				   envp);
+	CHECK(rc == 0);
+	CHECK(strcmp(argv[0], "sh") == 0);
+	CHECK(strcmp(argv[1], "-c") == 0);
+	CHECK(strcmp(envp[0], "PATH=/bin") == 0);
+	CHECK(strcmp(envp[1], "HOME=/") == 0);
+	/* the filename closes the blob (not returned) */
+
+	/* count mismatch = fail loud (not a silent alias) */
+	CHECK(uml_nt_elf_split_args(blob, sizeof(blob) - 1, 3, 2, argv,
+				    envp) < 0);
+	CHECK(uml_nt_elf_split_args(blob, sizeof(blob) - 1, 2, 3, argv,
+				    envp) < 0);
+	CHECK(uml_nt_elf_split_args(blob, sizeof(blob) - 1, -1, 2, argv,
+				    envp) < 0);
+	CHECK(uml_nt_elf_split_args(blob, 0, 2, 2, argv, envp) < 0);
+
+	/* the empty-argv rule (argc=1 with argv[0] = "") */
+	{
+		static unsigned char blob2[] = "\0PATH=/bin\0/init\0";
+
+		rc = uml_nt_elf_split_args(blob2, sizeof(blob2) - 1, 1,
+					   1, argv, envp);
+		CHECK(rc == 0);
+		CHECK(argv[0][0] == '\0');
+		CHECK(strcmp(envp[0], "PATH=/bin") == 0);
+	}
+
+	/* end-to-end: split + tables on the SAME blob — the block the
+	 * guest sees must round-trip the strings */
+	{
+		static unsigned char stackbuf[UML_NT_PHYS_RUN_SIZE];
+		static const unsigned char rnd[16] = { 9 };
+		unsigned long long va_base = 0x62020000ull, top = va_base +
+			RUN, rsp, *v;
+		long long used;
+
+		rc = uml_nt_elf_split_args(blob, sizeof(blob) - 1, 2, 2,
+					   argv, envp);
+		CHECK(rc == 0);
+		/* main()-style contract: terminate BOTH vectors — the
+		 * tables count envp by walking to the NULL. */
+		argv[2] = NULL;
+		envp[2] = NULL;
+		used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 2,
+					       argv, envp, rnd);
+		CHECK(used > 0);
+		rsp = top - (unsigned long long)used;
+		v = (unsigned long long *)((char *)stackbuf +
+			(top - va_base - used));
+		CHECK(v[0] == 2);
+		CHECK(v[1] > rsp && v[1] < top);
+		CHECK(strcmp((const char *)(stackbuf + (v[1] - va_base)),
+			     "sh") == 0);
+		CHECK(strcmp((const char *)(stackbuf + (v[2] - va_base)),
+			     "-c") == 0);
+		CHECK(v[3] == 0);
+		CHECK(strcmp((const char *)(stackbuf + (v[4] - va_base)),
+			     "PATH=/bin") == 0);
+		CHECK(strcmp((const char *)(stackbuf + (v[5] - va_base)),
+			     "HOME=/") == 0);
+		CHECK(v[6] == 0);
+	}
 }
 
 /* The REAL S3 init (rootfs/init.c — built by test_elf.sh with the
@@ -698,6 +777,7 @@ int main(int argc, char **argv)
 	test_rollback();
 	test_stack();
 	test_stack_tables();
+	test_split_args();
 	if (argc > 1)
 		test_real_guest(argv[1]);
 	if (argc > 2)

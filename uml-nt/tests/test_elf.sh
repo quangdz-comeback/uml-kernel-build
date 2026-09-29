@@ -23,7 +23,7 @@ fi
 "$CC" -O1 -Wall -Wextra -Werror \
 	-I"$OS_DIR/include" -I"$SRC_DIR/include/shared" \
 	-o "$TMP/test" "$HERE/test_elf.c" \
-	"$OS_DIR/skas/elf.c" "$OS_DIR/skas/vma.c" \
+	"$OS_DIR/skas/elf.c" "$OS_DIR/skas/elf_split.c" "$OS_DIR/skas/vma.c" \
 	"$OS_DIR/skas/physalloc.c" "$OS_DIR/skas/scan_patch.c"
 
 # the REAL S3 init fixture — the rootfs recipe verbatim (rootfs/
