@@ -249,6 +249,7 @@ static void test_cow_fixup(void)
 	memset(buf, 0x5a, sizeof(buf));
 	CHECK(uml_nt_uacc_walk(&child, (char *)flat, RAM + 0x2000, 64,
 			       buf, UML_NT_UACC_TO_GUEST) == 0);
+	CHECK(uml_nt_uacc_fixups == 1); /* the fixup counter moved */
 
 	/* the SHARER's copy is untouched (the whole point) */
 	for (i = 0; i < 64; i++)
@@ -277,27 +278,32 @@ static void test_cow_fixup(void)
 	CHECK(parent.vma[0].flags & UML_NT_VMA_COW);
 	CHECK(parent.vma[0].run_off == (unsigned long long)parent_off);
 
-	/* Second write, same (now private) run: direct, NO new ops. */
+	/* Second write, same (now private) run: direct, NO new ops, NO
+	 * new fixup. */
 	memset(buf, 0xa5, 8);
 	CHECK(uml_nt_uacc_walk(&child, (char *)flat, RAM + 0x3000, 8,
 			       buf, UML_NT_UACC_TO_GUEST) == 0);
 	CHECK(plan.n_ops == 2);
+	CHECK(uml_nt_uacc_fixups == 1);
 	for (i = 0; i < 8; i++)
 		CHECK(flat[new_off + 0x3000 + i] == 0xa5);
 
-	/* clear_user on the child: private now, direct. */
+	/* clear_user on the child: private now, direct, no fixup. */
 	CHECK(uml_nt_uacc_walk(&child, (char *)flat, RAM + 0x4000, 16,
 			       NULL, UML_NT_UACC_ZERO_GUEST) == 0);
 	CHECK(plan.n_ops == 2);
+	CHECK(uml_nt_uacc_fixups == 1);
 	for (i = 0; i < 16; i++)
 		CHECK(flat[new_off + 0x4000 + i] == 0);
 
 	/* PARENT writes its own (now last-ref) run: direct — refs==1
-	 * means private-in-effect (upstream "private page" branch). */
+	 * means private-in-effect (upstream "private page" branch).
+	 * No surgery: the run is not shared anymore. */
 	memset(buf, 0x77, 8);
 	CHECK(uml_nt_uacc_walk(&parent, (char *)flat, RAM + 0x100, 8,
 			       buf, UML_NT_UACC_TO_GUEST) == 0);
 	CHECK(plan.n_ops == 2);
+	CHECK(uml_nt_uacc_fixups == 1);
 	for (i = 0; i < 8; i++)
 		CHECK(flat[pattern_at + 0x100 + i] == 0x77);
 
@@ -347,5 +353,7 @@ static void test_cow_fixup(void)
 			CHECK(flat[off3 + 16 + i] != 0x5a); /* sharer
 							     * intact */
 	}
+	/* The fail-safe paths (RO VMA, no sink) never surgery. */
+	CHECK(uml_nt_uacc_fixups == 1);
 	uml_nt_uacc_set_sink(NULL);
 }

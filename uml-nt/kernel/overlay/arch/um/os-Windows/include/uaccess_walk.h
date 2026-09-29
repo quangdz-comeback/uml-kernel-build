@@ -71,6 +71,13 @@ long long uml_nt_uacc_strnlen(const struct uml_nt_mm *mm, char *base,
  * per chunk; the futex atomics glue uses it instead of translating
  * directly (same hazard: a COW-shared futex write would land on the
  * shared page). */
+
+/* How many runs the fixups have copied private so far (boot-wide).
+ * Pure counter — the logging lives in the conn layer (stub_ctl.c /
+ * syscall.c own os_info; this file stays unit-testable on Linux),
+ * which turns the delta into the CI gate line. */
+extern unsigned long uml_nt_uacc_fixups;
+
 char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 			    unsigned long long va);
 

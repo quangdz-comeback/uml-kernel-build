@@ -58,6 +58,10 @@
 #define SC_CLONE_VM     0x00000100ull
 #define SC_CLONE_THREAD 0x00010000ull
 
+/* The fixup counter's last logged value (the dispatch-tail gate line
+ * prints the delta — hazard-3 native evidence). */
+static unsigned long uacc_fixups_seen;
+
 /* Queue one op for the syscall answer (the stub executes ops one
  * round-trip each). The dispatch resets the plan at entry, so ops
  * APPEND: the handler's own op (mmap/munmap/mprotect), any uaccess
@@ -421,6 +425,14 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		 * re-publishes ours on the final NONE. */
 		c->plan_has_retval = 1;
 		c->plan_retval = ret;
+	}
+	if (uml_nt_uacc_fixups != uacc_fixups_seen) {
+		/* Hazard-3 gate evidence: a handler's to_user/clear/
+		 * futex write hit a COW-shared run and the walker copied
+		 * it private (the native CI gate greps this line). */
+		uacc_fixups_seen = uml_nt_uacc_fixups;
+		os_info("[stubtest] uacc COW fixup: run(s) copied private "
+			"(total %lu)\n", uacc_fixups_seen);
 	}
 out:
 	uml_nt_uacc_set_mm(NULL);

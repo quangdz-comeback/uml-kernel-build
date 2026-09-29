@@ -41,6 +41,8 @@ static unsigned long long uacc_bstrnlen(const char *s,
  * channel (writes to COW-shared runs fault fail-safe). */
 static struct uml_nt_uacc_sink uacc_sink;
 
+unsigned long uml_nt_uacc_fixups;
+
 void uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s)
 {
 	if (s != (const struct uml_nt_uacc_sink *)0)
@@ -133,6 +135,7 @@ char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 	/* The content copy is INLINE (kernel flat view): fresh run gets
 	 * the shared run's bytes, then the caller's write lands on it. */
 	uacc_bcopy(base + new_run, base + old_run, UACC_RUN);
+	uml_nt_uacc_fixups++; /* the conn layer logs the delta */
 
 	if (uml_nt_vma_cow_split((struct uml_nt_mm *)mm, uacc_sink.ph, vma,
 				 page, new_run) < 0) {

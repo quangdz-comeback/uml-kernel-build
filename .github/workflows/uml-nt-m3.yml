@@ -235,6 +235,12 @@ jobs:
           grep -q "BRK-OK" boot.log || { echo "M3.7 brk failed"; exit 1; }
           grep -q "MMAP-OK" boot.log || { echo "M3.7 mmap/munmap failed"; exit 1; }
           grep -q "SYSCALL-OK" boot.log || { echo "M3.7 syscall chain incomplete"; exit 1; }
+          # M3.8 hazard 3: the fork answer re-protects the PARENT's
+          # views read-only (upstream fork marks both pte tables RO);
+          # the parent's later .data/heap writes fault into the COW
+          # machinery and the child's surgery preserved the sharer's
+          # bytes — the markers above now pass THROUGH that path.
+          grep -q "fork: re-protected" boot.log || { echo "fork parent re-protect never queued"; exit 1; }
           echo "M1.9 NATIVE BOOT OK + M2 ROUND-TRIP OK + M3.1 FAULTS OK + M3.3 FORK OK + M3.4 ELF LOADER OK + M3.6 CONSOLE OK + M3.7 SYSCALLS OK"
 
       # M3.5 native mount gate: ubd0 opens the ext4 image through the

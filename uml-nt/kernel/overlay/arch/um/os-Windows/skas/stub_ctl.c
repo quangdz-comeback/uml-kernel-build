@@ -293,6 +293,7 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	struct uml_nt_gp_regs *g = &d->regs;
 	struct uml_nt_stub_conn *k = &conn_child;
 	int vi;
+	int vi_reprotect;
 
 	if (k->alive) {
 		os_info("[stubtest] fork: child already exists\n");
@@ -341,6 +342,7 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	 * the child still reads. Ops ride the fork answer (the dispatch
 	 * parks the retval while plan_left > 0). The walker's by-refs
 	 * fixup guards the uaccess path independently. */
+	vi_reprotect = 0;
 	for (vi = 0; vi < c->mm->nvma; vi++) {
 		struct uml_nt_vma *pv = &c->mm->vma[vi];
 		unsigned long long len = pv->end - pv->start;
@@ -360,7 +362,11 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 			 * wrong there. */
 			break;
 		}
+		vi_reprotect++;
 	}
+	if (vi_reprotect)
+		os_info("[stubtest] fork: re-protected %d parent view(s) "
+			"read-only\n", vi_reprotect);
 	d->retval = k->pid;
 	d->err = 0;
 	os_info("[stubtest] fork: child pid %lu\n",
