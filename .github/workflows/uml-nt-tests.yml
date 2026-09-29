@@ -19,4 +19,4 @@ jobs:
 
       - name: Lint shell
         run: |
-          shellcheck uml-nt/kernel/fetch.sh uml-nt/tests/test_fetch.sh
+          shellcheck -x uml-nt/kernel/fetch.sh uml-nt/tests/test_fetch.sh
