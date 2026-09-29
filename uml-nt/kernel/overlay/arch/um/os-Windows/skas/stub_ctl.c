@@ -40,6 +40,8 @@
 #include <stub_nt.h>
 
 #include <os.h>
+#include <syscall.h>
+#include <uaccess_walk.h>
 #include "internal.h"
 
 extern const char nt_guest_init_start[], nt_guest_init_end[];
@@ -64,19 +66,8 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
  * so the INIT plan's NOACCESS ops can't derive them from entry_va. */
 static unsigned long long probe_guard_va0, probe_guard_va1;
 
-/* One guest process (stub side of the protocol). */
-struct uml_nt_stub_conn {
-	struct uml_nt_stub_data *d;
-	HANDLE evt_in, evt_out;
-	HANDLE proc, thread;
-	struct uml_nt_mm *mm;
-	ULONG pid;
-	int alive;
-	ULONG exit_code;
-	/* plan runner: ops stream one round-trip each */
-	struct uml_nt_fault_plan plan;
-	int plan_next, plan_left;
-};
+/* wait4 bookkeeping (uml_nt_sys_wait4): one child conn, reaped once. */
+static int child_reaped;
 
 static struct uml_nt_stub_conn conn_parent, conn_child;
 static struct uml_nt_mm mm_parent, mm_child;
@@ -140,8 +131,6 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
-	struct uml_nt_gp_regs *g = &d->regs;
-	unsigned long long nr = g->rax;
 
 	if (d->cmd == UML_STUB_CMD_PROT_DONE) {
 		/* The stub reports its op result. Failure here means
@@ -161,6 +150,13 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			return 0;
 		}
 		c->plan_left = 0;
+		if (c->plan_has_retval) {
+			/* A syscall carried these ops: re-publish its
+			 * return value (the stub's op results traveled
+			 * through d->retval and clobbered it). */
+			d->retval = c->plan_retval;
+			c->plan_has_retval = 0;
+		}
 		d->action = UML_STUB_ACTION_NONE;
 		d->err = 0;
 		return 0;
@@ -239,100 +235,116 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		return 0;
 	}
 
-	/* Syscall trap: dispatch on the guest syscall number (rax). */
+	/* Syscall trap: the D16 dispatch (skas/syscall.c) owns the
+	 * surface; this function keeps the plan/protocol streaming. */
 	d->action = UML_STUB_ACTION_NONE;
-	if (nr == 60) { /* __NR_exit */
-		d->retval = g->rdi;
-		d->halt = 1;
-		return 0;
-	}
-	if (nr == 1) { /* __NR_write */
-		/* D11: the buffer VA translates through the mm's VMA
-		 * tree — the identity (va - ram_base) only holds for
-		 * runs never COW-copied, and the ELF-loaded guest
-		 * lives at its own link VAs (M3.4). A buffer crossing
-		 * its VMA end or unmapped = -EFAULT (multi-VMA buffer
-		 * splitting is M3.7's syscall surface). */
-		long long off = uml_nt_vma_translate(c->mm, d->args[1],
-						     d->args[2]);
+	d->err = 0;
+	d->halt = 0;
+	c->plan.kill = 0;
+	c->plan.n_ops = 0;
+	c->plan.copy_src_off = 0;
+	c->plan.copy_dst_off = 0;
+	c->plan_next = 0;
+	c->plan_left = 0;
+	c->plan_has_retval = 0;
+	uml_nt_syscall_handle(c, d);
+	if (c->plan_left > 0)
+		issue_plan_op(c, &c->plan.ops[c->plan_next]);
+	return 0;
+}
 
-		if (off < 0) {
+/* fork/clone(!CLONE_VM) hook (D16): clone the parent mm (M3.2 COW
+ * machinery — writable VMAs become COW except the stack VMA, which
+ * eager-copies: the NT VEH dispatch cannot run on a COW-faulted
+ * stack page), copy the eager runs' contents parent→child through
+ * the kernel's flat view, spawn the second stub with the parent's
+ * register snapshot (rax = 0), resume it; the parent gets the child
+ * pid. Upstream fork semantics. */
+void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
+{
+	struct uml_nt_gp_regs *g = &d->regs;
+	struct uml_nt_stub_conn *k = &conn_child;
+	int vi;
+
+	if (k->alive) {
+		os_info("[stubtest] fork: child already exists\n");
+		d->retval = (unsigned long long)-9LL; /* -EBADF */
+		d->err = 1;
+		return;
+	}
+	if (uml_nt_mm_clone(&mm_child, c->mm, &probe_phys, g->rsp) < 0) {
+		os_info("[stubtest] fork: mm clone failed\n");
+		d->retval = (unsigned long long)-12LL; /* -ENOMEM */
+		d->err = 1;
+		return;
+	}
+	for (vi = 0; vi < mm_child.nvma; vi++) {
+		const struct uml_nt_vma *pv = &c->mm->vma[vi];
+		const struct uml_nt_vma *cv = &mm_child.vma[vi];
+
+		if (cv->run_off == pv->run_off)
+			continue; /* shared run */
+		memcpy(uml_boot.physmem_base + cv->run_off,
+		       uml_boot.physmem_base + pv->run_off,
+		       cv->end - cv->start);
+	}
+	k->mm = &mm_child;
+	k->ph = c->ph;
+	k->ppid = c->pid;
+	/* The child resumes at the same instruction with the parent's
+	 * registers and rax = 0 (fork semantics); the parent gets the
+	 * child pid. */
+	if (spawn_stub(k, g->rip + 2, g->rsp, g) < 0) {
+		uml_nt_mm_drop(&mm_child, &probe_phys);
+		d->retval = (unsigned long long)-12LL;
+		d->err = 1;
+		return;
+	}
+	k->d->init_regs = *g;
+	k->d->init_regs.rax = 0;
+	child_reaped = 0;
+	nt->ResumeThread(k->thread);
+	d->retval = k->pid;
+	d->err = 0;
+	os_info("[stubtest] fork: child pid %lu\n",
+		(unsigned long)k->pid);
+}
+
+/* wait4 hook (D16): reap the ONE forked child when it is dead — a
+ * live child answers -EAGAIN and the guest retries the trap (the
+ * service loop keeps serving every conn meanwhile); true blocking
+ * waits need the task scheduler (M3.8). Status encoding = Linux
+ * wait4: WEXITSTATUS is bits 8..15. */
+void uml_nt_sys_wait4(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d,
+		      const unsigned long long *a)
+{
+	struct uml_nt_stub_conn *k = &conn_child;
+	unsigned int status;
+
+	(void)c;
+	if (k->pid == 0 || child_reaped) {
+		d->retval = (unsigned long long)-10LL; /* -ECHILD */
+		d->err = 1;
+		return;
+	}
+	if (k->alive) {
+		d->retval = (unsigned long long)-11LL; /* -EAGAIN */
+		d->err = 1;
+		return;
+	}
+	status = ((unsigned int)k->exit_code & 0xffu) << 8;
+	if (a[1] != 0) {
+		if (uml_nt_uacc_walk(c->mm, uml_boot.physmem_base, a[1],
+				     4, (char *)&status,
+				     UML_NT_UACC_TO_GUEST) < 0) {
 			d->retval = (unsigned long long)-14LL; /* -EFAULT */
 			d->err = 1;
-			return -1;
+			return;
 		}
-		/* fd 1 = console for now; others: -EBADF later. */
-		if (d->args[0] != 1 && d->args[0] != 2) {
-			d->retval = (unsigned long long)-9LL; /* -EBADF */
-			d->err = 1;
-			return -1;
-		}
-		nt_console_write((char *)uml_boot.physmem_base + off,
-				 (unsigned int)d->args[2]);
-		d->retval = d->args[2];
-		d->err = 0;
-		return 0;
 	}
-	if (nr == 57) { /* __NR_fork */
-		struct uml_nt_stub_conn *k = &conn_child;
-
-		if (k->alive) {
-			os_info("[stubtest] fork: child already exists\n");
-			goto bad;
-		}
-		/* Clone the parent mm: writable VMAs become COW except
-		 * the stack VMA (holds rsp — the NT VEH dispatch cannot
-		 * run on a COW-faulted stack page), which eager-copies.
-		 * Copy the eager runs' contents parent→child through
-		 * the kernel's flat view (the clone is pure logic). */
-		if (uml_nt_mm_clone(&mm_child, c->mm, &probe_phys,
-				    g->rsp) < 0) {
-			os_info("[stubtest] fork: mm clone failed\n");
-			d->retval = (unsigned long long)-12LL; /* -ENOMEM */
-			d->err = 1;
-			return -1;
-		}
-		{
-			int vi;
-
-			for (vi = 0; vi < mm_child.nvma; vi++) {
-				const struct uml_nt_vma *pv =
-					&c->mm->vma[vi];
-				const struct uml_nt_vma *cv =
-					&mm_child.vma[vi];
-
-				if (cv->run_off == pv->run_off)
-					continue; /* shared run */
-				memcpy(uml_boot.physmem_base +
-					       cv->run_off,
-				       uml_boot.physmem_base +
-					       pv->run_off,
-				       cv->end - cv->start);
-			}
-		}
-		k->mm = &mm_child;
-		/* The child resumes at the same instruction with the
-		 * parent's registers and rax = 0 (fork semantics); the
-		 * parent gets the child pid. */
-		if (spawn_stub(k, g->rip + 2, g->rsp, g) < 0) {
-			uml_nt_mm_drop(&mm_child, &probe_phys);
-			d->retval = (unsigned long long)-12LL;
-			d->err = 1;
-			return -1;
-		}
-		k->d->init_regs = *g;
-		k->d->init_regs.rax = 0;
-		nt->ResumeThread(k->thread);
-		d->retval = k->pid;
-		d->err = 0;
-		os_info("[stubtest] fork: child pid %lu\n",
-			(unsigned long)k->pid);
-		return 0;
-	}
-bad:
-	d->retval = (unsigned long long)-9LL; /* -EBADF */
-	d->err = 1;
-	return -1;
+	child_reaped = 1;
+	d->retval = k->pid;
+	d->err = 0;
 }
 
 /* Spawn one stub.exe for `mm` (S5 pattern: inheritable handles, value
@@ -691,6 +703,30 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		}
 	}
 	conn_parent.mm = &mm_parent;
+
+	/* M3.7: the heap run — ONE pre-reserved, pre-mapped run the
+	 * brk(2) surface moves inside (vma.h contract; the buddy owes
+	 * no adjacency, so multi-run heap growth is M3.8+). The probe
+	 * exercises brk/mmap on it. */
+	{
+		long long hoff = uml_nt_phys_alloc(&probe_phys);
+
+		if (hoff < 0 ||
+		    uml_nt_vma_add(&mm_parent,
+				   UML_STUB_RAM_BASE + hoff,
+				   UML_STUB_RAM_BASE + hoff +
+				   UML_NT_PHYS_RUN_SIZE,
+				   hoff, UML_NT_PAGE_READWRITE,
+				   0) < 0) {
+			os_info("[stubtest] heap run failed\n");
+			return 0;
+		}
+		mm_parent.heap_start = UML_STUB_RAM_BASE + hoff;
+		mm_parent.heap_end = mm_parent.heap_start +
+				     UML_NT_PHYS_RUN_SIZE;
+		mm_parent.brk = mm_parent.heap_start;
+	}
+	conn_parent.ph = &probe_phys;
 
 	/* Initial guest rsp = the TOP of the stack run (grows down);
 	 * the stack VMA itself owns [stack_va, stack_va + RUN) (ELF:

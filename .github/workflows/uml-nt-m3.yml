@@ -218,7 +218,17 @@ jobs:
           # printk routes through it.
           grep -q "stdio console ready" boot.log || { echo "M3.6 console driver never registered"; exit 1; }
           grep -q "console \[tty0\] enabled" boot.log || { echo "M3.6 tty console never enabled (printk not routed)"; exit 1; }
-          echo "M1.9 NATIVE BOOT OK + M2 ROUND-TRIP OK + M3.1 FAULTS OK + M3.3 FORK OK + M3.4 ELF LOADER OK + M3.6 CONSOLE OK"
+          # M3.7: the D16 syscall surface — wait4 reaps the forked
+          # child (status via the D15 uaccess walker), identity
+          # syscalls, brk on the reserved heap run, anon mmap/munmap
+          # round-trips with stub MAP/UNMAP ops.
+          grep -q "WAIT4-OK" boot.log || { echo "M3.7 wait4 never reaped the child"; exit 1; }
+          grep -q "PID-OK" boot.log || { echo "M3.7 getpid/getppid/set_tid_address failed"; exit 1; }
+          grep -q "SIG-OK" boot.log || { echo "M3.7 rt_sigprocmask failed"; exit 1; }
+          grep -q "BRK-OK" boot.log || { echo "M3.7 brk failed"; exit 1; }
+          grep -q "MMAP-OK" boot.log || { echo "M3.7 mmap/munmap failed"; exit 1; }
+          grep -q "SYSCALL-OK" boot.log || { echo "M3.7 syscall chain incomplete"; exit 1; }
+          echo "M1.9 NATIVE BOOT OK + M2 ROUND-TRIP OK + M3.1 FAULTS OK + M3.3 FORK OK + M3.4 ELF LOADER OK + M3.6 CONSOLE OK + M3.7 SYSCALLS OK"
 
       # M3.5 native mount gate: ubd0 opens the ext4 image through the
       # os-Windows fd table (NtCreateFile), sync do_io serves the reads,

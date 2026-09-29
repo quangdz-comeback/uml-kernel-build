@@ -23,7 +23,8 @@ EXPECTED=(file.c start_up.c mem.c process.c execvp.c helper.c umid.c \
 signal.c util.c time.c irq.c sigio.c tty.c registers.c main.c \
 user_syms.c stub-impl.c ubd_user.c console.c skas/mem.c skas/process.c \
 skas/scan_patch.c skas/stub_ctl.c skas/fault.c skas/vma.c skas/elf.c \
-skas/physalloc.c skas/physbackend.c)
+skas/physalloc.c skas/physbackend.c skas/syscall.c skas/uaccess.c \
+skas/uaccess_walk.c)
 ACTUAL="$(cd "$SRC" && find . -name '*.c' | sed 's|^\./||' | sort | tr '\n' ' ')"
 EXPECTED_SORTED="$(printf '%s\n' "${EXPECTED[@]}" | sort | tr '\n' ' ')"
 if [[ "$ACTUAL" != "$EXPECTED_SORTED" ]]; then
@@ -37,7 +38,8 @@ echo "ok  - file set mirrors os-Linux map (elf_aux.c excluded, stub-impl.c added
 # --- REAL modules: kernel-header based, no scaffolding type mirrors -----
 REAL=(main.c util.c time.c mem.c signal.c irq.c start_up.c process.c \
 file.c skas/process.c registers.c skas/stub_ctl.c skas/fault.c \
-skas/vma.c skas/physalloc.c ubd_user.c console.c)
+skas/vma.c skas/physalloc.c ubd_user.c console.c skas/syscall.c \
+skas/uaccess.c)
 for f in "${REAL[@]}"; do
   if grep -qE '^\s*#\s*include\s+"stub-impl\.h"' "$SRC/$f"; then
     echo "FAIL- real module $f still includes stub-impl.h (type-mirror collision)"

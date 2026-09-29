@@ -50,6 +50,12 @@ struct uml_nt_vma {
 struct uml_nt_mm {
 	struct uml_nt_vma vma[UML_NT_VMA_MAX];
 	int nvma;
+	/* brk bookkeeping (M3.7): [heap_start, heap_end) is the ONE
+	 * pre-reserved, pre-mapped run the exec setup hands the mm —
+	 * the buddy cannot promise an ADJACENT block, so the heap VMA
+	 * never grows past its reservation; brk(2) moves inside it
+	 * (heap_end == 0 = no heap reserved: brk fails -ENOMEM). */
+	unsigned long long heap_start, heap_end, brk;
 };
 
 void uml_nt_mm_init(struct uml_nt_mm *mm);
@@ -70,6 +76,15 @@ struct uml_nt_vma *uml_nt_vma_find(struct uml_nt_mm *mm,
  * table full or unmap of nothing. */
 int uml_nt_vma_del(struct uml_nt_mm *mm, unsigned long long start,
 		   unsigned long long end);
+
+/* First free guest-VA range of `len` bytes inside [base, limit),
+ * walking the sorted VMA list bottom-up (first gap). `len` must be a
+ * run multiple (the geometry contract). Returns the VA or 0 when
+ * nothing fits (0 is never a valid guest VA base). */
+unsigned long long uml_nt_vma_find_free(const struct uml_nt_mm *mm,
+					unsigned long long len,
+					unsigned long long base,
+					unsigned long long limit);
 
 /* mprotect analogue over [start, end) (must be inside VMAs). */
 int uml_nt_vma_chg(struct uml_nt_mm *mm, unsigned long long start,

@@ -17,6 +17,8 @@ jobs:
           bash uml-nt/tests/test_os_windows_skeleton.sh
           bash uml-nt/tests/test_scan_patch.sh
           bash uml-nt/tests/test_mm.sh
+          # M3.7 uaccess walker (D15) over the vma tree
+          bash uml-nt/tests/test_uaccess.sh
           # M3.4 guest ELF loader — the real-fixture build needs lld
           # (same clang+lld recipe as the kernel job's guest build).
           if ! command -v ld.lld >/dev/null 2>&1; then
@@ -42,4 +44,5 @@ jobs:
         run: |
           shellcheck -x uml-nt/kernel/fetch.sh uml-nt/tests/test_fetch.sh \
             uml-nt/tests/test_os_windows_skeleton.sh uml-nt/tests/test_scan_patch.sh \
-            uml-nt/tests/test_mm.sh uml-nt/tests/test_elf.sh
+            uml-nt/tests/test_mm.sh uml-nt/tests/test_elf.sh \
+            uml-nt/tests/test_uaccess.sh

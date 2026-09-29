@@ -7,4 +7,5 @@ ccflags-y += -I$(src)/..
 ccflags-y += -Wno-missing-prototypes
 
 obj-y := mem.o process.o fault.o vma.o physalloc.o physbackend.o \
-	 elf.o scan_patch.o stub_ctl.o init_blob.o
+	 elf.o scan_patch.o stub_ctl.o init_blob.o \
+	 syscall.o uaccess.o uaccess_walk.o

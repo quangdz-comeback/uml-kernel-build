@@ -9,6 +9,9 @@
 void uml_nt_mm_init(struct uml_nt_mm *mm)
 {
 	mm->nvma = 0;
+	mm->heap_start = 0;
+	mm->heap_end = 0;
+	mm->brk = 0;
 }
 
 /* Insert keeping sort order; overlap rejected (caller's mmap contract). */
@@ -133,6 +136,27 @@ int uml_nt_vma_chg(struct uml_nt_mm *mm, unsigned long long start,
 	return hit ? 0 : -1;
 }
 
+unsigned long long uml_nt_vma_find_free(const struct uml_nt_mm *mm,
+					unsigned long long len,
+					unsigned long long base,
+					unsigned long long limit)
+{
+	unsigned long long cand = base;
+	int i;
+
+	if (len == 0 || base > limit)
+		return 0;
+	for (i = 0; i < mm->nvma; i++) {
+		if (cand + len <= mm->vma[i].start)
+			return cand; /* the gap before this VMA fits */
+		if (mm->vma[i].end > cand)
+			cand = mm->vma[i].end;
+	}
+	if (cand + len <= limit)
+		return cand;
+	return 0;
+}
+
 /* Ref/unref every run of a VMA's span (VMAs are run multiples —
  * vma.h). */
 static int span_ref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)
@@ -205,6 +229,11 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		if (run_off == v->run_off && span_ref(ph, v) < 0)
 			goto fail;
 	}
+	/* brk bookkeeping survives fork (the child's brk == parent's;
+	 * the COW machinery already duplicated the pages it backs). */
+	dst->heap_start = src->heap_start;
+	dst->heap_end = src->heap_end;
+	dst->brk = src->brk;
 	return 0;
 
 fail:

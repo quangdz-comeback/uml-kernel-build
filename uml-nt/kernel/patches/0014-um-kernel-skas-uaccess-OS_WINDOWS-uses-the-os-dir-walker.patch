@@ -1,0 +1,23 @@
+diff --git a/arch/um/kernel/skas/Makefile b/arch/um/kernel/skas/Makefile
+index 3384be4..1e5813c 100644
+--- a/arch/um/kernel/skas/Makefile
++++ b/arch/um/kernel/skas/Makefile
+@@ -3,9 +3,17 @@
+ # Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
+ #
+ 
+-obj-y := stub.o mmu.o process.o syscall.o uaccess.o \
++obj-y := stub.o mmu.o process.o syscall.o \
+ 	 stub_exe_embed.o
+ 
++# uml-nt (D15): the page-table-walking uaccess is an os-Linux
++# realization — the guest VA space IS the kernel's address space
++# there. On NT the guest space lives in the stub process; uaccess
++# translates through the per-conn VMA tree (os-Windows/skas/
++# uaccess.c + uaccess_walk.c, installed per syscall by the D16
++# dispatch).
++obj-$(CONFIG_OS_LINUX) += uaccess.o
++
+ # Stub executable
+ 
+ stub_exe_objs-y := stub_exe.o

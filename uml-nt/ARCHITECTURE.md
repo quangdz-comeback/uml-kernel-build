@@ -160,3 +160,64 @@ Port chọn lọc trong `os-Windows/console.c`:
 
 Chữ ký tty_operations 6.18 (lỗi compile gặp phải): `.write = ssize_t
 (tty, const u8 *, size_t)`, `.write_room = unsigned int (tty)`.
+
+## D15 — uaccess OS_WINDOWS = walker qua VMA tree, không phải page-table (2026-09-29)
+
+**M3.7.** Upstream `arch/um/kernel/skas/uaccess.c` dựng uaccess trên
+page table của `current->mm`: trên UML, guest VA space CHÍNH là địa
+chỉ kernel (guest page = trang kernel; `virt_to_pte` + `page_address`
++ memcpy). Trên NT mô hình đó không tồn tại: guest address space sống
+trong stub process (per-VMA views của section — D10/M3), kernel chỉ
+biết nó qua `uml_nt_mm` của conn. Vì vậy dưới `CONFIG_OS_WINDOWS`:
+
+- Patch **0014** bỏ `uaccess.o` upstream khỏi `arch/um/kernel/skas/`
+  (giữ cho OS_LINUX); `os-Windows/skas/uaccess.c` cung cấp cùng
+  contract: `raw_copy_from_user/to_user`, `strncpy_from_user`,
+  `strnlen_user`, `__clear_user` + 2 futex atomic.
+- Phần walker là file PURE `uaccess_walk.c` (unit test Linux CI):
+  dịch guest VA từng chunk 4K (chunk không bao giờ vường VMA biên —
+  VMA là bội run 64K), memcpy/strnlen qua flat view
+  `uml_boot.physmem_base + off`. All-or-nothing (-1 khi có byte
+  không map được); convention retval theo upstream (raw_copy_* trả
+  số byte CHƯA copy; strnlen_user trả 0 = fault).
+- **Nguồn mm**: dispatch (D16) cài `uml_nt_uacc_set_mm(conn->mm)`
+  cho ĐÚNG MỘT lượt chạy handler rồi trả NULL — ngoài handler mọi
+  uaccess fault (fail-safe, không bao giờ deref mù qua flat view).
+  VFS syscall thật của guest sẽ dùng cùng seam khi có task context
+  (M3.8).
+- Futex atomic = translate 4 byte + `__sync` trên flat view — đúng
+  cho trang private; futex trên trang COW-shared sẽ ghi Shared page
+  không fault (threads là M5, ghép cùng M4 signals).
+- `__access_ok` giữ generic (guest VA < TASK_SIZE là đủ — translate
+  mới là phán quyết cuối).
+
+## D16 — Syscall surface = dispatch riêng trong os-Windows/skas/syscall.c (2026-09-29)
+
+**M3.7.** Bề mặt syscall guest phục vụ theo conn (1 conn = 1 guest
+process), shape giống `handle_syscall` upstream: `d->regs.rax` = nr,
+`d->args[6]` = ABI (rdi rsi rdx r10 r8 r9), retval về `d->retval`.
+Điểm dời Reality NT:
+
+- **Ops kèm syscall**: mmap/munmap/mprotect trả kết quả bằng cách
+  STREAM stub ops qua cơ chế plan sẵn có (stub tự thao tác address
+  space của chính nó — đúng mô hình seccomp-stub upstream); retval
+  syscall được PARK trong `conn->plan_retval` vì `d->retval` đang
+  là kênh vận chuyển kết quả từng op (do_action ghi 1/0) — plan
+  rỗng mới republish retval trước NONE cuối. Đây là lý do
+  `plan_has_retval` tồn tại (INIT/FAULT đặt 0).
+- **Thứ tự theo busybox /init**: exit/exit_group (halt), getpid/
+  gettid/getppid/get*id, set_tid_address, rt_sigprocmask/rt_sigaction
+  (no-op POC), brk (heap run đặt trước trong mm — buddy không nợ
+  kề nhau nên heap KHÔNG vượt reservation; hết chỗ = ENOMEM), mmap
+  anon|private (+MAP_FIXED trên vùng FREE; file-backed = ENOSYS),
+  mprotect (1 VMA, không COW), munmap (trọn VMA — UnmapViewOfFile
+  là whole-view), write (fd 0/1/2 = console), read (ENOSYS tới
+  M3.8), ioctl → ENOTTY (non-interactive), wait4 (reap con ĐÃ
+  chết; con sống → -EAGAIN — block thật cần scheduler M3.8),
+  fork/clone(!CLONE_VM) → hook `uml_nt_sys_fork` (cỗ máy M3.3).
+- **Mặc định = -ENOSYS + os_info loud** — chính là "mỗi boot fail
+  chỉ syscall thiếu kế tiếp": log nêu nr để thêm handler tiếp.
+- **KHÔNG mô phỏng openat/fstat/getdents64/execve** ở tầng này:
+  bytes nằm trong ext4 trên ubda, chỉ VFS của guest đọc được —
+  cần kernel task thật chạy userspace() loop (M3.8); mô phỏng
+  tắt đường VFS = phá khoá kiến trúc M3.5.

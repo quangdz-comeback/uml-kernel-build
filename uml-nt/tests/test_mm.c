@@ -624,6 +624,67 @@ static void test_fault(void)
 	CHECK(UML_NT_FOP_PROTECT == UML_STUB_ACTION_PROT);
 }
 
+/* M3.7: first-gap placement (mmap without a hint) + brk bookkeeping
+ * fields. VMAs are 1 run each, backed by REALLY allocated runs (the
+ * refcount layer rejects refs of unused runs — clone's span_ref). */
+static void test_find_free(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	long long r0, r1, r2;
+
+	CHECK(uml_nt_phys_init(&ph, MOCK_BASE + 16 * RUN) == 0);
+	r0 = uml_nt_phys_alloc(&ph);
+	r1 = uml_nt_phys_alloc(&ph);
+	r2 = uml_nt_phys_alloc(&ph);
+	CHECK(r0 >= 0 && r1 >= 0 && r2 >= 0);
+
+	uml_nt_mm_init(&mm);
+	CHECK(mm.heap_start == 0 && mm.heap_end == 0 && mm.brk == 0);
+	/* empty mm: the whole span is one gap */
+	CHECK(uml_nt_vma_find_free(&mm, 3 * RUN, RAM, RAM + 16 * RUN)
+	      == RAM);
+	/* one VMA at [RAM, +1 run): the gap AFTER it */
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, r0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_vma_find_free(&mm, 2 * RUN, RAM, RAM + 16 * RUN)
+	      == RAM + RUN);
+	/* exactly fills the tail gap */
+	CHECK(uml_nt_vma_find_free(&mm, 15 * RUN, RAM, RAM + 16 * RUN)
+	      == RAM + RUN);
+	/* one run more than the tail = 0 (nothing fits) */
+	CHECK(uml_nt_vma_find_free(&mm, 16 * RUN, RAM, RAM + 16 * RUN)
+	      == 0);
+	/* second VMA far above: still fits in the tail, first-gap */
+	CHECK(uml_nt_vma_add(&mm, RAM + 8 * RUN, RAM + 9 * RUN, r1,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_vma_find_free(&mm, 3 * RUN, RAM, RAM + 16 * RUN)
+	      == RAM + RUN);
+	/* bottom-up: first gap wins even when a smaller one exists */
+	CHECK(uml_nt_vma_add(&mm, RAM + RUN, RAM + 2 * RUN, r2,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_vma_find_free(&mm, 2 * RUN, RAM, RAM + 16 * RUN)
+	      == RAM + 2 * RUN);
+	/* the 6-run hole [RAM+2, RAM+8) fits 6, not 7 */
+	CHECK(uml_nt_vma_find_free(&mm, 6 * RUN, RAM, RAM + 16 * RUN)
+	      == RAM + 2 * RUN);
+	CHECK(uml_nt_vma_find_free(&mm, 7 * RUN, RAM, RAM + 16 * RUN)
+	      == RAM + 9 * RUN);
+	/* heap bookkeeping survives clone (child brk == parent brk) */
+	{
+		struct uml_nt_mm child;
+
+		mm.heap_start = RAM + 12 * RUN;
+		mm.heap_end = RAM + 13 * RUN;
+		mm.brk = RAM + 12 * RUN + 0x100;
+		CHECK(uml_nt_mm_clone(&child, &mm, &ph, 0) == 0);
+		CHECK(child.heap_start == mm.heap_start);
+		CHECK(child.heap_end == mm.heap_end);
+		CHECK(child.brk == mm.brk);
+		uml_nt_mm_drop(&child, &ph);
+	}
+}
+
 int main(void)
 {
 	test_phys();
@@ -631,6 +692,7 @@ int main(void)
 	test_vma();
 	test_translate();
 	test_fault();
+	test_find_free();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);
