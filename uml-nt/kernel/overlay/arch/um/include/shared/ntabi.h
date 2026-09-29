@@ -67,6 +67,7 @@ typedef struct {
 
 typedef struct {
 	ULONG cb; /* DWORD */
+	char *lpReserved; /* must be NULL */
 	char *lpDesktop;
 	char *lpTitle;
 	ULONG dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars,
@@ -74,7 +75,7 @@ typedef struct {
 	USHORT wShowWindow, cbReserved2;
 	unsigned char *lpReserved2;
 	HANDLE hStdInput, hStdOutput, hStdError;
-} STARTUPINFOA; /* 104 bytes on x64 */
+} STARTUPINFOA; /* 104 bytes on x64 (lpReserved included) */
 
 typedef struct {
 	HANDLE hProcess, hThread;

@@ -92,7 +92,7 @@ bad:
 	return -1;
 }
 
-static int __init uml_nt_stubtest_init(void)
+static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 {
 	unsigned long long blob_len, entry_off, stack_off, patched;
 	struct uml_nt_stub_data *d;
@@ -101,14 +101,12 @@ static int __init uml_nt_stubtest_init(void)
 	char cmd[1200];
 	STARTUPINFOA si;
 	PROCESS_INFORMATION pi;
-	ULONG dummy, exit_code;
+	ULONG exit_code;
 	int i;
 
-	(void)dummy;
+	(void)arg;
 
-	if (!have_stub_path)
-		return 0;
-
+	os_info("[stubtest] probe thread running\n"); /* TEMP M2.1 */
 	blob_len = nt_guest_init_end - nt_guest_init_start;
 	entry_off = (uml_boot.image_size + 0xFFFFull) & ~0xFFFFull;
 	stack_off = entry_off + GUEST_STACK_SLACK;
@@ -179,6 +177,12 @@ static int __init uml_nt_stubtest_init(void)
 	memset(&si, 0, sizeof(si));
 	si.cb = sizeof(si);
 	memset(&pi, 0, sizeof(pi));
+	{ /* TEMP M2.1 bisect: does a minimal call return at all? */
+		BOOL r = nt->CreateProcessA(NULL, NULL, NULL, NULL, 0, 0,
+					    NULL, NULL, &si, &pi);
+		os_info("[stubtest] selftest CreateProcessA -> %d "
+			"win32=%lu\n", r, nt->RtlGetLastWin32Error());
+	}
 	os_info("[stubtest] spawning: %s\n", cmd);
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
 				0x4 /*CREATE_SUSPENDED*/, NULL, NULL,
@@ -237,6 +241,35 @@ static int __init uml_nt_stubtest_init(void)
 
 fail:
 	os_info("[stubtest] FAILED (see messages above)\n");
+	return 0;
+}
+
+/*
+ * The probe runs on its OWN NT thread with a fat stack: the boot CPU
+ * stack is a UML THREAD_SIZE stack and CreateProcessA + loader work
+ * blew it natively (wine tolerates; found M2.1 CI — exit 127 mid-call).
+ */
+static int __init uml_nt_stubtest_init(void)
+{
+	ULONG tid;
+	HANDLE th;
+
+	if (!have_stub_path)
+		return 0;
+	/* 32MB: CreateProcessA (wine builtin + native kernel32 loader
+	 * work) burned ~2MB — the UML boot stack (16KB) died natively
+	 * and even a 1MB thread overflowed under wine (M2.1 CI). */
+	th = nt->CreateThread(NULL, 0x2000000, stubtest_thread, NULL, 0,
+			      &tid);
+	if (th == NULL) {
+		os_info("[stubtest] CreateThread failed win32=%lu\n",
+			nt->RtlGetLastWin32Error());
+		return 0;
+	}
+	/* Serialize with the boot thread: concurrent console NtWriteFile
+	 * from two threads loses/dups output nondeterministically (seen
+	 * under wine, M2.1) and the probe result must be assertable. */
+	nt->NtWaitForSingleObject(th, 0, UML_NT_INFINITE);
 	return 0;
 }
 __initcall(uml_nt_stubtest_init);
