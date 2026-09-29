@@ -227,9 +227,14 @@ jobs:
           cd uml-nt/launcher
           # artifact downloads to <ws>/rootfs — two levels up from here
           ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          # MSYS2 rewrites POSIX-looking args (/dev/ubda → its own /dev
+          # tree) when invoking native exes — exclude everything, and
+          # use root=98:0 (decimal devt, no slashes; the format UML's
+          # own default cmdline uses).
+          export MSYS2_ARG_CONV_EXCL="*"
           set +e
           timeout 180 ./launcher.exe ../../build/vmlinux \
-            "ubd0=$ROOTFS" "root=/dev/ubda" > mount.log 2>&1
+            "ubd0=$ROOTFS" "root=98:0" > mount.log 2>&1
           code=$?
           set -e
           cat mount.log
