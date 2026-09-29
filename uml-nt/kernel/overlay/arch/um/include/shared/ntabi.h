@@ -311,6 +311,8 @@ NTSTATUS UML_NTABI_CC NtUnmapViewOfSection(HANDLE process, PVOID base);
 NTSTATUS UML_NTABI_CC NtProtectVirtualMemory(HANDLE process, PVOID *base,
 					     SIZE_T *size, ULONG protect,
 					     ULONG *old_protect);
+ULONG UML_NTABI_CC RtlGetLastWin32Error(void);
+BOOLEAN UML_NTABI_CC CloseHandle(HANDLE handle);
 #endif /* !_WIN64 */
 
 /*
@@ -393,6 +395,8 @@ struct uml_nt_api_table {
 	NTSTATUS (UML_NTABI_CC *NtProtectVirtualMemory)(HANDLE process,
 			PVOID *base, SIZE_T *size, ULONG protect,
 			ULONG *old_protect);
+	ULONG (UML_NTABI_CC *RtlGetLastWin32Error)(void);
+	BOOLEAN (UML_NTABI_CC *CloseHandle)(HANDLE handle);
 };
 
 #endif /* __UML_NTABI_H */

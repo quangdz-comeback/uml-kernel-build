@@ -23,6 +23,7 @@
 
 static HANDLE g_timer;           /* waitable timer (not owned by table) */
 static unsigned long long g_qpc_freq;
+static int g_timer_hr;           /* created with HIGH_RESOLUTION flag */
 
 static LARGE_INTEGER qpc_to_li(long long nsecs)
 {
@@ -31,7 +32,7 @@ static LARGE_INTEGER qpc_to_li(long long nsecs)
 	/* negative = relative, 100ns units (D6). Clamp to signed range. */
 	if (nsecs > 4000000000000000LL)
 		nsecs = 4000000000000000LL;
-	li.QuadPart = -(long long)nsecs;
+	li.QuadPart = -(nsecs / 100LL); /* ns -> 100ns units */
 	return li;
 }
 
@@ -54,22 +55,27 @@ static unsigned long __attribute__((ms_abi)) nt_timer_thread(void *arg)
 
 int os_timer_create(void)
 {
-	LARGE_INTEGER due;
+	LARGE_INTEGER f;
 	HANDLE thread;
 	ULONG tid;
 
-	{
-		LARGE_INTEGER f;
-
-		f.QuadPart = 0;
-		nt->QueryPerformanceFrequency(&f);
-		g_qpc_freq = (unsigned long long)f.QuadPart;
-	}
+	f.QuadPart = 0;
+	nt->QueryPerformanceFrequency(&f);
+	g_qpc_freq = (unsigned long long)f.QuadPart;
 	if (g_qpc_freq == 0)
 		return -1;
 
-	/* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002. */
-	g_timer = nt->CreateWaitableTimerExW(NULL, NULL, 0x00000002, 0x1F0003);
+	/* HIGH_RESOLUTION first; some VMs (observed on the GitHub
+	 * windows-2022 runner, M1.9) create the HR timer fine but fail
+	 * SetWaitableTimer on it — recreate plain in that case. */
+	g_timer_hr = 1;
+	g_timer = nt->CreateWaitableTimerExW(NULL, NULL, 0x00000002,
+					     0x1F0003);
+	if (g_timer == NULL) {
+		g_timer_hr = 0;
+		g_timer = nt->CreateWaitableTimerExW(NULL, NULL, 0,
+						     0x1F0003);
+	}
 	if (g_timer == NULL)
 		return -1;
 
@@ -77,8 +83,8 @@ int os_timer_create(void)
 	if (thread == NULL)
 		return -1;
 	/* Thread handle leaked deliberately: it lives for the UML run. */
-	os_info("[probe] os_timer_create ok: timer=%p thread=%lu\n",
-		g_timer, (unsigned long)tid); /* TEMP M1.8 */
+	os_info("[probe] os_timer_create ok: hr=%d err=%lu\n",
+		g_timer_hr, nt->RtlGetLastWin32Error()); /* TEMP M1.9 */
 	return 0;
 }
 
@@ -95,8 +101,21 @@ int os_timer_set_interval(unsigned long long nsecs)
 	period_ms = (LONG)(nsecs / 1000000ULL);
 	if (period_ms < 1)
 		period_ms = 1;
+	if (nt->SetWaitableTimer(g_timer, &due, period_ms, NULL, NULL, 0))
+		return 0;
+
+	/* HR-timer quirk on some VMs: recreate without the HR flag. */
+	os_info("[probe] SetWaitableTimer hr failed win32=%lu\n",
+		nt->RtlGetLastWin32Error()); /* TEMP M1.9 */
+	if (!g_timer_hr)
+		return -1;
+	nt->CloseHandle(g_timer);
+	g_timer = nt->CreateWaitableTimerExW(NULL, NULL, 0, 0x1F0003);
+	if (g_timer == NULL)
+		return -1;
 	if (!nt->SetWaitableTimer(g_timer, &due, period_ms, NULL, NULL, 0)) {
-		os_info("[probe] SetWaitableTimer FAILED\n"); /* TEMP */
+		os_info("[probe] SetWaitableTimer plain failed win32=%lu\n",
+			nt->RtlGetLastWin32Error());
 		return -1;
 	}
 	return 0;

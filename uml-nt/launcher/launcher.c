@@ -117,6 +117,8 @@ static void resolve_api_table(void)
 	RESOLVE(NtMapViewOfSection, ntdll, "NtMapViewOfSection");
 	RESOLVE(NtUnmapViewOfSection, ntdll, "NtUnmapViewOfSection");
 	RESOLVE(NtProtectVirtualMemory, ntdll, "NtProtectVirtualMemory");
+	RESOLVE(RtlGetLastWin32Error, ntdll, "RtlGetLastWin32Error");
+	RESOLVE(CloseHandle, k32, "CloseHandle");
 
 	fprintf(stderr, "[launcher] D9 table v%u: %u bytes, all exports "
 			"resolved\n", g_api.version, g_api.size);
