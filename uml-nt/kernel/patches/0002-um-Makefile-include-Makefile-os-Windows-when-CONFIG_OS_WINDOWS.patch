@@ -1,0 +1,14 @@
+--- a/arch/um/Makefile
++++ b/arch/um/Makefile
+@@ -74,7 +74,11 @@
+ 		-include $(srctree)/include/linux/kconfig.h
+ 
+ #This will adjust *FLAGS accordingly to the platform.
++ifeq ($(CONFIG_OS_WINDOWS),y)
++include $(srctree)/$(ARCH_DIR)/Makefile-os-Windows
++else
+ include $(srctree)/$(ARCH_DIR)/Makefile-os-Linux
++endif
+ 
+ KBUILD_CPPFLAGS += -I$(srctree)/$(HOST_DIR)/include \
+ 		   -I$(srctree)/$(HOST_DIR)/include/uapi \

@@ -1,0 +1,20 @@
+--- a/arch/x86/um/Makefile
++++ b/arch/x86/um/Makefile
+@@ -9,11 +9,16 @@
+ 	BITS := 64
+ endif
+ 
++OS_DIR := os-Linux
++ifeq ($(CONFIG_OS_WINDOWS),y)
++OS_DIR := os-Windows
++endif
++
+ obj-y = bugs_$(BITS).o delay.o fault.o \
+ 	ptrace.o ptrace_$(BITS).o ptrace_user.o setjmp_$(BITS).o signal.o \
+ 	stub_segv.o \
+ 	sys_call_table_$(BITS).o sysrq_$(BITS).o tls_$(BITS).o \
+-	mem_$(BITS).o subarch.o os-Linux/
++	mem_$(BITS).o subarch.o $(OS_DIR)/
+ 
+ ifeq ($(CONFIG_X86_32),y)
+ 

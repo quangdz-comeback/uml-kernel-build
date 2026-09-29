@@ -1,0 +1,10 @@
+#
+# uml-nt: NT backend build flags (arch/um/Makefile includes this when
+# CONFIG_OS_WINDOWS=y, mirroring Makefile-os-Linux).
+#
+# D1: freestanding kernel — no host libc headers; NT API is declared
+# in-tree (arch/um/include/shared/ntabi.h, M1.5). No _GNU_SOURCE /
+# _LARGEFILE64_SOURCE here: those select Linux-host libc behaviors.
+#
+KBUILD_CFLAGS += -D__UM_NT__
+DEV_NULL_PATH = \"NUL\"

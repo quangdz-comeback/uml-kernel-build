@@ -1,0 +1,29 @@
+--- a/arch/um/Kconfig
++++ b/arch/um/Kconfig
+@@ -2,6 +2,26 @@
+ 
+ menu "UML-specific options"
+ 
++choice
++	prompt "Host OS backend"
++	default OS_LINUX
++
++config OS_LINUX
++	bool "Linux host (upstream os-Linux)"
++	help
++	  Upstream UML host backend.
++
++config OS_WINDOWS
++	bool "Windows host (NT API, freestanding) - uml-nt"
++	help
++	  uml-nt: pure NT API backend (no WSL/QEMU/Cygwin). The kernel is
++	  freestanding (no host libc, D1); NT API is declared in-tree.
++	  Guest physmem is a pagefile-backed section; guest syscalls
++	  surface as ud2 traps through a PE stub via VEH.
++	  See uml-nt/HANDOFF.md and research ARCHITECTURE.md.
++
++endchoice
++
+ config UML
+ 	bool
+ 	default y
