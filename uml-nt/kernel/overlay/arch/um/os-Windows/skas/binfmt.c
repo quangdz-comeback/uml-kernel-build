@@ -231,6 +231,7 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		kvfree(buf);
 		return rc;
 	}
+	os_info("binfmt_umlnt: sniff ok, committing exec\n");
 
 	/* Commit the exec (de_thread + exec_mmap — upstream binfmt_elf
 	 * order); from here failures are fatal to the task, there is

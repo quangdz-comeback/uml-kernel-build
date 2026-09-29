@@ -435,8 +435,8 @@ static unsigned long long sys_execve(struct uml_nt_stub_conn *c,
 	}
 	kargv[nav] = NULL;
 	kenvp[nev] = NULL;
-	os_info("[syscall] execve(%s): %llu argv, %llu envp\n", path,
-		nav, nev);
+	os_info("[syscall] execve(%s): %llu argv, %llu envp — calling "
+		"kernel_execve\n", path, nav, nev);
 
 	rc = kernel_execve(path, kargv, kenvp);
 	kvfree(kargv);
