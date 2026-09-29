@@ -139,6 +139,23 @@ static void park_forever(void)
 static volatile unsigned long long fs_tramp_base, fs_tramp_target,
 	fs_save_r11;
 
+/* D18 CPUID gate (Shelley's ARCHITECTURE.md 44d710e note): wrfsbase
+ * #UDs on a CPU without FSGSBASE — the S4c probe measured the runner
+ * (leaf 7 ebx bit 0 = yes) but the stub must not assume. Without the
+ * feature the TLS path is simply not armed: resumes stay the plain
+ * rip+2, fs-prefixed faults fall through to the guest's fault path. */
+static int have_fsgsbase;
+
+static void fsgsbase_detect(void)
+{
+	unsigned int a = 0, b = 0, c = 0, d = 0;
+
+	__asm__ volatile ("cpuid"
+			  : "=a" (a), "=b" (b), "=c" (c), "=d" (d)
+			  : "a" (7), "c" (0));
+	have_fsgsbase = (b & 1) ? 1 : 0;
+}
+
 /* syscall resume: rcx/r11 are clobbered by the syscall contract —
  * r11 is free scratch, no register restoration needed. */
 __attribute__((naked)) static void fs_trampoline_sys(void)
@@ -295,7 +312,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	 * the instruction re-executes with the base live. A genuine
 	 * guest null/low deref is not fs-prefixed and keeps its
 	 * SIGSEGV round-trip. */
-	if (is_fault && d->fs_base != 0 &&
+	if (is_fault && d->fs_base != 0 && have_fsgsbase &&
 	    (uintptr_t)er->ExceptionInformation[1] <
 		    (uintptr_t)d->ram_base &&
 	    *(const unsigned char *)(uintptr_t)c->Rip == 0x64 /* fs: */) {
@@ -340,7 +357,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		 * r11 as scratch and touches nothing else). Without
 		 * TLS this stays the plain rip+2 resume the
 		 * M1.9–M3.7 gates have always run. */
-		if (d->fs_base != 0) {
+		if (d->fs_base != 0 && have_fsgsbase) {
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = d->regs.rip + 2; /* past ud2 */
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_sys;
@@ -445,6 +462,8 @@ int main(int argc, char **argv)
 
 	if (!AddVectoredExceptionHandler(1, veh_handler))
 		die("AddVectoredExceptionHandler", GetLastError());
+
+	fsgsbase_detect();
 
 	/* M3 model: publish INIT, stream the kernel's per-VMA map plan
 	 * (action_chain applies ops until ACTION_NONE), then jump. */
