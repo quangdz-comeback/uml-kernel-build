@@ -27,7 +27,13 @@ staging/sbin/init: init.c
 staging/dev:
 	@mkdir -p staging/dev
 
-rootfs.ext4: staging/sbin/init staging/dev
+# S4: the script /sbin/init reads back through the REAL VFS
+# (openat/read, M3.8 S4b gate) — and that busybox sh runs in S4c.
+staging/hi.sh:
+	@mkdir -p staging
+	printf 'echo hi\n' > $@
+
+rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 

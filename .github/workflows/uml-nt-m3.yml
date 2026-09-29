@@ -299,4 +299,9 @@ jobs:
           grep -q "stdio console ready" initexec.log || { echo "M3.6 console driver never registered"; exit 1; }
           grep -q "binfmt_umlnt: init loaded" initexec.log || { echo "binfmt_umlnt load_binary never ran (exec failed earlier? see log)"; exit 1; }
           grep -q "INIT-SYSCALL-OK" initexec.log || { echo "guest init never wrote through the exec + userspace() path"; exit 1; }
-          echo "M3.8 S3 NATIVE INIT-EXEC OK: binfmt_umlnt + userspace() + write(2) + exit"
+          # M3.8 S4b: openat/read/close through the REAL guest VFS —
+          # sys_call_table routing (upstream handle_syscall parity),
+          # guest pointers valid via the D15 uaccess walker. The bytes
+          # read back are /hi.sh — the script busybox runs in S4c.
+          grep -q "OPENAT-READ-OK: echo hi" initexec.log || { echo "S4b: openat/read never served through the real VFS (see [syscall] ENOSYS lines)"; exit 1; }
+          echo "M3.8 S3+S4b NATIVE INIT-EXEC OK: binfmt_umlnt + userspace() + write(2) + openat/read VFS"

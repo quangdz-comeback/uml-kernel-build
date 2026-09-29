@@ -24,6 +24,7 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 
+#include <asm/syscall.h>
 #include <os.h>
 #include <internal.h>
 #include <stub-panic.h>
@@ -32,6 +33,9 @@
 #include <uaccess_walk.h>
 
 #define UML_NT_SYSCALLS_BASE UML_STUB_RAM_BASE
+
+/* The real x86-64 UML table (arch/x86/um/sys_call_table_64.c). */
+extern int syscall_table_size;
 
 /* errno — x86_64 generic (asm-generic/errno.h values, UML included). */
 #define SC_ENOSYS  38
@@ -97,6 +101,24 @@ static int overlaps(const struct uml_nt_mm *mm, unsigned long long s,
 			return 1;
 	}
 	return 0;
+}
+
+/* Route one VFS-backed syscall through the REAL kernel table —
+ * upstream handle_syscall parity (sys_call_table[nr](args...)). This
+ * is the M3.8 answer to "bytes nằm trong ext4": getname()'s
+ * strncpy_from_user, read()'s copy_to_user, uname's fill — they all
+ * land on the D15 walker (patch 0014), which translates guest VAs
+ * through the conn's VMA tree onto the flat physmem view. The
+ * hand-rolled handlers above stay os-specific: they drive stub ops
+ * and conn state, not the VFS. */
+static unsigned long long sys_vfs(unsigned long long nr,
+				  const unsigned long long *a)
+{
+	if (nr >= (unsigned long long)syscall_table_size /
+			  sizeof(sys_call_ptr_t))
+		return SC_RET(SC_ENOSYS);
+	return (unsigned long long)sys_call_table[nr](a[0], a[1], a[2],
+						      a[3], a[4], a[5]);
 }
 
 static unsigned linux_prot_to_nt(u32 lprot)
@@ -345,10 +367,14 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		d->retval = a[0];
 		d->halt = 1;
 		goto out;
-	case 0: /* read — stdin/stdfile via the guest VFS (M3.8) */
-		os_info("[syscall] read: not implemented (M3.8) → "
-			"ENOSYS\n");
-		ret = SC_RET(SC_ENOSYS);
+	case 0: /* read — guest fds (init: 0/1/2 = /dev/console via
+		 * console_on_rootfs; script/file fds from openat) */
+	case 2: /* open — musl still issues plain open(2) */
+	case 3: /* close */
+	case 63: /* uname — busybox sh queries at startup */
+	case 72: /* fcntl — ash dups the script fd high (F_DUPFD*) */
+	case 257: /* openat */
+		ret = sys_vfs(nr, a);
 		break;
 	case 1: /* write */
 		ret = sys_write(c, a);

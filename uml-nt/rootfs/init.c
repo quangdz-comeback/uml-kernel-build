@@ -37,8 +37,75 @@ static void __attribute__((noreturn)) sys_exit(int code)
 	__builtin_unreachable();
 }
 
+/* arg4 lives in r10 on the x86_64 syscall ABI (rcx/r11 are clobbered
+ * by the syscall instruction itself — that is why the probe went
+ * wrong in M3.7 when rax was reused as an address register). */
+static long sys_openat(int dfd, const char *path, long flags, long mode)
+{
+	long ret;
+	register long r10 __asm__ ("r10") = mode;
+
+	__asm__ volatile ("syscall"
+			  : "=a" (ret)
+			  : "a" (257L), "D" ((long)dfd), "S" (path),
+			    "d" (flags), "r" (r10)
+			  : "rcx", "r11", "memory");
+	return ret;
+}
+
+static long sys_read(int fd, void *buf, unsigned long len)
+{
+	long ret;
+
+	__asm__ volatile ("syscall"
+			  : "=a" (ret)
+			  : "a" (0L), "D" ((long)fd), "S" (buf),
+			    "d" (len)
+			  : "rcx", "r11", "memory");
+	return ret;
+}
+
+static long sys_close(int fd)
+{
+	long ret;
+
+	__asm__ volatile ("syscall"
+			  : "=a" (ret)
+			  : "a" (3L), "D" ((long)fd)
+			  : "rcx", "r11", "memory");
+	return ret;
+}
+
+/*
+ * M3.8 S4b: the exec chain still starts here, but the S4 goal is the
+ * busybox shell — this init now proves the REAL VFS surface first:
+ * openat("/hi.sh") + read + close go through do_sys_openat2 /
+ * vfs_read on the guest kernel (ubd → ext4), with the guest pointers
+ * translated by the D15 uaccess walker. The bytes read back are the
+ * script busybox will run in S4c — the gate asserts them verbatim.
+ */
 void _start(void)
 {
+	static char buf[256];
+	long fd, n;
+
 	sys_write(1, "INIT-SYSCALL-OK\n", 16);
+
+	fd = sys_openat(-100 /* AT_FDCWD */, "/hi.sh", 0 /* O_RDONLY */, 0);
+	if (fd < 0) {
+		sys_write(1, "OPENAT-FAIL\n", 12);
+		sys_exit(3);
+	}
+	n = sys_read(fd, buf, sizeof(buf));
+	if (n <= 0) {
+		sys_write(1, "READ-FAIL\n", 10);
+		sys_exit(4);
+	}
+	if (sys_close(fd) != 0) {
+		sys_write(1, "CLOSE-FAIL\n", 11);
+		sys_exit(5);
+	}
+	sys_write(1, "OPENAT-READ-OK: ", 16);
+	sys_write(1, buf, (unsigned long)n);
 	sys_exit(0);
 }
