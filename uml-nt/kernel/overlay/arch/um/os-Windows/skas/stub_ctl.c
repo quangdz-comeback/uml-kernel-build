@@ -183,7 +183,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		/* Stream the conn's initial per-VMA map plan; the probe
 		 * appends NOACCESS protects for the parent's guard
 		 * pages (the fault-probe seed). */
-		if (uml_nt_mm_init_plan(c->mm, &probe_phys, &c->plan) < 0) {
+		if (uml_nt_mm_init_plan(c->mm, c->ph, &c->plan) < 0) {
 			os_info("[stubtest] INIT plan overflow (pid %lu)\n",
 				(unsigned long)c->pid);
 			d->action = UML_STUB_ACTION_KILL;
@@ -216,13 +216,23 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		c->plan_left = c->plan.n_ops;
 		os_info("[stubtest] INIT pid %lu: %d map op(s)\n",
 			(unsigned long)c->pid, c->plan.n_ops);
-		issue_plan_op(c, &c->plan.ops[0]);
+		if (c->plan_left > 0) {
+			issue_plan_op(c, &c->plan.ops[0]);
+		} else {
+			/* Empty mm (a fresh S1/S2 mm context holds no
+			 * VMA until binfmt fills it): answer NONE so
+			 * the stub proceeds — reading ops[0] here fed
+			 * the slot garbage (found on the S2 userspace
+			 * path, empty-INIT round). */
+			d->action = UML_STUB_ACTION_NONE;
+			d->err = 0;
+		}
 		return 0;
 	}
 	if (d->cmd == UML_STUB_CMD_FAULT) {
 		int rc;
 
-		rc = uml_nt_mm_fault(c->mm, &probe_phys, d->fault_addr,
+		rc = uml_nt_mm_fault(c->mm, c->ph, d->fault_addr,
 				     d->fault_type, &c->plan);
 		if (rc < 0 || c->plan.kill) {
 			os_info("[stubtest] FATAL fault pid %lu "
@@ -290,7 +300,7 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 		d->err = 1;
 		return;
 	}
-	if (uml_nt_mm_clone(&mm_child, c->mm, &probe_phys, g->rsp) < 0) {
+	if (uml_nt_mm_clone(&mm_child, c->mm, c->ph, g->rsp) < 0) {
 		os_info("[stubtest] fork: mm clone failed\n");
 		d->retval = (unsigned long long)-12LL; /* -ENOMEM */
 		d->err = 1;
@@ -313,7 +323,7 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	 * registers and rax = 0 (fork semantics); the parent gets the
 	 * child pid. */
 	if (uml_nt_spawn_stub(k, g->rip + 2, g->rsp, g) < 0) {
-		uml_nt_mm_drop(&mm_child, &probe_phys);
+		uml_nt_mm_drop(&mm_child, c->ph);
 		d->retval = (unsigned long long)-12LL;
 		d->err = 1;
 		return;
@@ -321,6 +331,7 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	k->d->init_regs = *g;
 	k->d->init_regs.rax = 0;
 	child_reaped = 0;
+	k->resumed = 1; /* the fork spawn resumes the child directly */
 	nt->ResumeThread(k->thread);
 	d->retval = k->pid;
 	d->err = 0;
@@ -463,8 +474,10 @@ fail:
 }
 
 /* Serve one signaled conn: seq-check, dispatch, release. Returns 1
- * when the conn halted (kernel terminated it), -1 on protocol error. */
-static int pump_conn(struct uml_nt_stub_conn *c)
+ * when the conn halted (kernel terminated it), -1 on protocol error.
+ * EXPORT (S2): the real userspace() loop serves through this — same
+ * machinery as the probe's service loop, one protocol. */
+int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 {
 	mb();
 	if (c->d->req_seq != c->d->done_seq + 1) {
@@ -820,9 +833,9 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		}
 		/* WAIT_OBJECT_0 == 0: w = signaled index */
 		if (w == 0)
-			rc = pump_conn(&conn_parent);
+			rc = uml_nt_pump_conn(&conn_parent);
 		else if (conn_child.alive)
-			rc = pump_conn(&conn_child);
+			rc = uml_nt_pump_conn(&conn_child);
 		else
 			rc = 0;
 		if (rc < 0)

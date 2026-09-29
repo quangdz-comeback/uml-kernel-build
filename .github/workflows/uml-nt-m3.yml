@@ -117,9 +117,12 @@ jobs:
 
       # M3.5 mount gate (wine): same vmlinux + the ext4 root image via
       # ubd0=/root= — must mount ext4 (sync ubd path, no io thread) and
-      # find /sbin/init in it. The boot then parks in the start_userspace
-      # stub_panic (M3.8 work) → timeout kills it (exit 124), so the
-      # contract is the log, not the exit code.
+      # find /sbin/init in it. Since M3.8 S1 the boot fails FAST after
+      # that: the /sbin/init exec dies at bprm_mm_init (no uml_nt_stub=
+      # configured for real mm contexts → "mmctx: no stub path
+      # configured", error -12, before binfmt search) → panic → exit 1.
+      # Exit 1 or 124 (pre-S1 park) both stay inside the assert; the
+      # contract is the log.
       - name: Wine ext4 mount gate (M3.5)
         run: |
           cd uml-nt/launcher
@@ -237,9 +240,10 @@ jobs:
       # M3.5 native mount gate: ubd0 opens the ext4 image through the
       # os-Windows fd table (NtCreateFile), sync do_io serves the reads,
       # ext4 mounts, /sbin/init (static, freestanding) is found in the
-      # image. The boot parks in the start_userspace stub_panic (M3.8:
-      # spawn) — timeout kills it, so exit 124 is the expected "reached
-      # the end", and the log is the contract.
+      # image. Since M3.8 S1 the boot fails FAST after that: the exec
+      # dies at bprm_mm_init (no uml_nt_stub= → "mmctx: no stub path
+      # configured") → panic → exit 1. Exit 1 or 124 (pre-S1 park)
+      # both stay inside the assert; the log is the contract.
       - name: NATIVE ext4 mount gate (M3.5)
         shell: msys2 {0}
         run: |

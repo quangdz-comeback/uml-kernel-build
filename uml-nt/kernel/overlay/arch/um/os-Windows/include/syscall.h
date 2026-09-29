@@ -55,6 +55,10 @@ struct uml_nt_stub_conn {
 	unsigned long long ppid;
 	/* set_tid_address(2) target (clear-on-exit is M4 signals). */
 	unsigned long long clear_tid_va;
+	/* S2: the owning task's userspace() loop resumed the thread
+	 * once (bootstrap: entry state + INIT plan streamed). A forked
+	 * conn is resumed by its spawn (fork hook sets this too). */
+	int resumed;
 };
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
@@ -85,6 +89,12 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 /* The configured stub exe path (uml_nt_stub= / uml_nt_stubtest=
  * param), or NULL when neither was given. */
 const char *uml_nt_stub_path(void);
+
+/* Serve one signaled conn (S2 export of the probe's pump_conn):
+ * seq-check, dispatch the published request, release the stub.
+ * Returns 0 = served, 1 = the conn halted (kernel terminated the
+ * stub — exit_code holds the guest retval), -1 = protocol error. */
+int uml_nt_pump_conn(struct uml_nt_stub_conn *c);
 
 /* Hooks implemented next to the conn table (stub_ctl.c):
  *  - fork/clone(!CLONE_VM): spawn the child stub from the parent's
