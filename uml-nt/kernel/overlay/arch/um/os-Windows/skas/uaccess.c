@@ -16,10 +16,10 @@
  * loop is single-threaded. Outside a handler uacc_mm is NULL and
  * every access faults (fail-safe, never a wild flat-view access).
  *
- * Futex atomics translate the uaddr once and use __sync on the flat
- * view — correct while the page is private (a COW-shared futex write
- * would land on the shared page without a fault; threads are M5 —
- * documented M4 follow-up together with guest signals).
+ * Futex atomics go through uml_nt_uacc_write_ptr (the hazard 3
+ * fixup): a COW-shared uaddr gets its run made private (inline copy
+ * + remap ops through the sink) before the atomic touches it — the
+ * __sync ops then always run on a private page.
  */
 #include <linux/kernel.h>
 #include <linux/uaccess.h>
@@ -90,16 +90,19 @@ unsigned long __clear_user(void __user *mem, unsigned long len)
 int arch_futex_atomic_op_inuser(int op, u32 oparg, int *oval,
 				u32 __user *uaddr)
 {
-	long long off;
+	char *w;
 	volatile u32 *p;
 	u32 oldval;
 
-	off = uml_nt_vma_translate(uacc_mm,
-				   (unsigned long long)(unsigned long)uaddr,
-				   4);
-	if (off < 0)
+	/* write_ptr = hazard 3 fix: a COW-shared uaddr gets its run
+	 * made private (inline copy + remap ops through the sink)
+	 * before the atomic touches it — a direct translate+write
+	 * would land on the page the sharing process still reads. */
+	w = uml_nt_uacc_write_ptr(uacc_mm, uml_boot.physmem_base,
+				  (unsigned long long)(unsigned long)uaddr);
+	if (w == NULL)
 		return -EFAULT;
-	p = (volatile u32 *)((char *)uml_boot.physmem_base + off);
+	p = (volatile u32 *)w;
 	oldval = *p;
 	switch (op) {
 	case FUTEX_OP_SET:
@@ -127,16 +130,15 @@ int arch_futex_atomic_op_inuser(int op, u32 oparg, int *oval,
 int futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
 				  u32 oldval, u32 newval)
 {
-	long long off;
+	char *w;
 	volatile u32 *p;
 	u32 v;
 
-	off = uml_nt_vma_translate(uacc_mm,
-				   (unsigned long long)(unsigned long)uaddr,
-				   4);
-	if (off < 0)
+	w = uml_nt_uacc_write_ptr(uacc_mm, uml_boot.physmem_base,
+				  (unsigned long long)(unsigned long)uaddr);
+	if (w == NULL)
 		return -EFAULT;
-	p = (volatile u32 *)((char *)uml_boot.physmem_base + off);
+	p = (volatile u32 *)w;
 	v = __sync_val_compare_and_swap(p, oldval, newval);
 	*uval = v;
 	return 0;

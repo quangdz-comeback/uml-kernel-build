@@ -58,23 +58,29 @@
 #define SC_CLONE_VM     0x00000100ull
 #define SC_CLONE_THREAD 0x00010000ull
 
-/* Prime a one-op plan for the syscall answer (the stub executes it
- * in its own address space, exactly like a fault repair). */
-static void sc_plan1(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
-		     unsigned long long va, unsigned long long len,
-		     unsigned long long off)
+/* Queue one op for the syscall answer (the stub executes ops one
+ * round-trip each). The dispatch resets the plan at entry, so ops
+ * APPEND: the handler's own op (mmap/munmap/mprotect), any uaccess
+ * write-fixup ops (hazard 3 — COW runs made private mid-handler)
+ * and the fork hook's parent re-protect ops accumulate in order.
+ * Never reset here — that would drop the fixups an earlier step in
+ * the same answer already queued. Shared with stub_ctl.c (the fork
+ * hook re-protects the parent's views). */
+int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
+		       unsigned long long va, unsigned long long len,
+		       unsigned long long off)
 {
-	c->plan.kill = 0;
-	c->plan.n_ops = 1;
-	c->plan.ops[0].op = op;
-	c->plan.ops[0].prot = prot;
-	c->plan.ops[0].va = va;
-	c->plan.ops[0].len = len;
-	c->plan.ops[0].off = off;
-	c->plan.copy_src_off = 0;
-	c->plan.copy_dst_off = 0;
+	if (c->plan.n_ops >= UML_NT_FAULT_MAX_OPS)
+		return -1;
+	c->plan.ops[c->plan.n_ops].op = op;
+	c->plan.ops[c->plan.n_ops].prot = prot;
+	c->plan.ops[c->plan.n_ops].va = va;
+	c->plan.ops[c->plan.n_ops].len = len;
+	c->plan.ops[c->plan.n_ops].off = off;
+	c->plan.n_ops++;
 	c->plan_next = 0;
-	c->plan_left = 1;
+	c->plan_left = c->plan.n_ops;
+	return 0;
 }
 
 static int overlaps(const struct uml_nt_mm *mm, unsigned long long s,
@@ -204,7 +210,7 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 					  UML_NT_PHYS_RUN_SIZE);
 		return SC_RET(SC_ENOMEM);
 	}
-	sc_plan1(c, UML_NT_FOP_MAP, prot, va, len, (unsigned long long)sp);
+	uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, prot, va, len, (unsigned long long)sp);
 	return va;
 }
 
@@ -255,7 +261,7 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 		return SC_RET(SC_ENOMEM);
 	for (i = 0; i < nruns; i++)
 		uml_nt_phys_unref(c->ph, (long long)runs[i]);
-	sc_plan1(c, UML_NT_FOP_UNMAP, 0, addr, len, 0);
+	uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0, addr, len, 0);
 	return 0;
 }
 
@@ -283,7 +289,7 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 	}
 	if (uml_nt_vma_chg(c->mm, addr, addr + len, prot) < 0)
 		return SC_RET(SC_ENOMEM);
-	sc_plan1(c, UML_NT_FOP_PROTECT, prot, addr,
+	uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT, prot, addr,
 		 len, 0);
 	return 0;
 }
@@ -308,8 +314,16 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	const unsigned long long *a = d->args;
 	unsigned long long nr = d->regs.rax;
 	unsigned long long ret;
+	struct uml_nt_uacc_sink sink;
 
 	uml_nt_uacc_set_mm(c->mm);
+	/* The write-fixup channel (hazard 3): the handler's to_user/
+	 * clear_user/futex writes force COW-shared runs private and
+	 * queue their remap ops into THIS plan — streamed after the
+	 * handler, retval parked (below). */
+	sink.ph = c->ph;
+	sink.plan = &c->plan;
+	uml_nt_uacc_set_sink(&sink);
 	d->err = 0;
 	d->halt = 0;
 	c->plan.kill = 0;
@@ -410,4 +424,5 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	}
 out:
 	uml_nt_uacc_set_mm(NULL);
+	uml_nt_uacc_set_sink(NULL);
 }

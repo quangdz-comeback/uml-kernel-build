@@ -333,6 +333,34 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	child_reaped = 0;
 	k->resumed = 1; /* the fork spawn resumes the child directly */
 	nt->ResumeThread(k->thread);
+	/* Upstream fork marks both pte tables read-only: re-protect the
+	 * PARENT's views too (mm_clone flagged the kernel-side VMAs —
+	 * the stub's MapViewOfFile views are per-conn and stay writable
+	 * until told). Unmap + remap read-only; the parent's next write
+	 * faults into the COW machinery instead of landing on the run
+	 * the child still reads. Ops ride the fork answer (the dispatch
+	 * parks the retval while plan_left > 0). The walker's by-refs
+	 * fixup guards the uaccess path independently. */
+	for (vi = 0; vi < c->mm->nvma; vi++) {
+		struct uml_nt_vma *pv = &c->mm->vma[vi];
+		unsigned long long len = pv->end - pv->start;
+
+		if (!uml_nt_prot_writable(pv->prot) ||
+		    !(pv->flags & UML_NT_VMA_COW))
+			continue;
+		if (uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0, pv->start,
+				       len, 0) < 0 ||
+		    uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
+				       uml_nt_prot_readonly(pv->prot),
+				       pv->start, len,
+				       pv->run_off) < 0) {
+			/* plan full: the parent keeps this writable view;
+			 * shared-run safety falls back to the walker's
+			 * by-refs fixup (kernel side) — never silently
+			 * wrong there. */
+			break;
+		}
+	}
 	d->retval = k->pid;
 	d->err = 0;
 	os_info("[stubtest] fork: child pid %lu\n",

@@ -38,10 +38,13 @@
 #define UML_NT_FOP_UNMAP   4u
 
 /* UNMAP + up to 3 MAP pieces (COW split), or an INIT plan: one MAP
- * per VMA + guard NOACCESS protects. 16 (M3.4): an ELF-loaded mm has
- * one VMA per load region + stack + guard — 8 ops with the probe
- * guest, real busybox images stay under it too. */
-#define UML_NT_FAULT_MAX_OPS 16
+ * per VMA + guard NOACCESS protects. 64 (hazard-3 slice): the uaccess
+ * write fixups QUEUE ops too — one COW run fixed up mid-syscall costs
+ * 4 (unmap + up to 3 piece maps), a multi-run to_user bursts several;
+ * the plan is kernel-side only (the stub sees ONE op per round-trip),
+ * so the cap is memory, not protocol. 64 covers UML_NT_VMA_MAX for
+ * INIT plans as well. */
+#define UML_NT_FAULT_MAX_OPS 64
 
 struct uml_nt_fault_op {
 	unsigned op;   /* UML_NT_FOP_* */

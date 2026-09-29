@@ -106,4 +106,12 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d);
 void uml_nt_sys_wait4(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d,
 		      const unsigned long long *a);
 
+/* Append one stub op to the conn's plan for the current answer (the
+ * syscall dispatch resets the plan at entry; ops accumulate and stream
+ * after the handler, retval parked). Used by the syscall handlers and
+ * the fork hook (parent-view re-protect). */
+int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
+		       unsigned long long va, unsigned long long len,
+		       unsigned long long off);
+
 #endif /* __UM_OS_WINDOWS_SYSCALL_H */

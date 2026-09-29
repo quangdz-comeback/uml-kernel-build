@@ -247,6 +247,14 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 			flags &= ~UML_NT_VMA_COW;
 		} else if (uml_nt_prot_writable(v->prot)) {
 			flags |= UML_NT_VMA_COW;
+			/* Upstream fork marks BOTH pte tables read-only
+			 * (copy_page_range on both mms): the parent's
+			 * writable view must fault too, or its post-
+			 * fork writes land on the shared run and the
+			 * child sees them. Effective prot still reads
+			 * writable while refs==1 (parent after the
+			 * child exits) — the mark only bites shared. */
+			((struct uml_nt_vma *)v)->flags |= UML_NT_VMA_COW;
 		}
 
 		rc = uml_nt_vma_add(dst, v->start, v->end, run_off,

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <vma.h>
+#include <fault.h>
 #include <uaccess_walk.h>
 
 static int fails;
@@ -21,22 +22,60 @@ static int fails;
 
 #define RAM  0x60000000ull
 #define RUN  UML_NT_PHYS_RUN_SIZE
-/* flat view buffer: 4 runs of guest RAM behind base 0 */
-static unsigned char flat[4 * RUN];
+/* flat view buffer: 8 runs of guest RAM behind base 0 */
+static unsigned char flat[8 * RUN];
 
-/* Backend mock: the walker never allocates, but vma.c (linked for
- * uml_nt_vma_translate) references the phys backend symbols. */
+/* Backend mock: block-granular buddy (test_elf pattern) — the COW
+ * fixups ALLOCATE runs, so the mock must hand out real blocks. */
+#define MOCK_RUNS 8
+static unsigned char mock_taken[MOCK_RUNS];
+
+static void mock_reset(void)
+{
+	memset(mock_taken, 0, sizeof(mock_taken));
+}
+
+static int mock_need(int nruns)
+{
+	int k;
+
+	for (k = 0; (1 << k) < nruns; k++)
+		;
+	return 1 << k;
+}
+
 long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 {
-	(void)page_out;
-	(void)nruns;
+	int i, j, need = mock_need(nruns);
+
+	for (i = 0; i + need <= MOCK_RUNS; i++) {
+		int ok = 1;
+
+		for (j = 0; j < need; j++) {
+			if (mock_taken[i + j]) {
+				ok = 0;
+				i += j;
+				break;
+			}
+		}
+		if (!ok)
+			continue;
+		for (j = 0; j < need; j++)
+			mock_taken[i + j] = 1;
+		*page_out = &mock_taken[i];
+		return (long long)i * RUN;
+	}
 	return -1;
 }
 
 void uml_nt_phys_backend_free(void *page, int nruns)
 {
-	(void)page;
-	(void)nruns;
+	int i = (int)((char *)page - (char *)mock_taken);
+	int j, need = mock_need(nruns);
+
+	for (j = 0; j < need; j++)
+		if (i + j >= 0 && i + j < MOCK_RUNS)
+			mock_taken[i + j] = 0;
 }
 
 static void fill_pattern(unsigned char *b, unsigned long n)
@@ -46,6 +85,8 @@ static void fill_pattern(unsigned char *b, unsigned long n)
 	for (i = 0; i < n; i++)
 		b[i] = (unsigned char)(i * 7 + 3);
 }
+
+static void test_cow_fixup(void);
 
 int main(void)
 {
@@ -150,10 +191,161 @@ int main(void)
 	CHECK(uml_nt_uacc_strncpy(buf, &mm, (char *)flat, RAM + 2 * RUN,
 				  64) < 0);
 
+	/* Hazard 3: the write fixups (COW surgery + remap ops + the
+	 * audit's prot check). */
+	test_cow_fixup();
+
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
 		return 1;
 	}
 	printf("test_uaccess: OK\n");
 	return 0;
+}
+
+/* Hazard 3 (review M3.8): WRITE paths must never touch a COW-shared
+ * run directly, and never write a read-only VMA. The fixup copies
+ * the run private INLINE (old content preserved for the sharer),
+ * splits the writer's VMA and queues the stub remap ops. */
+static void test_cow_fixup(void)
+{
+	struct uml_nt_mm parent, child;
+	struct uml_nt_phys ph;
+	struct uml_nt_fault_plan plan;
+	struct uml_nt_uacc_sink sink;
+	char buf[64];
+	unsigned i, pattern_at;
+	long long parent_off, new_off;
+
+	/* Parent: one writable run, populated through the phys API so
+	 * the mock's bookkeeping stays consistent. */
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 4 * RUN) == 0);
+	uml_nt_mm_init(&parent);
+	parent_off = uml_nt_phys_alloc(&ph);
+	CHECK(parent_off == 0); /* mock hands run 0 first */
+	CHECK(uml_nt_vma_add(&parent, RAM, RAM + RUN,
+			     (unsigned long long)parent_off,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	pattern_at = (unsigned)parent_off;
+	fill_pattern(flat + pattern_at, RUN);
+
+	/* fork: child shares every run (COW, refs=2). rsp=0 is in no
+	 * VMA — no eager stack copy. */
+	uml_nt_mm_init(&child);
+	CHECK(uml_nt_mm_clone(&child, &parent, &ph, 0) == 0);
+	CHECK(uml_nt_phys_refs(&ph, parent_off) == 2);
+	CHECK(child.vma[0].flags & UML_NT_VMA_COW);
+
+	/* The dispatch installs the sink; the plan starts reset (the
+	 * syscall handler contract). */
+	memset(&plan, 0, sizeof(plan));
+	sink.ph = &ph;
+	sink.plan = &plan;
+	uml_nt_uacc_set_sink(&sink);
+
+	/* CHILD writes 64 bytes into the shared run: surgery, not a
+	 * direct write. */
+	memset(buf, 0x5a, sizeof(buf));
+	CHECK(uml_nt_uacc_walk(&child, (char *)flat, RAM + 0x2000, 64,
+			       buf, UML_NT_UACC_TO_GUEST) == 0);
+
+	/* the SHARER's copy is untouched (the whole point) */
+	for (i = 0; i < 64; i++)
+		CHECK(flat[pattern_at + 0x2000 + i] ==
+		      (unsigned char)((0x2000 + i) * 7 + 3));
+	/* the writer's piece: private run, COW gone, old content kept
+	 * + new bytes on top */
+	CHECK(plan.n_ops == 2); /* UNMAP span + MAP piece */
+	CHECK(plan.ops[0].op == UML_NT_FOP_UNMAP);
+	CHECK(plan.ops[0].va == RAM && plan.ops[0].len == RUN);
+	CHECK(plan.ops[1].op == UML_NT_FOP_MAP);
+	CHECK(plan.ops[1].prot == UML_NT_PAGE_READWRITE);
+	CHECK(plan.ops[1].va == RAM && plan.ops[1].len == RUN);
+	new_off = (long long)plan.ops[1].off;
+	CHECK(new_off != parent_off);
+	CHECK(uml_nt_phys_refs(&ph, (long long)new_off) == 1);
+	CHECK(uml_nt_phys_refs(&ph, parent_off) == 1); /* child gave up
+							* its claim */
+	for (i = 0; i < 0x2000; i++)
+		CHECK(flat[new_off + i] == flat[pattern_at + i]);
+	for (i = 0; i < 64; i++)
+		CHECK(flat[new_off + 0x2000 + i] == 0x5a);
+	CHECK(!(child.vma[0].flags & UML_NT_VMA_COW));
+	CHECK(child.vma[0].run_off == (unsigned long long)new_off);
+	/* the parent's VMA still claims the old run, COW intact */
+	CHECK(parent.vma[0].flags & UML_NT_VMA_COW);
+	CHECK(parent.vma[0].run_off == (unsigned long long)parent_off);
+
+	/* Second write, same (now private) run: direct, NO new ops. */
+	memset(buf, 0xa5, 8);
+	CHECK(uml_nt_uacc_walk(&child, (char *)flat, RAM + 0x3000, 8,
+			       buf, UML_NT_UACC_TO_GUEST) == 0);
+	CHECK(plan.n_ops == 2);
+	for (i = 0; i < 8; i++)
+		CHECK(flat[new_off + 0x3000 + i] == 0xa5);
+
+	/* clear_user on the child: private now, direct. */
+	CHECK(uml_nt_uacc_walk(&child, (char *)flat, RAM + 0x4000, 16,
+			       NULL, UML_NT_UACC_ZERO_GUEST) == 0);
+	CHECK(plan.n_ops == 2);
+	for (i = 0; i < 16; i++)
+		CHECK(flat[new_off + 0x4000 + i] == 0);
+
+	/* PARENT writes its own (now last-ref) run: direct — refs==1
+	 * means private-in-effect (upstream "private page" branch). */
+	memset(buf, 0x77, 8);
+	CHECK(uml_nt_uacc_walk(&parent, (char *)flat, RAM + 0x100, 8,
+			       buf, UML_NT_UACC_TO_GUEST) == 0);
+	CHECK(plan.n_ops == 2);
+	for (i = 0; i < 8; i++)
+		CHECK(flat[pattern_at + 0x100 + i] == 0x77);
+
+	/* Read-only VMA: -EFAULT class, nothing written (the audit's
+	 * prot check — was a silent write before the fix). */
+	{
+		struct uml_nt_mm ro;
+		struct uml_nt_phys ph2;
+
+		mock_reset();
+		CHECK(uml_nt_phys_init(&ph2, 4 * RUN) == 0);
+		uml_nt_mm_init(&ro);
+		CHECK(uml_nt_vma_add(&ro, RAM, RAM + RUN, 0,
+				     UML_NT_PAGE_READONLY, 0) == 0);
+		fill_pattern(flat, RUN);
+		memset(buf, 0x5a, 8);
+		CHECK(uml_nt_uacc_walk(&ro, (char *)flat, RAM + 16, 8,
+				       buf, UML_NT_UACC_TO_GUEST) < 0);
+		for (i = 0; i < 8; i++)
+			CHECK(flat[16 + i] !=
+			      0x5a); /* pattern byte intact */
+	}
+
+	/* No sink installed (outside a handler): COW-shared write
+	 * faults fail-safe instead of corrupting the sharer. */
+	{
+		struct uml_nt_mm p2, c2;
+		struct uml_nt_phys ph3;
+		long long off3;
+
+		mock_reset();
+		CHECK(uml_nt_phys_init(&ph3, 4 * RUN) == 0);
+		uml_nt_mm_init(&p2);
+		off3 = uml_nt_phys_alloc(&ph3);
+		CHECK(off3 == 0);
+		CHECK(uml_nt_vma_add(&p2, RAM, RAM + RUN,
+				     (unsigned long long)off3,
+				     UML_NT_PAGE_READWRITE, 0) == 0);
+		fill_pattern(flat + off3, RUN);
+		uml_nt_mm_init(&c2);
+		CHECK(uml_nt_mm_clone(&c2, &p2, &ph3, 0) == 0);
+		uml_nt_uacc_set_sink(NULL); /* no channel */
+		memset(buf, 0x5a, 8);
+		CHECK(uml_nt_uacc_walk(&c2, (char *)flat, RAM + 16, 8,
+				       buf, UML_NT_UACC_TO_GUEST) < 0);
+		for (i = 0; i < 8; i++)
+			CHECK(flat[off3 + 16 + i] != 0x5a); /* sharer
+							     * intact */
+	}
+	uml_nt_uacc_set_sink(NULL);
 }

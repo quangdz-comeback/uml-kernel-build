@@ -8,6 +8,7 @@
 #define __UM_OS_WINDOWS_UACCESS_WALK_H
 
 #include <vma.h>
+#include <fault.h>
 
 /* Walk guest VA [va, va+len) through the mm's VMA tree in page-sized
  * chunks and copy against `base` (the kernel's flat physmem view).
@@ -19,10 +20,32 @@
  *   from_guest: guest -> buf (copy_from_user)
  *   to_guest:   buf -> guest (copy_to_user)
  *   zero_guest: guest <- 0 (clear_user)
+ *
+ * WRITE paths (to_guest/zero_guest) never touch a run they must not:
+ * a chunk landing on a COW-shared run (refs > 1) gets the COW surgery
+ * INLINE (fresh run + copy + cow_split — hazard 3, review M3.8: a
+ * direct write would corrupt the sharing process through the shared
+ * page) and queues the stub remap ops into the sink's plan; a chunk
+ * on a read-only VMA faults (-EFAULT class) instead of writing.
+ * Requires the sink (below): without it, writes to shared runs fault
+ * fail-safe rather than silently corrupt.
  */
 #define UML_NT_UACC_FROM_GUEST 0
 #define UML_NT_UACC_TO_GUEST   1
 #define UML_NT_UACC_ZERO_GUEST 2
+
+/* The write-fixup channel, installed by the syscall dispatch for one
+ * handler run (the same single-threaded pattern as set_mm): `ph`
+ * allocates the fresh run, `plan` receives the stub remap ops (the
+ * dispatch streams them after the handler, with the syscall retval
+ * parked per D16). */
+struct uml_nt_uacc_sink {
+	struct uml_nt_phys *ph;
+	struct uml_nt_fault_plan *plan;
+};
+
+void uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
+void uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s);
 
 int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 		     unsigned long long va, unsigned long long len,
@@ -40,5 +63,15 @@ long long uml_nt_uacc_strncpy(char *dst, const struct uml_nt_mm *mm,
 long long uml_nt_uacc_strnlen(const struct uml_nt_mm *mm, char *base,
 			      unsigned long long va,
 			      unsigned long long maxlen);
+
+/* Flat-view pointer for the byte at `va` after ensuring a kernel
+ * WRITE to its page is safe: COW-shared runs are copied private
+ * first (surgery + remap ops through the sink), read-only VMAs fault.
+ * Returns 0 on fault (EFAULT class). The walker's write paths use it
+ * per chunk; the futex atomics glue uses it instead of translating
+ * directly (same hazard: a COW-shared futex write would land on the
+ * shared page). */
+char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
+			    unsigned long long va);
 
 #endif /* __UM_OS_WINDOWS_UACCESS_WALK_H */
