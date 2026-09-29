@@ -347,7 +347,8 @@ int main(int argc, char **argv)
 
 	resolve_api_table();
 
-	/* console handles travel to the kernel (early console, D9). */
+	/* console handles travel to the kernel (early console, D9;
+	 * M3.6 adds stdin for the console reader thread). */
 	std_out = GetStdHandle(STD_OUTPUT_HANDLE);
 	std_err = GetStdHandle(STD_ERROR_HANDLE);
 
@@ -422,6 +423,7 @@ int main(int argc, char **argv)
 	bi->image_size = img_size;
 	bi->stdio_out = std_out;
 	bi->stdio_err = std_err;
+	bi->stdio_in = GetStdHandle(STD_INPUT_HANDLE);
 	bi->argc = nargs + 1; /* argv[0] + args (earlyprintk included) */
 	bi->argv = kargv_p;
 	bi->envp = kenv_p;

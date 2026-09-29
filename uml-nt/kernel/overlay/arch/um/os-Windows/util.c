@@ -16,14 +16,40 @@
 #include <os.h>
 #include "internal.h"
 
+/* HANDOFF §4.1 #13: NtWriteFile to the same console handle from two
+ * threads races output (printk from any thread vs tty writes vs
+ * stub-ctl diagnostics). Every console write funnels here, so the
+ * spinlock lives at the funnel. __sync CAS lowers to lock cmpxchg on
+ * both ELF (freestanding) and PE builds — no SRWLock needed in the
+ * D9 table. */
+static volatile int g_con_lock;
+
+static void con_lock(void)
+{
+	for (;;) {
+		if (__sync_val_compare_and_swap(&g_con_lock, 0, 1) == 0)
+			return;
+		/* 1-tick alertable delay = yield; FALSE is a PE-ism. */
+		nt->NtDelayExecution(0,
+				     &(LARGE_INTEGER){ .QuadPart = -1 });
+	}
+}
+
+static void con_unlock(void)
+{
+	__sync_lock_release(&g_con_lock); /* store-release */
+}
+
 void nt_console_write(const char *s, unsigned int n)
 {
 	IO_STATUS_BLOCK iosb;
 
 	if (nt == NULL || uml_boot.stdio_out == NULL || n == 0)
 		return;
+	con_lock();
 	nt->NtWriteFile(uml_boot.stdio_out, NULL, NULL, NULL, &iosb,
 			(void *)s, n, NULL, NULL);
+	con_unlock();
 }
 
 void um_early_printk(const char *s, unsigned int n)

@@ -127,3 +127,36 @@ filesystem)` + `Run /sbin/init as init process`; boot sau đó park
 trong stub_panic start_userspace (việc M3.7/M3.8) → timeout 124 =
 "đã tới cuối đường". devtmpfs mount báo `error mounting -2` — ghi
 nhận, xử lý cùng M3.8 (busybox cần /dev).
+
+## D14 — Console TTY = tty_driver thật + seam stdio handles, không port chan/line (2026-09-29)
+
+**Console M3.6 là driver thật nhưng không port stack chan/line của
+upstream.** Upstream 6.18: stdio_console + line + chan (~1900 dòng)
+— phần generic (tty core, line discipline, flip buffers) KERNEL đã
+có sẵn (CONFIG_TTY=y); phần riêng của UML (chan layer) là fd/poll
+shaped — thứ NT backend không có (os_pipe PANIC, overlapped là M4).
+Port chọn lọc trong `os-Windows/console.c`:
+- **1 tty_driver (major 4, /dev/tty0) trên 1 tty_port**: ops
+  open/close = `tty_port_open`/`tty_port_close` (generic, đòi
+  port->ops khác NULL — dùng `struct tty_port_operations{}` rỗng),
+  write → đường ghi console. `tty_alloc_driver(REAL_RAW|DYNAMIC_DEV)`
+  + `tty_register_device(driver,0,NULL)` — đúng recipe
+  `register_lines` của line.c.
+- **1 struct console** (name "tty", index 0, CON_PRINTBUFFER|CON_ANYTIME)
+  — printk route qua đây (`printk: legacy console [tty0] enabled`
+  trong log = hợp đồng); kernel tự thêm `console=tty0` vào cmdline
+  (um_arch DEFAULT_COMMAND_LINE_CONSOLE).
+- **Input = thread đọc stdin**: `boot-info v3` thêm `stdio_in`
+  (append-only; launcher GetStdHandle(STD_INPUT_HANDLE)); reader
+  thread block trong NtReadFile → `tty_insert_flip_string` +
+  `tty_flip_buffer_push` — pattern `deliver_alarm()` (host thread
+  gọi thẳng vào kernel context, không cần irq/epoll). EOF/stdin hỏng
+  → thread park sau 1 dòng log (loud, không silent). Raw console
+  input handle (interactive thật) là việc M4 — CI pipe stdin là FILE
+  handle nên NtReadFile chạy sạch.
+- **Pitfall §4.1 #13** (ghi console race): mọi write ch funnel qua
+  `nt_console_write()` (util.c) với spinlock `__sync` CAS (lock
+  cmpxchg cả ELF lẫn PE — không cần SRWLock trong D9 table).
+
+Chữ ký tty_operations 6.18 (lỗi compile gặp phải): `.write = ssize_t
+(tty, const u8 *, size_t)`, `.write_room = unsigned int (tty)`.

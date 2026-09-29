@@ -135,6 +135,7 @@ jobs:
           grep -q "EXT4-fs (ubda): mounted filesystem" mount.log || { echo "ext4 never mounted (ubd sync I/O broken?)"; exit 1; }
           grep -q "VFS: Mounted root (ext4 filesystem)" mount.log || { echo "root never mounted"; exit 1; }
           grep -q "Run /sbin/init as init process" mount.log || { echo "/sbin/init never found in the mounted image"; exit 1; }
+          grep -q "stdio console ready" mount.log || { echo "M3.6 console driver never registered"; exit 1; }
           echo "M3.5 wine mount gate ok"
 
   launcher:
@@ -213,7 +214,11 @@ jobs:
           grep -q "CHILD-ALIVE" boot.log || { echo "M3.3 fork: child never ran (COW stack fault?)"; exit 1; }
           grep -q "PARENT-RESUMED" boot.log || { echo "M3.3 fork: parent never resumed"; exit 1; }
           grep -q "FORK OK: parent exit 0, child exit 7" boot.log || { echo "M3.3 fork exit codes wrong"; exit 1; }
-          echo "M1.9 NATIVE BOOT OK + M2 ROUND-TRIP OK + M3.1 FAULTS OK + M3.3 FORK OK + M3.4 ELF LOADER OK"
+          # M3.6: the real console TTY registers (major 4 tty0) and
+          # printk routes through it.
+          grep -q "stdio console ready" boot.log || { echo "M3.6 console driver never registered"; exit 1; }
+          grep -q "console \[tty0\] enabled" boot.log || { echo "M3.6 tty console never enabled (printk not routed)"; exit 1; }
+          echo "M1.9 NATIVE BOOT OK + M2 ROUND-TRIP OK + M3.1 FAULTS OK + M3.3 FORK OK + M3.4 ELF LOADER OK + M3.6 CONSOLE OK"
 
       # M3.5 native mount gate: ubd0 opens the ext4 image through the
       # os-Windows fd table (NtCreateFile), sync do_io serves the reads,
@@ -242,4 +247,5 @@ jobs:
           grep -q "EXT4-fs (ubda): mounted filesystem" mount.log || { echo "ext4 never mounted (ubd sync I/O broken natively?)"; exit 1; }
           grep -q "VFS: Mounted root (ext4 filesystem)" mount.log || { echo "root never mounted"; exit 1; }
           grep -q "Run /sbin/init as init process" mount.log || { echo "/sbin/init never found in the mounted image"; exit 1; }
+          grep -q "stdio console ready" mount.log || { echo "M3.6 console driver never registered"; exit 1; }
           echo "M3.5 NATIVE MOUNT OK: ubd sync I/O + ext4 + /sbin/init"

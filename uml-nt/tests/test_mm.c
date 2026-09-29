@@ -271,6 +271,29 @@ static void test_vma(void)
 	CHECK(a.nvma == 1);
 	CHECK(uml_nt_vma_del(&a, RAM + 0x00000, RAM + 0x10000) == -1);
 
+	/* sorted-by-start invariant after out-of-order inserts —
+	 * find_free_base (elf.c) walks the list assuming ascending
+	 * order; vma_add's insert must keep it (M3.5 review note). */
+	{
+		int i;
+		unsigned long long prev = 0;
+
+		uml_nt_mm_init(&a);
+		CHECK(uml_nt_vma_add(&a, RAM + 0x60000, RAM + 0x70000,
+				     0x60000, UML_NT_PAGE_READWRITE,
+				     0) == 0);
+		CHECK(uml_nt_vma_add(&a, RAM + 0x30000, RAM + 0x40000,
+				     0x30000, UML_NT_PAGE_READWRITE,
+				     0) == 0);
+		CHECK(uml_nt_vma_add(&a, RAM, RAM + 0x10000, 0,
+				     UML_NT_PAGE_READWRITE, 0) == 0);
+		CHECK(a.nvma == 3);
+		for (i = 0; i < a.nvma; i++) {
+			CHECK(a.vma[i].start >= prev);
+			prev = a.vma[i].start;
+		}
+	}
+
 	/* clone: writable VMAs become COW; every run of the span is
 	 * reffed (owner alloc'd them); drop releases. rsp outside the
 	 * VMA = nothing eager-copies. */

@@ -15,7 +15,7 @@
 
 /* "UMLB" little-endian. */
 #define UML_BOOT_MAGIC   0x424C4D55u
-#define UML_BOOT_VERSION 2u /* v2: exec section (M3.4 ELF loader source) */
+#define UML_BOOT_VERSION 3u /* v3: stdin for the console TTY (M3.6) */
 
 struct uml_boot_info {
 	unsigned int magic;
@@ -54,6 +54,12 @@ struct uml_boot_info {
 	 * probe mode). Append-only: fields above stay frozen. */
 	HANDLE exec_section;
 	unsigned long long exec_size;
+
+	/* ---- v3 (M3.6): console stdin ----------------------------
+	 * The console reader thread blocks in NtReadFile here (a pipe
+	 * or file handle — raw console input handles are M4). NULL =
+	 * no input source; the console then runs write-only. */
+	HANDLE stdio_in;
 };
 
 #endif /* __UML_BOOT_INFO_H */
