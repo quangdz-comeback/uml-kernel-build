@@ -124,24 +124,24 @@ static void park_forever(void)
 
 /* FILE_MAP_* bits for a view with `prot` protection. FILE_MAP_EXECUTE
  * (0x20) must ride along on every executable view (M2.1 pitfall 9:
- * without it the first fetch dies with a DEP AV, info[0]=8). */
+ * without it the first fetch dies with a DEP AV, info[0]=8).
+ *
+ * Hazard-3 slice: EVERY view maps with full RWX access regardless of
+ * the requested page protection, and the protection is applied (down)
+ * with VirtualProtect right after the map. Native Windows refuses to
+ * RAISE a page protection past the view's map access — a view mapped
+ * FILE_MAP_READ (the old map_access(READONLY)) can never be
+ * VirtualProtect'ed PAGE_READWRITE later, so a fault-repair PROTECT
+ * on a read-only piece (COW split pre/post, fork re-protect) failed
+ * silently on the native runner: the guest's retry faulted, the stub
+ * died 0xC00000FD. Wine allows the raise — that is why the wine smoke
+ * stayed green. RWX views are raisable in both directions; the guest
+ * never runs inside the map→protect window (it is parked in the
+ * dispatch until the action chain completes). */
 static ULONG map_access(unsigned prot)
 {
-	switch (prot) {
-	case 0x02u: /* READONLY */
-		return 0x04u; /* FILE_MAP_READ */
-	case 0x04u: /* READWRITE */
-		return 0x06u; /* READ | WRITE */
-	case 0x10u: /* EXECUTE */
-		return 0x20u; /* FILE_MAP_EXECUTE */
-	case 0x20u: /* EXECUTE_READ */
-		return 0x24u; /* EXECUTE | READ */
-	case 0x40u: /* EXECUTE_READWRITE */
-		return 0x26u; /* EXECUTE | READ | WRITE */
-	default:   /* unknown: flat-view parity (RWX) — kernel never
-		    * asks for less by accident (fault.h contract) */
-		return 0x26u;
-	}
+	(void)prot;
+	return 0x26u; /* FILE_MAP_EXECUTE | READ | WRITE */
 }
 
 /* Execute one ACTION_* against this stub's views. Returns 1 = ok,
@@ -179,6 +179,16 @@ static int do_action(void)
 				"len=%#llx off=%#llx) failed (%lu)\n",
 				d->map_va, d->map_len, d->map_off,
 				GetLastError());
+			return 0;
+		}
+		/* The view came in RWX (raisable, see map_access): drop
+		 * the page protection to what the kernel asked for. A
+		 * later PROTECT op can move it either way. */
+		if (!VirtualProtect(base, (SIZE_T)d->map_len, d->map_prot,
+				    &old_prot)) {
+			fprintf(stderr, "stub: map VirtualProtect(%p, "
+				"%#x) failed (%lu)\n", base,
+				(unsigned)d->map_prot, GetLastError());
 			return 0;
 		}
 		return 1;
