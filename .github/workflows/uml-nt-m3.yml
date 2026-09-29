@@ -225,7 +225,8 @@ jobs:
         shell: msys2 {0}
         run: |
           cd uml-nt/launcher
-          ROOTFS=$(cygpath -w "$(pwd)/../rootfs/rootfs.ext4")
+          # artifact downloads to <ws>/rootfs — two levels up from here
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
           set +e
           timeout 180 ./launcher.exe ../../build/vmlinux \
             "ubd0=$ROOTFS" "root=/dev/ubda" > mount.log 2>&1
