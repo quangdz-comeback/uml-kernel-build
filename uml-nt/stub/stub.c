@@ -116,8 +116,14 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);
 
-	if (d->halt)
-		ExitProcess((UINT)d->retval); /* guest exit() */
+	if (d->halt) {
+		/* Guest exit(): the KERNEL owns the kill (upstream parity:
+		 * kernel terminates the stub). Park forever — ExitProcess
+		 * from inside a VEH frame gave a bogus native exit code
+		 * (0xC000013D, M2.1 CI). */
+		for (;;)
+			Sleep(INFINITE);
+	}
 
 	if (er->ExceptionCode == STATUS_ACCESS_VIOLATION)
 		return EXCEPTION_CONTINUE_SEARCH; /* M3: fault round-trip */

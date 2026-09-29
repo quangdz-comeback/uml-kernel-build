@@ -221,8 +221,14 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		stub_ctl_dispatch(d);
 		mb();
 		nt->NtSetEvent(evt_out, NULL);
-		if (d->halt)
+		if (d->halt) {
+			/* Kernel owns the kill (upstream parity): exit
+			 * code = guest retval, observed via
+			 * GetExitCodeProcess below. */
+			nt->NtTerminateProcess(pi.hProcess,
+					       (NTSTATUS)d->retval);
 			break;
+		}
 	}
 
 	nt->NtWaitForSingleObject(pi.hProcess, 0, UML_NT_INFINITE);
