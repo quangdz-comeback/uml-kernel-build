@@ -217,25 +217,30 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 	 * ceiling — the launcher's section view covers it, so
 	 * unprotecting is always safe). */
 	if (r != NULL && r->code == 0xc0000005U && r->nparams > 1 &&
-	    r->info[0] == 1 /* write */ &&
-	    (unsigned long long)(uintptr_t)r->address >= 0x64000000ULL &&
-	    (unsigned long long)(uintptr_t)r->address < 0x68000000ULL) {
-		void *pbase = (void *)(unsigned long)
-			((uintptr_t)r->address & ~(uintptr_t)0xfff);
-		unsigned long long plen = 0x1000;
-		ULONG oldp;
+	    r->info[0] == 1 /* write */) {
+		/* NT's ExceptionAddress for an AV = the RIP; the data
+		 * address = info[1]. Check the DATA address. */
+		unsigned long long wrote =
+			(unsigned long long)r->info[1];
 
-		nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
-					   &pbase, &plen,
-					   0x04 /* PAGE_READWRITE */,
-					   &oldp);
-		n = snprintf(buf, sizeof(buf),
-			     "guard hit: rip=%llx wrote %llx (padding "
-			     "unprotected, resuming)\n",
-			     rip, (unsigned long long)(uintptr_t)r->address);
-		if (n > 0)
-			uml_nt_crash_write(buf, (unsigned int)n);
-		return -1; /* EXCEPTION_CONTINUE_EXECUTION */
+		if (wrote >= 0x64000000ULL && wrote < 0x68000000ULL) {
+			void *pbase = (void *)(unsigned long)
+				(wrote & ~(unsigned long long)0xfff);
+			unsigned long long plen = 0x1000;
+			ULONG oldp;
+
+			nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
+						   &pbase, &plen,
+						   0x04 /* PAGE_READWRITE */,
+						   &oldp);
+			n = snprintf(buf, sizeof(buf),
+				     "guard hit: rip=%llx wrote %llx "
+				     "(padding unprotected, resuming)\n",
+				     rip, wrote);
+			if (n > 0)
+				uml_nt_crash_write(buf, (unsigned int)n);
+			return -1; /* EXCEPTION_CONTINUE_EXECUTION */
+		}
 	}
 
 	in_crash_report = 1;
