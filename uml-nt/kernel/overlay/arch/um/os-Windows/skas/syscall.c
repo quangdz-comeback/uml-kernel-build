@@ -1281,6 +1281,28 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 138: /* fstatfs */
 	case 318: /* getrandom — systemd + libcrypto key material */
 	case 439: /* faccessat2 — systemd file probes (RENAME flags) */
+	case 83: /* mkdir — systemd /run /tmp /var runtime dirs */
+	case 258: /* mkdirat */
+	case 84: /* rmdir */
+	case 87: /* unlink */
+	case 263: /* unlinkat — the whole tmpfile/lockfile family */
+	case 88: /* symlink */
+	case 266: /* symlinkat — /run/systemd/* wiring */
+	case 89: /* readlink — /proc/self/exe + unit aliases */
+	case 267: /* readlinkat — glibc's canonicalize */
+	case 90: /* chmod */
+	case 91: /* fchmod */
+	case 268: /* fchmodat — /run sockets/units perms */
+	case 92: /* chown */
+	case 93: /* fchown */
+	case 260: /* fchownat */
+	case 82: /* rename */
+	case 264: /* renameat */
+	case 316: /* renameat2 — atomic unit state moves */
+	case 280: /* utimensat — timestamp touch */
+	case 133: /* mknod — /dev/null-ish nodes systemd creates */
+	case 165: /* mount — proc/sysfs/devtmpfs/cgroup2 by systemd */
+	case 166: /* umount2 */
 	case 8: /* lseek — ash reads the script by chunks */
 	case 17: /* pread64 — glibc ld.so reads the ELF headers of the
 		  * libs it maps (M5.4 c2 census, D20) */
@@ -1317,6 +1339,28 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 270: /* pselect6 */
 	case 35: /* nanosleep — ping interval, retry loops (hrtimer
 		  * machinery: the same clock the sysbench window ran) */
+		ret = sys_vfs(nr, a);
+		break;
+	case 77: /* ftruncate */
+	case 74: /* fsync */
+	case 75: /* fdatasync */
+	case 285: /* fallocate — journal files */
+	case 28: /* madvise */
+	case 24: /* sched_yield */
+	case 179: /* sysinfo */
+	case 298: /* getrusage */
+	case 202: /* futex — guest pthreads (the walker serves the
+		   * guest pointers; hazard-3 fixups apply) */
+	case 230: /* clock_nanosleep — unit timeout arithmetic */
+	case 291: /* epoll_create1 — the systemd event loop */
+	case 233: /* epoll_ctl */
+	case 232: /* epoll_wait — rides the kernel poll backend */
+	case 253: /* timerfd_create */
+	case 254: /* timerfd_settime — unit timers */
+	case 289: /* signalfd4 */
+	case 290: /* eventfd2 — the wake channel */
+	case 299: /* open_tree */
+	case 437: /* openat2 — the glibc 2.34+ open shape */
 		ret = sys_vfs(nr, a);
 		break;
 	case 1: /* write — fds 0/1/2 ride the console hand-path (probe
@@ -1396,10 +1440,20 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		}
 		break;
 	case 39: /* getpid */
-	case 186: /* gettid */
-		ret = c->pid;
+	case 186: /* gettid — one thread per task on this port */
+		/* M5.4 c3: task-backed conns report the KERNEL's pid —
+		 * the init task IS pid 1 and systemd refuses to run
+		 * otherwise (its exec chain degraded to the systemctl
+		 * client and exit(1) with the windows pid). POC conns
+		 * keep the windows stub pid (the probe fork contract
+		 * asserts it). */
+		ret = c->task_backed ? current->pid : c->pid;
 		break;
 	case 110: /* getppid */
+		if (c->task_backed) {
+			ret = sys_vfs(nr, a);
+			break;
+		}
 		ret = c->ppid;
 		break;
 	case 102: /* getuid */
