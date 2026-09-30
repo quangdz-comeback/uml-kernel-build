@@ -124,6 +124,7 @@ build/busybox-$(BUSYBOX_VER)/busybox:
 	       -e 's/^# CONFIG_IFCONFIG is not set/CONFIG_IFCONFIG=y/' \
 	       -e 's/^# CONFIG_ROUTE is not set/CONFIG_ROUTE=y/' \
 	       -e 's/^# CONFIG_PING is not set/CONFIG_PING=y/' \
+	       -e 's/^# CONFIG_WGET is not set/CONFIG_WGET=y/' \
 	       -e 's|^CONFIG_EXTRA_CFLAGS=.*|CONFIG_EXTRA_CFLAGS="-I$(CURDIR)/build/filter-shim"|' \
 	       -e 's/^CONFIG_EXTRA_LDFLAGS=.*/CONFIG_EXTRA_LDFLAGS="-fuse-ld=lld -static -Wl,--image-base=$(IMAGE_BASE)"/' \
 	       build/busybox-$(BUSYBOX_VER)/.config
@@ -161,14 +162,28 @@ staging/etc/udhcpc.script:
 # own name upstream — the howto's `iface vec0 inet dhcp`; there is no
 # eth0 rename), DHCP lease through the D8 channel (vector TX + the
 # D19 reader ring), then ping the NAT gateway (10.0.2.2 — vdeplug-go
-# slirp parity). The two markers are the CI gate's evidence: they
-# only print when the lease landed and the gateway answered.
+# slirp parity), then /bin/nettest: the guest DOWNLOADS a file from
+# the runner's HTTP server through the NAT (TCP out of the guest).
+# The markers are the CI gate's evidence: they only print when the
+# lease landed, the gateway answered, and the body verified.
 # ping takes no -c here: the gate's busybox builds without
 # FEATURE_FANCY_PING, so its ping is the minimal one-shot form —
 # one echo request, 5s alarm, prints "is alive!" and exits 0.
 staging/net.sh:
 	@mkdir -p staging
-	printf '/bin/busybox ifconfig vec0 up\n/bin/busybox udhcpc -i vec0 -n -q -s /etc/udhcpc.script\n/bin/busybox ping 10.0.2.2 && echo NET-PING-GW-OK\n' > $@
+	printf '/bin/busybox ifconfig vec0 up\n/bin/busybox udhcpc -i vec0 -n -q -s /etc/udhcpc.script\n/bin/busybox ping 10.0.2.2 && echo NET-PING-GW-OK\n/bin/busybox sh /bin/nettest && echo "M5 NET OK"\n' > $@
+	chmod +x $@
+
+# M5.1d: the NAT acceptance — busybox wget fetches
+# http://10.0.2.2:19293/netok.txt (the gateway address: the NAT44 maps
+# it to host loopback, where the CI step serves the file) and the body
+# is verified in-shell (no grep applet on allnoconfig — `case` does
+# the match). -O - streams the body to stdout: the image root mounts
+# read-only, no scratch file. Runs via `sh /bin/nettest` (same open/
+# read path /net.sh itself uses) — no binfmt_script dependency.
+staging/bin/nettest:
+	@mkdir -p staging/bin
+	printf '#!/bin/sh\nbody=$$(/bin/busybox wget -O - http://10.0.2.2:19293/netok.txt) || { echo NET-WGET-FAIL; exit 1; }\ncase "$$body" in *uml-nt-net-ok*) echo NET-GET-OK ;; *) echo NET-BODY-MISMATCH; exit 1 ;; esac\n' > $@
 	chmod +x $@
 
 # M5.1c: the net gate guest — PID 1 (init=/bin/netsetup) execve()s
@@ -183,7 +198,7 @@ rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
 	     staging/bin/guardtest staging/bin/sysbench \
 	     staging/bin/busybox staging/bin/sh \
 	     staging/etc/udhcpc.script staging/net.sh \
-	     staging/bin/netsetup
+	     staging/bin/netsetup staging/bin/nettest
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 

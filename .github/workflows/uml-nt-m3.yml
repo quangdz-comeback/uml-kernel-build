@@ -564,20 +564,29 @@ jobs:
           go build -trimpath -ldflags='-s -w' -o ..\uml-nt\launcher\netstack.exe .
           Get-Item ..\uml-nt\launcher\netstack.exe
 
-      # M5.1c: the vector device end to end — the kernel spawns
+      # M5.1c/d: the vector device end to end — the kernel spawns
       # netstack.exe (uml_nt_netstack=), dials the D8 TCP channel
       # (vec0:transport=vde,vnl=...), the guest's udhcpc leases
       # through it (vector TX ring → helper DHCP → OFFER/ACK → the
       # D19 reader ring → the guest IP stack) and pings the NAT
-      # gateway (10.0.2.2 — slirp parity). PID 1 = /bin/netsetup,
-      # which execve()s busybox sh onto /net.sh (the applet markers
-      # are the evidence; PID 1 exit = the usual panic exit 1).
-      - name: NATIVE net gate (M5.1c)
+      # gateway (10.0.2.2 — slirp parity). M5.1d: the gateway address
+      # NATs to host loopback, so /bin/nettest's wget reaches an HTTP
+      # server ON THE RUNNER (the deterministic "internet") — the
+      # first guest TCP download out of the machine. PID 1 =
+      # /bin/netsetup, which execve()s busybox sh onto /net.sh (the
+      # applet markers are the evidence; PID 1 exit = the usual panic
+      # exit 1).
+      - name: NATIVE net gate (M5.1c + M5.1d)
         shell: msys2 {0}
         run: |
           cd uml-nt/launcher
           ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
           NETSTACK=$(cygpath -w "$(pwd)/netstack.exe")
+          # M5.1d: the file the guest fetches via wget through the NAT.
+          mkdir -p srvroot
+          printf 'uml-nt-net-ok\n' > srvroot/netok.txt
+          python -m http.server 19293 --directory srvroot > http.log 2>&1 & SRV=$!
+          sleep 1
           export MSYS2_ARG_CONV_EXCL="*"
           set +e
           timeout 180 ./launcher.exe ../../build/vmlinux \
@@ -588,9 +597,13 @@ jobs:
             "init=/bin/netsetup" > net.log 2>&1
           code=$?
           set -e
-          cat net.log
+          kill $SRV 2>/dev/null
+          cat net.log http.log
           [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code (boot hung elsewhere? see log)"; exit 1; }
           grep -q "net: dialed 127.0.0.1:9100" net.log || { echo "kernel never dialed the netstack channel (helper spawn / D8 dial broken? see log)"; exit 1; }
           grep -q "NET-LEASE-OK" net.log || { echo "udhcpc never got a lease (vector TX / DHCP path / reader ring broken? see [syscall] ENOSYS lines)"; exit 1; }
           grep -q "NET-PING-GW-OK" net.log || { echo "ping gateway never answered (ICMP through the NAT broken? see log)"; exit 1; }
-          echo "M5.1c NATIVE NET OK: vec0 up + udhcpc lease + ping gateway through the D8 TCP channel"
+          grep -q "NET-GET-OK" net.log || { echo "M5.1d: wget never fetched/verified the body through the NAT (guest TCP out broken? see net.log + http.log access lines)"; exit 1; }
+          grep -q "M5 NET OK" net.log || { echo "M5.1d: the net chain did not complete (see the NET-* markers above)"; exit 1; }
+          grep -q "NET-WGET-FAIL\|NET-BODY-MISMATCH" net.log && { echo "M5.1d: nettest reported failure"; exit 1; }
+          echo "M5.1c/d NATIVE NET OK: vec0 up + udhcpc lease + ping gateway + wget through the NAT (guest TCP out to the runner)"
