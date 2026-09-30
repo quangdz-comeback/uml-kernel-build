@@ -293,17 +293,24 @@ void uml_nt_signal_check(struct uml_nt_stub_conn *c)
 	REGS_SP(regs->gp) = true_sp - 0x2000;
 
 	interrupt_end();
-	if (REGS_IP(regs->gp) != rip_before)
-		uml_nt_diag_slot("sigdeliver-true-sp", c, true_sp);
 
-	/* Post-setup: SP = the frame (the handler's entry rsp, kept for
-	 * the verbatim push). The setup saved the DEEP sp into the
-	 * frame's mcontext — patch the saved rsp back to the true one
-	 * (frame + pretcode 8 + uc_flags 8 + uc_link 8 + uc_stack 24 =
-	 * the mcontext; sigcontext_64's sp = its 16th qword = +120 →
-	 * +168 total). Through the walker while the mm/sink window is
-	 * still open. */
-	{
+	if (REGS_IP(regs->gp) == rip_before) {
+		/* Nothing delivered: the deep sp was only a frame
+		 * placement. Put the real one back — after rt_sigreturn
+		 * the verbatim push below resumes the guest at exactly
+		 * this sp, and a 0x2000-deep one made its next `ret` pop
+		 * stale stack (the net gate's sh died at rip 0 right
+		 * after its first SIGCHLD). */
+		REGS_SP(regs->gp) = true_sp;
+	} else {
+		/* Post-setup: SP = the frame (the handler's entry rsp,
+		 * kept for the verbatim push). The setup saved the DEEP
+		 * sp into the frame's mcontext — patch the saved rsp
+		 * back to the true one (frame + pretcode 8 + uc_flags 8
+		 * + uc_link 8 + uc_stack 24 = the mcontext;
+		 * sigcontext_64's sp = its 16th qword = +120 → +168
+		 * total). Through the walker while the mm/sink window is
+		 * still open. */
 		unsigned long *sp_slot =
 			(unsigned long *)(REGS_SP(regs->gp) + 168);
 		unsigned long true_rsp = (unsigned long)true_sp;
