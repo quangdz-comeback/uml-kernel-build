@@ -369,11 +369,15 @@ static void test_rollback(void)
 	unsigned long long va;
 	int i, rc;
 
-	/* fill the VMA table to 63 of 64 slots, out of the ELF's way */
+	/* fill the VMA table to MAX-1 of MAX slots, out of the ELF's
+	 * way — MAX-1 because the loader's first add must still fit
+	 * (filling the table) and its second add must blow it. Scaled
+	 * with UML_NT_VMA_MAX since M5.4 c3 (the cap is per-mm
+	 * bookkeeping, the loader contract is "fail loud, roll back"). */
 	mock_reset();
 	CHECK(uml_nt_phys_init(&ph, SPAN) == 0);
 	uml_nt_mm_init(&mm);
-	for (i = 0; i < 63; i++) {
+	for (i = 0; i < UML_NT_VMA_MAX - 1; i++) {
 		va = RAM + (unsigned long long)i * RUN;
 		CHECK(uml_nt_vma_add(&mm, va, va + RUN,
 				     MOCK_BASE + (long long)i * RUN,
@@ -386,7 +390,8 @@ static void test_rollback(void)
 
 	rc = uml_nt_elf_load(&out, &mm, &ph, img, 0x2000, sec);
 	CHECK(rc == UML_NT_ELF_MM); /* second add blows the table */
-	CHECK(mm.nvma == 63);       /* the first add rolled back */
+	CHECK(mm.nvma == UML_NT_VMA_MAX - 1); /* the first add rolled
+					       * back */
 	/* spans freed: the mock pool is empty again */
 	for (i = 0; i < MOCK_RUNS; i++)
 		CHECK(!mock_taken[i]);
