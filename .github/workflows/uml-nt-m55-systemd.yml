@@ -117,8 +117,8 @@ jobs:
             --json databaseId --jq '.[0].databaseId')
           echo "base_image run: $RID"
           "$GH" run download "$RID" -R "${{ github.repository }}" \
-            -n uml-base-debian-bookworm -D ../rootfs-img
-          ls -lh ../rootfs-img
+            -n uml-base-debian-bookworm -D rootfs-img
+          ls -lh rootfs-img
 
       - name: NATIVE systemd boot (M5.5a)
         shell: msys2 {0}
@@ -132,6 +132,8 @@ jobs:
           code=$?
           set -e
           echo "launcher exit: $code (124 = still running at timeout — expected while systemd boots)"
+          echo "--- first 25 log lines (ubd attach / early boot) ---"
+          head -25 systemd.log
           # boot-failure-driven: the evidence table first.
           echo "--- not-implemented syscall table (this boot) ---"
           grep "not implemented" systemd.log \
