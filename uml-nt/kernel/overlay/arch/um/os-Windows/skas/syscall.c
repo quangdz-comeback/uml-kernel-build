@@ -828,8 +828,17 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		  * machinery: the same clock the sysbench window ran) */
 		ret = sys_vfs(nr, a);
 		break;
-	case 1: /* write */
-		ret = sys_write(c, a);
+	case 1: /* write — fds 0/1/2 ride the console hand-path (probe
+		  * conns have no files_struct; the bench markers ride
+		  * here too, M4.1). fd >= 3 = the REAL VFS: the guest
+		  * owns its fds since M3.8 — sockets (M5.1d nettest:
+		  * write on the connected TCP socket), pipes, files.
+		  * The hand-path's EBADF-for-everything-else swallowed
+		  * exactly those. */
+		if (a[0] > 2)
+			ret = sys_vfs(nr, a);
+		else
+			ret = sys_write(c, a);
 		break;
 	case 9: /* mmap */
 		ret = sys_mmap(c, a);
