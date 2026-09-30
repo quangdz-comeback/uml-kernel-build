@@ -50,6 +50,135 @@ struct uml_nt_mm *uml_nt_syscall_mm(void)
 	return uacc_mm;
 }
 
+/* M5.4 c3 EFAULT census (043 item 2 follow-up). The one-shot trace
+ * spent itself on the boot's FIRST to_user EFAULT — an early
+ * fork-child site (va=0x61300c10 len=4, tasks 30/31 in runs
+ * 36789783203/36791847827) — while the FATAL waitpid writeback
+ * ("waitpid() failed: Bad address" → init Freezing) stayed invisible
+ * ~1400 lines later. This census logs the first 16 failures, each
+ * CLASSIFIED by replicating uml_nt_uacc_write_ptr's decision tree
+ * READ-ONLY (no re-surgery, no retry — the dispatch state is still
+ * installed on this thread): the reason names the fail mode the
+ * fatal put_user hit — no-mm / no-vma (the between-VMAs hole
+ * hypothesis) / vma-edge / ro-vma / cow-no-channel (the fail-safe
+ * EFAULT) / cow-surgery (phys-alloc or split or plan-overflow —
+ * the exhaustion hypothesis, refs + plan headroom printed). */
+#define UACC_TRACE_PAGE        0x1000ull
+#define UACC_TRACE_PAGE_OFF(v) ((v) & (UACC_TRACE_PAGE - 1))
+#define UACC_TRACE_MAX         16
+
+static void uacc_trace_efault(unsigned long long va, unsigned long n)
+{
+	static int traced;
+	struct uml_nt_mm *mm = uacc_mm;
+	int task = current ? current->pid : 0;
+
+	while (n) {
+		unsigned long long chunk = UACC_TRACE_PAGE -
+					   UACC_TRACE_PAGE_OFF(va);
+		unsigned long long page, run_start, old_run, pe, ns;
+		struct uml_nt_vma *v;
+		struct uml_nt_phys *ph;
+		const struct uml_nt_fault_plan *plan;
+		int i;
+
+		if (chunk > n)
+			chunk = n;
+
+		if (traced >= UACC_TRACE_MAX)
+			return;
+		traced++;
+
+		if (mm == NULL) {
+			os_info("[uacc] to_user EFAULT #%d: va=0x%llx "
+				"len=%lu task=%d reason=no-mm\n",
+				traced, va, n, task);
+			return;
+		}
+
+		page = va & ~(UACC_TRACE_PAGE - 1);
+		v = uml_nt_vma_find(mm, page);
+		if (v == NULL) {
+			/* The between-VMAs hole: name its edges (0 =
+			 * none on that side). */
+			pe = 0;
+			ns = 0;
+			for (i = 0; i < mm->nvma; i++) {
+				if (mm->vma[i].end <= page &&
+				    mm->vma[i].end > pe)
+					pe = mm->vma[i].end;
+				if (mm->vma[i].start > page &&
+				    (ns == 0 || mm->vma[i].start < ns))
+					ns = mm->vma[i].start;
+			}
+			os_info("[uacc] to_user EFAULT #%d: va=0x%llx "
+				"len=%lu task=%d reason=no-vma "
+				"hole=(0x%llx,0x%llx)\n",
+				traced, va, n, task, pe, ns);
+			return;
+		}
+		if (page < v->start || page + UACC_TRACE_PAGE > v->end) {
+			os_info("[uacc] to_user EFAULT #%d: va=0x%llx "
+				"len=%lu task=%d reason=vma-edge "
+				"vma=[0x%llx,0x%llx) run_off=0x%llx\n",
+				traced, va, n, task, v->start, v->end,
+				v->run_off);
+			return;
+		}
+		if (!uml_nt_prot_writable(v->prot)) {
+			os_info("[uacc] to_user EFAULT #%d: va=0x%llx "
+				"len=%lu task=%d reason=ro-vma "
+				"vma=[0x%llx,0x%llx) prot=0x%x "
+				"flags=0x%x run_off=0x%llx\n",
+				traced, va, n, task, v->start, v->end,
+				v->prot, v->flags, v->run_off);
+			return;
+		}
+		if (!(v->flags & UML_NT_VMA_COW)) {
+			/* Unreachable while the walker is deterministic:
+			 * a writable non-COW chunk writes direct. If
+			 * this fires, the walk state moved between the
+			 * fail and the trace — say so honestly. */
+			os_info("[uacc] to_user EFAULT #%d: va=0x%llx "
+				"len=%lu task=%d reason=direct-write "
+				"vma=[0x%llx,0x%llx) run_off=0x%llx\n",
+				traced, va, n, task, v->start, v->end,
+				v->run_off);
+			return;
+		}
+
+		ph = uml_nt_uacc_sink_phys();
+		plan = uml_nt_uacc_sink_plan();
+		run_start = page & ~(UML_NT_PHYS_RUN_SIZE - 1);
+		old_run = v->run_off + (run_start - v->start);
+		if (ph == NULL || plan == NULL) {
+			os_info("[uacc] to_user EFAULT #%d: va=0x%llx "
+				"len=%lu task=%d reason=cow-no-channel "
+				"ph=%d plan=%d run=0x%llx\n",
+				traced, va, n, task, ph != NULL,
+				plan != NULL, old_run);
+			return;
+		}
+		os_info("[uacc] to_user EFAULT #%d: va=0x%llx len=%lu "
+			"task=%d reason=cow-surgery refs=%d plan=%d/%d "
+			"run=0x%llx\n",
+			traced, va, n, task,
+			uml_nt_phys_refs(ph, (long long)old_run),
+			plan->n_ops, UML_NT_FAULT_MAX_OPS, old_run);
+		return;
+	}
+
+	/* The walk failed but every chunk classifies clean — the walk
+	 * state moved between fail and trace (or len was 0). One line,
+	 * still bounded by the census above. */
+	if (traced < UACC_TRACE_MAX) {
+		traced++;
+		os_info("[uacc] to_user EFAULT #%d: va=0x%llx len=%lu "
+			"task=%d reason=unclassified\n",
+			traced, va, n, task);
+	}
+}
+
 unsigned long raw_copy_from_user(void *to, const void __user *from,
 				 unsigned long n)
 {
@@ -66,21 +195,7 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 	if (uml_nt_uacc_walk(uacc_mm, uml_boot.physmem_base,
 			     (unsigned long long)(unsigned long)to, n,
 			     (char *)from, UML_NT_UACC_TO_GUEST) < 0) {
-		/* One-shot trace (043 audit item 2): the waitid/
-		 * waitpid EFAULT class — the kernel's writeback to a
-		 * user buffer failed the walk. The first failure
-		 * names the buffer's VA (stack vs libc data vs a
-		 * between-VMAs hole) and its owner; later failures
-		 * stay silent (glibc probes expect some EFAULTs). */
-		static int diag_once;
-
-		if (!diag_once) {
-			diag_once = 1;
-			os_info("[uacc] first to_user EFAULT: va=0x%llx "
-				"len=%lu task=%d\n",
-				(unsigned long long)(unsigned long)to, n,
-				current ? current->pid : 0);
-		}
+		uacc_trace_efault((unsigned long long)(uintptr_t)to, n);
 		return n;
 	}
 	return 0;

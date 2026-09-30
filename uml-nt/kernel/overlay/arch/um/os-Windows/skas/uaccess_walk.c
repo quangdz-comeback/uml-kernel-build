@@ -43,6 +43,20 @@ static struct uml_nt_uacc_sink uacc_sink;
 
 unsigned long uml_nt_uacc_fixups;
 
+/* Sink peeks (see uaccess_walk.h) — the kernel-side EFAULT tracer
+ * needs the channel's shape without being able to reach the static
+ * state; exposing it through accessors keeps this file the only
+ * owner of the static. */
+struct uml_nt_phys *uml_nt_uacc_sink_phys(void)
+{
+	return uacc_sink.ph;
+}
+
+const struct uml_nt_fault_plan *uml_nt_uacc_sink_plan(void)
+{
+	return uacc_sink.plan;
+}
+
 struct uml_nt_uacc_sink uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s)
 {
 	struct uml_nt_uacc_sink prev = uacc_sink;

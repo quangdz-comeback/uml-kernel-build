@@ -51,6 +51,14 @@ struct uml_nt_uacc_sink {
 struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
 struct uml_nt_uacc_sink uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s);
 
+/* Read-only peek at the installed fixup channel (M5.4 c3 EFAULT
+ * census): the to_user tracer classifies a failed walk's residue —
+ * a COW-shared run with ph == NULL means "no-sink" (fail-safe
+ * EFAULT), with a plan it can report the headroom to MAX_OPS.
+ * Pure accessors, no state change — unit tests stay valid. */
+struct uml_nt_phys *uml_nt_uacc_sink_phys(void);
+const struct uml_nt_fault_plan *uml_nt_uacc_sink_plan(void);
+
 int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 		     unsigned long long va, unsigned long long len,
 		     char *buf, int op);
