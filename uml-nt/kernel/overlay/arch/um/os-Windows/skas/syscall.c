@@ -684,20 +684,11 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 
 	if (exec_pending) {
 		/* The exec destroyed this conn (and d): touch neither.
-		 * The out: teardown below only clears the globals. The
-		 * TEMP trace below reads a[] = d->args — it must ride
-		 * AFTER this check (it faulted on the exec round: the
-		 * destroyed d's page went away under it). */
+		 * The out: teardown below only clears the globals. */
 		goto out;
 	}
 	d->retval = ret;
 	d->err = ((long long)ret < 0 && (long long)ret > -512) ? 1 : 0;
-	/* TEMP syscall trace (S4c3 acceptance loop): every dispatch,
-	 * success or failure, with the first three args — the busybox
-	 * conn dies quietly (exit 127, no ENOSYS lines), this names
-	 * the syscall sequence it actually ran. Strip after M3.8. */
-	os_info("[syscall] nr=%llu ret=%lld a0=0x%llx a1=0x%llx "
-		"a2=0x%llx\n", nr, (long long)ret, a[0], a[1], a[2]);
 	if (c->plan_left > 0) {
 		/* The syscall carries stub ops: park the return value —
 		 * the op results travel through d->retval and the plan
