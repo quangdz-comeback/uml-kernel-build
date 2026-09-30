@@ -323,15 +323,61 @@ static unsigned long __attribute__((ms_abi)) net_reader_thread(void *arg)
 
 /* ---- transport open: spawn + dial + reader --------------------------- */
 
+/* The whole NT-heavy body runs on a fat thread (the house rule —
+ * probe/spawn precedent): the boot/vCPU stack is a UML THREAD_SIZE
+ * stack by discipline, and the first winsock call on a thread pulls
+ * lazy per-thread init frames on top of whatever kernel syscall path
+ * is already running — the native CI faulted c00000fd (stack
+ * overflow) dialing from the ioctl path directly. */
+struct uml_nt_open_ctx {
+	int unit;
+	const char *vnl;
+	unsigned long long s;   /* the dialed socket (INVALID on fail) */
+	int attempt;            /* the attempt that succeeded (or 50) */
+	unsigned long pid;      /* the spawned helper's pid, diagnostic */
+	int spawned;            /* netstack_spawn's rc */
+};
+
+/* One thread, the whole NT-heavy open: spawn the helper, then dial
+ * with retry — the helper needs a moment to bind (and a freshly
+ * spawned one starts listening asynchronously). 50 × 100ms = 5s,
+ * then the device open fails loudly. */
+static unsigned long __attribute__((ms_abi)) uml_nt_open_thread(void *arg)
+{
+	struct uml_nt_open_ctx *ctx = arg;
+	LARGE_INTEGER d;
+	int attempt;
+
+	if (uml_nt_ws_init() == 0) {
+		if (have_netstack) {
+			ctx->spawned = netstack_spawn(ctx->unit, ctx->vnl,
+						      &ctx->pid);
+			if (ctx->spawned != 0)
+				os_warn("net: helper spawn failed (win32 "
+					"%d) — assuming an external helper "
+					"on %s\n",
+					ctx->spawned, ctx->vnl);
+		}
+
+		d.QuadPart = -1000000LL; /* 100ms, relative */
+		for (attempt = 0; attempt < 50; attempt++) {
+			ctx->s = uml_nt_net_dial(ctx->vnl);
+			if (ctx->s != UML_NT_INVALID_SOCKET)
+				break;
+			nt->NtDelayExecution(0, &d);
+		}
+		ctx->attempt = attempt;
+	}
+	return 0;
+}
+
 struct vector_fds *uml_vector_user_open(int unit, struct arglist *parsed)
 {
 	char *transport, *vnl;
-	unsigned long long s;
+	struct uml_nt_open_ctx ctx;
 	struct vector_fds *result;
 	ULONG tid;
 	HANDLE th;
-	int attempt;
-	unsigned long pid = 0;
 
 	if (parsed == NULL)
 		return NULL;
@@ -350,56 +396,52 @@ struct vector_fds *uml_vector_user_open(int unit, struct arglist *parsed)
 		return NULL;
 	}
 
-	if (uml_nt_ws_init() != 0)
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.unit = unit;
+	ctx.vnl = vnl;
+	ctx.s = UML_NT_INVALID_SOCKET;
+
+	/* Fat thread: spawn + dial + winsock (see the ctx comment). */
+	th = nt->CreateThread(NULL, 1 << 20, uml_nt_open_thread, &ctx, 0,
+			      &tid);
+	if (th == NULL) {
+		os_warn("net: open thread failed win32=%lu\n",
+			nt->RtlGetLastWin32Error());
 		return NULL;
-
-	if (have_netstack) {
-		int rc = netstack_spawn(unit, vnl, &pid);
-
-		if (rc != 0)
-			os_warn("net: helper spawn failed (win32 %d) — "
-				"assuming an external helper on %s\n",
-				rc, vnl);
 	}
+	nt->NtWaitForSingleObject(th, 0, UML_NT_INFINITE);
+	nt->CloseHandle(th);
 
-	/* Dial with retry: the helper needs a moment to bind (and a
-	 * freshly spawned one starts listening asynchronously). 50 ×
-	 * 100ms = 5s, then the device open fails loudly. */
-	s = UML_NT_INVALID_SOCKET;
-	for (attempt = 0; attempt < 50; attempt++) {
-		s = uml_nt_net_dial(vnl);
-		if (s != UML_NT_INVALID_SOCKET)
-			break;
-		{
-			LARGE_INTEGER d;
-
-			d.QuadPart = -1000000LL; /* 100ms */
-			nt->NtDelayExecution(0, &d);
-		}
-	}
-	if (s == UML_NT_INVALID_SOCKET)
+	if (ctx.s == UML_NT_INVALID_SOCKET) {
+		os_warn("net: dial %s exhausted (%d attempts, helper %s) "
+			"— device dead\n",
+			vnl, ctx.attempt,
+			have_netstack ? (ctx.spawned == 0 ? "spawned"
+							  : "spawn FAILED")
+				      : "external");
 		return NULL;
+	}
 	os_info("net: dialed %s (helper %s, attempt %d)\n", vnl,
-		have_netstack ? "spawned" : "external", attempt + 1);
+		have_netstack ? "spawned" : "external", ctx.attempt + 1);
 
 	net_ring = uml_kmalloc(sizeof(*net_ring), UM_GFP_KERNEL);
 	if (net_ring == NULL) {
-		nt->closesocket(s);
+		nt->closesocket(ctx.s);
 		return NULL;
 	}
 	net_ring->head = 0;
 	net_ring->tail = 0;
 	net_ring->drops = 0;
 
-	net_dev.fd = (int)s;
-	net_dev.s = s;
+	net_dev.fd = (int)ctx.s;
+	net_dev.s = ctx.s;
 
 	th = nt->CreateThread(NULL, 1 << 20, net_reader_thread, &net_dev,
 			      0, &tid);
 	if (th == NULL) {
 		os_warn("net: reader thread failed win32=%lu\n",
 			nt->RtlGetLastWin32Error());
-		nt->closesocket(s);
+		nt->closesocket(ctx.s);
 		return NULL;
 	}
 	/* Detached: the thread parks forever when the channel dies
@@ -408,11 +450,11 @@ struct vector_fds *uml_vector_user_open(int unit, struct arglist *parsed)
 
 	result = uml_kmalloc(sizeof(struct vector_fds), UM_GFP_KERNEL);
 	if (result == NULL) {
-		nt->closesocket(s);
+		nt->closesocket(ctx.s);
 		return NULL;
 	}
-	result->rx_fd = (int)s;
-	result->tx_fd = (int)s;
+	result->rx_fd = (int)ctx.s;
+	result->tx_fd = (int)ctx.s;
 	result->remote_addr = NULL;
 	result->remote_addr_size = 0;
 	os_info("net: vec%d open — D8 TCP channel live (ring %d x %d)\n",
