@@ -483,6 +483,44 @@ void uml_nt_fork_trace(void)
 		task_stack_page(current));
 }
 
+/* M5.1c.5: the smash-writer hunt (see internal.h). The crash
+ * reporter resolves a smashed stack page to its section offset and
+ * asks both live mms: does any VMA's backing run cover it? The
+ * mm/VMA structs live here (statics); the walk is read-only. */
+void uml_nt_alias_scan(unsigned long long lo, unsigned long long hi)
+{
+	static const struct {
+		const char *name;
+		struct uml_nt_mm *mm;
+	} mms[] = {
+		{ "parent", &mm_parent }, { "child", &mm_child },
+	};
+	int mi;
+
+	for (mi = 0; mi < 2; mi++) {
+		struct uml_nt_mm *mm = mms[mi].mm;
+		int i;
+
+		if (mm->nvma == 0)
+			continue;
+		for (i = 0; i < mm->nvma; i++) {
+			struct uml_nt_vma *v = &mm->vma[i];
+			unsigned long long vs, ve;
+
+			vs = v->run_off;
+			ve = vs + (v->end - v->start);
+			if (ve <= lo || vs >= hi)
+				continue;
+			os_info("alias: mm %s guest [0x%llx,0x%llx) backs "
+				"section [0x%llx,0x%llx) hits [0x%llx,"
+				"0x%llx)\n",
+				mms[mi].name, v->start, v->end, vs, ve,
+				(vs > lo) ? vs : lo,
+				(ve < hi) ? ve : hi);
+		}
+	}
+}
+
 void uml_nt_fork_arm(struct uml_nt_stub_conn *parent, unsigned long long rsp)
 {
 	fork_pending_parent = parent;

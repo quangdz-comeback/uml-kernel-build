@@ -9,8 +9,10 @@
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
+#include <linux/vmalloc.h>
 #include <ntabi.h>
 #include <stub-panic.h>
 
@@ -120,8 +122,11 @@ static void uml_nt_crash_scan_stack(unsigned long long rsp)
 		char line[128];
 		unsigned long long lo = rsp >= 0x200 ? rsp - 0x200 : 0;
 
+		/* M5.1c.5: the whole 0x400 window (128 qwords) — the
+		 * smash ran to the stack TOP (rsp+0x150), past the old
+		 * 72-qword cap. */
 		for (va = lo & ~(unsigned long long)7, n = 0;
-		     n < 72 && va < rsp + 0x200; va += 8, n++) {
+		     n < 128 && va < rsp + 0x200; va += 8, n++) {
 			int m;
 
 			if ((va & ~0xfffULL) != pg) {
@@ -197,7 +202,7 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 		if (nt != NULL)
 			nt->NtTerminateProcess(UML_NT_CURRENT_PROCESS, 1);
 		for (;;)
-			;
+			asm volatile("");
 	}
 	in_crash_report = 1;
 
@@ -236,6 +241,7 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 	}
 	if (e != NULL && e->context != NULL) {
 		unsigned long long teb, base, limit;
+		unsigned long long frsp = UML_NT_X64_CTX_RSP(e->context);
 
 		__asm__ volatile("mov %%gs:0x30, %0" : "=r"(teb));
 		base = *(unsigned long long *)(teb + 0x08);
@@ -251,27 +257,71 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 			     UML_NT_X64_CTX_RDI(e->context),
 			     uml_nt_current_tid(),
 			     uml_nt_thread_role, base, limit,
-			     UML_NT_X64_CTX_RSP(e->context) <= base &&
-			     UML_NT_X64_CTX_RSP(e->context) >= limit);
+			     frsp <= base && frsp >= limit);
 		if (n > 0)
 			uml_nt_crash_write(buf, (unsigned int)n);
-		uml_nt_crash_scan_stack(UML_NT_X64_CTX_RSP(e->context));
+		uml_nt_crash_scan_stack(frsp);
 	}
 	/* M5.1c.4: WHO was running + the switch chain that led here.
 	 * The TEB bounds above are NOT the kernel's truth (kernel
 	 * contexts run on vmalloc'd task stacks — inbounds=0 is
-	 * normal); the task identity + the last 32 switches are. */
+	 * normal); the task identity + the last 32 switches are.
+	 * M5.1c.5: the smash window (task 21's stack top ~0x360 bytes
+	 * of 0/1 boolean bytes over the caller chain) vs the vmalloc
+	 * area map — find_vm_area on the stack and on the smash
+	 * window's edges aliases any object that owns those pages
+	 * (a freed-and-reallocated stack, an overlapping net-ring or
+	 * flat view), which is the root-cause class to name. */
 	{
 		const struct uml_nt_switch_rec *ring;
-		unsigned long long have, i;
+		unsigned long long have, i, frsp;
 		struct task_struct *t = current;
+		struct vm_struct *va;
 
+		frsp = (e != NULL && e->context != NULL) ?
+			       UML_NT_X64_CTX_RSP(e->context) :
+			       (unsigned long long)(uintptr_t)task_stack_page(t);
 		n = snprintf(buf, sizeof(buf),
 			     "  task=%d stack=%px state=%ld\n",
 			     t->pid, task_stack_page(t),
 			     (long)t->__state);
 		if (n > 0)
 			uml_nt_crash_write(buf, (unsigned int)n);
+
+		/* The stack's own vmalloc area + whatever owns the
+		 * smash window's edges. */
+		va = find_vm_area(task_stack_page(t));
+		n = snprintf(buf, sizeof(buf),
+			     "  vmalloc stack: %px size=%lx\n",
+			     va != NULL ? va->addr : NULL,
+			     va != NULL ? va->size : 0UL);
+		if (n > 0)
+			uml_nt_crash_write(buf, (unsigned int)n);
+		va = find_vm_area((void *)(unsigned long)
+				  ((frsp & ~(unsigned long long)7) - 0x8));
+		n = snprintf(buf, sizeof(buf),
+			     "  vmalloc rsp: %px size=%lx\n",
+			     va != NULL ? va->addr : NULL,
+			     va != NULL ? va->size : 0UL);
+		if (n > 0)
+			uml_nt_crash_write(buf, (unsigned int)n);
+
+		{
+			unsigned long long raddr, rhead, rtail;
+
+			uml_nt_net_ring_info(&raddr, &rhead, &rtail);
+			va = (raddr != 0) ? find_vm_area(
+				(void *)(uintptr_t)raddr) : NULL;
+			n = snprintf(buf, sizeof(buf),
+				     "  net ring: %llx head=%llu tail=%llu "
+				     "varea=%px size=%lx\n",
+				     raddr, rhead, rtail,
+				     va != NULL ? va->addr : NULL,
+				     va != NULL ? va->size : 0UL);
+			if (n > 0)
+				uml_nt_crash_write(buf, (unsigned int)n);
+		}
+
 		have = uml_nt_switch_ring(&ring);
 		for (i = 0; i < have && i < UML_NT_SWITCH_RING; i++) {
 			unsigned long long idx =
@@ -290,11 +340,45 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 			if (n > 0)
 				uml_nt_crash_write(buf, (unsigned int)n);
 		}
+
+		/* The smash-writer hunt: resolve each page of the
+		 * faulting task's stack to its section offset and ask
+		 * the guest mms whether a VMA is backed by it — the
+		 * flat view gives every section offset a permanent
+		 * kernel-side identity, so a guest VMA over the same
+		 * run = the same bytes under two owners (any guest
+		 * write = a kernel-stack write). Runs after the ring
+		 * dump: it uses os_info (console path) — if the fault
+		 * happened inside console code this stalls instead of
+		 * corrupting the report above. */
+		{
+			unsigned char *sp = task_stack_page(t);
+			int pi;
+
+			for (pi = 0; pi < THREAD_SIZE / PAGE_SIZE; pi++) {
+				struct page *pg =
+					vmalloc_to_page(sp +
+							pi * PAGE_SIZE);
+				unsigned long long off;
+
+				if (pg == NULL)
+					continue;
+				off = (unsigned long long)
+					page_to_pfn(pg) << PAGE_SHIFT;
+				uml_nt_alias_scan(off, off + PAGE_SIZE);
+			}
+		}
 	}
 	if (nt != NULL)
 		nt->NtTerminateProcess(UML_NT_CURRENT_PROCESS, 1);
 	for (;;)
-		;
+		asm volatile("");
+	/* Unreachable at runtime (the loop above spins forever), but
+	 * -ffinite-loops (GCC 13+) models the empty loop as exiting —
+	 * the compiler wants the return, so it gets one. 0L = the
+	 * EXCEPTION_CONTINUE_SEARCH disposition (ntabi.h keeps no
+	 * winnt.h names). */
+	return 0L;
 }
 
 void uml_nt_install_crash_reporter(void)
@@ -311,4 +395,4 @@ void uml_nt_install_crash_reporter(void)
 /* Kernel glue data (declared extern by kernel sources):
  * no seccomp on NT (D6); no auxv hwcap on NT (no ELF loader). */
 int using_seccomp;
-unsigned long elf_aux_hwcap;
+long elf_aux_hwcap;

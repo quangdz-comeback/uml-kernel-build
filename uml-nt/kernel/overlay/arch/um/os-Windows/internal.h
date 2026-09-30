@@ -85,4 +85,24 @@ unsigned long long uml_nt_switch_ring(const struct uml_nt_switch_rec **out);
 void uml_nt_switch_trace(void *from, void *to);
 void uml_nt_fork_trace(void);
 
+/* vector_user.c (M5.1c.5): the net SPSC ring identity for the crash
+ * report — the ring is the biggest kmalloc'd object of the net window;
+ * if its backing got aliased with vmalloc'd task stacks (allocator
+ * bug), find_vm_area on both names it. */
+void uml_nt_net_ring_info(unsigned long long *addr,
+			  unsigned long long *head,
+			  unsigned long long *tail);
+
+/* stub_ctl.c (M5.1c.5): the smash-writer hunt. The flat-view design
+ * gives every guest-physical offset a PERMANENT kernel-side identity
+ * (physmem_base+off), while kernel vmalloc objects (task stacks!)
+ * get mapped to the same section at a second VA — so a guest VMA
+ * backed by a run that the buddy also owns as a kernel object = the
+ * same bytes under two owners. Scan both live mms' VMA trees for
+ * VMA backing ([run_off, run_off+len)) intersecting the section
+ * offsets [lo, hi) and print the guilty VMAs (guest VA range + mm
+ * name) — the reporter calls this per page of a smashed task stack
+ * (stack VA -> vmalloc_to_page -> pfn -> section offset). */
+void uml_nt_alias_scan(unsigned long long lo, unsigned long long hi);
+
 #endif

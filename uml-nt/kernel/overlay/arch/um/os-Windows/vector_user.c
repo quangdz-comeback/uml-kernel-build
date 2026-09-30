@@ -185,7 +185,11 @@ static int netstack_spawn(int unit, const char *vnl,
 	if (i <= 0 || i >= (int)sizeof(req.cmd))
 		return -EINVAL;
 
-	th = nt->CreateThread(NULL, 0x2000000, netstack_spawn_thread,
+	/* 1 MiB — same as the other aux threads. The old 32 MiB reserve
+	 * was 32 MiB of UNPLACED VA in the crowded 0x6x.. world (the
+	 * M3.3 lesson: NT's allocator will take any free range, and
+	 * "free" is a lie while the flat view spans 0x60000000..). */
+	th = nt->CreateThread(NULL, 1 << 20, netstack_spawn_thread,
 			      &req, 0, &tid);
 	if (th == NULL)
 		return (int)nt->RtlGetLastWin32Error();
@@ -270,6 +274,17 @@ struct uml_nt_net_dev {
 };
 
 static struct uml_nt_net_dev net_dev;
+
+/* M5.1c.5: the ring's identity for the crash reporter (see
+ * internal.h). ring_addr = 0 before the first vector open. */
+void uml_nt_net_ring_info(unsigned long long *addr,
+			  unsigned long long *head,
+			  unsigned long long *tail)
+{
+	*addr = (unsigned long long)(uintptr_t)net_ring;
+	*head = net_ring != NULL ? net_ring->head : 0;
+	*tail = net_ring != NULL ? net_ring->tail : 0;
+}
 
 /* Blocking framed recv of exactly `need` bytes. 0 recv = EOF → the
  * channel is dead: park the thread loudly (never exit the process —

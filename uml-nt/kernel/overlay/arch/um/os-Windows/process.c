@@ -94,6 +94,16 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 		       uml_boot.physmem_size)
 		return 0;
 
+	/* M5.1c.5: the REAL-map ledger — every map outside the flat
+	 * guest RAM view (kernel vmalloc objects: task stacks, the
+	 * net ring's neighbors). The out-of-range map = the alias
+	 * surface: a section view at a second VA over bytes the flat
+	 * view also exposes. If the net gate's stack smash returns,
+	 * this names every stack map + its backing offset as it
+	 * happens. */
+	os_info("os_map_memory: real map @%px+%#lx off=%llx prot=%d%d%d\n",
+		virt, (unsigned long)len, off, r != 0, w != 0, x != 0);
+
 	base = (PVOID)v;
 	view = 0;
 	li.LowPart = (unsigned int)(off & 0xffffffffu);
