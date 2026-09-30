@@ -306,8 +306,8 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	}
 
 	/* The M3.7 brk contract: one pre-reserved, pre-mapped heap run
-	 * (buddy owes no adjacency — the heap never outgrows it until
-	 * multi-run growth lands). */
+	 * (brk past it re-homes the heap in a bigger contiguous span —
+	 * syscall.c sys_brk, M4 slice 4). */
 	heap_off = uml_nt_phys_alloc_span(c->ph, 1);
 	if (heap_off < 0)
 		return -ENOMEM;

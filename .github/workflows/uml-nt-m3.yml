@@ -455,3 +455,35 @@ jobs:
           grep -q "SIGTEST-XMM-ANTI-LEAK" sigtest.log && { echo "the handler's anti-magic XMM leaked through sigreturn"; exit 1; }
           grep -q "SIGTEST-OK" sigtest.log || { echo "sigtest did not complete (crash after sigreturn?)"; exit 1; }
           echo "M4d NATIVE SIGNAL OK: guest SIGSEGV delivered + fpstate fidelity in and out of the sigreturn frame"
+
+      # M4 slice 4: multi-run heap growth — /bin/heaptest runs as PID 1:
+      # brk(2) walks 24 runs (1.5 MiB) past the exec setup's ONE
+      # pre-reserved 64K run. Every growth re-homes the heap in a fresh
+      # contiguous span (one MapViewOfFileEx must cover the whole VMA;
+      # the buddy owes no adjacency): contents memcpy kernel-side, the
+      # VMA swaps to the new span, and UNMAP old / MAP new ops stream
+      # to the stub. The gate's proof is content survival across the
+      # copy chain (per-step magics at run ends), fresh-zero growth
+      # areas (__GFP_ZERO backend), shrink + regrow, and one forced
+      # re-home after the regrow.
+      - name: NATIVE heap growth gate (M4 slice 4)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$ROOTFS" "root=98:0" "init=/bin/heaptest" > heaptest.log 2>&1
+          code=$?
+          set -e
+          cat heaptest.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code"; exit 1; }
+          grep -q "HEAP-GROW-OK" heaptest.log || { echo "the 24-run brk growth never verified its per-step magics (copy chain broken? see brk grow: lines)"; exit 1; }
+          grep -q "HEAP-FRESH-ZERO-OK" heaptest.log || { echo "fresh growth area was not zero (backend no longer hands __GFP_ZERO spans?)"; exit 1; }
+          grep -q "HEAP-SHRINK-OK" heaptest.log || { echo "brk shrink failed"; exit 1; }
+          grep -q "HEAP-REGROW-OK" heaptest.log || { echo "brk regrow did not preserve contents"; exit 1; }
+          grep -q "HEAPTEST-OK" heaptest.log || { echo "heaptest did not complete (forced re-home broke content?)"; exit 1; }
+          grep -q "brk grow: heap" heaptest.log || { echo "no kernel-side growth logged (the guest never left the exec reservation — test vacuous?)"; exit 1; }
+          echo "M4 SLICE4 NATIVE HEAP OK: brk grows multi-run (fresh span + contents kept + zeroed growth + shrink/regrow)"

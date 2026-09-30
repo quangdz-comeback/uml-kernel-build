@@ -16,7 +16,7 @@ CC     ?= clang
 LD     ?= ld.lld
 IMAGE_BASE := 0x62000000
 
-all: guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf
+all: guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf heaptest.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
@@ -79,6 +79,19 @@ sigtest.elf: sigtest.c
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "sigtest must be a static ELF" >&2; exit 1; }
 
+# M4 slice 4: the multi-run heap growth proof — PID 1
+# (init=/bin/heaptest) walks brk(2) 24 runs past the exec
+# reservation's ONE run; every growth re-homes the heap in a fresh
+# contiguous span (contents memcpy'd kernel-side), so the proof is
+# content survival across growths + fresh-zero growth areas.
+heaptest.elf: heaptest.c
+	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "heaptest must be a static ELF" >&2; exit 1; }
+
 clean:
-	rm -f init.o guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf
+	rm -f init.o guest-init.elf step2.elf bench.elf forkwait.elf \
+		sigtest.elf heaptest.elf
 .PHONY: all clean

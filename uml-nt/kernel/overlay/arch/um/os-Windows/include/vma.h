@@ -50,11 +50,12 @@ struct uml_nt_vma {
 struct uml_nt_mm {
 	struct uml_nt_vma vma[UML_NT_VMA_MAX];
 	int nvma;
-	/* brk bookkeeping (M3.7): [heap_start, heap_end) is the ONE
-	 * pre-reserved, pre-mapped run the exec setup hands the mm —
-	 * the buddy cannot promise an ADJACENT block, so the heap VMA
-	 * never grows past its reservation; brk(2) moves inside it
-	 * (heap_end == 0 = no heap reserved: brk fails -ENOMEM). */
+	/* brk bookkeeping (M3.7, grown since M4 slice 4): [heap_start,
+	 * heap_end) starts as the ONE pre-reserved, pre-mapped run the
+	 * exec setup hands the mm; brk(2) past heap_end re-homes the
+	 * heap in a fresh contiguous span (contents memcpy'd, VMA
+	 * swapped, stub ops queued — syscall.c sys_brk). heap_end == 0
+	 * = no heap reserved: brk fails (returns current brk). */
 	unsigned long long heap_start, heap_end, brk;
 };
 

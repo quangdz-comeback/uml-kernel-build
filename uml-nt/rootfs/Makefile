@@ -85,6 +85,14 @@ staging/bin/sigtest: ../guest/sigtest.elf
 	@mkdir -p staging/bin
 	cp $< $@
 
+# M4 slice 4: the multi-run heap growth proof — PID 1
+# (init=/bin/heaptest): brk walks 24 runs past the exec reservation;
+# content must survive every re-home (fresh span + memcpy + stub view
+# swap), fresh areas read zero, shrink/regrow keeps everything.
+staging/bin/heaptest: ../guest/heaptest.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
 build/busybox-$(BUSYBOX_VER)/busybox:
 	@mkdir -p build
 	curl -sSL -o build/$(BUSYBOX_VER).tar.bz2 \
@@ -112,7 +120,8 @@ staging/bin/busybox: build/busybox-$(BUSYBOX_VER)/busybox
 
 rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
 	     staging/bin/step2 staging/bin/bench staging/bin/forkwait \
-	     staging/bin/sigtest staging/bin/busybox
+	     staging/bin/sigtest staging/bin/heaptest \
+	     staging/bin/busybox
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 

@@ -154,10 +154,22 @@ static unsigned long long sys_write(struct uml_nt_stub_conn *c,
 }
 
 /* brk(2): the mm owns a pre-reserved, pre-mapped heap run (set up by
- * the exec path — the buddy cannot promise an ADJACENT block, so the
- * heap never outgrows its reservation; out-of-room = -ENOMEM loud
- * until M3.8 wires multi-run growth). Linux returns the CURRENT brk
- * (not an errno) on failure. */
+ * the exec path — heap_start..heap_end). Multi-run growth (M4 slice
+ * 4): a request past the reservation re-homes the heap in a fresh
+ * CONTIGUOUS span of the new total size — one MapViewOfFileEx must
+ * cover the whole VMA (vma.h geometry), and the buddy owes no
+ * adjacency, so in-place extension is only luck. The old contents
+ * ride across through the flat view (kernel-side memcpy — the stub's
+ * views are only mutated later, when the queued UNMAP old / MAP new
+ * ops stream), the fresh growth area arrives zeroed (__GFP_ZERO
+ * backend, the mmap path's guarantee), and the old span dies by
+ * refcount. Fork-shared heaps grow correctly per-mm: the copy reads
+ * the shared run's live content, the unref only drops THIS mm's
+ * reference, the sibling keeps its own. Linux returns the CURRENT
+ * brk (not an errno) on failure — every failure path here does
+ * exactly that. Shrink: brk moves down, the reservation stays (no
+ * unmap/relloc — Linux would release the pages; nothing we run
+ * reclaims from it, and a regrow then needs no copy). */
 static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 				  const unsigned long long *a)
 {
@@ -169,11 +181,76 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 	}
 	if (a[0] == 0)
 		return mm->brk;
-	if (a[0] < mm->heap_start || a[0] > mm->heap_end) {
-		os_info("[syscall] brk 0x%llx outside reserved heap "
-			"[0x%llx, 0x%llx] — kept 0x%llx\n",
-			a[0], mm->heap_start, mm->heap_end, mm->brk);
+	if (a[0] < mm->heap_start) {
+		os_info("[syscall] brk 0x%llx below heap start 0x%llx "
+			"— kept 0x%llx\n",
+			a[0], mm->heap_start, mm->brk);
 		return mm->brk;
+	}
+	if (a[0] > mm->heap_end) {
+		struct uml_nt_vma *hv = uml_nt_vma_find(mm, mm->heap_start);
+		unsigned long long old_end = mm->heap_end;
+		unsigned long long old_off, old_len, new_off, new_end;
+		long long nruns, i;
+
+		if (hv == NULL || hv->start != mm->heap_start ||
+		    hv->end != old_end) {
+			os_info("[syscall] brk: heap VMA [0x%llx,0x%llx) "
+				"missing/mismatched — kept 0x%llx\n",
+				mm->heap_start, old_end, mm->brk);
+			return mm->brk;
+		}
+		nruns = ((a[0] - mm->heap_start) +
+			 UML_NT_PHYS_RUN_SIZE - 1) / UML_NT_PHYS_RUN_SIZE;
+		new_end = mm->heap_start +
+			(unsigned long long)nruns * UML_NT_PHYS_RUN_SIZE;
+		old_off = hv->run_off;
+		old_len = old_end - mm->heap_start;
+
+		new_off = (unsigned long long)
+			uml_nt_phys_alloc_span(c->ph, (int)nruns);
+		if ((long long)new_off < 0) {
+			os_info("[syscall] brk: span of %lld run(s) "
+				"exhausted — kept 0x%llx\n",
+				nruns, mm->brk);
+			return mm->brk;
+		}
+		memcpy((char *)uml_boot.physmem_base + new_off,
+		       (char *)uml_boot.physmem_base + old_off, old_len);
+
+		if (uml_nt_vma_del(mm, mm->heap_start, old_end) < 0 ||
+		    uml_nt_vma_add(mm, mm->heap_start, new_end, new_off,
+				   UML_NT_PAGE_READWRITE, 0) < 0) {
+			/* Roll the old VMA back (the del succeeded if
+			 * we got here); the fresh span dies young. */
+			uml_nt_vma_add(mm, mm->heap_start, old_end,
+				       old_off, UML_NT_PAGE_READWRITE, 0);
+			for (i = 0; i < nruns; i++)
+				uml_nt_phys_unref(c->ph,
+						  (long long)new_off +
+						  i * UML_NT_PHYS_RUN_SIZE);
+			os_info("[syscall] brk: VMA resize failed — "
+				"kept 0x%llx\n", mm->brk);
+			return mm->brk;
+		}
+		for (i = 0; i < (long long)(old_len / UML_NT_PHYS_RUN_SIZE);
+		     i++)
+			uml_nt_phys_unref(c->ph,
+					  (long long)old_off +
+					  i * UML_NT_PHYS_RUN_SIZE);
+
+		/* Stub view swap, in this op order: the whole old view
+		 * (base = heap_start) goes, the bigger one arrives. */
+		uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0, mm->heap_start,
+				   old_len, old_off);
+		uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, UML_NT_PAGE_READWRITE,
+				   mm->heap_start,
+				   new_end - mm->heap_start, new_off);
+		os_info("[syscall] brk grow: heap [0x%llx,0x%llx) -> "
+			"[0x%llx,0x%llx) span off=0x%llx (contents "
+			"kept)\n", mm->heap_start, old_end,
+			mm->heap_start, new_end, new_off);
+		mm->heap_end = new_end;
 	}
 	mm->brk = a[0];
 	return a[0];
