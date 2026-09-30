@@ -204,6 +204,40 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 		for (;;)
 			asm volatile("");
 	}
+
+	/* M5.1c.5: the FORGIVING guard-hit path. The switch-guard
+	 * leaves freed-stack padding pages read-only; a writer there
+	 * (the smash hunter's whole point) faults with op=write into
+	 * the vmalloc band. LOG THE RIP (names the writer), restore
+	 * the page writable, resume the faulting instruction — the
+	 * boot continues and the log collects every culprit. Anything
+	 * outside this narrow shape falls through to the fatal
+	 * report. The band = VMALLOC_START..the section end (0x6400
+	 * 0000 = physmem top, 0x68000000 = the launcher's 128 MiB
+	 * ceiling — the launcher's section view covers it, so
+	 * unprotecting is always safe). */
+	if (r != NULL && r->code == 0xc0000005U && r->nparams > 1 &&
+	    r->info[0] == 1 /* write */ &&
+	    (unsigned long long)(uintptr_t)r->address >= 0x64000000ULL &&
+	    (unsigned long long)(uintptr_t)r->address < 0x68000000ULL) {
+		void *pbase = (void *)(unsigned long)
+			((uintptr_t)r->address & ~(uintptr_t)0xfff);
+		unsigned long long plen = 0x1000;
+		ULONG oldp;
+
+		nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
+					   &pbase, &plen,
+					   0x04 /* PAGE_READWRITE */,
+					   &oldp);
+		n = snprintf(buf, sizeof(buf),
+			     "guard hit: rip=%llx wrote %llx (padding "
+			     "unprotected, resuming)\n",
+			     rip, (unsigned long long)(uintptr_t)r->address);
+		if (n > 0)
+			uml_nt_crash_write(buf, (unsigned int)n);
+		return -1; /* EXCEPTION_CONTINUE_EXECUTION */
+	}
+
 	in_crash_report = 1;
 
 	n = snprintf(buf, sizeof(buf),
