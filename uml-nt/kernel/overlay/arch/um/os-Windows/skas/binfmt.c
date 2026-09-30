@@ -432,6 +432,30 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	ax.secure = bprm->secureexec ? 1 : 0;
 	os_info("binfmt_umlnt: wiring stack tables (run_off %#llx)\n",
 		stk->run_off);
+	/* The stack VMA's run must be a REAL section offset: a garbage
+	 * run_off (seen 0xffffffffffffffff on run 36789783203's
+	 * systemd-run-generator exec — the buddy was order-10 starved:
+	 * mem= defaults to 64M while the section is 128 MiB) reaches
+	 * the wire as physmem_base + (-1) — a wild kernel write, and
+	 * the INIT plan's MAP op fails with the conn killed (the
+	 * "exit status 127" generator class). Fail the exec cleanly
+	 * instead: the task exits, systemd logs and moves on. */
+	if (stk->run_off >= uml_boot.physmem_size) {
+		int di;
+
+		os_info("binfmt_umlnt: stack run_off %#llx insane — mm "
+			"dump (%d vma(s)):\n", stk->run_off,
+			c->mm->nvma);
+		for (di = 0; di < c->mm->nvma; di++)
+			os_info("  vma[%d] [0x%llx,0x%llx) run_off=%#llx "
+				"prot=0x%x flags=0x%x\n", di,
+				c->mm->vma[di].start,
+				c->mm->vma[di].end,
+				c->mm->vma[di].run_off,
+				c->mm->vma[di].prot,
+				c->mm->vma[di].flags);
+		return -ENOMEM;
+	}
 	rc = uml_nt_elf_wire_args(bprm, bprm->mm,
 				  (char *)uml_boot.physmem_base +
 				  stk->run_off,

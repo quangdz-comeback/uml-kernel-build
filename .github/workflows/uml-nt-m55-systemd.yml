@@ -128,7 +128,7 @@ jobs:
           timeout 420 ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
-            "root=98:0" "rw" > systemd.log 2>&1
+            "root=98:0" "rw" "mem=120M" > systemd.log 2>&1
           code=$?
           set -e
           echo "launcher exit: $code (124 = still running at timeout — expected while systemd boots)"
