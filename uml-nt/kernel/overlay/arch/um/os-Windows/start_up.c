@@ -233,29 +233,64 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 						   &pbase, &plen,
 						   0x04 /* PAGE_READWRITE */,
 						   &oldp);
-			/* WHO is writing: the running task + its
-			 * io_uring tctx pointer (the observed hits =
-			 * io_uring_del_tctx_node's list_del walking a
-			 * garbage tctx — this names the task that owns
-			 * the garbage pointer and the value itself).
-			 * The field only exists with CONFIG_IO_URING;
-			 * M5.1c.6 turned that off (the exit path walked
-			 * garbage tctx into the SLUB freelist), so the
-			 * read must compile away with it. */
+			/* WHO is writing: rip 6001d362 = memset_orig
+			 * (the REP STOSB loop), NOT io_uring — the
+			 * early hot-text layout (kernel_setjmp/memcpy/
+			 * memmove/memset) is fixed at _stext in every
+			 * CI build, and the run-36717541886 vmlinux has
+			 * NO io_uring at all while the crash still
+			 * reproduces byte-identical. A byte-fill loop
+			 * faulting on four different pad pages = the
+			 * 0/1-array writer itself. Name it: the fill
+			 * args (src=rsi/count=rdx) and the caller
+			 * chain parked at [rsp]. (The io_uring tctx
+			 * print from M5.1c.6 stays: the field only
+			 * exists with CONFIG_IO_URING, which patch 0018
+			 * turned off for OS_WINDOWS.) */
 #ifdef CONFIG_IO_URING
 			void *iouring = current->io_uring;
 #else
 			void *iouring = NULL;
 #endif
+			unsigned long long frsp =
+				(e->context != NULL) ?
+				UML_NT_X64_CTX_RSP(e->context) : 0;
+			int ri;
+
 			n = snprintf(buf, sizeof(buf),
 				     "guard hit: rip=%llx wrote %llx "
 				     "task=%d iouring=%px tstate=%ld "
-				     "(padding unprotected, resuming)\n",
+				     "rsi=%llx rdx=%llx (memset args; "
+				     "padding unprotected, resuming)\n",
 				     rip, wrote, current->pid,
 				     iouring,
-				     (long)current->__state);
+				     (long)current->__state,
+				     (e->context != NULL) ?
+					     UML_NT_X64_CTX_RSI(e->context) :
+					     0,
+				     (e->context != NULL) ?
+					     UML_NT_X64_CTX_RDX(e->context) :
+					     0);
 			if (n > 0)
 				uml_nt_crash_write(buf, (unsigned int)n);
+			for (ri = 0; ri < 6; ri++) {
+				unsigned long long va = frsp + 8ULL * ri;
+				unsigned long long v;
+
+				if (!uml_nt_page_readable(va & ~0xfffULL))
+					break;
+				v = *(unsigned long long *)va;
+				/* kernel text only — the return chain */
+				if (v < 0x60001000ull ||
+				    v >= 0x60400000ull)
+					continue;
+				n = snprintf(buf, sizeof(buf),
+					     "  ret[%d] rsp=%llx -> %llx\n",
+					     ri, va, v);
+				if (n > 0)
+					uml_nt_crash_write(buf,
+							   (unsigned int)n);
+			}
 			return -1; /* EXCEPTION_CONTINUE_EXECUTION */
 		}
 	}
