@@ -267,3 +267,29 @@ boot loud-fail, chấp nhận yêu cầu phần cứng hiện đại).
 syscall boundary không cần FP (caller-saved ABI), nhưng SIGSEGV/sigreturn
 cần fpstate. Giữ CONTEXT_FULL (XSAVE) trong VEH path, stub_data mở rộng
 khối fp khi làm S4d.
+
+## D19 — Mô hình concurrency NT: chỉ vCPU thread chạy kernel code (2026-09-29, Shelley duyệt)
+
+**Quyết định:** các NT thread phụ trợ (timer/alarm, console reader, sau này
+io/netstack) là **edge-capture only** — bắt sự kiện rồi handoff qua flag/handle;
+TUYỆT ĐỐI không chạy kernel context. Toàn bộ kernel code (tick handler
+do_IRQ→do_timer, softirq...) chạy trên vCPU thread tại điểm unblock
+(block_signals/unblock_signals — đúng chỗ upstream SIGALRM được phép deliver).
+
+**Bối cảnh (root cause S4c2 busybox crash):** upstream serialize tick bằng
+OS signal mask — SIGALRM chỉ có thể fire trên vCPU thread khi unblock. Port
+NT giữ nguyên flag machine nhưng chuyển delivery sang timer NT thread riêng →
+tick (deliver_alarm → do_IRQ → do_timer → event_handler) chạy đồng thời với
+vCPU đang mid-exec trong cửa sổ execve busybox → rác DETERMINISTIC
+(physmem=0x400000001, high_physmem=0x62000200 — address-shaped, guest-window
+flavored) đè 2 word .bss kề nhau; kmem_cache_free sau đó free con trỏ bình
+thường qua virt_to_page với base đã rác. Fix `520e9a9`: timer thread chỉ set
+pending — alarm chờ vCPU unblock (parity upstream semantics).
+
+**Hệ quả:**
+- Rule review cho mọi thread mới (M4 io thread, M5 netstack): không bao giờ
+  gọi vào kernel từ thread phụ; handoff qua conn/flag, vCPU xử lý.
+- Canary "os-I/O funnel" (5e98421+) giữ làm hạ tầng chẩn đoán thường trực —
+  mọi write vào physmem qua os-I/O giờ có thể trace call-site.
+- Bài học dịch semantic: flag machine上游 dịch nguyên văn KHÔNG đủ — phải dịch
+  cả INVARIANT serialization của nó (ai được chạy cái gì trên thread nào).
