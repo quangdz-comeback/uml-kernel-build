@@ -23,7 +23,10 @@
 
 #include <physalloc.h>
 
-#define UML_NT_VMA_MAX 64 /* fixed table for the POC; heap later */
+#define UML_NT_VMA_MAX 256 /* fixed table; systemd's loader-chunked
+	* mm blew past 64 — "fork: mm clone failed" run 36776389525
+	* (38 vma(s) seeded at the first fork, grown past the cap by
+	* the next) */
 
 #define UML_NT_FAULT_PAGE_SIZE 0x1000ull /* guest page granularity —
 	* owned here (vma geometry: guards are page-granular); fault.h

@@ -1172,8 +1172,8 @@ static unsigned long long sys_arch_prctl(struct uml_nt_stub_conn *c,
  * "Comm:" panics), PDEATHSIG/DUMPABLE/NO_NEW_PRIVS are recorded and
  * ack'd. Unknown options = -EINVAL (systemd tolerates; a blanket 0
  * would lie about Getmm). */
-#define UML_NT_PR_SET_PDEATHSIG  2
-#define UML_NT_PR_GET_PDEATHSIG  3
+#define UML_NT_PR_SET_PDEATHSIG  1
+#define UML_NT_PR_GET_PDEATHSIG  2
 #define UML_NT_PR_SET_DUMPABLE   4
 #define UML_NT_PR_GET_DUMPABLE   5
 #define UML_NT_PR_SET_NAME       15
@@ -1280,6 +1280,9 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 137: /* statfs — systemd probes mount-point fs types */
 	case 138: /* fstatfs */
 	case 318: /* getrandom — systemd + libcrypto key material */
+	case 319: /* memfd_create — the executor's anonymous files */
+	case 321: /* bpf — systemd probes; the honest kernel answer
+		   * (enabled or -ENOSYS from the table) beats ours */
 	case 439: /* faccessat2 — systemd file probes (RENAME flags) */
 	case 83: /* mkdir — systemd /run /tmp /var runtime dirs */
 	case 258: /* mkdirat */
@@ -1350,6 +1353,8 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 7: /* poll — udhcpc waits the lease window in poll() */
 	case 23: /* select */
 	case 270: /* pselect6 */
+	case 271: /* ppoll — systemd's netlink wait ("Failed to wait
+		   * for netlink event, ignoring") */
 	case 35: /* nanosleep — ping interval, retry loops (hrtimer
 		  * machinery: the same clock the sysbench window ran) */
 		ret = sys_vfs(nr, a);
@@ -1581,9 +1586,18 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		ret = sys_arch_prctl(c, d, a);
 		break;
 	case 157: /* prctl — M5.4 c3: the systemd process-option
-		   * cluster (PR_SET_NAME ×many: every unit/child
-		   * names itself; PDEATHSIG/DUMPABLE/NO_NEW_PRIVS
-		   * on the early boot path) */
+		   * cluster. REAL on task-backed conns: the generic
+		   * prctl carries the commands the hand-rolled table
+		   * lacked with honest cred/cap checks — sd-executor's
+		   * PR_SET_PDEATHSIG (1 — the defines had 1/2 swapped:
+		   * "Failed to set death signal: Invalid argument"),
+		   * PR_SET_MM (35), PR_GET_AUXV (47, the repeated
+		   * cmd=47 EINVALs). POC conns keep the hand-rolled
+		   * answer. */
+		if (c->task_backed) {
+			ret = sys_vfs(nr, a);
+			break;
+		}
 		ret = sys_prctl(c, a);
 		break;
 	case 228: /* clock_gettime — the guest's time source (M4 sysbench):
