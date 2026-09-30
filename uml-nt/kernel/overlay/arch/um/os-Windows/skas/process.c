@@ -40,6 +40,7 @@
 #include <stub-panic.h>
 #include <stub_nt.h>
 #include <syscall.h>
+#include <bench.h>
 #include <os.h>
 #include "internal.h"
 
@@ -203,6 +204,11 @@ void userspace(struct uml_pt_regs *regs)
 
 		cmd = c->d->cmd;
 		rc = uml_nt_pump_conn(c);
+		/* M4.1 bench: one QPC timestamp per round — the delta
+		 * from the previous round is the full syscall RTT and
+		 * is recorded only while the bench window is open
+		 * (bench.c; nothing logs here per round). */
+		uml_nt_bench_sample();
 		if (rc == 2) {
 			/* execve conn switch: the old conn (and its d)
 			 * were destroyed mid-round — no reg pull (d is

@@ -32,6 +32,7 @@
 #include <stub-panic.h>
 #include <stub_nt.h>
 #include <syscall.h>
+#include <bench.h>
 #include <uaccess_walk.h>
 
 #define UML_NT_SYSCALLS_BASE UML_STUB_RAM_BASE
@@ -144,6 +145,10 @@ static unsigned long long sys_write(struct uml_nt_stub_conn *c,
 		return SC_RET(SC_EFAULT);
 	nt_console_write((char *)uml_boot.physmem_base + off,
 			 (unsigned int)a[2]);
+	/* M4.1: the bench markers ride the console path — exact-match
+	 * (length-gated) so ordinary writes never pay a memcmp. */
+	uml_nt_bench_write_marker((const char *)uml_boot.physmem_base + off,
+				  a[2]);
 	return a[2];
 }
 

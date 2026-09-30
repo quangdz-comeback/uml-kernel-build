@@ -25,7 +25,8 @@ user_syms.c stub-impl.c ubd_user.c console.c skas/mem.c skas/process.c \
 skas/scan_patch.c skas/stub_ctl.c skas/fault.c skas/vma.c skas/elf.c \
 skas/elf_split.c \
 skas/physalloc.c skas/physbackend.c skas/syscall.c skas/uaccess.c \
-skas/uaccess_walk.c skas/mmctx.c skas/binfmt.c)
+skas/uaccess_walk.c skas/mmctx.c skas/binfmt.c \
+skas/bench.c skas/bench_stats.c)
 ACTUAL="$(cd "$SRC" && find . -name '*.c' | sed 's|^\./||' | sort | tr '\n' ' ')"
 EXPECTED_SORTED="$(printf '%s\n' "${EXPECTED[@]}" | sort | tr '\n' ' ')"
 if [[ "$ACTUAL" != "$EXPECTED_SORTED" ]]; then

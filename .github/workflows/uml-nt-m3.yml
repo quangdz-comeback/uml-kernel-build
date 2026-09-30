@@ -342,3 +342,37 @@ jobs:
           grep -q "EXEC2-FAIL" initexec.log && { echo "step2: execve /bin/busybox failed"; exit 1; }
           grep "BUSYBOX-SHELL-OK" initexec.log | grep -qv "OPENAT-READ-OK" || { echo "busybox sh never ran the script (acceptance)"; exit 1; }
           echo "M3.8 S3+S4b+S4c NATIVE INIT-EXEC OK: binfmt_umlnt + userspace() + write(2) + openat/read VFS + execve chain + TLS + busybox sh echo hi"
+
+      # M4.1: syscall RTT benchmark, clean path — /bin/bench runs as
+      # PID 1 (init=/bin/bench, its own invocation: the POC chain
+      # above stays untouched): BENCH_N getpid rounds between
+      # kernel-recognized window markers (skas/bench.c opens/closes
+      # the sampling window inside the write handler); the real
+      # userspace() loop times every round (os_nsecs, wake-to-wake)
+      # and prints ONE summary at END — zero per-round logging, the
+      # distortion M3.9 called out is gone by construction. The
+      # guest's BENCH-GUEST-CYCLES line is the rdtsc cross-check.
+      # Perf numbers go to RESULTS.md; the gate asserts structure
+      # (all rounds served) plus a 20x-headroom sanity ceiling —
+      # NOT a perf gate.
+      - name: NATIVE RTT bench gate (M4.1)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$ROOTFS" "root=98:0" "init=/bin/bench" > bench.log 2>&1
+          code=$?
+          set -e
+          cat bench.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code"; exit 1; }
+          grep -q "UMLNT-BENCH-BEGIN" bench.log || { echo "bench window never opened (guest marker write missing)"; exit 1; }
+          grep -q "BENCH-KERNEL: rounds=8000 " bench.log || { echo "kernel window did not record all 8000 getpid rounds (dispatch dropped rounds?)"; exit 1; }
+          grep -q "BENCH-GUEST-CYCLES: total=" bench.log || { echo "guest rdtsc cross-check line missing"; exit 1; }
+          MEAN=$(grep -oE "mean_ns=[0-9]+" bench.log | head -1 | cut -d= -f2)
+          [ -n "$MEAN" ] || { echo "mean_ns missing from BENCH-KERNEL summary"; exit 1; }
+          [ "$MEAN" -lt 1000000 ] || { echo "RTT mean ${MEAN}ns above the 1ms sanity ceiling (per-round logging back? wait timeouts?)"; exit 1; }
+          echo "M4.1 NATIVE BENCH OK: rounds=8000 recorded clean (no per-round log), mean ${MEAN}ns/syscall"

@@ -16,7 +16,7 @@ CC     ?= clang
 LD     ?= ld.lld
 IMAGE_BASE := 0x62000000
 
-all: guest-init.elf step2.elf
+all: guest-init.elf step2.elf bench.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
@@ -43,6 +43,17 @@ step2.elf: step2.c
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "step2 must be a static ELF" >&2; exit 1; }
 
+# M4.1: the RTT bench guest — runs as PID 1 (init=/bin/bench), a
+# tight getpid loop between kernel-recognized window markers
+# (bench.c); the kernel prints the ns summary, this binary the rdtsc
+# cross-check. Same link recipe as step2 (in-window base).
+bench.elf: bench.c
+	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "bench must be a static ELF" >&2; exit 1; }
+
 clean:
-	rm -f init.o guest-init.elf step2.elf
+	rm -f init.o guest-init.elf step2.elf bench.elf
 .PHONY: all clean

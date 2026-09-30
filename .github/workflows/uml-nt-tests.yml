@@ -19,6 +19,9 @@ jobs:
           bash uml-nt/tests/test_mm.sh
           # M3.7 uaccess walker (D15) over the vma tree
           bash uml-nt/tests/test_uaccess.sh
+          # M4.1 bench stats — the pure math the freestanding kernel
+          # ships must match the host test (sort/percentile/mean/eps)
+          bash uml-nt/tests/test_bench.sh
           # M3.4 guest ELF loader — the real-fixture build needs lld
           # (same clang+lld recipe as the kernel job's guest build).
           if ! command -v ld.lld >/dev/null 2>&1; then
@@ -56,4 +59,4 @@ jobs:
           shellcheck -x uml-nt/kernel/fetch.sh uml-nt/tests/test_fetch.sh \
             uml-nt/tests/test_os_windows_skeleton.sh uml-nt/tests/test_scan_patch.sh \
             uml-nt/tests/test_mm.sh uml-nt/tests/test_elf.sh \
-            uml-nt/tests/test_uaccess.sh
+            uml-nt/tests/test_uaccess.sh uml-nt/tests/test_bench.sh

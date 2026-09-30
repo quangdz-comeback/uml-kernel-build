@@ -62,6 +62,14 @@ staging/bin/step2: ../guest/step2.elf
 	@mkdir -p staging/bin
 	cp $< $@
 
+# M4.1: the RTT bench guest — PID 1 of the bench gate's own launcher
+# run (init=/bin/bench), a tight getpid loop between kernel-recognized
+# window markers (guest/bench.c). Lives in the same image so both
+# gates share one rootfs artifact.
+staging/bin/bench: ../guest/bench.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
 build/busybox-$(BUSYBOX_VER)/busybox:
 	@mkdir -p build
 	curl -sSL -o build/$(BUSYBOX_VER).tar.bz2 \
@@ -88,7 +96,7 @@ staging/bin/busybox: build/busybox-$(BUSYBOX_VER)/busybox
 		{ echo "busybox must be a static ELF" >&2; exit 1; }
 
 rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
-	     staging/bin/step2 staging/bin/busybox
+	     staging/bin/step2 staging/bin/bench staging/bin/busybox
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 
