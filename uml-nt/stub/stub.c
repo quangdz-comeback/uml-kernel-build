@@ -376,21 +376,35 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	gp_from_context(c, &d->regs);
 
 	/* D18 fast path: an fs-prefixed guest access that faults below
-	 * the guest span means the TLS base was wiped while the guest
-	 * ran. Redirect through the fault trampoline (which re-applies
-	 * the base AFTER the context restore) back to the SAME rip —
-	 * the instruction re-executes with the base live. A genuine
-	 * guest null/low deref is not fs-prefixed and keeps its
-	 * SIGSEGV round-trip. */
-	if (is_fault && d->fs_base != 0 && have_fsgsbase &&
-	    (uintptr_t)er->ExceptionInformation[1] <
-		    (uintptr_t)d->ram_base &&
-	    *(const unsigned char *)(uintptr_t)c->Rip == 0x64 /* fs: */) {
-		fs_tramp_base = d->fs_base;
-		fs_save_r11 = c->R11;
-		fs_tramp_target = c->Rip;
-		c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
-		return EXCEPTION_CONTINUE_EXECUTION;
+	 * the guest span — or WRAPPED — means the TLS base was wiped
+	 * while the guest ran. The trampoline re-applies the base at
+	 * every resume, but the base only lives in the CPU: a preemption
+	 * between wrfsbase and the guest's next %fs access makes Windows
+	 * restore fs=0 (it never saw the wrfsbase), and glibc's struct
+	 * pthread sits at NEGATIVE fs offsets — the fault signs in at
+	 * the TOP of the VA space (0 + -0x150 = 0xfff...feb0), which no
+	 * unsigned "below ram_base" test can see (init died exactly
+	 * there, run 36785701760). Both windows route through the fault
+	 * trampoline (which re-applies the base AFTER the context
+	 * restore) back to the SAME rip — the instruction re-executes
+	 * with the base live. A genuine guest null/low deref is not
+	 * fs-prefixed and keeps its SIGSEGV round-trip; the guest's own
+	 * base is always a validated mapped VA (arch_prctl), so an
+	 * fs-prefixed wrapped access is never a real guest address. */
+	{
+		uintptr_t fa = (uintptr_t)er->ExceptionInformation[1];
+
+		if (is_fault && d->fs_base != 0 && have_fsgsbase &&
+		    (fa < (uintptr_t)d->ram_base ||
+		     fa >= (uintptr_t)0xFFFFFFFF00000000ull) &&
+		    *(const unsigned char *)(uintptr_t)c->Rip ==
+			    0x64 /* fs: */) {
+			fs_tramp_base = d->fs_base;
+			fs_save_r11 = c->R11;
+			fs_tramp_target = c->Rip;
+			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
 	}
 
 	if (is_syscall) {
