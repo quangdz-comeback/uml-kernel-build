@@ -134,6 +134,8 @@ jobs:
           echo "launcher exit: $code (124 = still running at timeout — expected while systemd boots)"
           echo "--- first 25 log lines (ubd attach / early boot) ---"
           head -25 systemd.log
+          echo "--- exec chain ---"
+          grep -E "execve\(|binfmt_umlnt:" systemd.log | head -40 || true
           # boot-failure-driven: the evidence table first.
           echo "--- not-implemented syscall table (this boot) ---"
           grep "not implemented" systemd.log \
@@ -141,6 +143,8 @@ jobs:
             | sort -n | uniq -c | sort -rn | head -40 || true
           echo "--- last 30 log lines ---"
           tail -30 systemd.log
+          echo "--- last console writes from the guest ---"
+          grep -E "^\[syscall\] (write|writev|openat|open|execve)" systemd.log | tail -25 || true
           grep -q "Reached target Basic System" systemd.log || \
             { echo "M5.5a: basic.target not reached yet — implement the clusters above, re-dispatch"; exit 1; }
           echo "M5.5a NATIVE SYSTEMD OK: systemd reached basic.target"
