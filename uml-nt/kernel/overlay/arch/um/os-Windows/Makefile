@@ -22,4 +22,9 @@ obj-y += ubd_user.o
 # vector transport (M5.1c) reuses the dial/framed-io helpers here.
 obj-y += net_win.o
 
+# M5.1c: the vector driver's user half — TCP-framed netstack channel
+# (D8) replacing the unix-fd transports. Links against vector_kern.o
+# (drivers patch 0011 keeps only the kernel side in vector-objs).
+obj-y += vector_user.o
+
 obj-y += skas/

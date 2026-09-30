@@ -13,3 +13,10 @@ CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_BLK_DEV_UBD=y
 CONFIG_EXT4_FS=y
 CONFIG_EARLY_PRINTK=y
+# M5: netstack channel (D8) — vector driver + guest IP stack
+# (udhcpc needs AF_PACKET, ping needs INET/ICMP)
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_PACKET=y
+CONFIG_UML_NET=y
+CONFIG_UML_NET_VECTOR=y

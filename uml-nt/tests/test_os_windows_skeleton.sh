@@ -21,7 +21,8 @@ command -v "$CC" >/dev/null 2>&1 || { echo "clang not found"; exit 1; }
 
 EXPECTED=(file.c start_up.c mem.c process.c execvp.c helper.c umid.c \
 signal.c util.c time.c irq.c sigio.c tty.c registers.c main.c \
-user_syms.c stub-impl.c ubd_user.c console.c net_win.c skas/mem.c \
+user_syms.c stub-impl.c ubd_user.c console.c net_win.c vector_user.c \
+skas/mem.c \
 skas/process.c skas/scan_patch.c skas/stub_ctl.c skas/fault.c \
 skas/vma.c skas/elf.c skas/elf_split.c \
 skas/physalloc.c skas/physbackend.c skas/syscall.c skas/uaccess.c \
@@ -41,7 +42,7 @@ echo "ok  - file set mirrors os-Linux map (elf_aux.c excluded, stub-impl.c added
 REAL=(main.c util.c time.c mem.c signal.c irq.c start_up.c process.c \
 file.c skas/process.c registers.c skas/stub_ctl.c skas/fault.c \
 skas/vma.c skas/physalloc.c ubd_user.c console.c skas/syscall.c \
-skas/uaccess.c net_win.c)
+skas/uaccess.c net_win.c vector_user.c)
 for f in "${REAL[@]}"; do
   if grep -qE '^\s*#\s*include\s+"stub-impl\.h"' "$SRC/$f"; then
     echo "FAIL- real module $f still includes stub-impl.h (type-mirror collision)"

@@ -1,6 +1,6 @@
 --- a/arch/um/drivers/Makefile
 +++ b/arch/um/drivers/Makefile
-@@ -23,6 +23,16 @@
+@@ -23,6 +23,25 @@
  # When the above is fixed, don't forget to add this too!
  #targets += $(obj)/pcap.o
  
@@ -13,14 +13,25 @@
 +# must not leak into this branch.
 +ubd-objs := ubd_kern.o
 +obj-$(CONFIG_BLK_DEV_UBD) += ubd.o
++
++# uml-nt (M5.1c): the vector driver is the only ethernet transport
++# left in 6.18 (legacy net drivers removed) — its kernel side builds
++# freestanding unchanged (vector_transports.o is kernel-half header
++# logic; its raw/tap/bess cases stay dead without those transports);
++# the user half is os-Windows/vector_user.c (TCP-framed netstack
++# channel per D8, not unix fds).
++vector-objs := vector_kern.o vector_transports.o
++obj-$(CONFIG_UML_NET_VECTOR) += vector.o
 +else
  obj-y := stdio_console.o fd.o chan_kern.o chan_user.o line.o
  obj-$(CONFIG_SSL) += ssl.o
  obj-$(CONFIG_STDERR_CONSOLE) += stderr_console.o
-@@ -52,5 +62,6 @@
- CFLAGS_null.o = -DDEV_NULL=$(DEV_NULL_PATH)
+@@ -53,4 +72,6 @@
  
  CFLAGS_xterm.o += '-DCONFIG_XTERM_CHAN_DEFAULT_EMULATOR="$(CONFIG_XTERM_CHAN_DEFAULT_EMULATOR)"'
-+endif
  
- include $(srctree)/arch/um/scripts/Makefile.rules
+-include $(srctree)/arch/um/scripts/Makefile.rules
++endif
++
++include $(srctree)/arch/um/scripts/Makefile.rules
+\ No newline at end of file
