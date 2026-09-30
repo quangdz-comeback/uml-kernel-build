@@ -17,7 +17,8 @@ LD = ld.lld
 # pointers say. All guest binaries share it — execs replace each other
 # sequentially and never share the address space.
 IMAGE_BASE := 0x62000000
-IMG_BLOCKS ?= 2048   # 8 MiB at 4K blocks
+IMG_BLOCKS ?= 4096   # 16 MiB at 4K blocks (glibc cluster: ld-linux +
+		     # libc.so.6 ≈ 3 MB on top of the musl binaries)
 
 # S4c2: busybox FROM SOURCE, not the Alpine prebuilt — the prebuilt
 # links at 0x400000 and the load shift would break every baked pointer
@@ -186,6 +187,31 @@ staging/bin/dynsetup: ../guest/dynsetup.elf
 	@mkdir -p staging/bin
 	cp $< $@
 
+# M5.4 c2 cluster glibc (D20 cluster 2): the REAL glibc startup —
+# the build machine's own /bin/true + its loader and libc (Ubuntu
+# 24.04 CI runner = glibc 2.39; this host matches). Copying the
+# runner's own files keeps the hard rule intact (no image artifact;
+# ~2 MB into the ext4). init=/bin/true exercises: PT_INTERP
+# ld-linux (c1) → ld.so.cache mmap (file-backed, PROT_READ) → the
+# ldso minimal malloc (anon) → libc.so.6 span mmap + per-segment
+# MAP_FIXED refills + the D20 exec sweep → bss zero refill → TLS
+# (arch_prctl, D18) → set_robust_list/prlimit64/rseq → exit_group(0)
+# → "Attempted to kill init! exitcode=0x00000000".
+staging/bin/true:
+	@mkdir -p staging/bin
+	test -f /usr/bin/true || { echo "no /usr/bin/true on the build host" >&2; exit 1; }
+	cp /usr/bin/true $@
+
+staging/lib64/ld-linux-x86-64.so.2:
+	@mkdir -p staging/lib64
+	test -f /lib64/ld-linux-x86-64.so.2 || { echo "no glibc loader on the build host" >&2; exit 1; }
+	cp -L /lib64/ld-linux-x86-64.so.2 $@
+
+staging/lib/x86_64-linux-gnu/libc.so.6:
+	@mkdir -p staging/lib/x86_64-linux-gnu
+	test -f /usr/lib/x86_64-linux-gnu/libc.so.6 || { echo "no glibc on the build host" >&2; exit 1; }
+	cp /usr/lib/x86_64-linux-gnu/libc.so.6 $@
+
 # udhcpc execs its helper script via /bin/sh — the one busybox symlink
 # the net gate needs (the other applets are called through /bin/busybox
 # explicitly).
@@ -258,7 +284,9 @@ rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
 	     staging/bin/netsetup staging/bin/dyntest \
 	     staging/lib/ld-musl-x86_64.so.1 staging/bin/nettest \
 	     staging/bin/busybox-dyn staging/lib/libc.so \
-	     staging/bin/dynsetup
+	     staging/bin/dynsetup \
+	     staging/bin/true staging/lib64/ld-linux-x86-64.so.2 \
+	     staging/lib/x86_64-linux-gnu/libc.so.6
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 

@@ -302,7 +302,10 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 	long long sp;
 	u32 lprot = (u32)a[2];
 	u32 flags = (u32)a[3];
-	long long fd = (long long)a[4];
+	/* fd is an int in the mmap ABI: glibc's -1 arrives as the
+	 * zero-extended 0xFFFFFFFF (mov r8d, -1) — Linux reads only
+	 * the low 32 bits. */
+	long long fd = (long long)(int)(unsigned)a[4];
 
 	if (len == 0)
 		return SC_RET(SC_EINVAL);
@@ -322,11 +325,6 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 		int nfree, i;
 
 		va = addr;
-		if (va & (UML_NT_PHYS_RUN_SIZE - 1)) {
-			os_info("[syscall] mmap MAP_FIXED 0x%llx: not "
-				"run-aligned\n", va);
-			return SC_RET(SC_EINVAL);
-		}
 		/* Sub-run MAP_FIXED (page-aligned, inside ONE VMA backed
 		 * by a private run): MATERIALIZED since M4 slice 5 —
 		 * the musl mallocng brk guard
@@ -408,6 +406,14 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 				"prot=0x%x: file-VMA refill (%d guard(s) "
 				"cleared)\n", addr, len, lprot, killed);
 			return addr;
+		}
+		/* Fresh/replace territory — run-aligned only (the VMA
+		 * geometry contract). The refill paths above are
+		 * byte-ranged and take any 4K-aligned address. */
+		if (va & (UML_NT_PHYS_RUN_SIZE - 1)) {
+			os_info("[syscall] mmap MAP_FIXED 0x%llx: not "
+				"run-aligned\n", va);
+			return SC_RET(SC_EINVAL);
 		}
 		if (uml_nt_vma_span_fits(c->mm, va, va + len) < 0) {
 			os_info("[syscall] mmap MAP_FIXED 0x%llx+%llu: "
@@ -583,7 +589,9 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 	struct uml_nt_vma *v = NULL;
 	u32 lprot = (u32)a[2];
 	u32 flags = (u32)a[3];
-	long long fd = (long long)a[4];
+	/* fd is an int in the mmap ABI (see sys_mmap's note) — the
+	 * loader's fd numbers and the -1 sentinel both fit 32 bits. */
+	long long fd = (long long)(int)(unsigned)a[4];
 	struct fd fdesc;
 	struct file *f;
 	int kind;
@@ -1102,6 +1110,8 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 257: /* openat */
 	case 4: /* stat — musl path resolution (sh /hi.sh) */
 	case 5: /* fstat — musl stdio sizing/ash script fd */
+	case 262: /* newfstatat — glibc's fstat/stat shape (AT_EMPTY_PATH) */
+	case 332: /* statx — glibc stat variants */
 	case 8: /* lseek — ash reads the script by chunks */
 	case 17: /* pread64 — glibc ld.so reads the ELF headers of the
 		  * libs it maps (M5.4 c2 census, D20) */
@@ -1153,8 +1163,12 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			ret = sys_write(c, a);
 		break;
 	case 9: /* mmap — file-backed (fd != -1) = the dynamic-loader
-		 * path (M5.4 c2, D20); anon stays below */
-		if (!(a[3] & SC_MAP_ANONYMOUS) && a[4] != -1ull)
+		 * path (M5.4 c2, D20); anon stays below. fd is an INT
+		 * in the mmap ABI: glibc materializes -1 as the
+		 * 32-bit 0xFFFFFFFF (mov r8d, -1 — zero-extended into
+		 * the register), Linux reads only the low 32 bits. */
+		if (!(a[3] & SC_MAP_ANONYMOUS) &&
+		    (long long)(int)(unsigned)a[4] != -1L)
 			ret = sys_mmap_file(c, a);
 		else
 			ret = sys_mmap(c, a);

@@ -663,3 +663,35 @@ jobs:
           grep -q "DYNBUSY-OK" dynlib.log || { echo "the dynamic busybox never ran (ld-musl DT_NEEDED handshake broken? see [syscall] ENOSYS lines)"; exit 1; }
           grep -q "DYNSETUP-EXEC-FAIL\|DYNBUSY-FAIL" dynlib.log && { echo "the dyn chain reported failure"; exit 1; }
           echo "M5.4 C2 NATIVE DYNLIB OK: static PID 1 -> dynamic busybox (ld-musl interp + DT_NEEDED libc.so) ran to its own console write"
+
+      # M5.4 c2 cluster glibc (D20 cluster 2): the REAL glibc startup,
+      # natively — /bin/true + ld-linux + libc.so.6 copied from the
+      # runner itself into the rootfs (no image artifact; the PVE
+      # image's /bin/true is the same shape, local-only). The full
+      # ld.so sequence: cache mmap (file-backed PROT_READ) → ldso
+      # malloc (anon) → libc.so.6 span mmap + per-segment MAP_FIXED
+      # refills + the D20 exec sweep → bss zero refill → TLS
+      # (arch_prctl) → set_robust_list/prlimit64/rseq → exit_group(0)
+      # — the init-exit panic with exitcode 0x00000000 is the "ran
+      # fully" marker (the only exit a PID-1 /bin/true can print).
+      - name: NATIVE glibc gate (M5.4 c2)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$ROOTFS" "root=98:0" "init=/bin/true" > glibc.log 2>&1
+          code=$?
+          set -e
+          cat glibc.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code (boot hung elsewhere? see log)"; exit 1; }
+          grep -q "binfmt_umlnt: interp /lib64/ld-linux-x86-64.so.2 requested" glibc.log || { echo "the glibc binary never reached binfmt_umlnt (exec chain broken? see log)"; exit 1; }
+          grep -q "mmap file.*-> fresh" glibc.log || { echo "ld.so never mapped a library through the file-backed mmap path (M5.4 c2 broken?)"; exit 1; }
+          grep -q "mmap exec sweep.*syscall(s) patched (D20)" glibc.log || { echo "the libc text segment was never swept at map time (D20 exec-sweep hook broken?)"; exit 1; }
+          grep -q "arch_prctl(SET_FS" glibc.log || { echo "ld.so never set its TLS (startup stopped before TLS init? see [syscall] ENOSYS lines)"; exit 1; }
+          grep -q "Attempted to kill init! exitcode=0x00000000" glibc.log || { echo "/bin/true did not exit 0 (glibc startup failed mid-way? see the error lines + [syscall] ENOSYS lines in the log)"; exit 1; }
+          grep -q "cannot\|error while loading" glibc.log && { echo "the glibc loader reported failure"; exit 1; }
+          echo "M5.4 C2 NATIVE GLIBC OK: ld-linux + libc.so.6 through the file-backed mmap + D20 sweep + TLS, /bin/true exit 0"
