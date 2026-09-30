@@ -1,0 +1,56 @@
+uml-nt: io_uring defaults OFF under OS_WINDOWS
+
+The M5.1c net-gate crash hunt caught the io_uring task-exit path
+smashing task stacks (kernel runs 36710288173 / 36711876142 /
+36714161309 on the diag commits 88459b7..120a649). Nothing in this
+port creates an io_uring ring — busybox/udhcpc never touch it and
+copy_process zeroes p->io_uring (kernel/fork.c) — yet EVERY dying
+task runs do_exit -> io_uring_files_cancel (kernel/exit.c) ->
+__io_uring_cancel_generic -> io_uring_clean_tctx ->
+io_uring_del_tctx_node.
+
+On a task whose ->io_uring holds stale memory, that chain
+list_del's and kfree's through FREED STACK vmalloc memory:
+list_del(&node->ctx_node) writes through stale stack values into
+live task stacks (the forgiving pad guard caught rip=6001d362
+writing the pad pages of four different stacks), and
+kfree(node)/kfree(tctx) feed vmalloc-stack addresses into the SLUB
+freelist — later kmallocs hand freed stack memory out as slab
+objects and slab writes spray the 0/1-byte arrays over suspended
+tasks' schedule chains (the ~0x210-byte smash, pad qword ->
+0x1000000) that killed the net reader (ret to 0x1000100, DEP-X) the
+moment the vector channel went live.
+
+No guest user needs io_uring, so the subsystem must not even be
+built. Make the base default OS_WINDOWS-conditional instead of
+forcing "# CONFIG_IO_URING is not set" through the defconfig:
+kconfig silently drops that line for an EXPERT-hidden symbol
+without CONFIG_EXPERT=y, and CONFIG_EXPERT=y flips a dozen
+default-y-if-!EXPERT knobs (BINFMT_SCRIPT, SHMEM, EPOLL, ...) the
+port relies on.
+
+Under OS_LINUX (plain UML, the lts CI recipe) the default stays y —
+untouched.
+
+Signed-off-by: quangdz-comeback <204571370+quangdz-comeback@users.noreply.github.com>
+---
+ init/Kconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/init/Kconfig b/init/Kconfig
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1837,7 +1837,12 @@ config AIO
+ config IO_URING
+ 	bool "Enable IO uring support" if EXPERT
+ 	select IO_WQ
+-	default y
++	# uml-nt: the exit path (io_uring_files_cancel -> clean_tctx ->
++	# del_tctx_node) runs for every dying task; with no ring user,
++	# a stale ->io_uring there walks freed stack memory and sprays
++	# the SLUB freelist with vmalloc-stack addresses (the M5.1c
++	# stack smash). Default OFF for the NT port.
++	default y if !OS_WINDOWS
+ 	help
+ 	  This option enables support for the io_uring interface, enabling
+ 	  applications to submit and complete IO through submission and

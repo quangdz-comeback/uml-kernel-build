@@ -237,13 +237,22 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 			 * io_uring tctx pointer (the observed hits =
 			 * io_uring_del_tctx_node's list_del walking a
 			 * garbage tctx — this names the task that owns
-			 * the garbage pointer and the value itself). */
+			 * the garbage pointer and the value itself).
+			 * The field only exists with CONFIG_IO_URING;
+			 * M5.1c.6 turned that off (the exit path walked
+			 * garbage tctx into the SLUB freelist), so the
+			 * read must compile away with it. */
+#ifdef CONFIG_IO_URING
+			void *iouring = current->io_uring;
+#else
+			void *iouring = NULL;
+#endif
 			n = snprintf(buf, sizeof(buf),
 				     "guard hit: rip=%llx wrote %llx "
 				     "task=%d iouring=%px tstate=%ld "
 				     "(padding unprotected, resuming)\n",
 				     rip, wrote, current->pid,
-				     current->io_uring,
+				     iouring,
 				     (long)current->__state);
 			if (n > 0)
 				uml_nt_crash_write(buf, (unsigned int)n);
