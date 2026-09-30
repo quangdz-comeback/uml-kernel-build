@@ -169,3 +169,38 @@ Bài học M4.1:
 3. Wine CHẠY ĐƯỢC cả đường exec `init=/bin/bench` (argv-less) tới
    hết bench — EFAULT wine của S4b là ở chuỗi argv-walk; native CI
    vẫn là trọng tài perf.
+
+## M4 final — sysbench cpu thật trong guest (native CI, 2026-09-30)
+
+Commit 4be986d. Cửa hàng đo: `/bin/sysbench` (PID 1, init=/bin/sysbench)
+chạy cpu_execute_event của sysbench 1:1 (sb_cpu.c: quét nguyên tố bằng
+double-sqrt trial division tới cpu-max-prime 10000 — mặc định sysbench —
+1 event = 1 vòng quét), cửa sổ 10s CLOCK_MONOTONIC (syscall
+clock_gettime(228) mới — QPC, D6; không vDSO: mỗi event 1 trap ~26µs).
+Không libm: sqrtsd inline, cùng semantics double của sqrt(). Tính trung
+thực: PRIMES=1228 (deterministic: pi(10000)-1) — gate assert, compute
+không thể giả.
+
+| Môi trường | eps (1 thread) | events | ghi chú |
+|---|---|---|---|
+| Linux mark (tham chiếu) | 2100–3500 | — | band mốc M4 theo kickoff |
+| wine 9.0 (dev host) | 4394.01 | 43941 | bỏ qua — native là trọng tài |
+| **Native windows-latest (CI)** | **3151.42** | **31515** | run 36674969630, gate "M4 FINAL NATIVE SYSBENCH OK" |
+
+**≥ 1/3 mốc Linux: ĐẠT** — 3151 eps nằm TRONG band 2100–3500 (đọc nghiêm
+nhất của bar), gấp ~4.5x cách đọc bảo thủ (1/3 của 2100 = 700). Sàn gate
+CI cố định 2100 (cách đọc nghiêm nhất).
+
+Boot ≤ 5 phút: ĐẠT — boot tới PID 1 (một chuỗi đủ map/conn) chảy trong
+giây trong mọi gate; step boot gate CI (không-image panic) và step
+sysbench (đầy đủ) đều hoàn tất trong < 1 phút thực thi step, so với
+trần 5 phút của chuẩn M4.
+
+Bài học M4 final:
+1. clock_gettime guest = QPC thẳng (os_nsecs) — đủ cho cửa sổ 10s;
+   precision/sub-ns drift không phải mục tiêu M4.
+2. eps chịu chi phí 1 trap clock_gettime/event (~26µs trên event
+   ~230µs = ~11%) — vẫn dư dả so bar; tối ưu sau = vDSO-analogue
+   (rdtsc đã calib ở M4.1, ~2.45 GHz) nếu muốn bỏ trap.
+3. "Real workload" gate phải kèm assert kết quả DETERMINISTIC
+   (PRIMES=1228) — eps tốt + sai kết quả là compute bị tối ưu mất.
