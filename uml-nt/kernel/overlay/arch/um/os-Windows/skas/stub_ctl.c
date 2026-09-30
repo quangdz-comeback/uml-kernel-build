@@ -779,10 +779,19 @@ void uml_nt_fork_reprotect_parent(struct uml_nt_stub_conn *c)
 				       uml_nt_prot_readonly(pv->prot),
 				       pv->start, len,
 				       pv->run_off) < 0) {
-			/* plan full: the parent keeps this writable view;
-			 * shared-run safety falls back to the walker's
-			 * by-refs fixup (kernel side) — never silently
-			 * wrong there. */
+			/* Plan full: the skipped views keep WRITABLE
+			 * stub views over runs the child shares — the
+			 * parent's guest writes there never fault (no
+			 * COW machinery) and stomp the child's pages
+			 * (run 36787150906: the plan capped at 32 views
+			 * — exactly 64 ops — and the skipped high-VA
+			 * arena/heap views were where the executors
+			 * read their torn malloc metadata). Never
+			 * silent: name how many and where. */
+			os_info("fork: reprotect plan full at view %d — "
+				"%d view(s) [0x%llx..] stay WRITABLE on "
+				"shared runs\n", vi, c->mm->nvma - vi,
+				pv->start);
 			break;
 		}
 		vi_reprotect++;

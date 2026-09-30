@@ -40,13 +40,24 @@
 #define UML_NT_FOP_UNMAP   4u
 
 /* UNMAP + up to 3 MAP pieces (COW split), or an INIT plan: one MAP
- * per VMA + guard NOACCESS protects. 64 (hazard-3 slice): the uaccess
- * write fixups QUEUE ops too — one COW run fixed up mid-syscall costs
- * 4 (unmap + up to 3 piece maps), a multi-run to_user bursts several;
- * the plan is kernel-side only (the stub sees ONE op per round-trip),
- * so the cap is memory, not protocol. 64 covers UML_NT_VMA_MAX for
- * INIT plans as well. */
-#define UML_NT_FAULT_MAX_OPS 64
+ * per VMA + guard NOACCESS protects. The plan is kernel-side only
+ * (the stub sees ONE op per round-trip), so the cap is memory, not
+ * protocol: it lives embedded in the conn (kzalloc) — 256 ops * 32B
+ * = 8KB, no kernel-stack copies.
+ *
+ * 64 was the hazard-3 slice number and it broke the fork re-protect
+ * (run 36787150906): the fork answer re-protects the parent's
+ * writable COW views read-only at 2 ops per view — 64 ops capped
+ * that at EXACTLY 32 views ("fork: re-protected 32 parent view(s)"
+ * on every fork), and the rest of the parent's ~40 writable views
+ * kept their WRITABLE stub views over runs shared with the child.
+ * The parent's post-fork writes then landed on the child's pages
+ * without faulting — no COW machinery — and the child read torn
+ * malloc metadata (wild list nodes 0x61432 / -1 in the executors,
+ * SIGSEGV 'w'). 256 covers the systemd boot: ~50 VMAs (INIT plans),
+ * ~40 writable views * 2 ops, plus the uaccess fixup bursts (4 per
+ * COW run fixed mid-syscall). */
+#define UML_NT_FAULT_MAX_OPS 256
 
 struct uml_nt_fault_op {
 	unsigned op;   /* UML_NT_FOP_* */
