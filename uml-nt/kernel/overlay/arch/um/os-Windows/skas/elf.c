@@ -46,6 +46,60 @@ _Static_assert(sizeof(elf_phdr) == 56, "ELF64 phdr layout");
 
 #define RUN UML_NT_PHYS_RUN_SIZE
 
+#define PT_INTERP 3
+
+/*
+ * D20 cluster 1: the PT_INTERP path of `image` — a dynamic binary
+ * names its interpreter there. Returns 0 = none, 1 = the path copied
+ * into `out` (NUL-terminated, must start with '/'), negative = a
+ * broken segment (bounds/NUL violations — fail loud BEFORE
+ * begin_new_exec, where the failure is still recoverable). Pure
+ * logic — unit-tested.
+ */
+int uml_nt_elf_interp_path(const void *image, unsigned long long len,
+			   char *out, unsigned out_cap)
+{
+	const unsigned char *img = image;
+	const elf_ehdr *eh;
+	const elf_phdr *phd;
+	unsigned long long off, n, e_off, e_len;
+	unsigned i;
+
+	if (out_cap == 0)
+		return -1;
+	out[0] = '\0';
+	if (len < sizeof(elf_ehdr) + sizeof(elf_phdr))
+		return -1;
+	eh = (const elf_ehdr *)img;
+	if (eh->e_ident[0] != 0x7f || eh->e_ident[1] != 'E' ||
+	    eh->e_ident[2] != 'L' || eh->e_ident[3] != 'F' ||
+	    eh->e_ident[4] != 2 || eh->e_ident[5] != 1)
+		return -1;
+	if (eh->e_phentsize != sizeof(elf_phdr) || eh->e_phnum == 0 ||
+	    eh->e_phnum == 0xffff)
+		return -1;
+	e_off = eh->e_phoff;
+	e_len = (unsigned long long)eh->e_phnum * sizeof(elf_phdr);
+	if (e_off > len || e_len > len - e_off)
+		return -1;
+	phd = (const elf_phdr *)(img + e_off);
+	for (i = 0; i < eh->e_phnum; i++) {
+		if (phd[i].p_type != PT_INTERP)
+			continue;
+		off = phd[i].p_offset;
+		n = phd[i].p_filesz;
+		if (n < 2 || off > len || n > len - off)
+			return -1;
+		if (img[off] != '/' || img[off + n - 1] != '\0')
+			return -1;
+		if (n > out_cap)
+			return -1;
+		__builtin_memcpy(out, img + off, n);
+		return 1;
+	}
+	return 0;
+}
+
 static unsigned long long floor_run(unsigned long long va)
 {
 	return va & ~(RUN - 1);
@@ -124,6 +178,9 @@ int uml_nt_elf_load(struct uml_nt_elf_image *out, struct uml_nt_mm *mm,
 	out->nseg = 0;
 	out->entry = 0;
 	out->brk = 0;
+	out->base = 0;
+	out->phdr_va = 0;
+	out->phnum = 0;
 
 	/* ---- header + phdr table validation (all bounds first) ---- */
 	if (len < sizeof(elf_ehdr) + sizeof(elf_phdr))
@@ -237,6 +294,22 @@ merged:
 	if (i == nreg || entry < base)
 		return UML_NT_ELF_VA;
 
+	/* ---- D20: where the phdr table landed (AT_PHDR) ---------- */
+	out->base = base;
+	out->phnum = (unsigned long long)phn;
+	for (i = 0; i < phn; i++) {
+		const elf_phdr *p = &phd[i];
+
+		if (p->p_type != PT_LOAD || p->p_filesz == 0)
+			continue;
+		if (e_off >= p->p_offset &&
+		    e_off + e_len <= p->p_offset + p->p_filesz) {
+			out->phdr_va = base + p->p_vaddr +
+				       (e_off - p->p_offset);
+			break;
+		}
+	}
+
 	/* ---- allocate the spans (contiguous blocks, D12) ---------- */
 	for (i = 0; i < nreg; i++) {
 		long long off = uml_nt_phys_alloc_span(ph,
@@ -342,9 +415,24 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
 
 /* auxv tags (asm-generic/auxvec.h / the x86-64 ABI). */
 #define AT_NULL   0
+#define AT_PHDR   3
+#define AT_PHENT  4
+#define AT_PHNUM  5
 #define AT_PAGESZ 6
+#define AT_BASE   7
+#define AT_ENTRY  9
+#define AT_UID    11
+#define AT_EUID   12
+#define AT_GID    13
+#define AT_EGID   14
+#define AT_HWCAP  16
+#define AT_CLKTCK 17
+#define AT_SECURE 23
 #define AT_RANDOM 25
+#define AT_EXECFN 31
 
+/* D20 cluster 1: 16 pairs — the full set a dynamic starter reads. */
+#define UML_NT_ELF_AUXV_PAIRS 16
 
 /* Build the initial user stack block at the TOP of the stack run —
  * the exact layout _start expects at rsp (SysV x86-64 ABI / binfmt_elf
@@ -353,16 +441,22 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
  *   rsp+0       argc
  *   rsp+8..     argv[0..argc-1] pointers, NULL
  *               envp[0..n-1] pointers, NULL
- *               auxv: {AT_RANDOM, ptr} {AT_PAGESZ, 4096} {AT_NULL, 0}
+ *               auxv: AT_PHDR/AT_PHENT/AT_PHNUM/AT_BASE/AT_ENTRY/
+ *                     AT_UID/AT_EUID/AT_GID/AT_EGID/AT_SECURE/
+ *                     AT_HWCAP/AT_CLKTCK/AT_EXECFN/AT_RANDOM/
+ *                     AT_PAGESZ/AT_NULL (D20)
  *   ...pad 16-align...
- *   strings: argv bytes, envp bytes, 16 AT_RANDOM bytes
+ *   strings: argv bytes, envp bytes, execfn, 16 AT_RANDOM bytes
  *   top
  *
  * `dst` is the stack run through the kernel's flat view, `va_base`
  * the guest VA of dst[0], `cap` the run size. rand16 is the 16
  * AT_RANDOM bytes (get_random_bytes at the caller; the tables stay
- * pure for unit tests). Returns the bytes used — rsp = stack_top -
- * used, 16-aligned — or -1 on overflow (loud, never truncate).
+ * pure for unit tests). `ax` carries the D20 fields (the interp
+ * base, the main program's entry/phdrs, ids — a zeroed struct for
+ * the minimal static shape). Returns the bytes used — rsp =
+ * stack_top - used, 16-aligned — or -1 on overflow (loud, never
+ * truncate).
  *
  * The S3 init reads none of this (argc=0 is passed); the layout is
  * the real ABI from day one so S4 (busybox argv) only wires bprm
@@ -371,11 +465,12 @@ long long uml_nt_elf_stack_tables(void *dst, unsigned long long va_base,
 				  unsigned long long cap, int argc,
 				  const char *const *argv,
 				  const char *const *envp,
-				  const unsigned char *rand16)
+				  const unsigned char *rand16,
+				  const struct uml_nt_elf_auxv *ax)
 {
 	unsigned long long o = cap; /* top-down cursor in dst[] */
 	unsigned long long str_va[UML_NT_ELF_MAX_STR];
-	unsigned long long rnd_va, vec, i;
+	unsigned long long rnd_va, execfn_va = 0, vec, i;
 	int nenv = 0, n;
 
 	if (argc < 0 || argc > UML_NT_ELF_MAX_STR)
@@ -403,6 +498,14 @@ long long uml_nt_elf_stack_tables(void *dst, unsigned long long va_base,
 		__builtin_memcpy((char *)dst + o, envp[i], n);
 		str_va[argc + i] = va_base + o;
 	}
+	if (ax != 0 && ax->execfn != 0) {
+		n = __builtin_strlen(ax->execfn) + 1;
+		if ((unsigned long long)n > o)
+			return -1;
+		o -= n;
+		__builtin_memcpy((char *)dst + o, ax->execfn, n);
+		execfn_va = va_base + o;
+	}
 	if (o < 16)
 		return -1;
 	o -= 16;
@@ -412,13 +515,14 @@ long long uml_nt_elf_stack_tables(void *dst, unsigned long long va_base,
 		__builtin_memset((char *)dst + o, 0, 16);
 	rnd_va = va_base + o;
 
-	/* vectors: argc + (argc+1 argv) + (nenv+1 envp) + 3 auxv pairs */
-	vec = (1 + (unsigned)argc + 1 + (unsigned)nenv + 1 + 6) * 8;
+	/* vectors: argc + (argc+1 argv) + (nenv+1 envp) + auxv pairs */
+	vec = (1 + (unsigned)argc + 1 + (unsigned)nenv + 1 +
+	       2 * UML_NT_ELF_AUXV_PAIRS) * 8;
 	if (vec > o)
 		return -1;
 	o -= vec;
 	/* rsp must be 16-aligned — vec is slot-count*8, NOT always a
-	 * 16-multiple (argc=0: 9 slots = 72), so align AFTER. */
+	 * 16-multiple (argc=0: 41 slots), so align AFTER. */
 	o &= ~(unsigned long long)15;
 
 	{
@@ -433,6 +537,32 @@ long long uml_nt_elf_stack_tables(void *dst, unsigned long long va_base,
 		for (n = 0; n < nenv; n++)
 			v[i++] = str_va[argc + n];
 		v[i++] = 0; /* envp NULL */
+		v[i++] = AT_PHDR;
+		v[i++] = (ax != 0) ? ax->at_phdr : 0;
+		v[i++] = AT_PHENT;
+		v[i++] = sizeof(elf_phdr); /* 56 */
+		v[i++] = AT_PHNUM;
+		v[i++] = (ax != 0) ? ax->at_phnum : 0;
+		v[i++] = AT_BASE;
+		v[i++] = (ax != 0) ? ax->at_base : 0;
+		v[i++] = AT_ENTRY;
+		v[i++] = (ax != 0) ? ax->at_entry : 0;
+		v[i++] = AT_UID;
+		v[i++] = (ax != 0) ? ax->uid : 0;
+		v[i++] = AT_EUID;
+		v[i++] = (ax != 0) ? ax->euid : 0;
+		v[i++] = AT_GID;
+		v[i++] = (ax != 0) ? ax->gid : 0;
+		v[i++] = AT_EGID;
+		v[i++] = (ax != 0) ? ax->egid : 0;
+		v[i++] = AT_SECURE;
+		v[i++] = (ax != 0) ? ax->secure : 0;
+		v[i++] = AT_HWCAP;
+		v[i++] = 0; /* no features advertised */
+		v[i++] = AT_CLKTCK;
+		v[i++] = 100;
+		v[i++] = AT_EXECFN;
+		v[i++] = execfn_va;
 		v[i++] = AT_RANDOM;
 		v[i++] = rnd_va;
 		v[i++] = AT_PAGESZ;

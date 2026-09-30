@@ -489,8 +489,22 @@ static void test_stack_tables(void)
 	long long used, i;
 
 	memset(stackbuf, 0xCC, sizeof(stackbuf));
-	used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 2, argv,
-				       envp, rnd);
+	{
+		/* D20 cluster 1: the auxv a starter needs */
+		const struct uml_nt_elf_auxv ax = {
+			.at_base = 0x62010000ull,
+			.at_entry = 0x62000110ull,
+			.at_phdr = 0x62000040ull,
+			.at_phnum = 8,
+			.execfn = "/bin/dyntest",
+			.uid = 1000, .euid = 1000,
+			.gid = 1000, .egid = 1000,
+			.secure = 0,
+		};
+
+		used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 2,
+					       argv, envp, rnd, &ax);
+	}
 	CHECK(used > 0);
 	rsp = top - (unsigned long long)used;
 	CHECK(rsp % 16 == 0);
@@ -520,21 +534,48 @@ static void test_stack_tables(void)
 		CHECK(strcmp(s, "A=B") == 0);
 	}
 	CHECK(v[5] == 0); /* envp NULL */
-	/* auxv: AT_RANDOM → the 16 bytes, AT_PAGESZ → 4096, AT_NULL */
-	CHECK(v[6] == 25 /*AT_RANDOM*/ && v[7] > rsp);
-	CHECK(v[8] == 6 /*AT_PAGESZ*/ && v[9] == 4096);
-	CHECK(v[10] == 0 && v[11] == 0);
+	/* auxv (D20): 16 pairs — AT_PHDR/AT_PHENT/AT_PHNUM/AT_BASE/
+	 * AT_ENTRY/ids/AT_SECURE/AT_HWCAP/AT_CLKTCK/AT_EXECFN then the
+	 * classic AT_RANDOM/AT_PAGESZ/AT_NULL */
+	CHECK(v[6] == 3 /*AT_PHDR*/ && v[7] == 0x62000040ull);
+	CHECK(v[8] == 4 /*AT_PHENT*/ && v[9] == 56);
+	CHECK(v[10] == 5 /*AT_PHNUM*/ && v[11] == 8);
+	CHECK(v[12] == 7 /*AT_BASE*/ && v[13] == 0x62010000ull);
+	CHECK(v[14] == 9 /*AT_ENTRY*/ && v[15] == 0x62000110ull);
+	CHECK(v[16] == 11 /*AT_UID*/ && v[17] == 1000);
+	CHECK(v[18] == 12 /*AT_EUID*/ && v[19] == 1000);
+	CHECK(v[20] == 13 /*AT_GID*/ && v[21] == 1000);
+	CHECK(v[22] == 14 /*AT_EGID*/ && v[23] == 1000);
+	CHECK(v[24] == 23 /*AT_SECURE*/ && v[25] == 0);
+	CHECK(v[26] == 16 /*AT_HWCAP*/ && v[27] == 0);
+	CHECK(v[28] == 17 /*AT_CLKTCK*/ && v[29] == 100);
+	CHECK(v[30] == 31 /*AT_EXECFN*/);
+	{
+		const char *s = (const char *)(stackbuf +
+			(v[31] - va_base));
+
+		CHECK(strcmp(s, "/bin/dyntest") == 0);
+	}
+	CHECK(v[32] == 25 /*AT_RANDOM*/ && v[33] > rsp);
+	CHECK(v[34] == 6 /*AT_PAGESZ*/ && v[35] == 4096);
+	CHECK(v[36] == 0 && v[37] == 0); /* AT_NULL */
 	{
 		const unsigned char *r = (const unsigned char *)(stackbuf +
-			(v[7] - va_base));
+			(v[33] - va_base));
 
-		CHECK(v[7] >= rsp && v[7] < top);
+		CHECK(v[33] >= rsp && v[33] < top);
 		CHECK(memcmp(r, rnd, 16) == 0);
 	}
 
 	/* argc=0/envp=NULL — the S3 init shape: still a valid block */
-	memset(stackbuf, 0xCC, sizeof(stackbuf));	used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 0, NULL,
-				       NULL, rnd);
+	memset(stackbuf, 0xCC, sizeof(stackbuf));
+	{
+		struct uml_nt_elf_auxv ax0;
+
+		memset(&ax0, 0, sizeof(ax0));
+		used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 0,
+					       NULL, NULL, rnd, &ax0);
+	}
 	CHECK(used > 0);
 	rsp = top - (unsigned long long)used;
 	CHECK(rsp % 16 == 0);
@@ -543,12 +584,18 @@ static void test_stack_tables(void)
 	CHECK(v[0] == 0 && v[1] == 0); /* argc, argv NULL */
 
 	/* overflow: 1-byte run cannot hold the tables — fail loud */
-	CHECK(uml_nt_elf_stack_tables(stackbuf, va_base, 8, 2, argv,
-				      envp, rnd) == -1);
-	/* deterministic without rand16 (zeroed AT_RANDOM bytes) */
-	memset(stackbuf, 0xCC, sizeof(stackbuf));
-	used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 0, NULL,
-				       NULL, NULL);
+	{
+		struct uml_nt_elf_auxv ax0;
+
+		memset(&ax0, 0, sizeof(ax0));
+		CHECK(uml_nt_elf_stack_tables(stackbuf, va_base, 8, 2,
+					      argv, envp, rnd,
+					      &ax0) == -1);
+		/* deterministic without rand16 (zeroed AT_RANDOM bytes) */
+		memset(stackbuf, 0xCC, sizeof(stackbuf));
+		used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 0,
+					       NULL, NULL, NULL, &ax0);
+	}
 	CHECK(used > 0);
 	(void)i;
 }
@@ -612,8 +659,14 @@ static void test_split_args(void)
 		 * tables count envp by walking to the NULL. */
 		argv[2] = NULL;
 		envp[2] = NULL;
-		used = uml_nt_elf_stack_tables(stackbuf, va_base, RUN, 2,
-					       argv, envp, rnd);
+		{
+			struct uml_nt_elf_auxv ax0;
+
+			memset(&ax0, 0, sizeof(ax0));
+			used = uml_nt_elf_stack_tables(stackbuf, va_base,
+						       RUN, 2, argv, envp,
+						       rnd, &ax0);
+		}
 		CHECK(used > 0);
 		rsp = top - (unsigned long long)used;
 		v = (unsigned long long *)((char *)stackbuf +
@@ -631,6 +684,59 @@ static void test_split_args(void)
 			     "HOME=/") == 0);
 		CHECK(v[6] == 0);
 	}
+}
+
+/* D20 cluster 1: the PT_INTERP path extraction — none / byte-exact /
+ * relative-path rejection / NUL-close / bounds, on synthetic images. */
+static void test_interp_path(void)
+{
+	elf_ehdr *eh;
+	char path[256];
+	int rc;
+
+	/* no PT_INTERP → 0 (the static shape) */
+	mock_reset();
+	(void)mk_ehdr(2, 0x1000);
+	add_phdr(5, 0x400, 0x0, 0x1000, 0x1000);
+	rc = uml_nt_elf_interp_path(img, 0x2000, path, sizeof(path));
+	CHECK(rc == 0);
+
+	/* a real interp segment → the path, byte-exact */
+	mock_reset();
+	eh = mk_ehdr(3, 0x1000); /* interp carriers are PIE (ET_DYN) */
+	add_phdr(5, 0x400, 0x0, 0x1000, 0x1000);
+	{
+		elf_phdr *pi = (elf_phdr *)(img + sizeof(elf_ehdr) +
+					    sizeof(elf_phdr));
+		static const char ld[] = "/lib/ld-musl-x86_64.so.1";
+
+		pi->p_type = 3; /* PT_INTERP */
+		pi->p_offset = 0x1000;
+		pi->p_filesz = sizeof(ld); /* the NUL rides along */
+		memcpy(img + 0x1000, ld, sizeof(ld));
+		eh->e_phnum = 2; /* the interp phdr joins the table */
+	}
+	rc = uml_nt_elf_interp_path(img, 0x2000, path, sizeof(path));
+	CHECK(rc == 1);
+	CHECK(strcmp(path, "/lib/ld-musl-x86_64.so.1") == 0);
+
+	/* relative path = broken */
+	img[0x1000] = 'l';
+	CHECK(uml_nt_elf_interp_path(img, 0x2000, path,
+				     sizeof(path)) < 0);
+	img[0x1000] = '/';
+
+	/* the NUL must close the segment */
+	img[0x1000 + sizeof("/lib/ld-musl-x86_64.so.1") - 1] = 'x';
+	CHECK(uml_nt_elf_interp_path(img, 0x2000, path,
+				     sizeof(path)) < 0);
+	img[0x1000 + sizeof("/lib/ld-musl-x86_64.so.1") - 1] = '\0';
+
+	/* truncated phdr table = broken */
+	CHECK(uml_nt_elf_interp_path(img, sizeof(elf_ehdr) + 8, path,
+				     sizeof(path)) < 0);
+	/* out_cap smaller than the path = broken, never truncate */
+	CHECK(uml_nt_elf_interp_path(img, 0x2000, path, 8) < 0);
 }
 
 /* The REAL S3 init (rootfs/init.c — built by test_elf.sh with the
@@ -781,6 +887,7 @@ int main(int argc, char **argv)
 	test_rollback();
 	test_stack();
 	test_stack_tables();
+	test_interp_path();
 	test_split_args();
 	if (argc > 1)
 		test_real_guest(argv[1]);

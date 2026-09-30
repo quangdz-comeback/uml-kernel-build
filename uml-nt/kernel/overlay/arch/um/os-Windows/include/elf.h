@@ -61,6 +61,14 @@ struct uml_nt_elf_image {
 	unsigned long long entry;   /* guest entry VA (base added for DYN) */
 	unsigned long long brk;     /* first free VA past the last region */
 	unsigned long long stack_top; /* set by uml_nt_elf_stack_place */
+	/* D20 cluster 1: what a dynamic starter needs to know about
+	 * THIS image — the base it loaded at (0 for an ET_EXEC linked
+	 * inside the window), the VA of its program header table as
+	 * loaded (0 when no PT_LOAD covers e_phoff), and the phdr
+	 * count. AT_PHDR/AT_PHNUM/AT_BASE feed from these. */
+	unsigned long long base;
+	unsigned long long phdr_va;
+	unsigned long long phnum;
 	int nseg;
 	struct uml_nt_elf_seg seg[UML_NT_ELF_MAX_SEG];
 };
@@ -81,6 +89,15 @@ int uml_nt_elf_load(struct uml_nt_elf_image *out, struct uml_nt_mm *mm,
 		    unsigned long long len, void *section);
 
 /*
+ * D20 cluster 1: the PT_INTERP path of `image` — 0 = none (static),
+ * 1 = the absolute path copied into `out` (NUL-terminated, out_cap
+ * checked), negative = a broken interp segment (bounds/NUL/absolute
+ * violations). Pure logic — unit-tested.
+ */
+int uml_nt_elf_interp_path(const void *image, unsigned long long len,
+			   char *out, unsigned out_cap);
+
+/*
  * Place the guest stack: one fresh run immediately above the highest
  * region (the execve analogue — the stack belongs to the image being
  * loaded), VMA added RW, *top_out = first byte PAST the run (the
@@ -91,15 +108,37 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
 			   unsigned long long *top_out);
 
 /*
+ * D20 cluster 1: the auxv entries beyond the always-present
+ * {AT_RANDOM, AT_PAGESZ, AT_NULL} — the set a dynamic starter
+ * (ld.so/ld-musl) reads: it relocates itself from AT_BASE, walks the
+ * MAIN program's phdrs from AT_PHDR, jumps to AT_ENTRY, and glibc
+ * additionally takes the ids/AT_EXECFN. All plain values; execfn is
+ * the plain filename string (copied into the strings area when
+ * non-NULL).
+ */
+struct uml_nt_elf_auxv {
+	unsigned long long at_base;  /* AT_BASE — interp load base, 0 static */
+	unsigned long long at_entry; /* AT_ENTRY — the main program */
+	unsigned long long at_phdr;  /* AT_PHDR — main phdr table VA */
+	unsigned long long at_phnum; /* AT_PHNUM */
+	const char *execfn;          /* AT_EXECFN string; NULL = omit */
+	unsigned uid, euid, gid, egid;
+	unsigned secure;             /* AT_SECURE */
+};
+
+/*
  * Build the SysV x86-64 process-start block at the TOP of the stack
  * run (S3, the create_elf_tables analogue): argc, argv/envp pointer
- * vectors (NULL-terminated), auxv {AT_RANDOM, AT_PAGESZ, AT_NULL} and
- * the strings + 16 random bytes above them; rsp lands 16-aligned.
- * `dst` = the stack run through the flat view, `va_base` = the guest
- * VA of dst[0], `cap` = the run size, `rand16` = the AT_RANDOM bytes.
- * argv/envp are main()-style NULL-terminated (counted by walking to
- * the NULL). Returns the bytes used (rsp = stack_top - used) or -1
- * on overflow.
+ * vectors (NULL-terminated), the full auxv (D20: {AT_PHDR, AT_PHENT,
+ * AT_PHNUM, AT_BASE, AT_ENTRY, AT_UID, AT_EUID, AT_GID, AT_EGID,
+ * AT_SECURE, AT_HWCAP, AT_CLKTCK, AT_EXECFN, AT_RANDOM, AT_PAGESZ,
+ * AT_NULL}) and the strings + 16 random bytes above them; rsp lands
+ * 16-aligned. `dst` = the stack run through the flat view, `va_base`
+ * = the guest VA of dst[0], `cap` = the run size, `rand16` = the
+ * AT_RANDOM bytes. argv/envp are main()-style NULL-terminated
+ * (counted by walking to the NULL). `ax` = the D20 auxv fields
+ * (pass a zeroed struct for the minimal static shape). Returns the
+ * bytes used (rsp = stack_top - used) or -1 on overflow.
  * Pure logic — unit-tested (the binfmt passes bprm's argv/envp;
  * S3 passes argc=0).
  */
@@ -107,7 +146,8 @@ long long uml_nt_elf_stack_tables(void *dst, unsigned long long va_base,
 				  unsigned long long cap, int argc,
 				  const char *const *argv,
 				  const char *const *envp,
-				  const unsigned char *rand16);
+				  const unsigned char *rand16,
+				  const struct uml_nt_elf_auxv *ax);
 
 /* argv+envp entries the stack block can hold (the tables' cap; shared
  * with the splitter's bounds check). */

@@ -33,6 +33,7 @@
  * D1: freestanding — HANDLE = void*, NT only through the D9 table.
  */
 #include <linux/binfmts.h>
+#include <linux/cred.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
@@ -69,11 +70,12 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
  * (the same generic GUP access copy_strings wrote them with — the
  * stub views never see the bprm stack), split it (elf_split.c) and
  * build the SysV block on OUR stack run. *used_out = bytes consumed
- * (rsp = stack_top - used_out). */
+ * (rsp = stack_top - used_out). `ax` carries the D20 auxv fields. */
 static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
 				unsigned long long va_base,
 				unsigned long long cap,
 				const unsigned char *rand16,
+				const struct uml_nt_elf_auxv *ax,
 				long long *used_out)
 {
 	unsigned long long blob_len, fn_len, done = 0, npages;
@@ -158,7 +160,7 @@ static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
 	envp[bprm->envc] = NULL;
 
 	*used_out = uml_nt_elf_stack_tables(dst, va_base, cap, bprm->argc,
-					    argv, envp, rand16);
+					    argv, envp, rand16, ax);
 	rc = *used_out < 0 ? -E2BIG : 0;
 out:
 	kvfree(envp);
@@ -168,16 +170,81 @@ out:
 	return rc;
 }
 
+/* Static init ceiling: the ext4 image is read whole into kernel
+ * memory; a guest binary beyond 8 MiB is not the POC shape. */
+#define UML_NT_BINFMT_MAX_FILE (8ull << 20)
+
 static int uml_nt_load_binary(struct linux_binprm *bprm);
+
+/* D20 cluster 1: read the interpreter file whole (same shape + cap as
+ * the main image read — the bytes are all the loader needs; the file
+ * is dropped right after the load). NULL = open/read failure. */
+static char *uml_nt_read_interp(const char *path,
+				unsigned long long *len_out)
+{
+	struct file *f;
+	loff_t fsize, pos = 0;
+	char *buf;
+	long long rc;
+
+	f = filp_open(path, O_RDONLY, 0);
+	if (IS_ERR(f))
+		return NULL;
+	fsize = i_size_read(file_inode(f));
+	if (fsize <= 0 || fsize > UML_NT_BINFMT_MAX_FILE) {
+		filp_close(f, NULL);
+		return NULL;
+	}
+	buf = kvmalloc(fsize, GFP_KERNEL);
+	if (buf == NULL) {
+		filp_close(f, NULL);
+		return NULL;
+	}
+	rc = kernel_read(f, buf, fsize, &pos);
+	filp_close(f, NULL);
+	if (rc < 0 || (unsigned long long)rc != (unsigned long long)fsize) {
+		kvfree(buf);
+		return NULL;
+	}
+	*len_out = (unsigned long long)fsize;
+	return buf;
+}
+
+/* Central patch contract §5.1, per image: every `syscall` in
+ * exec-only regions becomes ud2 before any stub view maps the pages.
+ * M5.1c.6b: the mark scratch is a real allocation — a whole busybox
+ * text segment is 0x30000, three times the kernel stack the old
+ * alloca burned through. Negative = mark alloc failure. */
+static long long uml_nt_patch_image(const struct uml_nt_elf_image *im)
+{
+	unsigned long long total = 0;
+	int si;
+
+	for (si = 0; si < im->nseg; si++) {
+		unsigned long long slen, mk;
+
+		if (!uml_nt_prot_execable(im->seg[si].prot))
+			continue;
+		slen = im->seg[si].end - im->seg[si].start;
+		mk = (unsigned long long)(uintptr_t)
+		     kvmalloc(slen, GFP_KERNEL);
+		if (mk == 0) {
+			os_info("binfmt_umlnt: patch mark alloc failed "
+				"(%llu bytes)\n", slen);
+			return -ENOMEM;
+		}
+		total += uml_nt_patch_syscalls(
+			uml_boot.physmem_base + im->seg[si].run_off,
+			slen, 0, (void *)(uintptr_t)mk);
+		kvfree((void *)(uintptr_t)mk);
+	}
+	return (long long)total;
+}
 
 static struct linux_binfmt uml_nt_binfmt = {
 	.module      = THIS_MODULE,
 	.load_binary = uml_nt_load_binary,
 };
-
-/* Static init ceiling: the ext4 image is read whole into kernel
- * memory; a guest binary beyond 8 MiB is not the POC shape. */
-#define UML_NT_BINFMT_MAX_FILE (8ull << 20)
 
 /* Header sniff BEFORE begin_new_exec: non-ELF files must return
  * -ENOEXEC so the binfmt search stays honest (and the failure stays
@@ -205,14 +272,18 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 {
 	struct mm_id *id = &bprm->mm->context.id;
 	struct uml_nt_stub_conn *c;
-	struct uml_nt_elf_image img;
-	unsigned long long len, stack_top, heap_va, patched;
+	struct uml_nt_elf_image img, iimg;
+	const struct cred *cr;
+	struct uml_nt_elf_auxv ax;
+	unsigned long long len, interp_len = 0, stack_top, heap_va, patched;
+	unsigned long long entry;
 	loff_t fsize, pos = 0;
 	unsigned char rnd[16];
 	struct uml_nt_vma *stk;
-	char *buf;
+	char *buf, *interp_buf = NULL;
+	char interp_path[256];
 	long long used, heap_off;
-	int rc, si;
+	int rc, have_interp = 0;
 
 	/* No conn = the mm never got the NT lifecycle (no stub path
 	 * configured — init_new_context already failed the exec before
@@ -252,6 +323,29 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	}
 	os_info("binfmt_umlnt: sniff ok, committing exec\n");
 
+	/* D20 cluster 1: PT_INTERP — a dynamic binary names its starter.
+	 * Parse + read NOW, while a failure is still recoverable
+	 * (-ENOEXEC keeps the binfmt search honest); the LOAD joins
+	 * the main image after commit. */
+	interp_path[0] = '\0';
+	rc = uml_nt_elf_interp_path(buf, len, interp_path,
+				    sizeof(interp_path));
+	if (rc < 0) {
+		os_info("binfmt_umlnt: broken PT_INTERP\n");
+		kvfree(buf);
+		return -ENOEXEC;
+	}
+	if (rc == 1) {
+		os_info("binfmt_umlnt: interp %s requested\n", interp_path);
+		interp_buf = uml_nt_read_interp(interp_path, &interp_len);
+		if (interp_buf == NULL) {
+			os_info("binfmt_umlnt: interp %s read failed\n",
+				interp_path);
+			kvfree(buf);
+			return -ENOEXEC;
+		}
+	}
+
 	/* Commit the exec (de_thread + exec_mmap — upstream binfmt_elf
 	 * order); from here failures are fatal to the task, there is
 	 * no unwinding to the old mm. */
@@ -281,6 +375,28 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	}
 	os_info("binfmt_umlnt: elf mapped %d region(s), entry 0x%llx\n",
 		img.nseg, img.entry);
+
+	/* D20 cluster 1: the interpreter loads as a SECOND image —
+	 * ET_DYN first-fit above the main regions (D12); the ENTRY
+	 * becomes the interp's (the starter runs first and jumps to
+	 * AT_ENTRY, which points at the main image). */
+	have_interp = (interp_buf != NULL);
+	if (have_interp) {
+		memset(&iimg, 0, sizeof(iimg));
+		rc = uml_nt_elf_load(&iimg, c->mm, c->ph, interp_buf,
+				     interp_len, uml_boot.physmem_base);
+		kvfree(interp_buf);
+		interp_buf = NULL;
+		if (rc != UML_NT_ELF_OK) {
+			os_info("binfmt_umlnt: interp load failed rc=%d\n",
+				rc);
+			return -ENOEXEC;
+		}
+		os_info("binfmt_umlnt: interp loaded base 0x%llx entry "
+			"0x%llx\n", iimg.base, iimg.entry);
+	}
+	entry = have_interp ? iimg.entry : img.entry;
+
 	rc = uml_nt_elf_stack_place(&img, c->mm, c->ph, &stack_top);
 	if (rc != UML_NT_ELF_OK) {
 		os_info("binfmt_umlnt: stack place failed rc=%d\n", rc);
@@ -296,40 +412,49 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	if (stk == NULL)
 		return -ENOEXEC;
 	get_random_bytes(rnd, sizeof(rnd));
+	/* D20 cluster 1: the auxv a starter needs — AT_BASE points at
+	 * the interp (0 static), AT_ENTRY/AT_PHDR at the MAIN image. */
+	memset(&ax, 0, sizeof(ax));
+	ax.at_base = have_interp ? iimg.base : 0;
+	ax.at_entry = img.entry;
+	ax.at_phdr = img.phdr_va;
+	ax.at_phnum = img.phnum;
+	ax.execfn = bprm->filename;
+	cr = current_cred();
+	ax.uid = cr->uid.val;
+	ax.euid = cr->euid.val;
+	ax.gid = cr->gid.val;
+	ax.egid = cr->egid.val;
+	ax.secure = bprm->secureexec ? 1 : 0;
 	os_info("binfmt_umlnt: wiring stack tables (run_off %#llx)\n",
 		stk->run_off);
 	rc = uml_nt_elf_wire_args(bprm, (char *)uml_boot.physmem_base +
 				  stk->run_off,
 				  stack_top - UML_NT_PHYS_RUN_SIZE,
-				  UML_NT_PHYS_RUN_SIZE, rnd, &used);
+				  UML_NT_PHYS_RUN_SIZE, rnd, &ax, &used);
 	if (rc) {
 		os_info("binfmt_umlnt: stack tables failed rc=%d\n", rc);
 		return rc;
 	}
 
 	/* Central patch contract §5.1: every `syscall` in exec-only
-	 * regions becomes ud2 before any stub view maps the pages.
-	 * M5.1c.6b: the mark scratch is a real allocation — a whole
-	 * busybox text segment is 0x30000, three times the kernel
-	 * stack the old alloca burned through. */
+	 * regions becomes ud2 before any stub view maps the pages —
+	 * BOTH images now (the interp is exec code that traps like
+	 * any other). */
 	patched = 0;
-	for (si = 0; si < img.nseg; si++) {
-		unsigned long long slen, mk;
+	{
+		long long p = uml_nt_patch_image(&img);
 
-		if (!uml_nt_prot_execable(img.seg[si].prot))
-			continue;
-		slen = img.seg[si].end - img.seg[si].start;
-		mk = (unsigned long long)(uintptr_t)
-		     kvmalloc(slen, GFP_KERNEL);
-		if (mk == 0) {
-			os_info("binfmt_umlnt: patch mark alloc failed "
-				"(%llu bytes)\n", slen);
-			return -ENOMEM;
-		}
-		patched += uml_nt_patch_syscalls(
-			uml_boot.physmem_base + img.seg[si].run_off,
-			slen, 0, (void *)(uintptr_t)mk);
-		kvfree((void *)(uintptr_t)mk);
+		if (p < 0)
+			return (int)p;
+		patched = (unsigned long long)p;
+	}
+	if (have_interp) {
+		long long p = uml_nt_patch_image(&iimg);
+
+		if (p < 0)
+			return (int)p;
+		patched += (unsigned long long)p;
 	}
 
 	/* The M3.7 brk contract: one pre-reserved, pre-mapped heap run
@@ -354,12 +479,15 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	 * new_thread_handler enters userspace() (S2) and the FIRST
 	 * round bootstraps the conn from these regs (conn_bootstrap:
 	 * d->init_regs + entry_va → stub applies after the INIT plan
-	 * streams). */
-	start_thread(current_pt_regs(), img.entry, stack_top - used);
+	 * streams). D20: the entry is the INTERP's for a dynamic
+	 * binary — the starter runs first and jumps to AT_ENTRY. */
+	start_thread(current_pt_regs(), entry, stack_top - used);
 
-	os_info("binfmt_umlnt: init loaded: %d region(s), entry 0x%llx, "
+	os_info("binfmt_umlnt: init loaded: %d region(s)%s, entry 0x%llx, "
 		"rsp 0x%llx, %llu syscall(s) patched, heap 0x%llx\n",
-		img.nseg, img.entry, stack_top - used, patched, heap_va);
+		img.nseg,
+		have_interp ? " + interp" : "",
+		entry, stack_top - used, patched, heap_va);
 	return 0;
 }
 

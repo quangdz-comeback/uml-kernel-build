@@ -17,7 +17,7 @@ LD     ?= ld.lld
 IMAGE_BASE := 0x62000000
 
 all: guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf \
-	heaptest.elf guardtest.elf sysbench.elf netsetup.elf
+	heaptest.elf guardtest.elf sysbench.elf netsetup.elf dyn.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
@@ -128,8 +128,21 @@ netsetup.elf: netsetup.c
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "netsetup must be a static ELF" >&2; exit 1; }
 
+# M5.4 cluster 1 (D20): the dynamic-PIE proof — ET_DYN with a
+# PT_INTERP (—dynamic-linker names /lib/ld-musl-x86_64.so.1, which
+# the rootfs serves from musl's libc.so: musl's one-file-is-both
+# design). No DT_NEEDED — ld.so maps nothing; the mmap-exec patch
+# hook is cluster 2 (glibc census). NOT --image-base: a PIE links at
+# 0 and the loader picks the base; lld -pie emits the interp segment.
+dyn.elf: dyn.c
+	$(CC) --target=x86_64-linux-gnu -nostdlib -pie -O1 -fuse-ld=lld \
+		-Wall -Wl,--dynamic-linker=/lib/ld-musl-x86_64.so.1 \
+		-Wl,-z,max-page-size=0x10000 -o $@ $<
+	@readelf -lW $@ | grep -q INTERP || \
+		{ echo "dyn.elf must carry a PT_INTERP" >&2; exit 1; }
+
 clean:
 	rm -f init.o guest-init.elf step2.elf bench.elf forkwait.elf \
 		sigtest.elf heaptest.elf guardtest.elf sysbench.elf \
-		netsetup.elf
+		netsetup.elf dyn.elf
 .PHONY: all clean

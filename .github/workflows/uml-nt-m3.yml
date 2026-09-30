@@ -607,3 +607,31 @@ jobs:
           grep -q "M5 NET OK" net.log || { echo "M5.1d: the net chain did not complete (see the NET-* markers above)"; exit 1; }
           grep -q "NET-WGET-FAIL\|NET-BODY-MISMATCH" net.log && { echo "M5.1d: nettest reported failure"; exit 1; }
           echo "M5.1c/d NATIVE NET OK: vec0 up + udhcpc lease + ping gateway + wget through the NAT (guest TCP out to the runner)"
+
+      # M5.4 cluster 1 (D20): dynamic-PIE — binfmt_umlnt parses
+      # PT_INTERP (/bin/dyntest is ET_DYN, PIE), reads the interpreter
+      # through the guest VFS, loads it as a SECOND ET_DYN image
+      # (first-fit above the app), starts it at the interp entry with
+      # the full auxv (AT_PHDR/AT_PHENT/AT_PHNUM/AT_BASE/AT_ENTRY/
+      # ids/AT_RANDOM/AT_PAGESZ), and ld-musl self-relocates, sets
+      # TLS (arch_prctl, D18) and jumps to AT_ENTRY. DYNTASK-OK is
+      # the app's own write — the whole chain's evidence.
+      - name: NATIVE dynamic-PIE gate (M5.4 c1)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$ROOTFS" "root=98:0" "init=/bin/dyntest" > dyn.log 2>&1
+          code=$?
+          set -e
+          cat dyn.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code (boot hung elsewhere? see log)"; exit 1; }
+          grep -q "binfmt_umlnt: interp /lib/ld-musl-x86_64.so.1 requested" dyn.log || { echo "PT_INTERP never parsed (the loader missed the interp segment? see log)"; exit 1; }
+          grep -q "interp loaded base" dyn.log || { echo "the interpreter never loaded as the second image"; exit 1; }
+          grep -q "DYNTASK-OK" dyn.log || { echo "ld-musl never jumped to AT_ENTRY / the app never ran (auxv or self-reloc broken? see [syscall] ENOSYS lines)"; exit 1; }
+          grep -q "DYNTASK-FAIL" dyn.log && { echo "the dyn app reported failure"; exit 1; }
+          echo "M5.4 C1 NATIVE DYNPIE OK: PT_INTERP parsed + interp loaded as second image + full-auxv start to the app"
