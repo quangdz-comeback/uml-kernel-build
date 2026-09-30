@@ -226,15 +226,23 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 			uml_nt_crash_write(buf, (unsigned int)n);
 	}
 	if (e != NULL && e->context != NULL) {
+		unsigned long long teb, base, limit;
+
+		__asm__ volatile("mov %%gs:0x30, %0" : "=r"(teb));
+		base = *(unsigned long long *)(teb + 0x08);
+		limit = *(unsigned long long *)(teb + 0x10);
 		n = snprintf(buf, sizeof(buf),
 			     "  rax=%llx rcx=%llx rdx=%llx rsi=%llx "
-			     "rdi=%llx thread=%s\n",
+			     "rdi=%llx thread=%s stackbase=%llx "
+			     "stacklimit=%llx inbounds=%d\n",
 			     UML_NT_X64_CTX_RAX(e->context),
 			     UML_NT_X64_CTX_RCX(e->context),
 			     UML_NT_X64_CTX_RDX(e->context),
 			     UML_NT_X64_CTX_RSI(e->context),
 			     UML_NT_X64_CTX_RDI(e->context),
-			     uml_nt_thread_role);
+			     uml_nt_thread_role, base, limit,
+			     UML_NT_X64_CTX_RSP(e->context) <= base &&
+			     UML_NT_X64_CTX_RSP(e->context) >= limit);
 		if (n > 0)
 			uml_nt_crash_write(buf, (unsigned int)n);
 		uml_nt_crash_scan_stack(UML_NT_X64_CTX_RSP(e->context));
