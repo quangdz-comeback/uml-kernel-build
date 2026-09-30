@@ -908,6 +908,8 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 53: /* socketpair */
 	case 54: /* setsockopt — SO_BROADCAST, SO_ATTACH_FILTER */
 	case 55: /* getsockopt */
+	case 22: /* pipe — udhcpc's self-pipe (signal wakeup) */
+	case 293: /* pipe2 */
 	case 7: /* poll — udhcpc waits the lease window in poll() */
 	case 23: /* select */
 	case 270: /* pselect6 */

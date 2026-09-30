@@ -163,9 +163,12 @@ staging/etc/udhcpc.script:
 # D19 reader ring), then ping the NAT gateway (10.0.2.2 — vdeplug-go
 # slirp parity). The two markers are the CI gate's evidence: they
 # only print when the lease landed and the gateway answered.
+# ping takes no -c here: the gate's busybox builds without
+# FEATURE_FANCY_PING, so its ping is the minimal one-shot form —
+# one echo request, 5s alarm, prints "is alive!" and exits 0.
 staging/net.sh:
 	@mkdir -p staging
-	printf '/bin/busybox ifconfig vec0 up\n/bin/busybox udhcpc -i vec0 -n -q -s /etc/udhcpc.script\n/bin/busybox ping -c 2 10.0.2.2 && echo NET-PING-GW-OK\n' > $@
+	printf '/bin/busybox ifconfig vec0 up\n/bin/busybox udhcpc -i vec0 -n -q -s /etc/udhcpc.script\n/bin/busybox ping 10.0.2.2 && echo NET-PING-GW-OK\n' > $@
 	chmod +x $@
 
 # M5.1c: the net gate guest — PID 1 (init=/bin/netsetup) execve()s
