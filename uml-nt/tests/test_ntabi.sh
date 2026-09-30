@@ -115,3 +115,56 @@ EOF
 "$CC" --target=x86_64-linux-gnu -I "$INC" -o "$TMP/ntpath" \
 	"$TMP/ntpath.c"
 "$TMP/ntpath"
+
+# --- 5. winsock helpers (M5.1a): pure inline logic, runnable host test ---
+cat > "$TMP/inet.c" <<'EOF'
+#include <stdio.h>
+#include <ntabi.h>
+static int fails;
+static void expect(int cond, const char *what)
+{
+	if (!cond) {
+		printf("FAIL- %s\n", what);
+		fails++;
+	}
+}
+int main(void)
+{
+	unsigned int a;
+
+	expect(uml_nt_htons(0x1234) == 0x3412, "htons");
+	expect(uml_nt_htonl(0x11223344u) == 0x44332211u, "htonl");
+	expect(uml_nt_htonl(0) == 0 && uml_nt_htons(0) == 0, "hton zero");
+
+	expect(uml_nt_inet_pton4("127.0.0.1", &a) == 1, "parse 127.0.0.1");
+	expect(((unsigned char *)&a)[0] == 127 &&
+	       ((unsigned char *)&a)[1] == 0 &&
+	       ((unsigned char *)&a)[2] == 0 &&
+	       ((unsigned char *)&a)[3] == 1, "127.0.0.1 wire bytes");
+
+	expect(uml_nt_inet_pton4("10.0.2.15", &a) == 1, "parse 10.0.2.15");
+	expect(((unsigned char *)&a)[0] == 10 &&
+	       ((unsigned char *)&a)[3] == 15, "10.0.2.15 wire bytes");
+
+	expect(uml_nt_inet_pton4("0.0.0.0", &a) == 1 && a == 0,
+	       "parse 0.0.0.0");
+	expect(uml_nt_inet_pton4("255.255.255.255", &a) == 1 &&
+	       a == 0xffffffffu, "parse 255.255.255.255");
+
+	expect(uml_nt_inet_pton4("256.1.1.1", &a) == 0, "reject octet 256");
+	expect(uml_nt_inet_pton4("1.2.3", &a) == 0, "reject 3 octets");
+	expect(uml_nt_inet_pton4("1.2.3.4.5", &a) == 0, "reject 5 octets");
+	expect(uml_nt_inet_pton4("a.b.c.d", &a) == 0, "reject letters");
+	expect(uml_nt_inet_pton4("01.2.3.4", &a) == 0, "reject leading zero");
+	expect(uml_nt_inet_pton4("1.2.3.4 ", &a) == 0, "reject trailing junk");
+	expect(uml_nt_inet_pton4("1..2.3", &a) == 0, "reject empty octet");
+	expect(uml_nt_inet_pton4(NULL, &a) == 0, "reject NULL");
+
+	if (fails)
+		return 1;
+	puts("ok  - uml_nt_htons/htonl/inet_pton4: byte order + strict parse");
+	return 0;
+}
+EOF
+"$CC" --target=x86_64-linux-gnu -I "$INC" -o "$TMP/inet" "$TMP/inet.c"
+"$TMP/inet"

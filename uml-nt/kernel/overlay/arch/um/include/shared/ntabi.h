@@ -287,11 +287,113 @@ static inline long long uml_nt_ntpath(const char *path, WCHAR *out,
 }
 
 /*
+ * Winsock mirror structs (M5.1a, D8): the kernel speaks the netstack
+ * channel over TCP localhost, so the D9 table carries ws2_32 exports.
+ * These are OUR structs — both build sides see the same definition, so
+ * the table layout is identical; test_ntabi.sh asserts the layouts
+ * against the real winsock types on the PE side (drift fails to
+ * compile) and pins the sizes freestanding-side.
+ */
+#ifndef AF_INET
+#define AF_INET 2
+#endif
+#ifndef SOCK_STREAM
+#define SOCK_STREAM 1
+#endif
+#ifndef IPPROTO_TCP
+#define IPPROTO_TCP 6
+#endif
+/* Winsock version request: MAKEWORD(2,2). */
+#define UML_NT_WSA_VERSION 0x0202u
+/* WSAEventSelect network-event bits (subset). */
+#define UML_NT_FD_READ  0x1u
+#define UML_NT_FD_WRITE 0x2u
+#define UML_NT_FD_CLOSE 0x20u
+
+struct uml_nt_wsadata {
+	unsigned short wVersion;     /* 0 */
+	unsigned short wHighVersion; /* 2 */
+	unsigned short iMaxSockets;  /* 4 */
+	unsigned short iMaxUdpDg;    /* 6 */
+	void *lpVendorInfo;          /* 8 */
+	char szDescription[257];     /* 16 */
+	char szSystemStatus[129];    /* 273 */
+}; /* 402 bytes, sizeof 408 (8-aligned) on x64 */
+
+struct uml_nt_sockaddr_in {
+	short sin_family;      /* AF_INET */
+	unsigned short sin_port; /* network order */
+	unsigned int sin_addr;   /* network order (uml_nt_inet_pton4) */
+	char sin_zero[8];
+}; /* 16 bytes on x64 — ABI-identical to winsock's sockaddr_in */
+
+#define UML_NT_INVALID_SOCKET (~0ULL)
+
+/*
+ * Byte-order + dotted-quad helpers: pure inline logic (no export
+ * needed, testable on both build sides — test_ntabi.sh runs them).
+ * Network order on a little-endian host means the u32 VALUE holds the
+ * wire bytes a,b,c,d as 0xa | b<<8 | c<<16 | d<<24.
+ */
+static inline unsigned short uml_nt_htons(unsigned short v)
+{
+	return (unsigned short)((v << 8) | (v >> 8));
+}
+
+static inline unsigned int uml_nt_htonl(unsigned int v)
+{
+	return ((v & 0xffu) << 24) | ((v & 0xff00u) << 8) |
+	       ((v >> 8) & 0xff00u) | ((v >> 24) & 0xffu);
+}
+
+/* 1 = parsed (*out filled, network order), 0 = not a dotted quad.
+ * Strict: exactly four decimal octets 0-255, no leading zeros ("01"
+ * rejected like inet_pton), no trailing junk. */
+static inline int uml_nt_inet_pton4(const char *s, unsigned int *out)
+{
+	unsigned int oct[4];
+	unsigned int v;
+	int i, digits;
+	const char *p = s;
+
+	if (s == NULL || out == NULL)
+		return 0;
+	for (i = 0; i < 4; i++) {
+		v = 0;
+		digits = 0;
+		while (*p >= '0' && *p <= '9') {
+			if (++digits > 3)
+				return 0;
+			v = v * 10 + (unsigned int)(*p - '0');
+			if (v > 255)
+				return 0;
+			/* leading zero: a second digit after "0" */
+			if (digits == 2 && v < 10 &&
+			    p[-1] == '0')
+				return 0;
+			p++;
+		}
+		if (digits == 0)
+			return 0;
+		oct[i] = v;
+		if (i < 3) {
+			if (*p != '.')
+				return 0;
+			p++;
+		}
+	}
+	if (*p != 0)
+		return 0;
+	*out = oct[0] | (oct[1] << 8) | (oct[2] << 16) | (oct[3] << 24);
+	return 1;
+}
+
+/*
  * The D9 contract. Version bumps must append only (never reorder); the
  * kernel accepts version == UML_NT_API_VERSION exactly (it fails loudly
  * otherwise — silent ABI drift is the failure mode we refuse).
  */
-#define UML_NT_API_VERSION 1u
+#define UML_NT_API_VERSION 2u
 
 /* ---- function prototypes (ms_abi) — the launcher resolves these ------
  * Kernel-ELF consumers need them declared here (nothing else will).
@@ -459,6 +561,27 @@ struct uml_nt_exception_pointers {
 #define UML_NT_X64_CTX_RBP(ctx) UML_NT_X64_CTX_REG(ctx, 0xa0)
 #define UML_NT_X64_CTX_RSI(ctx) UML_NT_X64_CTX_REG(ctx, 0xa8)
 #define UML_NT_X64_CTX_RDI(ctx) UML_NT_X64_CTX_REG(ctx, 0xb0)
+
+/* M5.1a winsock prototypes (ELF freestanding side only — PE mode gets
+ * the real decls from winsock headers, and redeclaring would risk
+ * collision; the kernel only calls through the table anyway). SOCKET
+ * is UINT_PTR (8 bytes x64); the mirror structs above are
+ * ABI-identical to winsock's own types (asserted in ntabi_abi_check.c
+ * against the PE headers). */
+int UML_NTABI_CC WSAStartup(unsigned short version,
+			    struct uml_nt_wsadata *data);
+unsigned long long UML_NTABI_CC socket(int af, int type, int protocol);
+int UML_NTABI_CC closesocket(unsigned long long s);
+int UML_NTABI_CC connect(unsigned long long s,
+			 struct uml_nt_sockaddr_in *addr, int namelen);
+int UML_NTABI_CC send(unsigned long long s, const char *buf, int len,
+		      int flags);
+int UML_NTABI_CC recv(unsigned long long s, char *buf, int len, int flags);
+void *UML_NTABI_CC WSACreateEvent(void);
+int UML_NTABI_CC WSACloseEvent(void *event);
+int UML_NTABI_CC WSAEventSelect(unsigned long long s, void *event,
+				long net_events);
+int UML_NTABI_CC WSAGetLastError(void);
 #endif /* !_WIN64 */
 
 /*
@@ -576,6 +699,28 @@ struct uml_nt_api_table {
 	 * freestanding handler — same signature either way. */
 	PVOID (UML_NTABI_CC *AddVectoredExceptionHandler)(ULONG first,
 			PVOID handler);
+
+	/* ---- appended for M5.1 (winsock — the D8 TCP channel) ------------
+	 * SOCKET typed as unsigned long long (UINT_PTR x64): keeps the
+	 * table definition identical on both build sides without pulling
+	 * winsock headers into PE mode. Mirror structs above are
+	 * ABI-identical to winsock's own (asserted in ntabi_abi_check.c). */
+	int (UML_NTABI_CC *WSAStartup)(unsigned short version,
+			struct uml_nt_wsadata *data);
+	unsigned long long (UML_NTABI_CC *socket)(int af, int type,
+			int protocol);
+	int (UML_NTABI_CC *closesocket)(unsigned long long s);
+	int (UML_NTABI_CC *connect)(unsigned long long s,
+			struct uml_nt_sockaddr_in *addr, int namelen);
+	int (UML_NTABI_CC *send)(unsigned long long s, const char *buf,
+			int len, int flags);
+	int (UML_NTABI_CC *recv)(unsigned long long s, char *buf, int len,
+			int flags);
+	void *(UML_NTABI_CC *WSACreateEvent)(void);
+	int (UML_NTABI_CC *WSACloseEvent)(void *event);
+	int (UML_NTABI_CC *WSAEventSelect)(unsigned long long s,
+			void *event, long net_events);
+	int (UML_NTABI_CC *WSAGetLastError)(void);
 };
 
 #endif /* __UML_NTABI_H */

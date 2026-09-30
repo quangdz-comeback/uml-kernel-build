@@ -9,6 +9,11 @@
  * silent struct drift would corrupt every syscall before any test on
  * Windows could catch it.
  */
+#ifdef _WIN64
+/* winsock2.h BEFORE windows.h (ntabi.h includes it) — otherwise
+ * windows.h drags winsock.h in first and the compile breaks. */
+#include <winsock2.h>
+#endif
 #include <ntabi.h>
 
 /* Materialize a call through the D9 table with 9 arguments so the
@@ -45,4 +50,17 @@ _Static_assert(sizeof(struct uml_nt_exception_record) == 0x98,
 	       "EXCEPTION_RECORD x64");
 _Static_assert(sizeof(struct uml_nt_exception_pointers) == 16,
 	       "EXCEPTION_POINTERS x64");
+#endif
+
+/* M5.1a winsock mirrors: identical layout both build sides; the PE
+ * side additionally pins them against winsock's own types. */
+_Static_assert(sizeof(struct uml_nt_wsadata) == 408, "WSADATA mirror x64");
+_Static_assert(sizeof(struct uml_nt_sockaddr_in) == 16,
+	       "sockaddr_in mirror x64");
+#ifdef _WIN64
+_Static_assert(sizeof(struct uml_nt_wsadata) == sizeof(WSADATA),
+	       "WSADATA mirror drifts from winsock");
+_Static_assert(sizeof(struct uml_nt_sockaddr_in) ==
+	       sizeof(struct sockaddr_in),
+	       "sockaddr_in mirror drifts from winsock");
 #endif

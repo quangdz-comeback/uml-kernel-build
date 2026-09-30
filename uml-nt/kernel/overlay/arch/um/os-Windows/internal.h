@@ -37,4 +37,15 @@ void uml_nt_install_crash_reporter(void);
 void uml_nt_physmem_check(const char *what, int fd, long len,
 			  unsigned long long off);
 
+/* net_win.c (M5.1a): winsock seam for the netstack channel (D8).
+ * uml_nt_ws_init is idempotent; dial returns UML_NT_INVALID_SOCKET on
+ * failure (reason already logged). Frame io speaks the 2-byte
+ * big-endian length-prefix protocol of vdeplug-go's TCP transport. */
+int uml_nt_ws_init(void);
+unsigned long long uml_nt_net_dial(const char *host_port);
+int uml_nt_net_send_frame(unsigned long long s, const void *buf,
+			  unsigned int len);
+int uml_nt_net_recv_frame(unsigned long long s, void *buf,
+			  unsigned int maxlen);
+
 #endif

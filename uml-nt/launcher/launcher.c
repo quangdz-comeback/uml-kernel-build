@@ -135,6 +135,26 @@ static void resolve_api_table(void)
 	RESOLVE(AddVectoredExceptionHandler, k32,
 		"AddVectoredExceptionHandler");
 
+	/* M5.1a: winsock for the kernel's TCP channel (D8 — no AF_UNIX).
+	 * Loaded at runtime (LoadLibrary + GetProcAddress): no link-time
+	 * ws2_32 dependency, same D9 shape as every other export. */
+	{
+		HMODULE ws2 = LoadLibraryA("ws2_32.dll");
+
+		if (ws2 == NULL)
+			die("LoadLibraryA(ws2_32.dll)", GetLastError());
+		RESOLVE(WSAStartup, ws2, "WSAStartup");
+		RESOLVE(socket, ws2, "socket");
+		RESOLVE(closesocket, ws2, "closesocket");
+		RESOLVE(connect, ws2, "connect");
+		RESOLVE(send, ws2, "send");
+		RESOLVE(recv, ws2, "recv");
+		RESOLVE(WSACreateEvent, ws2, "WSACreateEvent");
+		RESOLVE(WSACloseEvent, ws2, "WSACloseEvent");
+		RESOLVE(WSAEventSelect, ws2, "WSAEventSelect");
+		RESOLVE(WSAGetLastError, ws2, "WSAGetLastError");
+	}
+
 	fprintf(stderr, "[launcher] D9 table v%u: %u bytes, all exports "
 			"resolved\n", g_api.version, g_api.size);
 }

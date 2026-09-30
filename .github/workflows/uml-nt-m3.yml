@@ -551,3 +551,28 @@ jobs:
           [ -n "$EPS" ] || { echo "eps missing from the sysbench summary"; exit 1; }
           [ "$EPS" -ge 2100 ] || { echo "sysbench cpu ${EPS} eps BELOW the 1/3-Linux-mark floor (2100) — perf regress or slow runner?"; exit 1; }
           echo "M4 FINAL NATIVE SYSBENCH OK: real cpu workload, ${EPS} eps (>= 2100 = the 1/3 Linux-mark floor)"
+
+      # M5.1a: winsock through the D9 table (ntabi v2) — the freestanding
+      # kernel dials a framed TCP echo server on loopback and round-trips
+      # a 512-byte payload. This is the kernel↔netstack channel shape
+      # (D8: TCP localhost, 2-byte BE length prefix per frame — the
+      # protocol vdeplug-go's own TCP transport speaks); the netstack
+      # helper itself arrives at M5.1b.
+      - name: NATIVE TCP probe gate (M5.1a)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          python ../probes/tcp_echo.py 19292 > echo.log 2>&1 & SRV=$!
+          sleep 1
+          set +e
+          timeout 90 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_netprobe=127.0.0.1:19292" > netprobe.log 2>&1
+          code=$?
+          set -e
+          kill $SRV 2>/dev/null
+          cat netprobe.log echo.log
+          [ "$code" -eq 1 ] || { echo "expected exit 1 (panic after probe), got $code"; exit 1; }
+          grep -q "NETPROBE-DIAL-OK" netprobe.log || { echo "kernel never dialed the echo server (winsock via D9 v2 broken? see log)"; exit 1; }
+          grep -q "NETPROBE-TCP-OK 512 bytes" netprobe.log || { echo "framed round-trip never completed (framing/stream bug? see log)"; exit 1; }
+          grep -q "NETPROBE-FAIL" netprobe.log && { echo "probe reported failure"; exit 1; }
+          echo "M5.1a NATIVE TCP PROBE OK: freestanding kernel dialed + framed round-trip via ws2_32"

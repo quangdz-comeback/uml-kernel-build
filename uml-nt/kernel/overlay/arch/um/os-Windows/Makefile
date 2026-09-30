@@ -18,4 +18,8 @@ obj-y := file.o start_up.o mem.o process.o execvp.o helper.o umid.o \
 # driver falls back to synchronous request execution (drivers patch).
 obj-y += ubd_user.o
 
+# M5.1a: winsock seam (D8 TCP channel) + the netprobe initcall. The
+# vector transport (M5.1c) reuses the dial/framed-io helpers here.
+obj-y += net_win.o
+
 obj-y += skas/
