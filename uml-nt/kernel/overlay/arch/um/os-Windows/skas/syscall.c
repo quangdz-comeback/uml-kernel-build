@@ -289,6 +289,30 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 				   unsigned long long map_start,
 				   unsigned long long len);
 
+/* c3: is [start, end) fully covered by FILE VMAs (fresh chunking
+ * makes refills cross chunk boundaries)? *nchunks counts the VMAs
+ * hit (a hole or a non-FILE VMA fails it). */
+static int uml_nt_mmap_refill_ok(struct uml_nt_mm *mm,
+				 unsigned long long start,
+				 unsigned long long end, int *nchunks)
+{
+	unsigned long long cur = start;
+	struct uml_nt_vma *v;
+	int n = 0;
+
+	while (cur < end) {
+		v = uml_nt_vma_find(mm, cur);
+
+		if (v == NULL || v->end <= cur ||
+		    !(v->flags & UML_NT_VMA_FILE))
+			return 0;
+		cur = (end < v->end) ? end : v->end;
+		n++;
+	}
+	*nchunks = n;
+	return 1;
+}
+
 /* mmap(2), anonymous|private only: fresh runs (zeroed by the D11
  * backend) + a VMA + a MAP op for the stub's address space. MAP_FIXED
  * must land on a FREE range — silently replacing VMAs would need
@@ -321,7 +345,6 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 	if (flags & SC_MAP_FIXED) {
 		unsigned long long runs[UML_NT_VMA_MAX];
 		unsigned long long req_len = a[1];
-		struct uml_nt_vma *fv;
 		int nfree, i;
 
 		va = addr;
@@ -384,28 +407,45 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 		 * (and the anon .bss tail: fd == -1 + MAP_ANONYMOUS
 		 * arrives here as a ZERO refill) all sit mid-run,
 		 * 4K-aligned, where a run cannot be split for a view.
+		 * c3: big file mappings are CHUNKED (sys_mmap_file,
+		 * span order cap), so the refill may cross several
+		 * chunk VMAs — every intersecting VMA must be
+		 * file-backed (the chunks tile the span, no holes),
+		 * then the fill/sweep walk does the rest per-VMA.
 		 * Non-NONE anon sub-run mappings on ANON VMAs keep the
 		 * old semantics below (no refill — nothing maps there
 		 * twice). */
-		if (uml_nt_vma_map_kind(c->mm, addr, addr + len, &fv) == 1 &&
-		    (fv->flags & UML_NT_VMA_FILE)) {
-			int killed = uml_nt_guard_del_range(c->mm, addr,
-							    addr + len);
+		{
+			int nfile = 0;
 
-			if (uml_nt_mmap_fill(c, addr, len, NULL, 0, 0, 1)
-			    < 0)
-				return SC_RET(SC_EFAULT);
-			if (lprot & SC_PROT_EXEC) {
-				long long p = uml_nt_mmap_sweep(c, addr,
-								len);
+			/* The byte range, NOT the run-rounded len — a
+			 * round-raised end would stick out of the file
+			 * span and fail the walk (glibc's bss tail
+			 * rides just under mapend). */
+			if (uml_nt_mmap_refill_ok(c->mm, addr,
+						  addr + req_len, &nfile)) {
+				int killed = uml_nt_guard_del_range(c->mm,
+								addr,
+								addr +
+								req_len);
 
-				if (p < 0)
+				if (uml_nt_mmap_fill(c, addr, req_len, NULL,
+						     0, 0, 1) < 0)
 					return SC_RET(SC_EFAULT);
+				if (lprot & SC_PROT_EXEC) {
+					long long p = uml_nt_mmap_sweep(c,
+							addr, req_len);
+
+					if (p < 0)
+						return SC_RET(SC_EFAULT);
+				}
+				os_info("[syscall] mmap MAP_FIXED 0x%llx+"
+					"%llu prot=0x%x: file-VMA refill "
+					"(%d chunk(s), %d guard(s) "
+					"cleared)\n", addr, req_len, lprot,
+					nfile, killed);
+				return addr;
 			}
-			os_info("[syscall] mmap MAP_FIXED 0x%llx+%llu "
-				"prot=0x%x: file-VMA refill (%d guard(s) "
-				"cleared)\n", addr, len, lprot, killed);
-			return addr;
 		}
 		/* Fresh/replace territory — run-aligned only (the VMA
 		 * geometry contract). The refill paths above are
@@ -469,7 +509,12 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 
 /* ---- M5.4 c2 (D20): file-backed mmap — the dynamic-loader path ----
  *
- * ld.so maps every shared library through here: ONE span mapping
+ * c3: max runs one fresh chunk may span — order-10 in the buddy
+ * (RUN_ORDER 4 + 6); anything bigger fails alloc_pages with a
+ * MAX_ORDER WARN. sys_mmap_file splits around this cap. */
+#define UML_NT_MMAP_SPAN_RUNS 64
+
+/* ld.so maps every shared library through here: ONE span mapping
  * (first segment's prot, no MAP_FIXED — the kernel picks the base),
  * then one MAP_FIXED mapping per remaining segment (4K-aligned,
  * mid-run), then anon MAP_FIXED for the .bss tail. Model (vma.h
@@ -501,8 +546,7 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 /* File bytes at `off` → [map_start, map_start+len), zeros beyond EOF
  * (everywhere for the anon bss refill). Walks per-VMA pieces — the
  * range may cross VMAs (each segment mapping does); each piece lands
- * at ITS VMA's run offset. */
-static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
+ * at ITS VMA's run offset. */static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
 			    unsigned long long map_start,
 			    unsigned long long len, struct file *f,
 			    unsigned long long off,
@@ -586,6 +630,7 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 {
 	unsigned long long addr = a[0], len = a[1], off = a[5];
 	unsigned long long rs, re, fsize, nruns, sp, va, map_start;
+	unsigned long long hint_base = UML_NT_SYSCALLS_BASE;
 	struct uml_nt_vma *v = NULL;
 	u32 lprot = (u32)a[2];
 	u32 flags = (u32)a[3];
@@ -629,11 +674,53 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 		return SC_RET(SC_EINVAL);
 	}
 	kind = uml_nt_vma_map_kind(c->mm, addr, addr + len, &v);
+	if (kind < 0 && !(flags & SC_MAP_FIXED)) {
+		/* c3: without MAP_FIXED the address is a HINT, not a
+		 * location — Linux searches free space from it. Our
+		 * run-rounding makes the loader's next hint overlap
+		 * the previous mapping's rounded span (its own
+		 * bookkeeping rounds to 4K), so a plain hint must
+		 * relocate, not fail. */
+		kind = 0;
+		hint_base = addr;
+		v = NULL;
+	}
 	if (kind < 0) {
+		/* FIXED and MIXED: a file refill crossing chunk VMAs
+		 * (c3) — every intersecting VMA must be file-backed,
+		 * then the fill walk does the rest per-VMA. */
+		int nfile = 0;
+
+		if (!uml_nt_mmap_refill_ok(c->mm, addr, addr + len,
+					   &nfile)) {
+			fdput(fdesc);
+			os_info("[syscall] mmap file 0x%llx+%llu: flank "
+				"overlap — unsupported\n", addr, len);
+			return SC_RET(SC_ENOMEM);
+		}
+		uml_nt_guard_del_range(c->mm, addr, addr + len);
+		if (uml_nt_mmap_fill(c, addr, len, f, off, fsize, 0) < 0) {
+			fdput(fdesc);
+			return SC_RET(SC_EFAULT);
+		}
+		if (lprot & SC_PROT_EXEC) {
+			long long p = uml_nt_mmap_sweep(c, addr, len);
+
+			if (p < 0) {
+				fdput(fdesc);
+				return SC_RET(SC_EFAULT);
+			}
+			os_info("[syscall] mmap exec sweep 0x%llx+%llu: "
+				"%lld syscall(s) patched (D20)\n", addr,
+				len, p);
+		}
 		fdput(fdesc);
-		os_info("[syscall] mmap file 0x%llx+%llu: flank overlap — "
-			"unsupported\n", addr, len);
-		return SC_RET(SC_ENOMEM);
+		os_info("[syscall] mmap file 0x%llx+%llu prot=0x%x -> "
+			"refill 0x%llx off=0x%llx (size %llu, %d "
+			"chunk(s))%s\n", addr, len, lprot, addr, off,
+			fsize, nfile,
+			(lprot & SC_PROT_EXEC) ? " EXEC" : "");
+		return addr;
 	}
 
 	if (kind == 0) {
@@ -641,15 +728,23 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 		 * VMA is run-rounded around it — the [rs, addr) head
 		 * is a zero hole, run granularity); otherwise the
 		 * mapping IS the VMA base (the file offset belongs to
-		 * it). File VMAs map the view RWX (vma.h note). */
+		 * it). File VMAs map the view RWX (vma.h note).
+		 *
+		 * c3: a span is alloc_pages(order = RUN_ORDER +
+		 * runs_order(nruns)) — order 10 (64 runs, 4MB) is the
+		 * buddy's ceiling, so a bigger mapping (systemd's
+		 * libcrypto.so.3 is 4.7MB) is split into chunk VMAs,
+		 * each with its own span + view. fill/sweep and the
+		 * refill walk per-VMA pieces already; nothing else
+		 * knows the chunks exist. */
 		unsigned long long slen = re - rs;
+		unsigned long long cur;
 
 		if (flags & SC_MAP_FIXED) {
 			va = rs;
 			map_start = addr;
 		} else {
-			va = uml_nt_vma_find_free(c->mm, slen,
-						  UML_NT_SYSCALLS_BASE,
+			va = uml_nt_vma_find_free(c->mm, slen, hint_base,
 						  UML_NT_SYSCALLS_BASE +
 						  uml_boot.physmem_size);
 			if (va == 0) {
@@ -658,23 +753,32 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 			}
 			map_start = va;
 		}
-		nruns = slen / UML_NT_PHYS_RUN_SIZE;
-		sp = (unsigned long long)
-			uml_nt_phys_alloc_span(c->ph, (int)nruns);
-		if ((long long)sp < 0) {
-			fdput(fdesc);
-			return SC_RET(SC_ENOMEM);
+		for (cur = va; cur < va + slen; cur += nruns *
+						     UML_NT_PHYS_RUN_SIZE) {
+			unsigned long long clen = va + slen - cur;
+
+			if (clen > UML_NT_MMAP_SPAN_RUNS *
+			    UML_NT_PHYS_RUN_SIZE)
+				clen = UML_NT_MMAP_SPAN_RUNS *
+				       UML_NT_PHYS_RUN_SIZE;
+			nruns = clen / UML_NT_PHYS_RUN_SIZE;
+			sp = (unsigned long long)
+				uml_nt_phys_alloc_span(c->ph, (int)nruns);
+			if ((long long)sp < 0) {
+				fdput(fdesc);
+				return SC_RET(SC_ENOMEM);
+			}
+			if (uml_nt_vma_add(c->mm, cur, cur + clen, sp,
+					   UML_NT_PAGE_EXECUTE_READWRITE,
+					   UML_NT_VMA_FILE) < 0) {
+				uml_nt_phys_unref(c->ph, (long long)sp);
+				fdput(fdesc);
+				return SC_RET(SC_ENOMEM);
+			}
+			uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
+					   UML_NT_PAGE_EXECUTE_READWRITE,
+					   cur, clen, sp);
 		}
-		if (uml_nt_vma_add(c->mm, va, va + slen, sp,
-				   UML_NT_PAGE_EXECUTE_READWRITE,
-				   UML_NT_VMA_FILE) < 0) {
-			uml_nt_phys_unref(c->ph, (long long)sp);
-			fdput(fdesc);
-			return SC_RET(SC_ENOMEM);
-		}
-		uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
-				   UML_NT_PAGE_EXECUTE_READWRITE, va,
-				   slen, sp);
 	} else {
 		va = addr;
 		map_start = addr;
