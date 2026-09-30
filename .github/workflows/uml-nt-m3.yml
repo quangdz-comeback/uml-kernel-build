@@ -18,27 +18,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # One bounded apt round (a stuck mirror once ate 17 min of
+      # "Install deps" and the run was cancelled): musl-tools for the
+      # rootfs busybox and ccache for the kernel ride along here.
       - name: Install deps
+        timeout-minutes: 8
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y build-essential flex bison bc patch \
-            xz-utils clang lld llvm
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+            update -y
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+            install -y build-essential flex bison bc patch xz-utils \
+            clang lld llvm ccache musl-tools
+
+      # ccache across runs: the tree and O= paths are fixed on the
+      # runner, so an overlay-only change recompiles just the touched
+      # objects. The key rolls per commit; restore picks the newest.
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: uml-nt-ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            uml-nt-ccache-${{ runner.os }}-
 
       - name: Fetch pinned v6.18.37 + apply uml-nt overlay
         run: |
           TREE=$(bash uml-nt/kernel/fetch.sh extract)
           bash uml-nt/kernel/apply.sh "$TREE"
           echo "TREE=$TREE" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+          # fresh extract = fresh mtimes; hash contents, not stat
+          echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime" >> "$GITHUB_ENV"
 
       - name: Configure (uml_nt_defconfig, clang+lld)
         run: |
-          make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC=clang LD=ld.lld \
-            uml_nt_defconfig
+          make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC="ccache clang" \
+            LD=ld.lld uml_nt_defconfig
 
-      - name: Build vmlinux (clang+lld)
+      - name: Build vmlinux (clang+lld, ccache)
         run: |
-          make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC=clang LD=ld.lld \
-            -j"$(nproc)"
+          ccache -z
+          make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC="ccache clang" \
+            LD=ld.lld KBUILD_BUILD_TIMESTAMP="uml-nt" -j"$(nproc)"
+          ccache -s
 
       - name: Freestanding gates (D1/D2)
         run: |
@@ -78,8 +102,7 @@ jobs:
       # root, no loop device). Uploaded for the native mount gate.
       - name: Build gate rootfs (M3.5)
         run: |
-          # musl-gcc builds the busybox that lands in the image (S4c2)
-          sudo apt-get install -y musl-tools
+          # musl-gcc (Install deps) builds the image's busybox (S4c2)
           make -C uml-nt/rootfs
           file uml-nt/rootfs/rootfs.ext4
 
@@ -88,60 +111,6 @@ jobs:
         with:
           name: uml-nt-rootfs-ext4
           path: uml-nt/rootfs/rootfs.ext4
-
-      # M1.9 boot gate (wine): mingw-cross-build launcher.exe + boot the
-      # just-built vmlinux.elf — must reach the "no rootfs" panic and
-      # exit 1 (os_dump_core → NtTerminateProcess(1)). Fast regression
-      # gate; the REAL Windows boot + M2 round-trip run natively below.
-      # NOTE: the M2 stub probe canNOT run under wine — wine implements
-      # CreateProcess as fork() of a multithreaded parent, and the UML
-      # kernel is always multithreaded (timer + longjmp-jumped threads);
-      # the forked child breaks in wine's own setup (stack overflow in
-      # the exec path) nondeterministically. Native runner = source of
-      # truth (verified M2.1: wine sometimes forks fine, sometimes not).
-      - name: Boot test under wine (M1.9 gate)
-        run: |
-          sudo apt-get install -y gcc-mingw-w64-x86-64 wine64
-          make -C uml-nt/launcher MINGW_CC=x86_64-w64-mingw32-gcc all
-          cd uml-nt/launcher
-          set +e
-          timeout 120 wine ./launcher.exe ../../build/vmlinux > boot.log 2>&1
-          code=$?
-          set -e
-          cat boot.log
-          [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code"; exit 1; }
-          # M3.5 note: with ext4 + ubd in the build, UML's default
-          # root=98:0 now resolves to a REGISTERED fs list, so the
-          # no-image boot panics with "Unable to mount root fs"
-          # instead of the old "No filesystem could mount root".
-          grep -q "Unable to mount root fs" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
-          echo "M1.9 wine boot gate ok"
-
-      # M3.5 mount gate (wine): same vmlinux + the ext4 root image via
-      # ubd0=/root= — must mount ext4 (sync ubd path, no io thread) and
-      # find /sbin/init in it. Since M3.8 S1 the boot fails FAST after
-      # that: the /sbin/init exec dies at bprm_mm_init (no uml_nt_stub=
-      # configured for real mm contexts → "mmctx: no stub path
-      # configured", error -12, before binfmt search) → panic → exit 1.
-      # Exit 1 or 124 (pre-S1 park) both stay inside the assert; the
-      # contract is the log.
-      - name: Wine ext4 mount gate (M3.5)
-        run: |
-          cd uml-nt/launcher
-          ROOTFS=$(realpath ../rootfs/rootfs.ext4)
-          ROOTFS_BS=${ROOTFS//\//\\}
-          set +e
-          timeout 90 wine ./launcher.exe ../../build/vmlinux \
-            "ubd0=Z:${ROOTFS_BS}" "root=/dev/ubda" > mount.log 2>&1
-          code=$?
-          set -e
-          cat mount.log
-          [ "$code" -eq 124 ] || [ "$code" -eq 1 ] || { echo "unexpected exit $code (boot hung elsewhere?)"; exit 1; }
-          grep -q "EXT4-fs (ubda): mounted filesystem" mount.log || { echo "ext4 never mounted (ubd sync I/O broken?)"; exit 1; }
-          grep -q "VFS: Mounted root (ext4 filesystem)" mount.log || { echo "root never mounted"; exit 1; }
-          grep -q "Run /sbin/init as init process" mount.log || { echo "/sbin/init never found in the mounted image"; exit 1; }
-          grep -q "stdio console ready" mount.log || { echo "M3.6 console driver never registered"; exit 1; }
-          echo "M3.5 wine mount gate ok"
 
   launcher:
     # M1.9: NATIVE Windows boot — build launcher.exe with the MSYS2
@@ -229,7 +198,7 @@ jobs:
           set -e
           cat boot.log
           [ "$code" -eq 1 ] || { echo "expected exit 1 (panic), got $code (124 = boot hang — see log)"; exit 1; }
-          # M3.5 note: see the wine gate — the no-image panic is now
+          # M3.5 note: with ext4 + ubd built in, the no-image panic is
           # "Unable to mount root fs" (ext4 present, root=98:0 default).
           grep -q "Unable to mount root fs" boot.log || { echo "boot never reached the no-rootfs panic"; exit 1; }
           grep -q "exec loaded: 3 region" boot.log || { echo "M3.4 ELF loader never ran (no exec image loaded)"; exit 1; }
