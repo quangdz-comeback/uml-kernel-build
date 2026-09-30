@@ -1166,6 +1166,67 @@ static unsigned long long sys_arch_prctl(struct uml_nt_stub_conn *c,
 	}
 }
 
+/* prctl(2) — M5.4 c3 (systemd): the process-option cluster. Per-conn
+ * state only (this conn IS the guest process): PR_SET_NAME stores
+ * the 16-byte comm (guest string via the D15 walker — shows up in
+ * "Comm:" panics), PDEATHSIG/DUMPABLE/NO_NEW_PRIVS are recorded and
+ * ack'd. Unknown options = -EINVAL (systemd tolerates; a blanket 0
+ * would lie about Getmm). */
+#define UML_NT_PR_SET_PDEATHSIG  2
+#define UML_NT_PR_GET_PDEATHSIG  3
+#define UML_NT_PR_SET_DUMPABLE   4
+#define UML_NT_PR_GET_DUMPABLE   5
+#define UML_NT_PR_SET_NAME       15
+#define UML_NT_PR_GET_NAME       16
+#define UML_NT_PR_SET_NO_NEW_PRIVS 38
+
+static unsigned long long sys_prctl(struct uml_nt_stub_conn *c,
+				    const unsigned long long *a)
+{
+	char name[16];
+	int i;
+
+	switch (a[0]) {
+	case UML_NT_PR_SET_NAME:
+		if (uml_nt_uacc_strncpy(name, c->mm, uml_boot.physmem_base,
+					a[1], sizeof(name) - 1) < 0)
+			return SC_RET(SC_EFAULT);
+		name[sizeof(name) - 1] = 0;
+		for (i = 0; i < (int)sizeof(c->comm) && name[i]; i++)
+			c->comm[i] = name[i];
+		c->comm[i] = 0;
+		return 0;
+	case UML_NT_PR_GET_NAME:
+		if (uml_nt_uacc_walk(c->mm, uml_boot.physmem_base, a[1],
+				     sizeof(c->comm), c->comm,
+				     UML_NT_UACC_TO_GUEST) < 0)
+			return SC_RET(SC_EFAULT);
+		return 0;
+	case UML_NT_PR_SET_PDEATHSIG:
+		c->pdeathsig = (u32)a[1];
+		return 0;
+	case UML_NT_PR_GET_PDEATHSIG:
+		if (uml_nt_uacc_walk(c->mm, uml_boot.physmem_base, a[1],
+				     sizeof(c->pdeathsig),
+				     (char *)&c->pdeathsig,
+				     UML_NT_UACC_TO_GUEST) < 0)
+			return SC_RET(SC_EFAULT);
+		return 0;
+	case UML_NT_PR_SET_DUMPABLE:
+		c->dumpable = (a[1] == 1);
+		return 0;
+	case UML_NT_PR_GET_DUMPABLE:
+		return c->dumpable ? 1 : 0;
+	case UML_NT_PR_SET_NO_NEW_PRIVS:
+		c->no_new_privs = (a[1] != 0);
+		return 0;
+	default:
+		os_info("[syscall] prctl(cmd=%llu): unsupported — "
+			"EINVAL\n", a[0]);
+		return SC_RET(SC_EINVAL);
+	}
+}
+
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			   struct uml_nt_stub_data *d)
 {
@@ -1216,6 +1277,10 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 5: /* fstat — musl stdio sizing/ash script fd */
 	case 262: /* newfstatat — glibc's fstat/stat shape (AT_EMPTY_PATH) */
 	case 332: /* statx — glibc stat variants */
+	case 137: /* statfs — systemd probes mount-point fs types */
+	case 138: /* fstatfs */
+	case 318: /* getrandom — systemd + libcrypto key material */
+	case 439: /* faccessat2 — systemd file probes (RENAME flags) */
 	case 8: /* lseek — ash reads the script by chunks */
 	case 17: /* pread64 — glibc ld.so reads the ELF headers of the
 		  * libs it maps (M5.4 c2 census, D20) */
@@ -1407,6 +1472,12 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		break;
 	case 158: /* arch_prctl — musl TLS (ARCH_SET_FS → D18) */
 		ret = sys_arch_prctl(c, d, a);
+		break;
+	case 157: /* prctl — M5.4 c3: the systemd process-option
+		   * cluster (PR_SET_NAME ×many: every unit/child
+		   * names itself; PDEATHSIG/DUMPABLE/NO_NEW_PRIVS
+		   * on the early boot path) */
+		ret = sys_prctl(c, a);
 		break;
 	case 228: /* clock_gettime — the guest's time source (M4 sysbench):
 		   * CLOCK_MONOTONIC/REALTIME both read os_nsecs() (QPC,

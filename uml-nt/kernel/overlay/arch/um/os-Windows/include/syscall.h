@@ -92,6 +92,13 @@ struct uml_nt_stub_conn {
 	 * forced by rt_sigreturn, implied by a delivered signal. */
 	int sig_regs_current;
 	int push_verbatim;
+	/* M5.4 c3 (systemd): per-process prctl state. comm shows up in
+	 * the "Comm:" panic field (PR_SET_NAME); pdeathsig/dumpable/
+	 * no_new_privs are recorded and served by PR_GET_*. */
+	char comm[16];
+	u32 pdeathsig;
+	int dumpable;
+	int no_new_privs;
 };
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
