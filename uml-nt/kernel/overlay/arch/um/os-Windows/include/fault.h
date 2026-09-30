@@ -56,6 +56,11 @@ struct uml_nt_fault_op {
 
 struct uml_nt_fault_plan {
 	int kill;        /* 1 = fatal: stub parks, kernel terminates */
+	char kill_why;   /* kill reason: 'w' wild VMA, 'b' page outside
+			  * the VMA, 'p' RO write, 'r' unreadable read,
+			  * 'x' DEP exec, 'o' plan full, 'a' alloc fail,
+			  * 's' split fail, '?' unknown access class;
+			  * 0 = not a kill decision */
 	int n_ops;
 	struct uml_nt_fault_op ops[UML_NT_FAULT_MAX_OPS];
 	/* COW copy directive (integration: kernel memcpy through its

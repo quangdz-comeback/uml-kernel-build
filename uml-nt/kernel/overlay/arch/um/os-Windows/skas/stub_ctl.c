@@ -235,10 +235,22 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		rc = uml_nt_mm_fault(c->mm, c->ph, d->fault_addr,
 				     d->fault_type, &c->plan);
 		if (rc < 0 || c->plan.kill) {
+			int vi;
+
 			os_info("[stubtest] FATAL fault pid %lu "
-				"addr=0x%llx type=%u — killing\n",
+				"addr=0x%llx type=%u why=%c — killing\n",
 				(unsigned long)c->pid, d->fault_addr,
-				d->fault_type);
+				d->fault_type,
+				c->plan.kill_why ? c->plan.kill_why : '?');
+			for (vi = 0; vi < c->mm->nvma; vi++)
+				os_info("[stubtest]   vma[%d] "
+					"0x%llx-0x%llx prot=0x%x "
+					"flags=0x%x off=0x%llx\n",
+					vi, c->mm->vma[vi].start,
+					c->mm->vma[vi].end,
+					c->mm->vma[vi].prot,
+					c->mm->vma[vi].flags,
+					c->mm->vma[vi].run_off);
 			d->action = UML_STUB_ACTION_KILL;
 			d->err = 1;
 			return -1;

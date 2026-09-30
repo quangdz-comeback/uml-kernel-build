@@ -54,6 +54,11 @@ static int plan_op(struct uml_nt_fault_plan *plan, unsigned op, unsigned prot,
 	return 0;
 }
 
+/* Every goto kill records its reason — the stub_ctl FATAL print
+ * reports it (CI triage: 'w' = the VMA was not in the tree, 'p' =
+ * prot mismatch, ...). */
+#define KILL(w) do { plan->kill_why = (w); goto kill; } while (0)
+
 int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		    unsigned long long addr, unsigned type,
 		    struct uml_nt_fault_plan *plan)
@@ -62,17 +67,18 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	unsigned long long page;
 
 	plan->kill = 0;
+	plan->kill_why = 0;
 	plan->n_ops = 0;
 	plan->copy_src_off = 0;
 	plan->copy_dst_off = 0;
 
 	vma = uml_nt_vma_find(mm, addr);
 	if (vma == 0)
-		goto kill; /* wild pointer — SIGSEGV semantics at M4 */
+		KILL('w'); /* wild pointer — SIGSEGV semantics at M4 */
 
 	page = addr & ~(UML_NT_FAULT_PAGE_SIZE - 1);
 	if (page < vma->start || page + UML_NT_FAULT_PAGE_SIZE > vma->end)
-		goto kill; /* run-multiple VMAs make this unreachable */
+		KILL('b'); /* run-multiple VMAs make this unreachable */
 
 	switch (type) {
 	case UML_NT_FAULT_READ:
@@ -80,22 +86,22 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		 * A read fault on an unreadable VMA is a guest bug —
 		 * kill instead of looping. */
 		if (!uml_nt_prot_readable(vma->prot))
-			goto kill;
+			KILL('r');
 		if (plan_op(plan, UML_NT_FOP_PROTECT,
 			    uml_nt_vma_effective_prot(vma, ph), page,
 			    UML_NT_FAULT_PAGE_SIZE, 0) < 0)
-			goto kill;
+			KILL('o');
 		return 0;
 
 	case UML_NT_FAULT_EXEC:
 		/* Executable VMAs carry exec prot; a DEP fault on a
 		 * non-exec VMA is a guest bug — kill, don't loop. */
 		if (!uml_nt_prot_execable(vma->prot))
-			goto kill;
+			KILL('x');
 		if (plan_op(plan, UML_NT_FOP_PROTECT,
 			    uml_nt_vma_effective_prot(vma, ph), page,
 			    UML_NT_FAULT_PAGE_SIZE, 0) < 0)
-			goto kill;
+			KILL('o');
 		return 0;
 
 	case UML_NT_FAULT_WRITE: {
@@ -105,7 +111,7 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		int rc;
 
 		if (!uml_nt_prot_writable(vma->prot))
-			goto kill; /* true RO violation — SIGSEGV at M4 */
+			KILL('p'); /* true RO violation — SIGSEGV at M4 */
 
 		if (!(vma->flags & UML_NT_VMA_COW) ||
 		    uml_nt_phys_refs(ph, (long long)page_run_off(vma, page)) <= 1) {
@@ -115,7 +121,7 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			 * read zero) — no alloc needed. */
 			if (plan_op(plan, UML_NT_FOP_PROTECT, vma->prot,
 				    page, UML_NT_FAULT_PAGE_SIZE, 0) < 0)
-				goto kill;
+				KILL('o');
 			return 0;
 		}
 
@@ -129,7 +135,7 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 
 		new_run = (unsigned long long)uml_nt_phys_alloc(ph);
 		if (new_run == (unsigned long long)-1)
-			goto kill; /* loud: physmem exhausted */
+			KILL('a'); /* loud: physmem exhausted */
 		/* alloc returns the byte offset already (run-aligned) */
 
 		plan->copy_src_off = old_run;
@@ -138,7 +144,7 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		rc = uml_nt_vma_cow_split(mm, ph, vma, page, new_run);
 		if (rc < 0) {
 			uml_nt_phys_unref(ph, (long long)new_run);
-			goto kill; /* table full — loud */
+			KILL('s'); /* table full — loud */
 		}
 
 		run_start = page & ~(UML_NT_PHYS_RUN_SIZE - 1);
@@ -147,25 +153,25 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			run_start + UML_NT_PHYS_RUN_SIZE : e;
 
 		if (plan_op(plan, UML_NT_FOP_UNMAP, 0, s, e - s, 0) < 0)
-			goto kill;
+			KILL('o');
 		if (mid_s > s &&
 		    plan_op(plan, UML_NT_FOP_MAP,
 			    uml_nt_prot_readonly(prot), s, mid_s - s,
 			    span_base) < 0)
-			goto kill;
+			KILL('o');
 		if (plan_op(plan, UML_NT_FOP_MAP, prot, mid_s, mid_e - mid_s,
 			    new_run) < 0)
-			goto kill;
+			KILL('o');
 		if (mid_e < e &&
 		    plan_op(plan, UML_NT_FOP_MAP,
 			    uml_nt_prot_readonly(prot), mid_e, e - mid_e,
 			    span_base + (mid_e - s)) < 0)
-			goto kill;
+			KILL('o');
 		return 0;
 	}
 
 	default:
-		goto kill; /* unknown access class — the NT contract
+		KILL('?'); /* unknown access class — the NT contract
 			    * grew, or the record is garbage */
 	}
 
@@ -183,6 +189,7 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	int i;
 
 	plan->kill = 0;
+	plan->kill_why = 0;
 	plan->n_ops = 0;
 	plan->copy_src_off = 0;
 	plan->copy_dst_off = 0;
