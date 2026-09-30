@@ -3,38 +3,46 @@
  * os-Windows/sigio.c — SIGIO delivery has no NT equivalent.
  * Upstream: linux v6.18.37 arch/um/os-Linux/sigio.c
  *
- * Why keep the file at all: os.h parity for kernel-side callers until
- * M1.7 decides whether the async-fd path collapses into IOCP completions
- * entirely (expected). Status: M1.3 skeleton — PANICs.
+ * Upstream keeps the async-fd (O_ASYNC) plumbing for the "SIGIO via
+ * host signal" model: these helpers fcntl the fd, spawn a sigio
+ * thread, and detect a broken async state. The NT port delivers IO
+ * readiness through the irq.c registry + flag machine instead (D19) —
+ * the aux reader thread replaces the signal entirely. The kernel-side
+ * irq.c still calls maybe_sigio_broken/ignore_sigio_fd at the
+ * upstream call sites, so the functions stay as honest no-ops rather
+ * than being removed (os.h parity, M1.3 convention).
  */
-#include <stub-impl.h>
+#include <os.h>
 
 int add_sigio_fd(int fd)
 {
-	stub_panic("sigio.c: add_sigio_fd");
+	(void)fd;
+	return 0;
 }
 
 int ignore_sigio_fd(int fd)
 {
-	stub_panic("sigio.c: ignore_sigio_fd");
+	(void)fd;
+	return 0;
 }
 
 void maybe_sigio_broken(int fd)
 {
-	stub_panic("sigio.c: maybe_sigio_broken");
+	(void)fd;
 }
 
 void sigio_broken(void)
 {
-	stub_panic("sigio.c: sigio_broken");
 }
 
 int __add_sigio_fd(int fd)
 {
-	stub_panic("sigio.c: __add_sigio_fd");
+	(void)fd;
+	return 0;
 }
 
 int __ignore_sigio_fd(int fd)
 {
-	stub_panic("sigio.c: __ignore_sigio_fd");
+	(void)fd;
+	return 0;
 }

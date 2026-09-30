@@ -58,7 +58,7 @@ grep -q 'UML_NT_MEMFD_PHYS' "$SRC/process.c" || {
 echo "ok  - real modules: no stub-impl.h, D9 handoff validated in main.c"
 
 # --- SKELETON modules: freestanding compile + PANIC-style enforced ------
-SKELETON=(execvp.c helper.c umid.c sigio.c tty.c skas/mem.c)
+SKELETON=(execvp.c helper.c umid.c tty.c skas/mem.c)
 FAIL=0
 for f in "${SKELETON[@]}"; do
   obj="$TMP/$(echo "$f" | tr '/' '_').o"

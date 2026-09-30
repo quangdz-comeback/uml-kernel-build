@@ -394,12 +394,19 @@ int os_pipe(int *fd, int stream, int close_on_exec)
 
 int os_set_fd_async(int fd)
 {
-	stub_panic("file.c: os_set_fd_async");
+	/* Upstream fcntl(O_ASYNC) — SIGIO on the fd. NT: readiness is
+	 * registry-driven (irq.c); the aux reader thread plays the
+	 * signal's role (D19). The kernel's activate_fd calls this on
+	 * every um_request_irq — sockets (the vector transport) have
+	 * nothing to arm here. */
+	(void)fd;
+	return 0;
 }
 
 int os_clear_fd_async(int fd)
 {
-	stub_panic("file.c: os_clear_fd_async");
+	(void)fd;
+	return 0;
 }
 
 int os_set_fd_block(int fd, int blocking)

@@ -406,26 +406,64 @@ void userspace(struct uml_pt_regs *regs)
 
 		/* Turnstile (D10): block on THIS conn's evt_in — the
 		 * per-task wait (upstream blocks on the stub's futex).
-		 * A 1s timeout keeps a dead/hung stub loud instead of
-		 * a silent boot hang (M1.9 lesson; the probe's service
-		 * loop does the same). */
+		 * M5.1c: the net reader thread also wakes us (the D19
+		 * wake event) so RX IRQs run between stub traps — the
+		 * upstream shape (SIGIO interrupts the blocking poll,
+		 * the handler runs, delivery returns). The timeout
+		 * keeps a dead/hung stub loud instead of a silent
+		 * boot hang (M1.9 lesson). */
 		for (;;) {
+			HANDLE waits[2];
+			ULONG w, code;
 			LARGE_INTEGER to;
-			ULONG code;
 
-			to.QuadPart = -10000000LL; /* 1s, relative */
-			if (nt->NtWaitForSingleObject(c->evt_in, 0,
-						      &to) !=
-			    UML_NT_STATUS_TIMEOUT)
-				break;
-			code = 0;
-			nt->GetExitCodeProcess(c->proc, &code);
-			if (code != UML_NT_STILL_ACTIVE) {
-				os_info("userspace: stub pid %d died "
-					"silently (%lu)\n", mm_id->pid,
-					(unsigned long)code);
-				os_dump_core();
+			waits[0] = c->evt_in;
+			waits[1] = uml_nt_net_wake_event();
+			if (waits[1] != NULL) {
+				w = nt->WaitForMultipleObjects(2, waits, 0,
+							       1000);
+			} else {
+				/* No wake event (creation failed): the
+				 * old plain wait — 1s timeout, no RX
+				 * wake (loud at creation site). */
+				to.QuadPart = -10000000LL; /* 1s */
+				w = nt->NtWaitForSingleObject(c->evt_in, 0,
+							      &to) ==
+				    UML_NT_STATUS_TIMEOUT ?
+					    258u : 0;
 			}
+			if (w == 0)
+				break; /* stub trap ready */
+			if (w == 1) {
+				/* A frame was staged: run the SIGIO
+				 * machinery (registry flush → the net
+				 * IRQ) on THIS thread, then re-wait. */
+				uml_nt_sigio_flush();
+				continue;
+			}
+			if (w == 258u /*WAIT_TIMEOUT*/) {
+				code = 0;
+				nt->GetExitCodeProcess(c->proc, &code);
+				if (code != UML_NT_STILL_ACTIVE) {
+					os_info("userspace: stub pid %d "
+						"died silently (%lu)\n",
+						mm_id->pid,
+						(unsigned long)code);
+					os_dump_core();
+				}
+				continue;
+			}
+			if (w == 0xFFFFFFFFu /*WAIT_FAILED*/) {
+				os_info("userspace: wait failed "
+					"win32=%lu\n",
+					nt->RtlGetLastWin32Error());
+				nt->NtDelayExecution(0, &(LARGE_INTEGER){
+					.QuadPart = -100000LL /*10ms*/ });
+				continue;
+			}
+			/* Any other wait outcome: treat as the trap
+			 * being ready (defensive; not reachable). */
+			break;
 		}
 
 		cmd = c->d->cmd;

@@ -48,4 +48,16 @@ int uml_nt_net_send_frame(unsigned long long s, const void *buf,
 int uml_nt_net_recv_frame(unsigned long long s, void *buf,
 			  unsigned int maxlen);
 
+/* irq.c (M5.1c): the net RX wake multiplex. uml_nt_net_wake_event is
+ * the auto-reset event the userspace() wait listens on alongside the
+ * stub's evt_in (lazily created, CAS-guarded — vCPU side). The aux
+ * reader thread calls uml_nt_net_rx_ready(fd) when a frame is staged:
+ * registry flag + mark_sigio_pending + SetEvent (D19 handoff). */
+HANDLE uml_nt_net_wake_event(void);
+void uml_nt_net_rx_ready(int fd);
+
+/* signal.c (M5.1c): vCPU-side SIGIO flush for waiters with signals
+ * enabled (the userspace() wake path). */
+void uml_nt_sigio_flush(void);
+
 #endif

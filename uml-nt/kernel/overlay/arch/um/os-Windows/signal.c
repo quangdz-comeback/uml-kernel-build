@@ -10,6 +10,7 @@
  * thread callback (time.c), IO events arrive at M3 (IOCP).
  */
 #include <linux/string.h>
+#include <irq_user.h>
 #include <kern_util.h>
 #include <ntabi.h>
 #include <os.h>
@@ -29,13 +30,24 @@
 #define SIGCHLD_BIT 2
 #define SIGCHLD_MASK (1 << SIGCHLD_BIT)
 
+/*
+ * Kernel-side handler table (upstream os-Linux/signal.c defines it
+ * with the same shape). SIGIO → sigio_handler (kernel/irq.c — the
+ * registry flush, os-Windows/irq.c); SIGCHLD → sigchld_handler.
+ * relay_signal is for fault-shaped signals only and PANICS on a
+ * kernel-context regs — pointing SIGIO there (the pre-M5 wiring)
+ * would have panicked the first net IRQ (found reading trap.c:
+ * "Kernel mode signal %d").
+ */
+void (*sig_info[65])(int, struct siginfo *, struct uml_pt_regs *,
+		     void *mc) = {
+	[SIGIO]    = sigio_handler,
+	[SIGCHLD]  = sigchld_handler,
+};
+
 int signals_enabled;
 static unsigned int signals_pending;
 static unsigned int signals_active;
-
-/* Kernel-side handlers reached on delivery (upstream sig_info[]): */
-extern void relay_signal(int sig, struct siginfo *si,
-			 struct uml_pt_regs *regs, void *mc);
 
 static void sig_handler_common(int sig, struct siginfo *si, void *mc)
 {
@@ -47,7 +59,7 @@ static void sig_handler_common(int sig, struct siginfo *si, void *mc)
 	if ((sig != SIGIO) && (sig != SIGWINCH) && (sig != SIGCHLD))
 		unblock_signals_trace();
 
-	relay_signal(sig, si, &r, mc);
+	(*sig_info[sig])(sig, si, &r, mc);
 }
 
 static void timer_real_alarm_handler(void *mc)
@@ -158,6 +170,22 @@ void remove_sigstack(void) { }
 void mark_sigio_pending(void)
 {
 	signals_pending |= SIGIO_MASK;
+}
+
+/* The vCPU-side SIGIO flush for waiters with signals ENABLED: the
+ * userspace() loop blocks on {stub evt_in, net wake} and unblock_
+ * signals() only flushes when signals were disabled — a frame arriving
+ * mid-wait needs its IRQ run HERE (upstream: the SIGIO signal simply
+ * interrupts the blocking poll and hard_handler runs it). Atomic
+ * clear-then-run: a reader re-arming the bit mid-flush re-runs later,
+ * never strands. */
+void uml_nt_sigio_flush(void)
+{
+	unsigned int p = __sync_fetch_and_and(&signals_pending,
+					      ~SIGIO_MASK);
+
+	if (p & SIGIO_MASK)
+		sig_handler_common(SIGIO, NULL, NULL);
 }
 
 void send_sigio_to_self(void)
