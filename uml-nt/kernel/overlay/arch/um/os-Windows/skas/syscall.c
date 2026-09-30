@@ -1287,7 +1287,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 87: /* unlink */
 	case 263: /* unlinkat — the whole tmpfile/lockfile family */
 	case 88: /* symlink */
-	case 266: /* symlinkat — /run/systemd/* wiring */
+	case 266: /* symlinkat — the systemd run-dir wiring */
 	case 89: /* readlink — /proc/self/exe + unit aliases */
 	case 267: /* readlinkat — glibc's canonicalize */
 	case 90: /* chmod */
@@ -1319,7 +1319,8 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 81: /* fchdir */
 	case 259: /* mknodat — do_static_devnodes creates /dev/null,
 		   * zero, full, random, urandom when /dev/null is
-		   * missing (5 calls named by run 36772786755) */
+		   * missing (5 calls named by run 36772786755; mknod
+		   * 133 was routed, the at-suffix twin was not) */
 	case 79: /* getcwd — ash prompt/pwd */
 	case 217: /* getdents64 — ash PATH search, glob */
 	case 20: /* writev — musl __stdio_write IS writev: every byte
@@ -1339,6 +1340,11 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 53: /* socketpair */
 	case 54: /* setsockopt — SO_BROADCAST, SO_ATTACH_FILTER */
 	case 55: /* getsockopt */
+	case 51: /* getsockname — systemd's netlink open checks the
+		  * bound address ("Failed to open netlink, ignoring"
+		  * run 36774586381 — socket+bind succeeded, this was
+		  * the missing tail) */
+	case 52: /* getpeername */
 	case 22: /* pipe — udhcpc's self-pipe (signal wakeup) */
 	case 293: /* pipe2 */
 	case 7: /* poll — udhcpc waits the lease window in poll() */
@@ -1367,11 +1373,26 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 287: /* timerfd_gettime */
 	case 289: /* signalfd4 */
 	case 290: /* eventfd2 — the wake channel */
+	case 253: /* inotify_init */
+	case 254: /* inotify_add_watch */
+	case 255: /* inotify_rm_watch */
+	case 294: /* inotify_init1 — manager_new's control-group inotify
+		   * object: "Failed to create control group inotify
+		   * object" → "Failed to allocate manager object" →
+		   * "Freezing execution" (run 36774586381) — THE hard
+		   * stop of this boot; the real fs/notify machinery is
+		   * kernel-internal and rides the bridge as-is */
 	case 428: /* open_tree */
 	case 437: /* openat2 — the glibc 2.34+ open shape */
 	case 436: /* close_range — systemd closing its fds */
 	case 34: /* pause — MUST block (a busy-looping unit ate 1.4M
 		  * instant ENOSYS returns in one 2.7-minute boot) */
+	case 112: /* setsid — systemd early boot (tolerated ENOSYS
+		   * so far; the real call is one route away) */
+	case 170: /* sethostname — "Failed to set hostname to <uml>" */
+	case 169: /* reboot — RB_DISABLE_CAD bookkeeping ("Failed to
+		   * enable ctrl-alt-del handling"); a real poweroff
+		   * would ride machine_power_off — correct semantics */
 	case 95: /* umask — systemd sets the boot umask */
 	case 125: /* capget */
 	case 126: /* capset — unit capability drops */
