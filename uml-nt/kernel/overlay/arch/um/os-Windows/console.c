@@ -140,6 +140,13 @@ static int __init nt_con_init(void)
 	g_driver->init_termios = tty_std_termios;
 	tty_set_operations(g_driver, &nt_con_ops);
 
+	/* Wire the port into the device slot BEFORE registering: it is
+	 * driver->ports[idx] that alloc_tty_struct copies into
+	 * tty->port. The raw tty_register_device left it NULL — the
+	 * "tty driver does not set tty->port" WARN on every console
+	 * open, and the real VFS write path (writev from musl stdio)
+	 * had no port-backed tty. */
+	g_driver->ports[0] = &g_port;
 	err = tty_register_driver(g_driver);
 	if (err) {
 		printk(KERN_ERR "uml-nt: can't register console tty driver"

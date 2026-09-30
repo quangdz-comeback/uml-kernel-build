@@ -682,6 +682,13 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		break;
 	}
 
+	/* TEMP syscall trace (S4c3 acceptance loop): every dispatch,
+	 * success or failure, with the first three args — the busybox
+	 * conn dies quietly (exit 127, no ENOSYS lines), this names
+	 * the syscall sequence it actually ran. Strip after M3.8. */
+	os_info("[syscall] nr=%llu ret=%lld a0=0x%llx a1=0x%llx "
+		"a2=0x%llx\n", nr, (long long)ret, a[0], a[1], a[2]);
+
 	if (exec_pending) {
 		/* The exec destroyed this conn (and d): touch neither.
 		 * The out: teardown below only clears the globals. */
