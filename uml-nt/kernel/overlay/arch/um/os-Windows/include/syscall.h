@@ -84,6 +84,14 @@ struct uml_nt_stub_conn {
 	 * next slice) reads/writes the same block. POC conns stay
 	 * NULL — no task, no FP bookkeeping. */
 	struct uml_pt_regs *owner_regs;
+	/* S4d signal delivery state (uml_nt_signal_check):
+	 * sig_regs_current = the dispatch already wrote the restored
+	 * state into current->thread.regs (rt_sigreturn) — skip the
+	 * trap-state pull; push_verbatim = the answer must resume the
+	 * stub at d->regs.rip EXACTLY (no rip+2, no rax=retval) —
+	 * forced by rt_sigreturn, implied by a delivered signal. */
+	int sig_regs_current;
+	int push_verbatim;
 };
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
@@ -171,6 +179,20 @@ void uml_nt_sync_trap_regs(struct uml_pt_regs *regs,
  * put_fp_registers half (the pull is conn_pull_regs, the get half).
  * Called by the pump before the answer releases the stub. */
 void uml_nt_fp_push(struct uml_nt_stub_conn *c, struct uml_pt_regs *regs);
+
+/* S4d: the signal delivery point (upstream interrupt_end() parity —
+ * it runs between "trap served" and "stub resumed"): make
+ * current->thread.regs this round's state, run the generic signal
+ * machinery (get_signal → do_signal → the sigframe setup), and when
+ * a signal was delivered push the rewritten regs verbatim + flag the
+ * stub. POC conns never call this (no task, no signals). */
+void uml_nt_signal_check(struct uml_nt_stub_conn *c);
+
+/* S4d: publish one plan op into the conn's stub slot (the static
+ * issue_plan_op's export — the pump-side signal delivery queues
+ * COW-fixup ops mid-signal_check). */
+void uml_nt_plan_issue_op(struct uml_nt_stub_conn *c,
+			  const struct uml_nt_fault_op *op);
 
 /* Append one stub op to the conn's plan for the current answer (the
  * syscall dispatch resets the plan at entry; ops accumulate and stream

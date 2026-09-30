@@ -663,12 +663,36 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 12: /* brk */
 		ret = sys_brk(c, a);
 		break;
-	case 13: /* rt_sigaction — POC: succeed, no old-state writeback
-		  * (musl reads oldact back only when querying) */
+	case 13: /* rt_sigaction — REAL on task-backed conns: the
+		  * generic sys_rt_sigaction records the handler +
+		  * SA_RESTORER; delivery runs in the pump's
+		  * signal_check (interrupt_end → do_signal). POC
+		  * conns keep the ack-only answer. */
+		if (c->task_backed) {
+			ret = sys_vfs(nr, a);
+			break;
+		}
 		ret = 0;
 		break;
 	case 14: /* rt_sigprocmask */
 		ret = sys_sigprocmask(c, a);
+		break;
+	case 15: /* rt_sigreturn — the frame is read from the TRAP's
+		  * rsp: sync the trap state into current->thread.regs
+		  * first (the dispatch runs one round stale — the
+		  * M4.2 fork lesson), then the generic
+		  * sys_rt_sigreturn restores GP + FP from the frame's
+		  * sigcontext/fpstate into thread.regs. The pump's
+		  * signal_check pushes the restored state VERBATIM
+		  * (no rip+2/rax=retval syscall resume over it). */
+		if (c->task_backed) {
+			uml_nt_sync_trap_regs(&current_pt_regs()->regs, d);
+			ret = sys_vfs(nr, a);
+			c->sig_regs_current = 1;
+			c->push_verbatim = 1;
+			break;
+		}
+		ret = SC_RET(SC_ENOSYS);
 		break;
 	case 16: /* ioctl — console is non-tty-interative for now */
 		ret = SC_RET(SC_ENOTTY);

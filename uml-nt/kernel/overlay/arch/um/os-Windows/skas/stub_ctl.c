@@ -32,6 +32,7 @@
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/sched/signal.h> /* force_sig_fault — the guest SIGSEGV (S4d) */
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <init.h>
@@ -147,6 +148,16 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 	c->plan_next++;
 }
 
+/* Publish one plan op into the stub slot (d->action operands) and
+ * advance the runner. Exported for the pump-side signal delivery
+ * (process.c): a sigframe write that COW-fixed-up a shared run
+ * queues ops into the conn's plan mid-signal_check. */
+void uml_nt_plan_issue_op(struct uml_nt_stub_conn *c,
+			  const struct uml_nt_fault_op *op)
+{
+	issue_plan_op(c, op);
+}
+
 /* Serve one published request on this conn. Returns 0 on success. */
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
@@ -239,6 +250,36 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		if (rc < 0 || c->plan.kill) {
 			int vi;
 
+			/* S4d: a task-backed conn turns the fatal fault
+			 * into a REAL guest SIGSEGV (upstream parity —
+			 * segv handler force_sig_faults, the generic
+			 * machinery delivers: handler, or default
+			 * death). The fault plan is dropped and the
+			 * faulting instruction does NOT replay: the
+			 * signal_check in the pump either runs the
+			 * handler (verbatim resume into it) or the
+			 * default action kills the task right there
+			 * (do_exit → exit_mm → mmctx_destroy terminates
+			 * this stub — no leak, no evt_out). POC conns
+			 * have no task: keep the loud KILL. */
+			if (c->task_backed && c->owner_regs != NULL) {
+				int code = (c->plan.kill_why == 'w') ?
+					SEGV_MAPERR : SEGV_ACCERR;
+
+				os_info("[stubtest] SIGSEGV -> guest pid %lu "
+					"addr=0x%llx type=%u rip=0x%llx "
+					"why=%c\n",
+					(unsigned long)c->pid, d->fault_addr,
+					d->fault_type, d->regs.rip,
+					c->plan.kill_why ?
+					c->plan.kill_why : '?');
+				force_sig_fault(SIGSEGV, code,
+					(void __user *)(unsigned long)
+						d->fault_addr);
+				d->action = UML_STUB_ACTION_NONE;
+				d->err = 0;
+				return 0;
+			}
 			os_info("[stubtest] FATAL fault pid %lu "
 				"addr=0x%llx type=%u why=%c — killing\n",
 				(unsigned long)c->pid, d->fault_addr,
@@ -636,13 +677,22 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	rc = serve_conn(c);
 	if (rc == 2)
 		return 2; /* exec: c/d are dead — no mb, no evt_out */
-	/* S4d: the FP/XSTATE round-trip rides the answer (upstream
-	 * put_fp_registers parity) — after the handler/dispatch (which
-	 * is what may change regs->fp, e.g. a sigreturn) and before
-	 * the stub resumes. Task-backed conns only: the POC probe
-	 * conns have no owning pt_regs. */
-	if (c->task_backed && c->owner_regs != NULL)
+	/* S4d (task-backed conns): the signal delivery point between
+	 * "trap served" and "stub resumed" — the upstream interrupt_
+	 * end() position. Ops in flight: the answer is an op, not a
+	 * resume — a pending signal stays pending (TIF_SIGPENDING
+	 * survives) and delivers on the first op-free round. The INIT
+	 * round never ran guest code: nothing can be pending and the
+	 * boot conn's trap slot holds bootstrap garbage (rip=2,
+	 * rsp=0xffffffffffffe000) — interrupt_end() on that state is
+	 * meaningless (found on the first wine run: the rsp-fixup
+	 * EFAULTed at frame ffffffffffffe000). */
+	if (c->task_backed && c->owner_regs != NULL &&
+	    c->d->cmd != UML_STUB_CMD_INIT) {
+		if (c->plan_left == 0)
+			uml_nt_signal_check(c);
 		uml_nt_fp_push(c, c->owner_regs);
+	}
 	mb();
 	nt->NtSetEvent(c->evt_out, NULL);
 	if (c->d->halt || c->d->action == UML_STUB_ACTION_KILL) {

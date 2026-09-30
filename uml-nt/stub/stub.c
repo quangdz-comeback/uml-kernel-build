@@ -50,6 +50,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <io.h>
 
 #include "../kernel/overlay/arch/um/include/shared/stub_nt.h"
 
@@ -379,6 +380,28 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	}
 	d->xstate_flags &= ~(u32_nt)(UML_STUB_XS_RESTORE |
 				     UML_STUB_XS_VERBATIM);
+
+	if (verbatim) {
+		/* A signal delivery rewrote the register file INCLUDING
+		 * RSP (the sigframe, placed deep by the kernel to keep
+		 * wine's dispatch context un-clobbered). Return the
+		 * context UNTOUCHED: wine 9.0's NtContinue restores the
+		 * full context faithfully ONLY while the wine-saved
+		 * ContextFlags stay intact — stripping
+		 * CONTEXT_DEBUG_REGISTERS|CONTEXT_XSTATE (the first
+		 * attempt, meant to dodge a wineserver round-trip)
+		 * pushes NtContinue down a partial-restore path that
+		 * resurrects the STALE volatile registers from its own
+		 * syscall frame: the guest handler came up with
+		 * rdx=0xD (the NtContinue dispatch id) instead of the
+		 * &frame->uc argument and died on its first frame read
+		 * (test-matrix: G?F?S1W? = RDX-FLIP, S0 = rdx-ok).
+		 * Native Windows restores the wine-saved Dr values
+		 * harmlessly (they are the thread's own), and the
+		 * CONTEXT_XSTATE claim is backed by the CONTEXT_EX the
+		 * dispatcher itself built next to this context. */
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
 
 	if (is_syscall) {
 		unsigned long long target;

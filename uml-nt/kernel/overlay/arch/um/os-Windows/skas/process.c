@@ -42,6 +42,7 @@
 #include <syscall.h>
 #include <bench.h>
 #include <os.h>
+#include <uaccess_walk.h>
 #include "internal.h"
 
 int is_skas_winch(int pid, int fd, void *data)
@@ -151,6 +152,18 @@ static void conn_pull_regs(struct uml_pt_regs *regs,
 		/* upstream: "assume it's not a syscall" */
 		UPT_SYSCALL_NR(regs) = -1;
 	}
+	/* S4d: a fault round records the fault itself — copy_sc_to_user
+	 * builds the sigframe's cr2/err/trapno from thread faultinfo
+	 * (upstream fills it via get_skas_faultinfo at the SIGSEGV
+	 * trap). NT mapping: cr2 = the faulting VA, trap 14 (page
+	 * fault), x86 error-code bits (user | write | instruction). */
+	if (cmd == UML_STUB_CMD_FAULT) {
+		regs->faultinfo.cr2 = (unsigned long)d->fault_addr;
+		regs->faultinfo.trap_no = 14;
+		regs->faultinfo.error_code = 0x4 /* user */ |
+			(d->fault_type == 1 ? 0x2 /* write */ :
+			 d->fault_type == 8 ? 0x10 /* exec */ : 0);
+	}
 	/* S4d: the FP half of get_fp_registers — the stub captured the
 	 * at-exception XSAVE_FORMAT block into d->xstate (context
 	 * flags gated); the task's fp block is the kernel's live copy
@@ -185,6 +198,162 @@ void uml_nt_fp_push(struct uml_nt_stub_conn *c, struct uml_pt_regs *regs)
 		return;
 	__builtin_memcpy((void *)d->xstate, regs->fp, host_fp_size);
 	d->xstate_flags |= UML_STUB_XS_RESTORE;
+}
+
+/* D15's guest-write (uaccess.c; linux/uaccess.h can't be included
+ * here — it collides with user.h's sized_strscpy). */
+extern unsigned long raw_copy_to_user(void *to, const void *from,
+				      unsigned long n);
+
+/* S4d: signal delivery between "trap served" and "stub resumed" —
+ * the position upstream gets from interrupt_end() at the bottom of
+ * every userspace() iteration (the stub is STOPPED there; the
+ * rewritten regs ride the next iteration's SETREGS push). The NT
+ * pump answers in one go, so this runs in pump_conn before the
+ * evt_out release:
+ *
+ * 1. make current->thread.regs THIS round's state (rt_sigreturn
+ *    already wrote the restored state into it — skip the pull);
+ * 2. interrupt_end(): the generic machinery runs get_signal →
+ *    do_signal → setup_signal_stack_si — the sigframe (GP snapshot
+ *    + FP block from regs->fp + siginfo) is written through the D15
+ *    walker and regs become the HANDLER's entry state; with no
+ *    handler the default action kills the task right here (do_exit
+ *    → exit_mm → mmctx_destroy terminates the stub — no leak);
+ * 3. a delivered signal (or the sigreturn's restored state) is
+ *    pushed VERBATIM: the stub must not do its own rip+2/rax=retval
+ *    syscall resume over it.
+ *
+ * The delivery here is the task's own — force_sig_fault (the fault
+ * path's SIGSEGV) and the generic send-signal syscalls mark
+ * TIF_SIGPENDING on THIS task; the POC conns never reach this. */
+void uml_nt_signal_check(struct uml_nt_stub_conn *c)
+{
+	struct uml_pt_regs *regs = c->owner_regs;
+	struct uml_nt_stub_data *d = c->d;
+	struct uml_nt_uacc_sink sink;
+	struct uml_nt_mm *prev_mm;
+	struct uml_nt_uacc_sink prev_sink;
+	unsigned long long rip_before;
+	unsigned long long true_sp;
+
+	if (!c->sig_regs_current) {
+		/* Syscall-shaped rounds resume past the ud2 (the stub
+		 * does rip+2) — the completed-syscall state is what a
+		 * signal frame must record. Fault rounds are
+		 * mid-instruction: pull verbatim, no +2. */
+		if (d->cmd == UML_STUB_CMD_FAULT)
+			conn_pull_regs(regs, d, d->cmd);
+		else
+			uml_nt_sync_trap_regs(regs, d);
+	}
+	c->sig_regs_current = 0;
+
+	/* The signal machinery WRITES GUEST MEMORY (the sigframe: GP
+	 * snapshot + FP block + siginfo — copy_to_user/__put_user all
+	 * walk through the D15 walker). The dispatch restored the
+	 * uaccess globals at its exit; install THIS conn's mm + a sink
+	 * for the duration (the dispatch's own pattern), so the frame
+	 * setup cannot hit the null-mm fail-safe EFAULT — which would
+	 * force_sigsegv the task to death with SIG_DFL (found on the
+	 * first wine run: handler installed, delivery took the default
+	 * action). COW fixups from the frame writes queue into the
+	 * conn's plan and stream with this answer. */
+	sink.ph = c->ph;
+	sink.plan = &c->plan;
+	prev_mm = uml_nt_uacc_set_mm(c->mm);
+	prev_sink = uml_nt_uacc_set_sink(&sink);
+
+	/* The previous ops (if any) streamed to completion (the pump
+	 * gates this call on plan_left == 0) — queue fresh. */
+	c->plan.n_ops = 0;
+
+	rip_before = REGS_IP(regs->gp);
+
+	/* Wine builds the exception dispatch state (EXCEPTION_RECORD +
+	 * full CONTEXT + xstate — the exc_stack) ON THE GUEST STACK,
+	 * just below the trap rsp (~12KB with the xstate area), and
+	 * the context buffer LIVES there while our VEH runs. The
+	 * upstream frame placement (at the interrupted rsp, growing
+	 * down) lands inside that window and corrupts the dispatch
+	 * context mid-round-trip: the handler resumed with wine's
+	 * saved registers replaced by sigframe bytes (rdx read as
+	 * 0xD), and NtSetContextThread rejected the context
+	 * (C000000D) — the dispatch fell to the SEH walk and died.
+	 * Deliver the frame 8KB deeper instead, then patch the frame's
+	 * saved mcontext rsp back to the TRUE trap rsp: rt_sigreturn
+	 * restores the guest exactly where it was, and the handler's
+	 * own execution (plus any wine dispatch below IT) stays inside
+	 * the 64KB stack run, away from everything else. Upstream
+	 * delivers at the interrupted rsp; the sigreturn path derives
+	 * the frame from the live rsp (frame = sp - 8 after the
+	 * handler's ret), so the frame position is free for us to
+	 * choose. */
+	true_sp = REGS_SP(regs->gp);
+	REGS_SP(regs->gp) = true_sp - 0x2000;
+
+	interrupt_end();
+
+	/* Post-setup: SP = the frame (the handler's entry rsp, kept for
+	 * the verbatim push). The setup saved the DEEP sp into the
+	 * frame's mcontext — patch the saved rsp back to the true one
+	 * (frame + pretcode 8 + uc_flags 8 + uc_link 8 + uc_stack 24 =
+	 * the mcontext; sigcontext_64's sp = its 16th qword = +120 →
+	 * +168 total). Through the walker while the mm/sink window is
+	 * still open. */
+	{
+		unsigned long *sp_slot =
+			(unsigned long *)(REGS_SP(regs->gp) + 168);
+		unsigned long true_rsp = (unsigned long)true_sp;
+
+		if (raw_copy_to_user(sp_slot, &true_rsp, sizeof(true_rsp)))
+			os_info("[stubtest] signal frame rsp fixup "
+				"EFAULT (frame %llx)\n",
+				(unsigned long long)REGS_SP(regs->gp));
+	}
+
+	uml_nt_uacc_set_mm(prev_mm);
+	uml_nt_uacc_set_sink(&prev_sink);
+
+	/* The frame setup queued stub ops (a COW-shared run went
+	 * private mid-write): prime the plan streaming — the answer
+	 * becomes the first op, the rest stream on the PROT_DONE
+	 * rounds, and the VERBATIM push below survives until the
+	 * stub's final resume (it clears the flags only there). */
+	if (c->plan.n_ops > 0) {
+		c->plan_next = 0;
+		c->plan_left = c->plan.n_ops;
+		uml_nt_plan_issue_op(c, &c->plan.ops[0]);
+	}
+
+	if (REGS_IP(regs->gp) != rip_before || c->push_verbatim) {
+		/* Delivered (or restored): regs = the exact resume
+		 * state. Push the GP snapshot verbatim — the FP push
+		 * follows in the pump (regs->fp is what setup copied
+		 * into the frame, or what sigreturn restored). */
+		struct uml_nt_gp_regs *g = &d->regs;
+
+		g->rax = REGS_AX(regs->gp);
+		g->rcx = REGS_CX(regs->gp);
+		g->rdx = REGS_DX(regs->gp);
+		g->rbx = REGS_BX(regs->gp);
+		g->rsp = REGS_SP(regs->gp);
+		g->rbp = REGS_BP(regs->gp);
+		g->rsi = REGS_SI(regs->gp);
+		g->rdi = REGS_DI(regs->gp);
+		g->r8 = REGS_R8(regs->gp);
+		g->r9 = REGS_R9(regs->gp);
+		g->r10 = REGS_R10(regs->gp);
+		g->r11 = REGS_R11(regs->gp);
+		g->r12 = REGS_R12(regs->gp);
+		g->r13 = REGS_R13(regs->gp);
+		g->r14 = REGS_R14(regs->gp);
+		g->r15 = REGS_R15(regs->gp);
+		g->rip = REGS_IP(regs->gp);
+		g->rflags = REGS_EFLAGS(regs->gp);
+		d->xstate_flags |= UML_STUB_XS_VERBATIM;
+	}
+	c->push_verbatim = 0;
 }
 
 /* M4.2 fork prep: the generic fork's copy_thread memcpy's

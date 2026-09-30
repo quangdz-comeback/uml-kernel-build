@@ -12,7 +12,7 @@ CFLAGS  += -I$(KERNELDIR)/include/shared
 all: stub.exe
 
 stub.exe: stub.c $(KERNELDIR)/include/shared/stub_nt.h
-	$(MINGW_CC) $(CFLAGS) -o $@ stub.c
+	$(MINGW_CC) $(CFLAGS) -o $@ stub.c -lntdll
 
 clean:
 	rm -f stub.exe
