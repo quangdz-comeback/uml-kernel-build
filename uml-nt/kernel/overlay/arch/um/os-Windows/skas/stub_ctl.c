@@ -506,6 +506,11 @@ void uml_nt_switch_trace(void *from, void *to)
 			unsigned long long off =
 				(unsigned long long)fa->size -
 				sizeof(long long);
+			unsigned char *pad =
+				(unsigned char *)task_stack_page(f) + off;
+			void *page = (void *)(unsigned long)
+				((uintptr_t)pad & ~(uintptr_t)0xfff);
+			ULONG old;
 
 			for (si = 0; si < UML_NT_GUARD_SLOTS; si++)
 				if (guard_tasks[si] == f)
@@ -516,9 +521,32 @@ void uml_nt_switch_trace(void *from, void *to)
 					UML_NT_GUARD_SLOTS;
 				guard_tasks[si] = f;
 			}
-			*(unsigned long long *)(void *)
-				((unsigned char *)task_stack_page(f) +
-				 off) = magic;
+			/* RW for the magic write (the page may still be
+			 * RO from this task's previous switch-out). */
+			{
+				void *pbase = page;
+				unsigned long long plen = 0x1000;
+
+				nt->NtProtectVirtualMemory(
+					UML_NT_CURRENT_PROCESS, &pbase,
+					&plen, 0x04 /* PAGE_READWRITE */,
+					&old);
+			}
+			*(unsigned long long *)(void *)pad = magic;
+			/* THE TRAP: the padding page goes read-only
+			 * while the task sleeps. The smash writer takes
+			 * a native fault ON ITS OWN RIP — the VEH
+			 * reporter (first handler) prints who/where
+			 * before anything else can react. */
+			{
+				void *pbase = page;
+				unsigned long long plen = 0x1000;
+
+				nt->NtProtectVirtualMemory(
+					UML_NT_CURRENT_PROCESS, &pbase,
+					&plen, 0x02 /* PAGE_READONLY */,
+					&old);
+			}
 		}
 	}
 	{
