@@ -30,9 +30,17 @@
 
 static struct uml_nt_mm *uacc_mm;
 
-void uml_nt_uacc_set_mm(struct uml_nt_mm *mm)
+/* Returns the PREVIOUS mm: dispatches NEST on the one host thread
+ * (the parent blocks inside its handler — wait4 — and the child's
+ * dispatch runs on the switched stack, M4.2); the dispatch restores
+ * at exit instead of clearing, or the woken parent's put_user walks
+ * with mm=NULL and every writeback EFAULTs. */
+struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm)
 {
+	struct uml_nt_mm *prev = uacc_mm;
+
 	uacc_mm = mm;
+	return prev;
 }
 
 struct uml_nt_mm *uml_nt_syscall_mm(void)

@@ -44,8 +44,12 @@ struct uml_nt_uacc_sink {
 	struct uml_nt_fault_plan *plan;
 };
 
-void uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
-void uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s);
+/* Both installers return the PREVIOUS value — dispatches nest on the
+ * one host thread (the parent blocks inside its handler, M4.2), so
+ * the dispatch saves at entry and restores at exit; clearing to NULL
+ * would EFAULT every writeback of the woken outer dispatch. */
+struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
+struct uml_nt_uacc_sink uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s);
 
 int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 		     unsigned long long va, unsigned long long len,

@@ -43,12 +43,17 @@ static struct uml_nt_uacc_sink uacc_sink;
 
 unsigned long uml_nt_uacc_fixups;
 
-void uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s)
+struct uml_nt_uacc_sink uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s)
 {
+	struct uml_nt_uacc_sink prev = uacc_sink;
+
 	if (s != (const struct uml_nt_uacc_sink *)0)
 		uacc_sink = *s;
-	else
+	else {
 		uacc_sink.ph = (struct uml_nt_phys *)0;
+		uacc_sink.plan = (struct uml_nt_fault_plan *)0;
+	}
+	return prev;
 }
 
 /* Queue one stub op into the sink's plan (the dispatch streams ops

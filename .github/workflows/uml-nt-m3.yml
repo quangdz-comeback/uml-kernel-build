@@ -376,3 +376,33 @@ jobs:
           [ -n "$MEAN" ] || { echo "mean_ns missing from BENCH-KERNEL summary"; exit 1; }
           [ "$MEAN" -lt 1000000 ] || { echo "RTT mean ${MEAN}ns above the 1ms sanity ceiling (per-round logging back? wait timeouts?)"; exit 1; }
           echo "M4.1 NATIVE BENCH OK: rounds=8000 recorded clean (no per-round log), mean ${MEAN}ns/syscall"
+
+      # M4.2: block-wait through the scheduler — /bin/forkwait runs as
+      # PID 1: fork goes through the GENERIC copy_process path (the
+      # child = a real kernel task: cold stack at fork_handler, own
+      # conn from init_new_context, own userspace() loop), so the
+      # parent's wait4 BLOCKS (do_wait → schedule()) while the child's
+      # stack runs, and the child's exit(7) does the real do_exit
+      # teardown and wakes it. The marker ORDER is the proof: the POC
+      # fork/wait4 (-EAGAIN retry, bare stub, no child task) cannot
+      # produce CHILD-RUN between WAIT-BLOCK-ENTER and WAIT-OK.
+      - name: NATIVE fork/wait4 block gate (M4.2)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$ROOTFS" "root=98:0" "init=/bin/forkwait" > forkwait.log 2>&1
+          code=$?
+          set -e
+          cat forkwait.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code"; exit 1; }
+          grep -q "FORK-PID: " forkwait.log || { echo "fork never returned a pid (copy_process failed? see fork: lines)"; exit 1; }
+          grep -q "WAIT-BLOCK-ENTER" forkwait.log || { echo "parent never reached the blocking wait4"; exit 1; }
+          grep -q "CHILD-RUN" forkwait.log || { echo "child kernel task never ran (scheduler never switched stacks?)"; exit 1; }
+          grep -q "WAIT-OK: child reaped, exit 7" forkwait.log || { echo "wait4 did not reap the child with exit 7 (block path broken?)"; exit 1; }
+          grep -q "FORKWAIT-OK" forkwait.log || { echo "fork/wait4 block gate incomplete"; exit 1; }
+          echo "M4.2 NATIVE FORK-WAIT OK: real child task + blocking wait4 via schedule()"

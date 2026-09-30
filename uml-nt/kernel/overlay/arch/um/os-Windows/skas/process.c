@@ -150,6 +150,21 @@ static void conn_pull_regs(struct uml_pt_regs *regs,
 	}
 }
 
+/* M4.2 fork prep: the generic fork's copy_thread memcpy's
+ * current_pt_regs — which on this port is one round STALE (the
+ * current trap lives in d->regs until conn_pull_regs runs after the
+ * handler). Sync the trap state in, with rip +2: the child's first
+ * conn_bootstrap jumps to shadow.rip, and it must resume PAST the
+ * ud2 (the stub does the same +2 for the parent's own resume).
+ * copy_thread then sets the child's syscall retval 0 — fork
+ * semantics. */
+void uml_nt_sync_trap_regs(struct uml_pt_regs *regs,
+			   const struct uml_nt_stub_data *d)
+{
+	conn_pull_regs(regs, d, UML_STUB_CMD_SYSCALL);
+	REGS_IP(regs->gp) += 2;
+}
+
 void userspace(struct uml_pt_regs *regs)
 {
 	interrupt_end();
@@ -235,14 +250,22 @@ void userspace(struct uml_pt_regs *regs)
 			os_dump_core();
 		}
 		if (rc == 1) {
-			/* The guest exited; the kernel terminated the
-			 * stub (halt → kill + reap). Upstream never
-			 * returns here either — the task is dead. Task
-			 * teardown parity (do_exit path) is the S4/M4
-			 * work: fail loud, never loop on a dead conn. */
-			os_info("userspace: guest pid %d halted\n",
-				mm_id->pid);
-			os_dump_core();
+			/* The guest exited (halt) or died (KILL): the
+			 * stub is already terminated. M4.2: THIS task
+			 * exits kernel-side — do_exit runs the full
+			 * teardown (exit_mm → destroy_context closes
+			 * the conn, exit_notify wakes a wait4 parent,
+			 * the scheduler moves on). The init task dying
+			 * here panics generically ("Attempted to kill
+			 * init") — same loud exit-1 the gates assert.
+			 * Signal-death fidelity (which signal, core
+			 * dump semantics) is the M4 signals slice;
+			 * the wait status carries the exit code only. */
+			os_info("userspace: guest pid %d halted "
+				"(exit %lu) — task exit\n",
+				mm_id->pid,
+				(unsigned long)c->exit_code);
+			do_exit((long)(c->exit_code & 0xffu) << 8);
 		}
 	}
 }

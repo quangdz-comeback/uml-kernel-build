@@ -30,7 +30,9 @@
  * dispatcher) is M3.7; this module proves the mechanism end to end.
  */
 #include <linux/init.h>
+#include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <init.h>
 #include <ntabi.h>
@@ -313,7 +315,6 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	struct uml_nt_gp_regs *g = &d->regs;
 	struct uml_nt_stub_conn *k = &conn_child;
 	int vi;
-	int vi_reprotect;
 
 	if (k->alive) {
 		os_info("[stubtest] fork: child already exists\n");
@@ -362,12 +363,99 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	/* Upstream fork marks both pte tables read-only: re-protect the
 	 * PARENT's views too (mm_clone flagged the kernel-side VMAs —
 	 * the stub's MapViewOfFile views are per-conn and stay writable
-	 * until told). Unmap + remap read-only; the parent's next write
-	 * faults into the COW machinery instead of landing on the run
-	 * the child still reads. Ops ride the fork answer (the dispatch
-	 * parks the retval while plan_left > 0). The walker's by-refs
-	 * fixup guards the uaccess path independently. */
-	vi_reprotect = 0;
+	 * until told). Ops ride the fork answer (the dispatch parks the
+	 * retval while plan_left > 0); the walker's by-refs fixup
+	 * guards the uaccess path independently. */
+	uml_nt_fork_reprotect_parent(c);
+	d->retval = k->pid;
+	d->err = 0;
+	os_info("[stubtest] fork: child pid %lu\n",
+		(unsigned long)k->pid);
+}
+
+/* ---- M4.2: real fork through the scheduler (task-backed conns) ----
+ *
+ * The POC fork above spawns a bare stub — no child KERNEL task, so
+ * nobody ever runs a userspace() loop for the child, and the parent's
+ * wait4 can only poll (-EAGAIN). The real path arms the pending state
+ * below right before the GENERIC fork: copy_process → dup_mm →
+ * init_new_context → mmctx_init spawns the child's conn and the seed
+ * clones the parent's address space into it at birth; copy_thread
+ * hands the child a cold stack at fork_handler → its own userspace()
+ * loop serves its own conn; the parent's wait4 blocks in schedule()
+ * and the child's do_exit wakes it — upstream parity end to end. */
+
+static struct uml_nt_stub_conn *fork_pending_parent;
+static unsigned long long fork_pending_rsp;
+
+void uml_nt_fork_arm(struct uml_nt_stub_conn *parent, unsigned long long rsp)
+{
+	fork_pending_parent = parent;
+	fork_pending_rsp = rsp;
+}
+
+void uml_nt_fork_disarm(void)
+{
+	fork_pending_parent = NULL;
+	fork_pending_rsp = 0;
+}
+
+int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
+{
+	struct uml_nt_stub_conn *parent = fork_pending_parent;
+	int vi;
+
+	if (parent == NULL)
+		return 0;
+
+	/* One phys table per MM CONTEXT would double-count nothing but
+	 * also see nothing: run refcounts must count mm CONTEXTS
+	 * sharing each run (S3 semantics, mmctx.c comment) — the child
+	 * shares the parent's table and abandons its fresh, unclaimed
+	 * one (phys_init allocates nothing — the kzalloc is the only
+	 * memory). */
+	kfree(child->ph);
+	child->ph = parent->ph;
+	child->ph_shared = 1;
+
+	if (uml_nt_mm_clone(child->mm, parent->mm, child->ph,
+			    fork_pending_rsp) < 0) {
+		os_info("fork: mm clone failed (child conn pid %lu)\n",
+			(unsigned long)child->pid);
+		uml_nt_fork_disarm();
+		return -ENOMEM;
+	}
+	/* Contents of the eager (private) spans: everything whose
+	 * run_off moved (the stack VMA — the COW-shared runs are the
+	 * same bytes by construction). */
+	for (vi = 0; vi < child->mm->nvma; vi++) {
+		const struct uml_nt_vma *cv = &child->mm->vma[vi];
+		const struct uml_nt_vma *pv = &parent->mm->vma[vi];
+
+		if (cv->run_off == pv->run_off)
+			continue;
+		memcpy(uml_boot.physmem_base + cv->run_off,
+		       uml_boot.physmem_base + pv->run_off,
+		       cv->end - cv->start);
+	}
+	/* D18: the child shares the TLS block COW and musl never
+	 * re-runs arch_prctl after fork — the child's stub re-applies
+	 * the inherited base at its first resume. */
+	child->fs_base = parent->fs_base;
+	if (child->d != NULL)
+		child->d->fs_base = parent->fs_base;
+	fork_pending_parent = NULL;
+	fork_pending_rsp = 0;
+	os_info("fork: child conn pid %lu seeded (%d vma(s), parent "
+		"pid %lu)\n", (unsigned long)child->pid,
+		child->mm->nvma, (unsigned long)parent->pid);
+	return 0;
+}
+
+void uml_nt_fork_reprotect_parent(struct uml_nt_stub_conn *c)
+{
+	int vi, vi_reprotect = 0;
+
 	for (vi = 0; vi < c->mm->nvma; vi++) {
 		struct uml_nt_vma *pv = &c->mm->vma[vi];
 		unsigned long long len = pv->end - pv->start;
@@ -390,19 +478,15 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 		vi_reprotect++;
 	}
 	if (vi_reprotect)
-		os_info("[stubtest] fork: re-protected %d parent view(s) "
+		os_info("fork: re-protected %d parent view(s) "
 			"read-only\n", vi_reprotect);
-	d->retval = k->pid;
-	d->err = 0;
-	os_info("[stubtest] fork: child pid %lu\n",
-		(unsigned long)k->pid);
 }
 
 /* wait4 hook (D16): reap the ONE forked child when it is dead — a
  * live child answers -EAGAIN and the guest retries the trap (the
  * service loop keeps serving every conn meanwhile); true blocking
- * waits need the task scheduler (M3.8). Status encoding = Linux
- * wait4: WEXITSTATUS is bits 8..15. */
+ * waits ride the scheduler (M4.2, task-backed conns). Status encoding
+ * = Linux wait4: WEXITSTATUS is bits 8..15. */
 void uml_nt_sys_wait4(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d,
 		      const unsigned long long *a)
 {

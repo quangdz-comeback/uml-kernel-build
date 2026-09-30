@@ -112,6 +112,21 @@ int uml_nt_mmctx_init(struct mm_id *id)
 		goto fail;
 	}
 
+	/* M4.2: this conn is backed by a REAL kernel task (its
+	 * userspace() loop will serve it) — fork/wait4 go through the
+	 * generic scheduler path, not the POC hooks. */
+	c->task_backed = 1;
+
+	/* A fork in flight (armed by the forking task's dispatch around
+	 * the generic fork): the child's address space is cloned into
+	 * THIS conn at birth — failure aborts the mm, and with it the
+	 * fork (mm_init's -errno path), exactly like an upstream
+	 * start_userspace failure. */
+	if (uml_nt_fork_seed(c) < 0) {
+		os_warn("mmctx: fork seed failed\n");
+		goto fail;
+	}
+
 	id->nt_conn = c;
 	id->pid = (int)c->pid;
 	os_info("mmctx: stub spawned pid %d (suspended, entry pending)\n",
@@ -162,9 +177,15 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	if (c->thread != NULL)
 		nt->CloseHandle(c->thread);
 
-	os_info("mmctx: stub pid %d destroyed\n", id->pid);
+	/* Release the mm's run claims (the exit/exec teardown hygiene,
+	 * M4.2): span_unref per VMA — shared runs survive on the other
+	 * contexts' refs (the table counts contexts, S3), private runs
+	 * return to the buddy backend. Then the table itself: forked
+	 * children SHARE the parent's (ph_shared) — never free that. */
+	uml_nt_mm_drop(c->mm, c->ph);
 	kfree(c->mm);
-	kfree(c->ph);
+	if (!c->ph_shared)
+		kfree(c->ph);
 	kfree(c);
 	id->nt_conn = NULL;
 	id->pid = -1;

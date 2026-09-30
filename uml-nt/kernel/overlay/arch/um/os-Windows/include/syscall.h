@@ -37,6 +37,10 @@ struct uml_nt_stub_conn {
 	HANDLE dsec;
 	struct uml_nt_mm *mm;
 	struct uml_nt_phys *ph; /* guest run refcount layer (mmap/brk) */
+	/* M4.2: ph is the PARENT's table (fork shares it — refcount =
+	 * mm contexts, S3); destroy must not free what it does not
+	 * own. */
+	int ph_shared;
 	ULONG pid;
 	int alive;
 	ULONG exit_code;
@@ -66,6 +70,13 @@ struct uml_nt_stub_conn {
 	 * once (bootstrap: entry state + INIT plan streamed). A forked
 	 * conn is resumed by its spawn (fork hook sets this too). */
 	int resumed;
+	/* M4.2: the conn is backed by a REAL kernel task (created by
+	 * init_new_context — exec bprm or fork dup_mm) whose
+	 * userspace() loop serves it. The probe's static conns
+	 * (stub_ctl conn_parent/conn_child) keep the POC fork/wait4
+	 * hooks; task-backed conns go through the generic fork/wait4
+	 * (sys_call_table) so blocking waits ride schedule(). */
+	int task_backed;
 };
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
@@ -80,8 +91,10 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 struct uml_nt_mm *uml_nt_syscall_mm(void);
 
 /* Install the uaccess mm (the dispatch calls this around each
- * handler; uaccess.c reads it through uml_nt_syscall_mm). */
-void uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
+ * handler; uaccess.c reads it through uml_nt_syscall_mm). Returns the
+ * PREVIOUS mm — dispatches nest on the one host thread (M4.2), save
+ * at entry and restore at exit; see uaccess_walk.h. */
+struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
 
 /* Spawn one stub.exe process for this conn (S5 pattern, suspended,
  * bootstrap via inherited handles + value cmdline). Used by the probe
@@ -107,11 +120,44 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c);
  *  - fork/clone(!CLONE_VM): spawn the child stub from the parent's
  *    register snapshot (M3.3 machinery).
  *  - wait4: reap a DEAD child; a live child answers -EAGAIN (the
- *    guest retries the trap; true blocking needs the scheduler M3.8).
+ *    guest retries the trap; true blocking needs the scheduler M4.2).
  * Both write d->retval/d->err. */
 void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d);
 void uml_nt_sys_wait4(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d,
 		      const unsigned long long *a);
+
+/* ---- M4.2: real fork through the scheduler (task-backed conns) ---- */
+
+/* Arm the pending-fork handoff for the NEXT init_new_context: the
+ * child mm's conn (spawned by copy_process → dup_mm → mmctx_init)
+ * gets the parent's address space cloned into it at birth (mm_clone:
+ * COW both sides, eager stack copy) — the window between conn spawn
+ * and the child task's first INIT serve, all on the forking task's
+ * stack. Call right before the generic fork, disarm right after. */
+void uml_nt_fork_arm(struct uml_nt_stub_conn *parent, unsigned long long rsp);
+void uml_nt_fork_disarm(void);
+
+/* init_new_context (mmctx.c) calls this on the freshly spawned conn:
+ * consumes a pending fork (nothing otherwise). Clones the parent's
+ * uml_nt_mm into the child conn's (sharing the parent's phys table —
+ * refcount = mm contexts, S3), eager-copies the private spans, and
+ * inherits the TLS base (D18). Returns 0, -ENOMEM on clone failure
+ * (the mm — and with it the fork — aborts). */
+int uml_nt_fork_seed(struct uml_nt_stub_conn *child);
+
+/* Queue the fork answer's re-protect ops on the PARENT (upstream fork
+ * marks both pte tables RO): unmap + remap read-only every COW-flagged
+ * writable VMA — the parent's next write faults into the COW machinery
+ * instead of landing on a run the child still reads. */
+void uml_nt_fork_reprotect_parent(struct uml_nt_stub_conn *c);
+
+/* Copy the CURRENT trap's register state into the task's kernel-shadow
+ * pt_regs (process.c, next to conn_pull_regs) — the generic fork's
+ * copy_thread memcpy's current_pt_regs, which is otherwise one round
+ * stale; rip lands +2 (resume past the ud2, matching what the stub
+ * does for the parent's own resume). */
+void uml_nt_sync_trap_regs(struct uml_pt_regs *regs,
+			   const struct uml_nt_stub_data *d);
 
 /* Append one stub op to the conn's plan for the current answer (the
  * syscall dispatch resets the plan at entry; ops accumulate and stream

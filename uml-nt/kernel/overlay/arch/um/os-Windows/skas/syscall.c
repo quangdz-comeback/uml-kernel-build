@@ -24,6 +24,7 @@
 #include <linux/kernel.h>
 #include <linux/binfmts.h>
 #include <linux/mm.h>
+#include <linux/ptrace.h>
 #include <linux/string.h>
 
 #include <asm/syscall.h>
@@ -400,6 +401,33 @@ static unsigned long long sys_sigprocmask(struct uml_nt_stub_conn *c,
 	return 0;
 }
 
+/* M4.2: the REAL fork — the generic copy_process machinery through
+ * the sys_call_table (upstream handle_syscall parity). The conn seed
+ * hands the child conn its address space at birth (init_new_context
+ * runs inside dup_mm); copy_thread gives the child a cold stack at
+ * fork_handler whose userspace() loop serves its own conn; blocking
+ * waits ride schedule(). The parent re-protect ops stream with the
+ * fork answer (retval parked while plan_left > 0). */
+static unsigned long long sys_fork_real(struct uml_nt_stub_conn *c,
+					struct uml_nt_stub_data *d,
+					const unsigned long long *a,
+					unsigned long long nr)
+{
+	unsigned long long ret;
+
+	uml_nt_sync_trap_regs(&current_pt_regs()->regs, d);
+	uml_nt_fork_arm(c, d->regs.rsp);
+	ret = sys_vfs(nr, a); /* generic fork/clone → copy_process */
+	uml_nt_fork_disarm();
+	if ((long long)ret >= 0) {
+		uml_nt_fork_reprotect_parent(c);
+	} else {
+		os_info("[syscall] fork nr=%llu failed: %lld\n", nr,
+			(long long)ret);
+	}
+	return ret;
+}
+
 /* execve (below) destroys the conn MID-DISPATCH on success: exec_mmap
  * drops the old mm (destroy_context → mmctx_destroy frees the conn and
  * unmaps d) and binfmt_umlnt loads the new image into a NEW conn —
@@ -571,15 +599,21 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	unsigned long long nr = d->regs.rax;
 	unsigned long long ret;
 	struct uml_nt_uacc_sink sink;
+	/* Nesting save (M4.2): a handler may BLOCK (wait4 → schedule)
+	 * and a nested dispatch runs on the switched stack — it saves
+	 * ours and we restore theirs at exit; clearing here would
+	 * EFAULT the woken outer dispatch's writebacks. */
+	struct uml_nt_mm *uacc_prev_mm;
+	struct uml_nt_uacc_sink uacc_prev_sink;
 
-	uml_nt_uacc_set_mm(c->mm);
+	uacc_prev_mm = uml_nt_uacc_set_mm(c->mm);
 	/* The write-fixup channel (hazard 3): the handler's to_user/
 	 * clear_user/futex writes force COW-shared runs private and
 	 * queue their remap ops into THIS plan — streamed after the
 	 * handler, retval parked (below). */
 	sink.ph = c->ph;
 	sink.plan = &c->plan;
-	uml_nt_uacc_set_sink(&sink);
+	uacc_prev_sink = uml_nt_uacc_set_sink(&sink);
 	d->err = 0;
 	d->halt = 0;
 	c->plan.kill = 0;
@@ -659,10 +693,20 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			ret = SC_RET(SC_ENOSYS);
 			break;
 		}
+		if (c->task_backed) {
+			/* !CLONE_VM clone ≈ fork with flags: the generic
+			 * path (M4.2) owns it end to end. */
+			ret = sys_fork_real(c, d, a, nr);
+			break;
+		}
 		uml_nt_sys_fork(c, d); /* fork semantics (POC) */
 		ret = d->retval;
 		break;
 	case 57: /* fork */
+		if (c->task_backed) {
+			ret = sys_fork_real(c, d, a, nr);
+			break;
+		}
 		uml_nt_sys_fork(c, d);
 		ret = d->retval;
 		break;
@@ -670,6 +714,16 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		ret = sys_execve(c, a);
 		break;
 	case 61: /* wait4 */
+		if (c->task_backed) {
+			/* The REAL wait: do_wait blocks the task (TASK_
+			 * INTERRUPTIBLE → schedule()) until the child's
+			 * do_exit wakes it — the scheduler runs the
+			 * child's stack (its userspace() loop serves its
+			 * conn) while the parent waits. The POC hook
+			 * below only serves the probe conns (no task). */
+			ret = sys_vfs(nr, a);
+			break;
+		}
 		uml_nt_sys_wait4(c, d, a);
 		ret = d->retval;
 		break;
@@ -710,6 +764,6 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			"(total %lu)\n", uacc_fixups_seen);
 	}
 out:
-	uml_nt_uacc_set_mm(NULL);
-	uml_nt_uacc_set_sink(NULL);
+	uml_nt_uacc_set_mm(uacc_prev_mm);
+	uml_nt_uacc_set_sink(&uacc_prev_sink);
 }

@@ -16,7 +16,7 @@ CC     ?= clang
 LD     ?= ld.lld
 IMAGE_BASE := 0x62000000
 
-all: guest-init.elf step2.elf bench.elf
+all: guest-init.elf step2.elf bench.elf forkwait.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
@@ -54,6 +54,18 @@ bench.elf: bench.c
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "bench must be a static ELF" >&2; exit 1; }
 
+# M4.2: the block-wait proof — PID 1 (init=/bin/forkwait) forks; the
+# child is a REAL kernel task (copy_process + fork_handler + its own
+# conn) and the parent's wait4 must BLOCK via schedule() until the
+# child's do_exit wakes it (the POC -EAGAIN retry cannot produce the
+# marker order this binary asserts).
+forkwait.elf: forkwait.c
+	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "forkwait must be a static ELF" >&2; exit 1; }
+
 clean:
-	rm -f init.o guest-init.elf step2.elf bench.elf
+	rm -f init.o guest-init.elf step2.elf bench.elf forkwait.elf
 .PHONY: all clean

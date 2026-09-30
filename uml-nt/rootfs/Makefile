@@ -70,6 +70,13 @@ staging/bin/bench: ../guest/bench.elf
 	@mkdir -p staging/bin
 	cp $< $@
 
+# M4.2: the block-wait proof — PID 1 (init=/bin/forkwait): fork makes
+# a REAL child kernel task; the parent's wait4 blocks via schedule()
+# until the child's do_exit wakes it.
+staging/bin/forkwait: ../guest/forkwait.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
 build/busybox-$(BUSYBOX_VER)/busybox:
 	@mkdir -p build
 	curl -sSL -o build/$(BUSYBOX_VER).tar.bz2 \
@@ -96,7 +103,8 @@ staging/bin/busybox: build/busybox-$(BUSYBOX_VER)/busybox
 		{ echo "busybox must be a static ELF" >&2; exit 1; }
 
 rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
-	     staging/bin/step2 staging/bin/bench staging/bin/busybox
+	     staging/bin/step2 staging/bin/bench staging/bin/forkwait \
+	     staging/bin/busybox
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 
