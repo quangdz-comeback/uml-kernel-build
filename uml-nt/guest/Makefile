@@ -17,7 +17,7 @@ LD     ?= ld.lld
 IMAGE_BASE := 0x62000000
 
 all: guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf \
-	heaptest.elf guardtest.elf
+	heaptest.elf guardtest.elf sysbench.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
@@ -105,7 +105,18 @@ guardtest.elf: guardtest.c
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "guardtest must be a static ELF" >&2; exit 1; }
 
+# M4 final: the REAL sysbench cpu workload — sb_cpu.c's
+# cpu_execute_event 1:1 (double-sqrt prime sweep to 10000), one event
+# per sweep, a 10s monotonic window, eps = the M4-done metric.
+# clock_gettime rides the new kernel syscall (QPC).
+sysbench.elf: sysbench.c
+	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O2 \
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "sysbench must be a static ELF" >&2; exit 1; }
+
 clean:
 	rm -f init.o guest-init.elf step2.elf bench.elf forkwait.elf \
-		sigtest.elf heaptest.elf guardtest.elf
+		sigtest.elf heaptest.elf guardtest.elf sysbench.elf
 .PHONY: all clean

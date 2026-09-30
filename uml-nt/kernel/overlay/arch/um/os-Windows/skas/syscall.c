@@ -521,9 +521,32 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 	return 0;
 }
 
+/* clock_gettime(2): ns-since-boot (os_nsecs, QPC) split into the
+ * timespec the guest asked for. CLOCK_MONOTONIC (1) and CLOCK_REALTIME
+ * (0) both map to it — the kernel owns no wall-clock offset (the
+ * sysbench gate times a monotonic window). */
+static unsigned long long sys_clock_gettime(struct uml_nt_stub_conn *c,
+					    const unsigned long long *a)
+{
+	long long nsecs;
+	unsigned long long buf[2];
+
+	if (a[0] != 0 /* CLOCK_REALTIME */ &&
+	    a[0] != 1 /* CLOCK_MONOTONIC */)
+		return SC_RET(SC_EINVAL);
+	if (a[1] == 0)
+		return SC_RET(SC_EFAULT);
+	nsecs = os_nsecs();
+	buf[0] = (unsigned long long)(nsecs / 1000000000LL);
+	buf[1] = (unsigned long long)(nsecs % 1000000000LL);
+	if (uml_nt_uacc_walk(c->mm, uml_boot.physmem_base, a[1], 16,
+			     (char *)buf, UML_NT_UACC_TO_GUEST) < 0)
+		return SC_RET(SC_EFAULT);
+	return 0;
+}
+
 /* rt_sigprocmask(2): signals are M4; the POC answers "mask was
- * empty" (zero the oldset the caller asked back) and succeeds. */
-static unsigned long long sys_sigprocmask(struct uml_nt_stub_conn *c,
+ * empty" (zero the oldset the caller asked back) and succeeds. */static unsigned long long sys_sigprocmask(struct uml_nt_stub_conn *c,
 					  const unsigned long long *a)
 {
 	if (a[2] != 0 && a[3] >= 8) {
@@ -891,6 +914,13 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		break;
 	case 158: /* arch_prctl — musl TLS (ARCH_SET_FS → D18) */
 		ret = sys_arch_prctl(c, d, a);
+		break;
+	case 228: /* clock_gettime — the guest's time source (M4 sysbench):
+		   * CLOCK_MONOTONIC/REALTIME both read os_nsecs() (QPC,
+		   * D6) — the boot-relative ns clock the whole kernel
+		   * already runs on. timespec walks the D15 walker
+		   * (guest pointer). */
+		ret = sys_clock_gettime(c, a);
 		break;
 	default:
 		os_info("[syscall] nr=%llu not implemented → ENOSYS "

@@ -101,6 +101,14 @@ staging/bin/guardtest: ../guest/guardtest.elf
 	@mkdir -p staging/bin
 	cp $< $@
 
+# M4 final: the REAL sysbench cpu workload (sb_cpu.c 1:1) — PID 1
+# (init=/bin/sysbench): the prime sweep to 10000 per event, 10s
+# monotonic window, eps printed for the M4-done bar (>= 2100 = 1/3
+# of the Linux mark).
+staging/bin/sysbench: ../guest/sysbench.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
 build/busybox-$(BUSYBOX_VER)/busybox:
 	@mkdir -p build
 	curl -sSL -o build/$(BUSYBOX_VER).tar.bz2 \
@@ -129,7 +137,8 @@ staging/bin/busybox: build/busybox-$(BUSYBOX_VER)/busybox
 rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
 	     staging/bin/step2 staging/bin/bench staging/bin/forkwait \
 	     staging/bin/sigtest staging/bin/heaptest \
-	     staging/bin/guardtest staging/bin/busybox
+	     staging/bin/guardtest staging/bin/sysbench \
+	     staging/bin/busybox
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 

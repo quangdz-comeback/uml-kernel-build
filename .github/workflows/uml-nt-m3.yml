@@ -518,3 +518,36 @@ jobs:
           grep -q "GUARD-NEIGHBOR-OK" guardtest.log || { echo "the page next to the guard was damaged (the guard leaked beyond 4K?)"; exit 1; }
           grep -q "GUARDTEST-OK" guardtest.log || { echo "guardtest did not complete"; exit 1; }
           echo "M4 SLICE5 NATIVE GUARD OK: sub-run PROT_NONE MAP_FIXED + mprotect materialized (trip -> ACCERR -> unprotect -> replay)"
+
+      # M4 final gate: the REAL sysbench cpu workload (sb_cpu.c's
+      # cpu_execute_event 1:1 — double-sqrt trial-division prime sweep
+      # to the sysbench default 10000, one event per sweep) runs as
+      # PID 1 behind a 10s CLOCK_MONOTONIC window (kernel clock_
+      #_gettime syscall, QPC-backed). The M4-done bar: eps >= 2100
+      # (1/3 of the Linux mark band 2100-3500 was sized against; the
+      # guest prints its exact eps for RESULTS.md). The sweep's prime
+      # count is deterministic (1228) — a wrong count means the
+      # compute was not real. Boot-to-PID-1 stays seconds-fast (the
+      # <= 5 min M4-done criterion; the step's own wall time is the
+      # record).
+      - name: NATIVE sysbench cpu gate (M4 final)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$ROOTFS" "root=98:0" "init=/bin/sysbench" > sysbench.log 2>&1
+          code=$?
+          set -e
+          cat sysbench.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code"; exit 1; }
+          grep -q "SYSBENCH-OK" sysbench.log || { echo "sysbench did not complete (clock_gettime broken? see the run log)"; exit 1; }
+          grep -q "PRIMES=1228" sysbench.log || { echo "the prime sweep count is wrong (compute not real or ABI skew?)"; exit 1; }
+          grep -q "total number of events: " sysbench.log || { echo "no event total printed"; exit 1; }
+          EPS=$(grep -oE "events per second: [0-9]+" sysbench.log | head -1 | grep -oE "[0-9]+")
+          [ -n "$EPS" ] || { echo "eps missing from the sysbench summary"; exit 1; }
+          [ "$EPS" -ge 2100 ] || { echo "sysbench cpu ${EPS} eps BELOW the 1/3-Linux-mark floor (2100) — perf regress or slow runner?"; exit 1; }
+          echo "M4 FINAL NATIVE SYSBENCH OK: real cpu workload, ${EPS} eps (>= 2100 = the 1/3 Linux-mark floor)"
