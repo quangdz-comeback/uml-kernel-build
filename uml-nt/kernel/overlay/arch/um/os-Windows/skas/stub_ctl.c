@@ -36,6 +36,7 @@
 #include <linux/sched/task_stack.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/vmalloc.h>
 #include <init.h>
 #include <ntabi.h>
 #include <fault.h>
@@ -446,6 +447,11 @@ static struct uml_nt_switch_rec switch_ring[UML_NT_SWITCH_RING];
 static unsigned int switch_ring_n, switch_ring_i;
 static int stale_task_warned;
 
+/* M5.1c.5: the off-CPU guard bookkeeping (see uml_nt_switch_trace). */
+#define UML_NT_GUARD_SLOTS 16
+static struct task_struct *guard_tasks[UML_NT_GUARD_SLOTS];
+static int guard_next, guard_warned;
+
 unsigned long long uml_nt_switch_ring(const struct uml_nt_switch_rec **out)
 {
 	*out = switch_ring;
@@ -472,6 +478,83 @@ void uml_nt_switch_trace(void *from, void *to)
 		(unsigned long long)(uintptr_t)task_stack_page(t);
 	switch_ring_i = (switch_ring_i + 1) % UML_NT_SWITCH_RING;
 	switch_ring_n++;
+
+	/* M5.1c.5: the off-CPU guard. The net-gate smash = a
+	 * deterministic ~0x210-byte array of 0/1 bytes over the top
+	 * of a SUSPENDED task's stack (the schedule chain), same
+	 * values every run — someone writes the stack while the task
+	 * is off-CPU. Tripwire: the vmalloc area's PADDING tail
+	 * (THREAD_SIZE is 4 pages (order 2); the areas come out 5
+	 * pages — the last qword of the area is dead VA no frame can
+	 * use) gets a per-task magic at switch-out; switch-in
+	 * verifies it. A blown magic = a writer ran while the task
+	 * was off-CPU, and the ring above brackets WHICH switches.
+	 * The slot table only records that a task HAS a guard (the
+	 * magic itself derives from the task pointer); 16 slots
+	 * comfortably cover this system's ~11 tasks. */
+	{
+		unsigned long long fkey =
+			(unsigned long long)(uintptr_t)f;
+		unsigned long long magic =
+			0x4f43464f4e544e55ULL ^ (fkey * 0x9e3779b97f4a7c15ULL);
+		struct vm_struct *fa = find_vm_area(task_stack_page(f));
+		int si;
+
+		/* Guard only where padding provably exists. */
+		if (fa != NULL && fa->size >
+		    (unsigned long)(THREAD_SIZE + sizeof(long long))) {
+			unsigned long long off =
+				(unsigned long long)fa->size -
+				sizeof(long long);
+
+			for (si = 0; si < UML_NT_GUARD_SLOTS; si++)
+				if (guard_tasks[si] == f)
+					break;
+			if (si == UML_NT_GUARD_SLOTS) {
+				si = guard_next;
+				guard_next = (guard_next + 1) %
+					UML_NT_GUARD_SLOTS;
+				guard_tasks[si] = f;
+			}
+			*(unsigned long long *)(void *)
+				((unsigned char *)task_stack_page(f) +
+				 off) = magic;
+		}
+	}
+	{
+		unsigned long long tkey =
+			(unsigned long long)(uintptr_t)t;
+		unsigned long long magic =
+			0x4f43464f4e544e55ULL ^ (tkey * 0x9e3779b97f4a7c15ULL);
+		struct vm_struct *ta = find_vm_area(task_stack_page(t));
+		int si;
+
+		if (ta == NULL || ta->size <=
+		    (unsigned long)(THREAD_SIZE + sizeof(long long)))
+			return;
+		for (si = 0; si < UML_NT_GUARD_SLOTS; si++)
+			if (guard_tasks[si] == t)
+				break;
+		if (si == UML_NT_GUARD_SLOTS)
+			return; /* never switched out: no guard yet */
+		{
+			unsigned long long off =
+				(unsigned long long)ta->size -
+				sizeof(long long);
+			unsigned long long got =
+				*(unsigned long long *)(void *)
+				((unsigned char *)task_stack_page(t) +
+				 off);
+
+			if (got != magic && !guard_warned) {
+				guard_warned = 1;
+				os_warn("GUARD BLOWN: task %d padding "
+					"qword changed while off-CPU "
+					"(want %llx got %llx)\n",
+					t->pid, magic, got);
+			}
+		}
+	}
 }
 
 void uml_nt_fork_trace(void)

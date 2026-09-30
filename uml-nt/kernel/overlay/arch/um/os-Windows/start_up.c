@@ -322,6 +322,27 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 				uml_nt_crash_write(buf, (unsigned int)n);
 		}
 
+		/* Pending kernel PTE syncs (M5.1c.5): the port never
+		 * syncs init_mm's marked range (vmalloc VAs run on the
+		 * launcher's section identity bytes instead of their
+		 * backing pages). Print how much the kernel thinks is
+		 * still owed. */
+		{
+			extern struct task_struct init_task;
+
+			n = snprintf(buf, sizeof(buf),
+				     "  init_mm pending sync: from=%llx "
+				     "to=%llx\n",
+				     init_task.mm ?
+				     (unsigned long long)init_task.mm->
+				     context.sync_tlb_range_from : 0,
+				     init_task.mm ?
+				     (unsigned long long)init_task.mm->
+				     context.sync_tlb_range_to : 0);
+			if (n > 0)
+				uml_nt_crash_write(buf, (unsigned int)n);
+		}
+
 		have = uml_nt_switch_ring(&ring);
 		for (i = 0; i < have && i < UML_NT_SWITCH_RING; i++) {
 			unsigned long long idx =
