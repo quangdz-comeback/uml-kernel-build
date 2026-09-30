@@ -316,7 +316,13 @@ jobs:
           # sys_call_table routing (upstream handle_syscall parity),
           # guest pointers valid via the D15 uaccess walker. The bytes
           # read back are /hi.sh — the script busybox runs in S4c.
+          # The OPENAT-READ-OK line carries the escaped content
+          # (human evidence); the hard proof is VFS-READ-VERIFIED — a
+          # literal the script content never contains, printed by
+          # init only when the read returned exactly /hi.sh's known
+          # bytes (M4 hardening: marker split from the content line).
           grep -q "OPENAT-READ-OK: echo hi" initexec.log || { echo "S4b: openat/read never served through the real VFS (see [syscall] ENOSYS lines)"; exit 1; }
+          grep -q "VFS-READ-VERIFIED" initexec.log || { echo "S4b: read bytes never verified against /hi.sh content (VFS-READ-VERIFIED absent)"; exit 1; }
           # M3.8 S4c: guest execve — the dispatch's kernel_execve
           # swaps the init task to /bin/step2 (conn switch: exec_mmap
           # destroys the old conn mid-round, the loop bootstraps the

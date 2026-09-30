@@ -125,7 +125,7 @@ void _start(void)
 	 * write leaked the script's own lines into the log ("echo
 	 * BUSYBOX-SHELL-OK" as a standalone line) — the S4c2
 	 * acceptance grep matched the LEAK once, not busybox's echo.
-	 * ONE write for the whole marker: the TEMP syscall trace
+	 * ONE write for the whole marker: the syscall trace
 	 * interlines every write() with a [syscall] log line, and a
 	 * byte-per-write loop shattered the marker across them (the
 	 * gate's "OPENAT-READ-OK: echo hi" grep lost). */
@@ -150,6 +150,21 @@ void _start(void)
 		}
 		line[o++] = '\n';
 		sys_write(1, line, o);
+	}
+
+	/* S4b hard gate (M4, pending Shelley ack): the read-back line
+	 * above contains the script's own text, so a grep for it
+	 * matches the printed content, not the read. This marker is a
+	 * LITERAL the file content never contains — printed only when
+	 * the VFS read returned exactly /hi.sh's known bytes. */
+	{
+		static const char expect[] = "echo hi\necho BUSYBOX-SHELL-OK\n";
+
+		if ((unsigned long)n == sizeof(expect) - 1 &&
+		    __builtin_memcmp(buf, expect, sizeof(expect) - 1) == 0)
+			sys_write(1, "VFS-READ-VERIFIED\n", 18);
+		else
+			sys_write(1, "VFS-READ-MISMATCH\n", 19);
 	}
 
 	/* S4c: chain the exec — the dispatch's kernel_execve swaps this
