@@ -293,3 +293,31 @@ pending — alarm chờ vCPU unblock (parity upstream semantics).
   mọi write vào physmem qua os-I/O giờ có thể trace call-site.
 - Bài học dịch semantic: flag machine上游 dịch nguyên văn KHÔNG đủ — phải dịch
   cả INVARIANT serialization của nó (ai được chạy cái gì trên thread nào).
+
+## D20 — binfmt_umlnt hỗ trợ dynamic ELF (PT_INTERP + glibc) (2026-09-30, Shelley duyệt)
+
+**Quyết định:** mở rộng binfmt_umlnt load dynamic-PIE theo staged cluster
+(audit 037 đã định vị): (1) đọc PT_INTERP → load interpreter (ET_DYN) vào
+conn như ELF thứ hai, entry = interp entry, auxv đủ bộ AT_PHDR/AT_PHENT/
+AT_PHNUM/AT_BASE/AT_ENTRY/AT_RANDOM/AT_PAGESZ/AT_UID... (mở rộng pure-fn
+argv/envp/auxv hiện có — S4a); (2) glibc startup cluster theo census strace
+thật (execve/openat/read/pread64/fstat/close/mmap/mprotect/munmap/brk/
+access/arch_prctl/set_tid_address/set_robust_list/prlimit64/rseq) — audit
+từng cái với pointer guest thật; (3) systemd cluster (mount cgroup2/
+devtmpfs/tmpfs, signalfd, epoll_*, pidfd, sendfile, recvmsg/sendmsg,
+AF_UNIX dgram, sched_setaffinity).
+
+**Điểm thiết kế quan trọng — patch syscall cho dynamic pages:** scan_patch
+hiện chạy lúc load static image. Với dynamic, libc/ld.so vào physmem qua
+guest mmap syscall (đường S4b/M4) — vì patch là CENTRAL trong physmem section
+(D10) và mọi stub thấy cùng trang, hook scan vào: (a) mỗi exec-able mapping
+được map vào conn lần đầu, (b) hoặc lazy tại fault exec đầu tiên của page.
+Chọn (a) — deterministic, không phá VEH RIP filter.
+
+**Lý do:** systemd + mọi binary distro đều dynamic; đây là cửa vào "giống
+Linux real" (M5.4/5.5/5.6). Wine chỉ để audit shape — native (M5.5 PVE
+image) là trọng tài.
+
+**Non-goal:** không patch binfmt_elf upstream; không vDSO giai đoạn này
+(clock_gettime đã kernel-side — RTT 26µs chấp nhận được cho boot; vDSO
+mở ở M6 nếu cần perf).
