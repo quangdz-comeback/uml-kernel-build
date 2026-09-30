@@ -110,3 +110,62 @@ execve** (acceptance grep lọc read-back của init).
   (scheduler task), signals M4; multi-run heap growth; page-granular MAP_FIXED
   (guard materialize thật); GUP/rwsem WARN khi wire_args đi gap argv (benign,
   dọn khi làm mm scan).
+
+---
+
+# M4 results — đúng đắn + hiệu năng (native CI, 2026-09-30)
+
+## M4.1 — Syscall RTT sạch + throughput probe nhỏ
+
+Run: https://github.com/quangdz-comeback/uml-kernel-build/actions/runs/36660134234
+(gate "NATIVE RTT bench gate (M4.1)", windows-latest; tests 36660134230
++ spikes 36660134290 cùng push `0bca1b0`)
+
+Phương pháp — sạch theo cấu trúc, không phải nhờ lọc log: guest
+`/bin/bench` chạy làm PID 1 (`init=/bin/bench` — launcher run riêng,
+chuỗi exec POC không bị đụng); 8000 vòng getpid (round rẻ nhất trên
+dispatch — thuần bookkeeping, không VFS, không stub ops) giữa 2 marker
+console `UMLNT-BENCH-BEGIN`/`UMLNT-BENCH-END` mà kernel nhận ngay
+TRONG write handler (khớp chính xác, gate theo độ dài — không đổi
+protocol, không syscall mới); vòng lặp `userspace()` THẬT đo từng vòng
+wake-to-wake (os_nsecs/QPC) và không log gì mỗi vòng. END in ĐÚNG MỘT
+dòng tóm tắt. rdtsc guest chạy native (chỉ `0F 05` bị patch) cho
+cross-check cycles.
+
+| Đại lượng | Native (windows-latest) | Wine (local VM — tham khảo) |
+|---|---|---|
+| Vòng ghi được | 8000/8000 (dropped=0) | 8000/8000 |
+| RTT p50 | **26.4µs** | 18.9µs |
+| RTT mean | 28.6µs → **eps 35 005 getpid/s** | 24.2µs → eps 41 300 |
+| RTT p99 | 83.9µs | 56µs |
+| min / max | 1.5µs / 323µs | 7.3µs / 3.96ms |
+| Guest cycles | 69 856 cyc/syscall | 74 942 cyc/syscall |
+| TSC suy ra (cyc ÷ mean-ns) | ~2.45 GHz | ~3.10 GHz |
+
+Đọc số:
+- **p50 26µs ≈ RT event 2 chiều** (S2 đo 24.3µs/RT) — D10 turnstile
+  (event cả hai chiều) là floor của đường RTT hiện tại; VEH dispatch
+  1.7µs (S1) bị nuốt bên trong. Tối ưu RTT về sau = đường spin-first
+  (recipe S2, 100ns) hoặc batch ops — KHÔNG phải tinh chỉnh VEH.
+- eps 35k getpid là **trần syscall-bound**; mốc M4 (sysbench ≥ 700 eps
+  = 1/3 tham chiếu 2100) còn dải rất rộng so với trần này — đối chiếu
+  sysbench thật là bước sau của M4.
+- max 323µs = nhiễu scheduler/tick (dữ liệu thô giữ nguyên); p99 ổn
+  định. Gate CI khẳng định cấu trúc (rounds=8000, đủ dòng
+  cross-check) + trần hợp lý 1ms/headroom 20x — CHƯA PHẢI perf gate.
+- WARN GUP/rwsem (wire_args) vẫn hiện trong bench log — đúng dự kiến,
+  slice 6 dọn.
+
+Bài học M4.1:
+1. Kernel build là `-nostdinc` THẬT SỰ — kể cả `stddef.h`
+   compiler-provided cũng không có trên include path của file
+   os-Windows; file thuần freestanding phải include-free (NULL tự
+   định nghĩa local). Test harness pass KHÔNG chứng minh include path
+   kernel — chỉ build vmlinux thật bắt được (1 vòng local, không mất
+   vòng CI).
+2. Overlay sync khi iterate local: sửa source phải `apply.sh` lại
+   trước build — tree cache giữ bản cũ im lặng (không có gì bảo
+   "stale").
+3. Wine CHẠY ĐƯỢC cả đường exec `init=/bin/bench` (argv-less) tới
+   hết bench — EFAULT wine của S4b là ở chuỗi argv-walk; native CI
+   vẫn là trọng tài perf.
