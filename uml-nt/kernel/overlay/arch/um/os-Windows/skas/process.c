@@ -115,6 +115,16 @@ static void conn_bootstrap(struct uml_nt_stub_conn *c,
 	g->rflags = REGS_EFLAGS(regs->gp);
 	c->d->entry_va = REGS_IP(regs->gp);
 	c->d->stack_va = REGS_SP(regs->gp);
+	/* D18 fork: the fork seed records the inherited base in the
+	 * CONN — the stub_data view does not exist yet (the stub is
+	 * born suspended), so nothing published it to d. The exec path
+	 * never notices (glibc calls arch_prctl before its first
+	 * fs-relative access), the fork path does: glibc's struct
+	 * pthread lives at NEGATIVE offsets from the TCB pointer, so
+	 * a zero base faults at tiny-negative addresses (-408 = -0x198
+	 * killed the sd-executor in run 36777774115). Publish the
+	 * conn's base for the stub's first resume. */
+	c->d->fs_base = c->fs_base;
 }
 
 /* get_stub_state analogue: pull the trap regs back into the task.
