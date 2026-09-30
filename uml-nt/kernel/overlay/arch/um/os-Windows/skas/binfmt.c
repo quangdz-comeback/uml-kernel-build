@@ -38,6 +38,7 @@
 #include <linux/fs.h>
 #include <linux/highmem.h>
 #include <linux/mm.h>
+#include <linux/mmap_lock.h>
 #include <linux/module.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
@@ -106,6 +107,13 @@ static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
 		goto out;
 	}
 
+	/* Upstream GUP contract: the caller holds mm->mmap_lock for the
+	 * duration (get_user_pages_remote asserts it via
+	 * mmap_assert_locked — find_vma, __get_user_pages and the outer
+	 * layer each WARN'd rwsem.h:80 per call on this port, because
+	 * nothing here ever took the lock; the UML mm's rw_semaphore is
+	 * a real, initialized lock — take it like upstream does). */
+	mmap_read_lock(current->mm);
 	while (done < blob_len) {
 		unsigned long long pg_va =
 			((unsigned long long)bprm->p + done) & PAGE_MASK;
@@ -123,7 +131,7 @@ static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
 				"(p=0x%lx exec=0x%lx len=%llu)\n", pg_va,
 				(int)got, bprm->p, bprm->exec, blob_len);
 			rc = -EFAULT;
-			goto out;
+			break;
 		}
 		/* UML: pages live in the one flat kernel mapping —
 		 * page_address() IS the host-mapped bytes (no highmem
@@ -134,6 +142,9 @@ static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
 		put_page(page);
 		done += pg_len;
 	}
+	mmap_read_unlock(current->mm);
+	if (rc)
+		goto out;
 
 	rc = uml_nt_elf_split_args(blob, blob_len, bprm->argc, bprm->envc,
 				   argv, envp);
