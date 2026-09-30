@@ -30,9 +30,11 @@ void uml_nt_install_crash_reporter(void);
 /* D19 canary: verify uml_physmem/high_physmem still hold their boot
  * values. A trashed page_offset makes every virt_to_page/kmem_cache_
  * free fault far from the offending write (the S4c2 busybox crash:
- * physmem read 0x400000001, high 0x62000200 — address-shaped values),
- * so the os-I/O layer checks on every call and dies loud AT the
- * corrupting window instead of three subsystems later. */
-void uml_nt_physmem_check(const char *where);
+ * physmem read 0x400000001, high 0x62000200 — deterministic,
+ * address-shaped values), so the os-I/O layer checks on every call,
+ * prints the offending call's context + return addresses, and dies
+ * loud AT the corrupting window. */
+void uml_nt_physmem_check(const char *what, int fd, long len,
+			  unsigned long long off);
 
 #endif

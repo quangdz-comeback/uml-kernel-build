@@ -149,15 +149,16 @@ void os_flush_stdout(void)
 /* ---- D19 physmem canary ------------------------------------------------
  * uml_physmem IS page_offset (asm/page.h: PAGE_OFFSET) and high_physmem
  * tops the guest RAM with it. The S4c2 busybox crash ran with
- * uml_physmem = 0x400000001 and high_physmem = 0x62000200 (an
- * address-shaped trash, guest-window flavored) while physmem_size
- * stayed clean — every virt_to_page/kmem_cache_free after that
- * computes a wild memmap index and faults far from the write that
- * did it. The os-I/O funnel (pread/pwrite/open/close) checks on every
- * call: the log names the last clean checkpoint, the corrupting step
- * is the code between two adjacent lines. Snapshot at first use (the
- * values are set in linux_main, before any host I/O). */
-void uml_nt_physmem_check(const char *where)
+ * uml_physmem = 0x400000001 and high_physmem = 0x62000200 (DETERMINISTIC
+ * across runs = logic bug, not a race) while physmem_size stayed clean —
+ * every virt_to_page/kmem_cache_free after that computes a wild memmap
+ * index and faults far from the write that did it. The os-I/O funnel
+ * (pread/pwrite/open) checks on every call and dies loud AT the
+ * corrupting window, printing the offending call (fd/len/off) plus two
+ * return addresses so the writer names itself. Snapshot at first use
+ * (the values are set in linux_main, before any host I/O). */
+void uml_nt_physmem_check(const char *what, int fd, long len,
+			  unsigned long long off)
 {
 	static unsigned long want_phys, want_high;
 	static int snapped;
@@ -169,12 +170,15 @@ void uml_nt_physmem_check(const char *where)
 		return;
 	}
 	if (uml_physmem != want_phys || high_physmem != want_high) {
-		os_info("PHYSMEM TRASHED at %s: physmem=%llx (want %llx) "
-			"high=%llx (want %llx)\n", where,
+		os_info("PHYSMEM TRASHED at %s (fd=%d len=%ld off=%llx): "
+			"physmem=%llx (want %llx) high=%llx (want %llx) "
+			"ra0=%llx ra1=%llx\n", what, fd, len, off,
 			(unsigned long long)uml_physmem,
 			(unsigned long long)want_phys,
 			(unsigned long long)high_physmem,
-			(unsigned long long)want_high);
+			(unsigned long long)want_high,
+			(unsigned long long)__builtin_return_address(0),
+			(unsigned long long)__builtin_return_address(1));
 		os_dump_core();
 	}
 }
