@@ -22,10 +22,12 @@
  * __sync ops then always run on a private page.
  */
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <asm/futex.h>
 
 #include <internal.h>
+#include <os.h>
 #include <uaccess_walk.h>
 
 static struct uml_nt_mm *uacc_mm;
@@ -63,8 +65,24 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 {
 	if (uml_nt_uacc_walk(uacc_mm, uml_boot.physmem_base,
 			     (unsigned long long)(unsigned long)to, n,
-			     (char *)from, UML_NT_UACC_TO_GUEST) < 0)
+			     (char *)from, UML_NT_UACC_TO_GUEST) < 0) {
+		/* One-shot trace (043 audit item 2): the waitid/
+		 * waitpid EFAULT class — the kernel's writeback to a
+		 * user buffer failed the walk. The first failure
+		 * names the buffer's VA (stack vs libc data vs a
+		 * between-VMAs hole) and its owner; later failures
+		 * stay silent (glibc probes expect some EFAULTs). */
+		static int diag_once;
+
+		if (!diag_once) {
+			diag_once = 1;
+			os_info("[uacc] first to_user EFAULT: va=0x%llx "
+				"len=%lu task=%d\n",
+				(unsigned long long)(unsigned long)to, n,
+				current ? current->pid : 0);
+		}
 		return n;
+	}
 	return 0;
 }
 

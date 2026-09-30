@@ -1428,6 +1428,13 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 197: /* removexattr — the cgroup/tmpfs xattr cleanup
 		   * systemd does at boot (6x, same run); a missing
 		   * attribute is the real -ENODATA answer */
+	case 188: /* setxattr — systemd's "systemd" / "security.SMACK64"
+		   * tmpfs xattr writes (14x in run 36787150906); the
+		   * real VFS answers (or -ENOTSUP where the fs says
+		   * so — the honest errno beats ENOSYS) */
+	case 146: /* sched_getscheduler — systemd's cpu-shaping probe
+		   * (1x in the same run) */
+	case 147: /* sched_rr_get_interval — the probe's tail */
 	case 303: /* name_to_handle_at — the file-handle probe; real
 		   * VFS answers, systemd takes its graceful fallback
 		   * path on any errno */
