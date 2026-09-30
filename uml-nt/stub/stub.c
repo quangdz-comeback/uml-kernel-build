@@ -297,26 +297,46 @@ static void action_chain(void)
 static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 {
 	static volatile LONG reported;
-	static char line[256];
+	static char line[512];
+	MEMORY_BASIC_INFORMATION mbi;
+	unsigned long long slot = 0, above = 0;
+	uintptr_t sva = (uintptr_t)c->Rsp - 8;
 	DWORD wrote;
 	int n;
 
 	if ((er->ExceptionCode & 0xC0000000u) != 0xC0000000u ||
 	    InterlockedExchange(&reported, 1) != 0)
 		return;
+	/* The stub's own view of the qword just below rsp (a `ret` into
+	 * a bad target popped it) — compared with the kernel's view of
+	 * the same VA, it separates a real write from a stale view. */
+	memset(&mbi, 0, sizeof(mbi));
+	if (VirtualQuery((void *)sva, &mbi, sizeof(mbi)) == sizeof(mbi) &&
+	    mbi.State == MEM_COMMIT &&
+	    !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+	    sva + 16 <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize) {
+		memcpy(&slot, (const void *)sva, 8);
+		memcpy(&above, (const void *)(sva + 8), 8);
+	}
 	n = snprintf(line, sizeof(line),
 		     "stub: UNOWNED exception %08lx rip=%llx rsp=%llx "
 		     "op=%llu addr=%llx fs_base=%llx last_cmd=%u — "
-		     "process dies\n",
+		     "process dies; view [rsp-8]=%llx [rsp]=%llx "
+		     "region base=%p alloc=%p size=%llx prot=%lx type=%lx\n",
 		     (unsigned long)er->ExceptionCode,
 		     (unsigned long long)c->Rip, (unsigned long long)c->Rsp,
 		     er->NumberParameters > 0 ?
 			     (unsigned long long)er->ExceptionInformation[0] : 0,
 		     er->NumberParameters > 1 ?
 			     (unsigned long long)er->ExceptionInformation[1] : 0,
-		     (unsigned long long)d->fs_base, (unsigned)d->cmd);
+		     (unsigned long long)d->fs_base, (unsigned)d->cmd,
+		     slot, above, mbi.BaseAddress, mbi.AllocationBase,
+		     (unsigned long long)mbi.RegionSize,
+		     (unsigned long)mbi.Protect, (unsigned long)mbi.Type);
 	if (n > 0)
-		WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, (DWORD)n,
+		WriteFile(GetStdHandle(STD_ERROR_HANDLE), line,
+			  (DWORD)(n < (int)sizeof(line) ? n :
+				  (int)sizeof(line) - 1),
 			  &wrote, NULL);
 }
 

@@ -293,6 +293,8 @@ void uml_nt_signal_check(struct uml_nt_stub_conn *c)
 	REGS_SP(regs->gp) = true_sp - 0x2000;
 
 	interrupt_end();
+	if (REGS_IP(regs->gp) != rip_before)
+		uml_nt_diag_slot("sigdeliver-true-sp", c, true_sp);
 
 	/* Post-setup: SP = the frame (the handler's entry rsp, kept for
 	 * the verbatim push). The setup saved the DEEP sp into the
@@ -460,6 +462,9 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->regs.rsp,
 						c->d->regs.rax,
 						(unsigned)c->d->xstate_flags);
+					uml_nt_diag_slot("death-rsp", c,
+							 c->d->regs.rsp);
+					uml_nt_diag_mm("death", c);
 					os_dump_core();
 				}
 				continue;

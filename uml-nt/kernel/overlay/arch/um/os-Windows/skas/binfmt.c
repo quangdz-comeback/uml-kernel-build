@@ -360,6 +360,7 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	os_info("binfmt_umlnt: init loaded: %d region(s), entry 0x%llx, "
 		"rsp 0x%llx, %llu syscall(s) patched, heap 0x%llx\n",
 		img.nseg, img.entry, stack_top - used, patched, heap_va);
+	uml_nt_diag_mm("exec", c);
 	return 0;
 }
 

@@ -700,6 +700,7 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	os_info("fork: child conn pid %lu seeded (%d vma(s), parent "
 		"pid %lu)\n", (unsigned long)child->pid,
 		child->mm->nvma, (unsigned long)parent->pid);
+	uml_nt_diag_mm("fork-child", child);
 	return 0;
 }
 

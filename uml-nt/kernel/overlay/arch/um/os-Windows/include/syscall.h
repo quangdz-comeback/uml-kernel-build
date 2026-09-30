@@ -209,4 +209,10 @@ int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
  * the userspace() loop restarts on the new conn. */
 int uml_nt_syscall_consume_exec(void);
 
+/* M5.1c.8 diag (bounded, syscall.c): the kernel-view qword at a guest
+ * VA of this conn's mm, and the mm's VMA/run layout with refs. */
+void uml_nt_diag_slot(const char *tag, struct uml_nt_stub_conn *c,
+		      unsigned long long va);
+void uml_nt_diag_mm(const char *tag, struct uml_nt_stub_conn *c);
+
 #endif /* __UM_OS_WINDOWS_SYSCALL_H */
