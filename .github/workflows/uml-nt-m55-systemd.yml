@@ -109,11 +109,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RID=$(gh run list -R "${{ github.repository }}" \
+          # gh.exe is on the runner but NOT on the msys2 PATH.
+          GH="/c/Program Files/GitHub CLI/gh.exe"
+          [ -x "$GH" ] || GH="$(command -v gh)"
+          RID=$("$GH" run list -R "${{ github.repository }}" \
             --workflow base_image.yml --status success \
             --json databaseId --jq '.[0].databaseId')
           echo "base_image run: $RID"
-          gh run download "$RID" -R "${{ github.repository }}" \
+          "$GH" run download "$RID" -R "${{ github.repository }}" \
             -n uml-base-debian-bookworm -D ../rootfs-img
           ls -lh ../rootfs-img
 
