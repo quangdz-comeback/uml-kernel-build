@@ -108,7 +108,30 @@ static void uml_nt_crash_scan_stack(unsigned long long rsp)
 	int n = 0;
 	char buf[96];
 
-	for (va = rsp & ~(unsigned long long)7;
+	/* RAW window first (M5.1c.3 diagnosis): the smash pattern itself
+	 * (runs of -1, heap pointers, repeated values) names the writer
+	 * even when no text address survives. */
+	{
+		char line[128];
+
+		for (va = rsp & ~(unsigned long long)7, n = 0;
+		     n < 24 && va < rsp + 0x200; va += 8, n++) {
+			int m;
+
+			if ((va & ~0xfffULL) != pg) {
+				pg = va & ~0xfffULL;
+				if (!uml_nt_page_readable(pg))
+					break;
+			}
+			m = snprintf(line, sizeof(line),
+				     "  raw %llx: %llx\n", va,
+				     *(unsigned long long *)va);
+			if (m > 0)
+				uml_nt_crash_write(line, (unsigned int)m);
+		}
+	}
+
+	for (va = rsp & ~(unsigned long long)7, n = 0;
 	     n < 12 && va < rsp + 0x4000; va += 8) {
 		unsigned long long v;
 
