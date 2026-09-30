@@ -181,9 +181,11 @@ staging/net.sh:
 # the match). -O - streams the body to stdout: the image root mounts
 # read-only, no scratch file. Runs via `sh /bin/nettest` (same open/
 # read path /net.sh itself uses) — no binfmt_script dependency.
+# The mismatch branch prints WHAT arrived (len + escaped body, one
+# line, never grepped as the marker — the M3.8 read-back lesson).
 staging/bin/nettest:
 	@mkdir -p staging/bin
-	printf '#!/bin/sh\nbody=$$(/bin/busybox wget -O - http://10.0.2.2:19293/netok.txt) || { echo NET-WGET-FAIL; exit 1; }\ncase "$$body" in *uml-nt-net-ok*) echo NET-GET-OK ;; *) echo NET-BODY-MISMATCH; exit 1 ;; esac\n' > $@
+	printf '#!/bin/sh\nbody=$$(/bin/busybox wget -O - http://10.0.2.2:19293/netok.txt) || { echo NET-WGET-FAIL; exit 1; }\ncase "$$body" in *uml-nt-net-ok*) echo NET-GET-OK ;; *) echo "NET-BODY-MISMATCH: len=$${#body} [$$body]"; exit 1 ;; esac\n' > $@
 	chmod +x $@
 
 # M5.1c: the net gate guest — PID 1 (init=/bin/netsetup) execve()s
@@ -192,13 +194,29 @@ staging/bin/netsetup: ../guest/netsetup.elf
 	@mkdir -p staging/bin
 	cp $< $@
 
+# M5.4 cluster 1 (D20): the dynamic-PIE proof — ET_DYN + PT_INTERP;
+# binfmt_umlnt loads the interpreter as a second image and starts it
+# with the full auxv.
+staging/bin/dyntest: ../guest/dyn.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
+# the interpreter itself — musl's libc.so IS the dynamic loader
+# (one-file-both design); served at the path dyn.elf's PT_INTERP
+# names. musl-tools/musl-dev provides it on the CI runner.
+staging/lib/ld-musl-x86_64.so.1:
+	@mkdir -p staging/lib
+	test -f /usr/lib/x86_64-linux-musl/libc.so
+	cp /usr/lib/x86_64-linux-musl/libc.so $@
+
 rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
 	     staging/bin/step2 staging/bin/bench staging/bin/forkwait \
 	     staging/bin/sigtest staging/bin/heaptest \
 	     staging/bin/guardtest staging/bin/sysbench \
 	     staging/bin/busybox staging/bin/sh \
 	     staging/etc/udhcpc.script staging/net.sh \
-	     staging/bin/netsetup staging/bin/nettest
+	     staging/bin/netsetup staging/bin/dyntest \
+	     staging/lib/ld-musl-x86_64.so.1 staging/bin/nettest
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 
