@@ -136,6 +136,22 @@ static void uml_nt_crash_scan_stack(unsigned long long rsp)
 
 static volatile int in_crash_report;
 
+/* Which kernel thread is running — set at each aux thread's entry,
+ * read by the crash reporter (rsp alone can't name the thread). */
+const char *uml_nt_thread_role = "boot/vcpu";
+
+/* x64: gs:[0x30] = TEB; TEB+0x40 = ClientId {pid, tid}. The guest
+ * only ever re-bases FS (arch_prctl SET_FS is the recorded syscall);
+ * GS stays the host's, so this reads the true Windows tid even from
+ * a vCPU mid-syscall. */
+static unsigned long long uml_nt_current_tid(void)
+{
+	unsigned long long teb;
+
+	__asm__ volatile("mov %%gs:0x30, %0" : "=r"(teb));
+	return *(unsigned long long *)(teb + 0x40 + 8);
+}
+
 static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 {
 	const struct uml_nt_exception_pointers *e = ep;
@@ -158,13 +174,14 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 
 	n = snprintf(buf, sizeof(buf),
 		     "\numl-nt: KERNEL NATIVE FAULT code=%08x rip=%llx "
-		     "rsp=%llx op=%d info1=%llx — terminating\n",
+		     "rsp=%llx op=%d info1=%llx tid=%llu — terminating\n",
 		     r != NULL ? (unsigned int)r->code : 0, rip,
 		     (e != NULL && e->context != NULL) ?
 			     UML_NT_X64_CTX_RSP(e->context) : 0,
 		     (r != NULL && r->nparams > 1) ?
 			     (int)r->info[0] : -1,
-		     (r != NULL && r->nparams > 1) ? r->info[1] : 0);
+		     (r != NULL && r->nparams > 1) ? r->info[1] : 0,
+		     uml_nt_current_tid());
 	if (n > 0)
 		uml_nt_crash_write(buf, (unsigned int)n);
 	/* Page-offset anchors: uml_physmem IS page_offset/PAGE_OFFSET —
@@ -188,12 +205,13 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 	if (e != NULL && e->context != NULL) {
 		n = snprintf(buf, sizeof(buf),
 			     "  rax=%llx rcx=%llx rdx=%llx rsi=%llx "
-			     "rdi=%llx\n",
+			     "rdi=%llx thread=%s\n",
 			     UML_NT_X64_CTX_RAX(e->context),
 			     UML_NT_X64_CTX_RCX(e->context),
 			     UML_NT_X64_CTX_RDX(e->context),
 			     UML_NT_X64_CTX_RSI(e->context),
-			     UML_NT_X64_CTX_RDI(e->context));
+			     UML_NT_X64_CTX_RDI(e->context),
+			     uml_nt_thread_role);
 		if (n > 0)
 			uml_nt_crash_write(buf, (unsigned int)n);
 		uml_nt_crash_scan_stack(UML_NT_X64_CTX_RSP(e->context));

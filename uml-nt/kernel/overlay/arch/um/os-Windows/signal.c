@@ -52,6 +52,7 @@ static unsigned int signals_active;
 static void sig_handler_common(int sig, struct siginfo *si, void *mc)
 {
 	struct uml_pt_regs r;
+	static int depth;
 
 	memset(&r, 0, sizeof(r));
 	r.is_user = 0;
@@ -59,7 +60,19 @@ static void sig_handler_common(int sig, struct siginfo *si, void *mc)
 	if ((sig != SIGIO) && (sig != SIGWINCH) && (sig != SIGCHLD))
 		unblock_signals_trace();
 
+	/* Recursion tripwire (M5.1c.3 diagnosis): the flag machine lets
+	 * a handler's own block/unblock cycle re-enter here with a
+	 * freshly-armed pending bit; upstream serializes on the host
+	 * signal mask instead. If the depth ever stacks, say so and
+	 * stop — a smashed stack far away is the alternative. */
+	if (++depth > 4) {
+		os_warn("signal: handler depth %d (sig %d) — re-entrancy "
+			"bug, stopping\n",
+			depth, sig);
+		os_dump_core();
+	}
 	(*sig_info[sig])(sig, si, &r, mc);
+	depth--;
 }
 
 static void timer_real_alarm_handler(void *mc)

@@ -105,6 +105,7 @@ int os_add_epoll_fd(int events, int fd, void *data)
 	for (i = 0; i < UML_NT_IRQ_MAX; i++) {
 		if (irq_fds[i].data != NULL && irq_fds[i].fd == fd) {
 			irq_fds[i].events = events;
+			os_info("irq: mod fd=%d events=%d\n", fd, events);
 			return 0;
 		}
 	}
@@ -114,6 +115,8 @@ int os_add_epoll_fd(int events, int fd, void *data)
 			irq_fds[i].events = events;
 			irq_fds[i].data = data;
 			irq_fds[i].ready = 0;
+			os_info("irq: add fd=%d events=%d data=%px\n", fd,
+				events, data);
 			return 0;
 		}
 	}

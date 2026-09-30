@@ -60,4 +60,8 @@ void uml_nt_net_rx_ready(int fd);
  * enabled (the userspace() wake path). */
 void uml_nt_sigio_flush(void);
 
+/* start_up.c (M5.1c.3 diagnosis): which aux thread is running — set
+ * at thread entry, printed by the crash reporter. */
+extern const char *uml_nt_thread_role;
+
 #endif

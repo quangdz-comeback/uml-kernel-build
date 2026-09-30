@@ -297,6 +297,8 @@ static unsigned long __attribute__((ms_abi)) net_reader_thread(void *arg)
 	unsigned char head[2];
 	int n;
 
+	uml_nt_thread_role = "net-reader";
+
 	for (;;) {
 		if (recv_exact(dev->s, head, 2) < 0)
 			break;
@@ -347,6 +349,8 @@ static unsigned long __attribute__((ms_abi)) uml_nt_open_thread(void *arg)
 	struct uml_nt_open_ctx *ctx = arg;
 	LARGE_INTEGER d;
 	int attempt;
+
+	uml_nt_thread_role = "net-open";
 
 	if (uml_nt_ws_init() == 0) {
 		if (have_netstack) {
@@ -409,6 +413,7 @@ struct vector_fds *uml_vector_user_open(int unit, struct arglist *parsed)
 			nt->RtlGetLastWin32Error());
 		return NULL;
 	}
+	os_info("net: open thread tid=%lu\n", tid);
 	nt->NtWaitForSingleObject(th, 0, UML_NT_INFINITE);
 	nt->CloseHandle(th);
 
@@ -444,6 +449,7 @@ struct vector_fds *uml_vector_user_open(int unit, struct arglist *parsed)
 		nt->closesocket(ctx.s);
 		return NULL;
 	}
+	os_info("net: reader thread tid=%lu\n", tid);
 	/* Detached: the thread parks forever when the channel dies
 	 * (never exits the process); the handle leaks with the boot. */
 	nt->CloseHandle(th);
