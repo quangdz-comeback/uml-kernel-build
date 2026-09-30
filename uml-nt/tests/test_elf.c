@@ -20,9 +20,13 @@
 static int fails;
 
 /* scan_patch.c (compiled into the kernel; the real-guest test sweeps
- * its loaded text — the same contract the kernel probe relies on) */
+ * its loaded text — the same contract the kernel probe relies on).
+ * M5.1c.6b: the mark scratch = caller-owned (the kernel allocates
+ * it; the old alloca(len) buried neighbouring task stacks on
+ * whole-image execs). */
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
-				    unsigned long entry_off);
+				    unsigned long entry_off, void *mark);
+static unsigned char mark[1 << 20];
 
 #define CHECK(cond) do { if (!(cond)) { \
 	fails++; \
@@ -676,7 +680,7 @@ static void test_real_init(const char *path)
 			continue;
 		patched += uml_nt_patch_syscalls(
 			sec + out.seg[rc].run_off,
-			out.seg[rc].end - out.seg[rc].start, 0);
+			out.seg[rc].end - out.seg[rc].start, 0, mark);
 	}
 	CHECK(patched >= 2); /* write + exit at minimum */
 	printf("real init: %d region(s), entry 0x%llx (linked 0x%llx), "
@@ -761,7 +765,7 @@ static void test_real_guest(const char *path)
 	 * markers, exit + 5 fail paths) */
 	patched = uml_nt_patch_syscalls(
 		sec + out.seg[text_seg].run_off,
-		out.seg[text_seg].end - out.seg[text_seg].start, 0);
+		out.seg[text_seg].end - out.seg[text_seg].start, 0, mark);
 	CHECK(patched == 31);
 	printf("real guest: %d region(s), entry 0x%llx, %lu patched\n",
 	       out.nseg, out.entry, patched);
