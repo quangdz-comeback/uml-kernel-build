@@ -4,7 +4,9 @@
  *
  * PID 1 of the net gate's own launcher run (init=/bin/netsetup): the
  * vector device (vec0 — spawned helper + dialed TCP channel) shows up
- * as eth0, and this binary execve()s busybox sh onto /net.sh, which
+ * The vector device keeps its own name upstream (vec0 — the howto's
+ * `iface vec0 inet dhcp`; there is no eth0 rename), and this binary
+ * execve()s busybox sh onto /net.sh, which
  * runs udhcpc (DHCP DISCOVER through the vector TX path, OFFER/ACK
  * back through the D19 reader ring) and pings the NAT gateway. The
  * markers NET-LEASE-OK / NET-PING-GW-OK are the gate's evidence.

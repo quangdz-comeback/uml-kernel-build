@@ -157,14 +157,15 @@ staging/etc/udhcpc.script:
 	printf '#!/bin/sh\ncase "$$1" in\n  bound|renew)\n    /bin/busybox ifconfig $$interface $$ip netmask $${subnet:-255.255.255.0}\n    [ -n "$$router" ] && /bin/busybox route add default gw $$router dev $$interface\n    echo NET-LEASE-OK ip=$$ip gw=$$router\n    ;;\nesac\n' > $@
 	chmod +x $@
 
-# M5.1c: the net gate script — eth0 up (the vector device), DHCP lease
-# through the D8 channel (vector TX + the D19 reader ring), then ping
-# the NAT gateway (10.0.2.2 — vdeplug-go slirp parity). The two markers
-# are the CI gate's evidence: they only print when the lease landed
-# and the gateway answered.
+# M5.1c: the net gate script — vec0 up (the vector device keeps its
+# own name upstream — the howto's `iface vec0 inet dhcp`; there is no
+# eth0 rename), DHCP lease through the D8 channel (vector TX + the
+# D19 reader ring), then ping the NAT gateway (10.0.2.2 — vdeplug-go
+# slirp parity). The two markers are the CI gate's evidence: they
+# only print when the lease landed and the gateway answered.
 staging/net.sh:
 	@mkdir -p staging
-	printf '/bin/busybox ifconfig eth0 up\n/bin/busybox udhcpc -i eth0 -n -q -s /etc/udhcpc.script\n/bin/busybox ping -c 2 10.0.2.2 && echo NET-PING-GW-OK\n' > $@
+	printf '/bin/busybox ifconfig vec0 up\n/bin/busybox udhcpc -i vec0 -n -q -s /etc/udhcpc.script\n/bin/busybox ping -c 2 10.0.2.2 && echo NET-PING-GW-OK\n' > $@
 	chmod +x $@
 
 # M5.1c: the net gate guest — PID 1 (init=/bin/netsetup) execve()s
