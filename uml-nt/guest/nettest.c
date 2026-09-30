@@ -79,29 +79,71 @@ static void fill_addr(unsigned char a, unsigned char b, unsigned char c,
 static const char req[] = "GET /netok.txt HTTP/1.0\r\nHost: gw\r\n\r\n";
 static const char marker[] = "uml-nt-net-ok";
 static const char ok[] = "NET-GET-OK\n";
-static const char fail[] = "NETTEST-FAIL\n";
 static char buf[4096];
+
+/* one-letter step + the raw syscall return — enough to place the
+ * death without another blind CI round */
+static void die_step(char step, long ret)
+{
+	out("NETTEST-FAIL ", 13);
+	out(&step, 1);
+	out(" ret=", 5);
+	/* signed decimal — small: errno range */
+	{
+		long v = ret;
+		char d[12];
+		int i = 12;
+
+		d[--i] = '\0';
+		if (v == 0)
+			d[--i] = '0';
+		else {
+			int neg = v < 0;
+
+			if (neg)
+				v = -v;
+			while (v) {
+				d[--i] = (char)('0' + (v % 10));
+				v /= 10;
+			}
+			if (neg)
+				d[--i] = '-';
+		}
+		out(d + i, (unsigned long)(11 - i));
+	}
+	out("\n", 1);
+	sys_exit(1);
+}
 
 void _start(void)
 {
 	long fd, n, total, i;
+	static const char s_sock[] = "NT-SOCKET-OK\n";
+	static const char s_conn[] = "NT-CONNECT-OK\n";
+	static const char s_send[] = "NT-SEND-OK\n";
+	static const char s_read[] = "NT-READ-OK\n";
 
 	fd = sys_call(41 /*socket*/, AF_INET, SOCK_STREAM, 0, 0, 0);
 	if (fd < 0)
-		goto die;
+		die_step('s', fd);
+	out(s_sock, sizeof(s_sock) - 1);
 	fill_addr(10, 0, 2, 2, 19293);
-	if (sys_call(42 /*connect*/, fd, (long)sockaddr, 16, 0, 0) < 0)
-		goto die;
-	if (sys_call(1 /*write on the socket*/, fd, (long)req,
-		     sizeof(req) - 1, 0, 0) != sizeof(req) - 1)
-		goto die;
+	n = sys_call(42 /*connect*/, fd, (long)sockaddr, 16, 0, 0);
+	if (n < 0)
+		die_step('c', n);
+	out(s_conn, sizeof(s_conn) - 1);
+	n = sys_call(1 /*write on the socket*/, fd, (long)req,
+		     sizeof(req) - 1, 0, 0);
+	if (n != sizeof(req) - 1)
+		die_step('w', n);
+	out(s_send, sizeof(s_send) - 1);
 
 	total = 0;
 	for (;;) {
 		n = sys_call(0 /*read*/, fd, (long)(buf + total),
 			     sizeof(buf) - 1 - total, 0, 0);
 		if (n < 0)
-			goto die;
+			die_step('r', n);
 		if (n == 0)
 			break; /* server closed: response complete */
 		total += n;
@@ -109,6 +151,7 @@ void _start(void)
 			break;
 	}
 	sys_call(3 /*close*/, fd, 0, 0, 0, 0);
+	out(s_read, sizeof(s_read) - 1);
 	buf[total] = '\0';
 
 	/* the body starts after the CRLF CRLF header terminator */
@@ -129,9 +172,5 @@ void _start(void)
 	else
 		out(buf, (unsigned long)total);
 	out("\n", 1);
-	sys_exit(1);
-
-die:
-	out(fail, sizeof(fail) - 1);
 	sys_exit(1);
 }
