@@ -605,7 +605,7 @@ jobs:
           grep -q "NET-PING-GW-OK" net.log || { echo "ping gateway never answered (ICMP through the NAT broken? see log)"; exit 1; }
           grep -q "NET-GET-OK" net.log || { echo "M5.1d: wget never fetched/verified the body through the NAT (guest TCP out broken? see net.log + http.log access lines)"; exit 1; }
           grep -q "M5 NET OK" net.log || { echo "M5.1d: the net chain did not complete (see the NET-* markers above)"; exit 1; }
-          grep -q "NET-WGET-FAIL\|NET-BODY-MISMATCH" net.log && { echo "M5.1d: nettest reported failure"; exit 1; }
+          grep -q "NET-WGET-FAIL\|NET-BODY-MISMATCH\|NETTEST-FAIL" net.log && { echo "M5.1d: nettest reported failure"; exit 1; }
           echo "M5.1c/d NATIVE NET OK: vec0 up + udhcpc lease + ping gateway + wget through the NAT (guest TCP out to the runner)"
 
       # M5.4 cluster 1 (D20): dynamic-PIE — binfmt_umlnt parses

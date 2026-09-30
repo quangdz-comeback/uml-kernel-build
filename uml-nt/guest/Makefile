@@ -17,7 +17,8 @@ LD     ?= ld.lld
 IMAGE_BASE := 0x62000000
 
 all: guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf \
-	heaptest.elf guardtest.elf sysbench.elf netsetup.elf dyn.elf
+	heaptest.elf guardtest.elf sysbench.elf netsetup.elf dyn.elf \
+	nettest.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
@@ -141,8 +142,20 @@ dyn.elf: dyn.c
 	@readelf -lW $@ | grep -q INTERP || \
 		{ echo "dyn.elf must carry a PT_INTERP" >&2; exit 1; }
 
+# M5.1d: the NAT acceptance — /bin/nettest (guest/nettest.c): raw
+# socket/connect/write/read through the REAL sys_call_table → the
+# guest inet stack → vector → D8 → the helper's NAT44 (10.0.2.2 = host
+# loopback, where the CI step serves /netok.txt). In-window static,
+# same recipe as the other guests.
+nettest.elf: nettest.c
+	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "nettest must be a static ELF" >&2; exit 1; }
+
 clean:
 	rm -f init.o guest-init.elf step2.elf bench.elf forkwait.elf \
 		sigtest.elf heaptest.elf guardtest.elf sysbench.elf \
-		netsetup.elf dyn.elf
+		netsetup.elf dyn.elf nettest.elf
 .PHONY: all clean

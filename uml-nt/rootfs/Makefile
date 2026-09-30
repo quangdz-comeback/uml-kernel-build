@@ -171,22 +171,20 @@ staging/etc/udhcpc.script:
 # one echo request, 5s alarm, prints "is alive!" and exits 0.
 staging/net.sh:
 	@mkdir -p staging
-	printf '/bin/busybox ifconfig vec0 up\n/bin/busybox udhcpc -i vec0 -n -q -s /etc/udhcpc.script\n/bin/busybox ping 10.0.2.2 && echo NET-PING-GW-OK\n/bin/busybox sh /bin/nettest && echo "M5 NET OK"\n' > $@
+	printf '/bin/busybox ifconfig vec0 up\n/bin/busybox udhcpc -i vec0 -n -q -s /etc/udhcpc.script\n/bin/busybox ping 10.0.2.2 && echo NET-PING-GW-OK\n/bin/nettest && echo "M5 NET OK"\n' > $@
 	chmod +x $@
 
-# M5.1d: the NAT acceptance — busybox wget fetches
-# http://10.0.2.2:19293/netok.txt (the gateway address: the NAT44 maps
-# it to host loopback, where the CI step serves the file) and the body
-# is verified in-shell (no grep applet on allnoconfig — `case` does
-# the match). -O - streams the body to stdout: the image root mounts
-# read-only, no scratch file. Runs via `sh /bin/nettest` (same open/
-# read path /net.sh itself uses) — no binfmt_script dependency.
-# The mismatch branch prints WHAT arrived (len + escaped body, one
-# line, never grepped as the marker — the M3.8 read-back lesson).
-staging/bin/nettest:
+# M5.1d: the NAT acceptance — /bin/nettest (guest/nettest.elf): raw
+# socket/connect/read through the guest inet stack → vector → D8 →
+# the helper's NAT44 (10.0.2.2 = host loopback). net.sh execs it
+# after the ping; NET-GET-OK is the gate's evidence. The first
+# attempt (busybox wget in an ash command substitution) captured an
+# empty body despite a proven transport — the shell fork/dup/pipe
+# capture layer gets its own investigation; this binary is the
+# acceptance.
+staging/bin/nettest: ../guest/nettest.elf
 	@mkdir -p staging/bin
-	printf '#!/bin/sh\nbody=$$(/bin/busybox wget -O - http://10.0.2.2:19293/netok.txt) || { echo NET-WGET-FAIL; exit 1; }\ncase "$$body" in *uml-nt-net-ok*) echo NET-GET-OK ;; *) echo "NET-BODY-MISMATCH: len=$${#body} [$$body]"; exit 1 ;; esac\n' > $@
-	chmod +x $@
+	cp $< $@
 
 # M5.1c: the net gate guest — PID 1 (init=/bin/netsetup) execve()s
 # busybox sh onto /net.sh above.
