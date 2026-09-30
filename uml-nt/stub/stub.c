@@ -455,18 +455,23 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		 * harmlessly (they are the thread's own), and the
 		 * CONTEXT_XSTATE claim is backed by the CONTEXT_EX the
 		 * dispatcher itself built next to this context. */
+		/* D18: the restore on the way out still wipes the TLS
+		 * base — the signal state rides through the same
+		 * trampoline (r11 is guest-live here, preserved). */
+		if (d->fs_base != 0 && have_fsgsbase) {
+			fs_save_r11 = c->R11;
+			fs_tramp_base = d->fs_base;
+			fs_tramp_target = d->regs.rip;
+			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
+		}
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
 	if (is_syscall) {
 		unsigned long long target;
 
-		if (verbatim) {
-			target = d->regs.rip; /* signal handler state */
-		} else {
-			c->Rax = (DWORD64)d->retval;
-			target = d->regs.rip + 2; /* past 0F 0B (ud2) */
-		}
+		c->Rax = (DWORD64)d->retval;
+		target = d->regs.rip + 2; /* past 0F 0B (ud2) */
 		/* D18: with a TLS base live, resume THROUGH the
 		 * trampoline — the context restore on the way out has
 		 * already zeroed the base, and rcx/r11 are clobbered
@@ -480,6 +485,24 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_sys;
 		} else {
 			c->Rip = (DWORD64)target;
+		}
+	} else {
+		/* D18: the fault-repair resume re-executes the faulting
+		 * instruction with every register live — and the
+		 * context restore wiped the TLS base on its way out
+		 * (Windows does not preserve user FS bases across
+		 * exception dispatch). glibc's struct pthread lives at
+		 * NEGATIVE fs offsets, so the re-execute faulted at a
+		 * huge wrapped VA (0 + (-0x198) = 0xfff...feb0) that
+		 * missed the wiped-base fast path above and killed the
+		 * guest (systemd's executor, run 36779376375). The
+		 * fault trampoline restores r11 from the VEH snapshot
+		 * and replays the same rip with the base live. */
+		if (d->fs_base != 0 && have_fsgsbase) {
+			fs_save_r11 = c->R11;
+			fs_tramp_base = d->fs_base;
+			fs_tramp_target = d->regs.rip;
+			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
 		}
 	}
 	MemoryBarrier();
@@ -508,6 +531,18 @@ static void jump_to_guest(struct uml_nt_gp_regs *ir,
 			  unsigned long long entry_va)
 {
 	__asm__ volatile(
+		/* D18: the fork child's FIRST guest code is the fork
+		 * return — no arch_prctl is coming (the base was
+		 * inherited through the conn), so apply the recorded
+		 * base here or the first %fs access faults at a
+		 * wrapped negative offset. The raw jmp crosses no
+		 * Windows context state, so a base set here survives
+		 * into the guest. r11 is scratch (ir reloads it). */
+		"movq	fs_tramp_base(%rip), %r11\n\t"
+		"testq	%r11, %r11\n\t"
+		"jz	1f\n\t"
+		"wrfsbase %r11\n\t"
+		"1:\n\t"
 		"movq	%r8, %r15\n\t"	/* entry, saved first */
 		"movq	%rdx, %rsp\n\t"	/* switch stack now */
 		"movq	0(%rcx), %rax\n\t"
@@ -587,6 +622,11 @@ int main(int argc, char **argv)
 	publish(UML_STUB_CMD_INIT);
 	action_chain();
 
+	/* D18: jump_to_guest applies the recorded base when nonzero —
+	 * the fork child's first guest code is the fork return and no
+	 * arch_prctl is coming (the base was inherited via the conn;
+	 * conn_bootstrap published it into d->fs_base). */
+	fs_tramp_base = d->fs_base;
 	jump_to_guest(&d->init_regs, d->stack_va, d->entry_va);
 	/* not reached */
 	ExitProcess(122);
