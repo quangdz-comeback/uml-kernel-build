@@ -1,0 +1,137 @@
+name: "uml-nt M5.5a systemd boot (native referee)"
+
+# M5.4 c3 / M5.5a: boot a REAL systemd rootfs natively on the Windows
+# runner. Wine cannot pass the arch_prctl wall (HANDOFF 4.1-11 — the
+# c3 wine boots die there, rax=9e, after the whole loader chain maps
+# clean), so native is the referee for everything past the guest
+# loader chain.
+#
+# Rootfs: base-debian-bookworm.img from base_image.yml (Debian 12,
+# glibc 2.36 + systemd 252 — the same shape as the local-only PVE
+# image; downloaded from that workflow's artifacts, never committed —
+# hard rule). Boot-failure-driven (greenlight 2026-09-30): every run
+# prints the not-implemented syscall table + the furthest systemd
+# marker; the gate tightens as clusters land. Target: basic.target.
+#
+# workflow_dispatch only during the iteration loop (CI stays fast on
+# push); flip to a weekly canary once basic.target is green (M5.5).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        timeout-minutes: 8
+        run: |
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+            update -y
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
+            install -y build-essential flex bison bc patch xz-utils \
+            clang lld llvm ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: uml-nt-ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            uml-nt-ccache-${{ runner.os }}-
+
+      - name: Fetch pinned v6.18.37 + apply uml-nt overlay
+        run: |
+          TREE=$(bash uml-nt/kernel/fetch.sh extract)
+          bash uml-nt/kernel/apply.sh "$TREE"
+          echo "TREE=$TREE" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+          echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime" >> "$GITHUB_ENV"
+
+      - name: Build vmlinux (uml_nt_defconfig, clang+lld)
+        run: |
+          make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC="ccache clang" \
+            LD=ld.lld uml_nt_defconfig
+          make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC="ccache clang" \
+            LD=ld.lld KBUILD_BUILD_TIMESTAMP="uml-nt" -j"$(nproc)"
+
+      - name: Upload vmlinux.elf
+        uses: actions/upload-artifact@v4
+        with:
+          name: uml-nt-vmlinux-elf
+          path: build/vmlinux
+
+  boot:
+    needs: kernel
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make
+            mingw-w64-x86_64-toolchain
+
+      - name: Build launcher.exe + stub.exe
+        shell: msys2 {0}
+        run: |
+          make -C uml-nt/launcher all
+          make -C uml-nt/stub all
+
+      - name: Download vmlinux.elf
+        uses: actions/download-artifact@v4
+        with:
+          name: uml-nt-vmlinux-elf
+          path: build
+
+      # The systemd rootfs comes from base_image.yml's latest
+      # successful run (Debian 12 cloud, systemd 252, root:root,
+      # getty@tty0, fstab /dev/ubda). Downloaded, never committed.
+      - name: Download base-debian-bookworm rootfs
+        shell: msys2 {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RID=$(gh run list -R "${{ github.repository }}" \
+            --workflow base_image.yml --status success \
+            --json databaseId --jq '.[0].databaseId')
+          echo "base_image run: $RID"
+          gh run download "$RID" -R "${{ github.repository }}" \
+            -n uml-base-debian-bookworm -D ../rootfs-img
+          ls -lh ../rootfs-img
+
+      - name: NATIVE systemd boot (M5.5a)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          set +e
+          timeout 420 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
+            "root=98:0" "rw" > systemd.log 2>&1
+          code=$?
+          set -e
+          echo "launcher exit: $code (124 = still running at timeout — expected while systemd boots)"
+          # boot-failure-driven: the evidence table first.
+          echo "--- not-implemented syscall table (this boot) ---"
+          grep "not implemented" systemd.log \
+            | sed 's/^\[syscall\] nr=//; s/ not implemented.*//' \
+            | sort -n | uniq -c | sort -rn | head -40 || true
+          echo "--- last 30 log lines ---"
+          tail -30 systemd.log
+          grep -q "Reached target Basic System" systemd.log || \
+            { echo "M5.5a: basic.target not reached yet — implement the clusters above, re-dispatch"; exit 1; }
+          echo "M5.5a NATIVE SYSTEMD OK: systemd reached basic.target"
+          grep -q "Reached target Multi-User System" systemd.log && \
+            echo "M5.5a BONUS: multi-user.target reached"
