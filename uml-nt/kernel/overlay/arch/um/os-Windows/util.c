@@ -170,15 +170,17 @@ void uml_nt_physmem_check(const char *what, int fd, long len,
 		return;
 	}
 	if (uml_physmem != want_phys || high_physmem != want_high) {
+		/* ra0 only: __builtin_return_address(1) needs a frame-
+		 * pointer chain the freestanding -O2 build doesn't keep
+		 * — it faulted (NULL+0x1008) before the print landed. */
 		os_info("PHYSMEM TRASHED at %s (fd=%d len=%ld off=%llx): "
 			"physmem=%llx (want %llx) high=%llx (want %llx) "
-			"ra0=%llx ra1=%llx\n", what, fd, len, off,
+			"ra0=%llx\n", what, fd, len, off,
 			(unsigned long long)uml_physmem,
 			(unsigned long long)want_phys,
 			(unsigned long long)high_physmem,
 			(unsigned long long)want_high,
-			(unsigned long long)__builtin_return_address(0),
-			(unsigned long long)__builtin_return_address(1));
+			(unsigned long long)__builtin_return_address(0));
 		os_dump_core();
 	}
 }
