@@ -233,13 +233,14 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 		limit = *(unsigned long long *)(teb + 0x10);
 		n = snprintf(buf, sizeof(buf),
 			     "  rax=%llx rcx=%llx rdx=%llx rsi=%llx "
-			     "rdi=%llx thread=%s stackbase=%llx "
+			     "rdi=%llx tid=%llu thread=%s stackbase=%llx "
 			     "stacklimit=%llx inbounds=%d\n",
 			     UML_NT_X64_CTX_RAX(e->context),
 			     UML_NT_X64_CTX_RCX(e->context),
 			     UML_NT_X64_CTX_RDX(e->context),
 			     UML_NT_X64_CTX_RSI(e->context),
 			     UML_NT_X64_CTX_RDI(e->context),
+			     uml_nt_current_tid(),
 			     uml_nt_thread_role, base, limit,
 			     UML_NT_X64_CTX_RSP(e->context) <= base &&
 			     UML_NT_X64_CTX_RSP(e->context) >= limit);

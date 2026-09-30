@@ -158,6 +158,27 @@ int um_set_signals(int enable)
 
 int um_set_signals_trace(int enable)
 {
+	/* M5.1c.3 diag (warn once): the flag machine runs on EVERY
+	 * irq-disable/enable — if this thread's rsp ever sits outside
+	 * its own TEB stack bounds, say so at the exact entry that
+	 * noticed, with the identity of the thread it noticed on. */
+	{
+		static int warned;
+		unsigned long long teb, base, limit, rsp;
+
+		__asm__ volatile("mov %%gs:0x30, %0" : "=r"(teb));
+		base = *(unsigned long long *)(teb + 0x08);
+		limit = *(unsigned long long *)(teb + 0x10);
+		__asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
+		if (!warned && (rsp > base || rsp < limit)) {
+			warned = 1;
+			os_warn("signal: rsp=%llx outside stack [%llx,%llx] "
+				"tid=%llu — the rsp left the thread's "
+				"stack before this call\n",
+				rsp, limit, base,
+				*(unsigned long long *)(teb + 0x48));
+		}
+	}
 	return um_set_signals(enable);
 }
 

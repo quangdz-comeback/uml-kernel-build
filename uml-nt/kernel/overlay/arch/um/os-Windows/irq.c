@@ -96,6 +96,7 @@ int os_setup_epoll(void)
 int os_add_epoll_fd(int events, int fd, void *data)
 {
 	int i;
+	static int adds; /* M5.1c.3 diag */
 
 	/* Upstream epoll_ctl semantics: a second registration for a
 	 * known fd (vector registers IRQ_WRITE on the rx fd too)
@@ -111,12 +112,31 @@ int os_add_epoll_fd(int events, int fd, void *data)
 	}
 	for (i = 0; i < UML_NT_IRQ_MAX; i++) {
 		if (irq_fds[i].data == NULL) {
+			unsigned long long teb, base, limit, rsp;
+
 			irq_fds[i].fd = fd;
 			irq_fds[i].events = events;
 			irq_fds[i].data = data;
 			irq_fds[i].ready = 0;
 			os_info("irq: add fd=%d events=%d data=%px\n", fd,
 				events, data);
+			/* M5.1c.3 diag: right after the second add (the
+			 * TX irq) print the RUNNING thread's TEB identity
+			 * + stack bounds + rsp, so the log pins which
+			 * thread/spa state the crash window opens on. */
+			adds++;
+			if (adds == 2) {
+				__asm__ volatile("mov %%gs:0x30, %0"
+						 : "=r"(teb));
+				base = *(unsigned long long *)(teb + 0x08);
+				limit = *(unsigned long long *)(teb + 0x10);
+				__asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
+				os_info("irq: post-add-2 tid=%llu rsp=%llx "
+					"base=%llx limit=%llx in=%d\n",
+					*(unsigned long long *)(teb + 0x48),
+					rsp, base, limit,
+					rsp <= base && rsp >= limit);
+			}
 			return 0;
 		}
 	}
