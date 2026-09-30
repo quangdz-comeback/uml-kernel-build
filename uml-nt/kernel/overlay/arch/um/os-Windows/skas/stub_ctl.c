@@ -365,6 +365,7 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	struct uml_nt_gp_regs *g = &d->regs;
 	struct uml_nt_stub_conn *k = &conn_child;
 	int vi;
+	int rc_clone;
 
 	if (k->alive) {
 		os_info("[stubtest] fork: child already exists\n");
@@ -372,8 +373,12 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 		d->err = 1;
 		return;
 	}
-	if (uml_nt_mm_clone(&mm_child, c->mm, c->ph, g->rsp) < 0) {
-		os_info("[stubtest] fork: mm clone failed\n");
+	rc_clone = uml_nt_mm_clone(&mm_child, c->mm, c->ph, g->rsp);
+	if (rc_clone != 0) {
+		os_info("[stubtest] fork: mm clone failed (reason %s, "
+			"parent nvma %d, nguard %d)\n",
+			uml_nt_clone_reason(rc_clone), c->mm->nvma,
+			c->mm->nguard);
 		d->retval = (unsigned long long)-12LL; /* -ENOMEM */
 		d->err = 1;
 		return;
@@ -655,6 +660,7 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 {
 	struct uml_nt_stub_conn *parent = fork_pending_parent;
 	int vi;
+	int rc_clone;
 
 	if (parent == NULL)
 		return 0;
@@ -669,10 +675,14 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	child->ph = parent->ph;
 	child->ph_shared = 1;
 
-	if (uml_nt_mm_clone(child->mm, parent->mm, child->ph,
-			    fork_pending_rsp) < 0) {
-		os_info("fork: mm clone failed (child conn pid %lu)\n",
-			(unsigned long)child->pid);
+	rc_clone = uml_nt_mm_clone(child->mm, parent->mm, child->ph,
+			    fork_pending_rsp);
+	if (rc_clone != 0) {
+		os_info("fork: mm clone failed (reason %s, child conn "
+			"pid %lu, parent nvma %d, nguard %d)\n",
+			uml_nt_clone_reason(rc_clone),
+			(unsigned long)child->pid, parent->mm->nvma,
+			parent->mm->nguard);
 		uml_nt_fork_disarm();
 		return -ENOMEM;
 	}

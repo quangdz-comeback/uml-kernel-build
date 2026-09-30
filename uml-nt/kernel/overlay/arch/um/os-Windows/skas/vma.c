@@ -313,6 +313,15 @@ static void span_unref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)
 		uml_nt_phys_unref(ph, (long long)off);
 }
 
+/* Clone the address-space bookkeeping for a fork child. Returns 0,
+ * or a positive UML_NT_CLONE_* reason code on failure (the caller
+ * logs it — this file is pure logic, unit-tested without kernel
+ * logging). Teardown contract: on failure the caller owns dst's
+ * partial state (mmctx_destroy / the POC fork fail path both
+ * uml_nt_mm_drop it) — dropping HERE would double-unref: the
+ * executor-era boot died of exactly that (the first failed fork
+ * unref'd the parent's shared runs twice, the buddy handed them to
+ * the next mmap and the parent's libc/TLS pages rotted under it). */
 int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		    struct uml_nt_phys *ph, unsigned long long rsp)
 {
@@ -345,7 +354,7 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 				      UML_NT_PHYS_RUN_SIZE));
 
 			if (off < 0)
-				goto fail;
+				return UML_NT_CLONE_SPAN;
 			run_off = (unsigned long long)off;
 			flags &= ~UML_NT_VMA_COW;
 		} else if (uml_nt_prot_writable(v->prot)) {
@@ -363,12 +372,12 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		rc = uml_nt_vma_add(dst, v->start, v->end, run_off,
 				    v->prot, flags);
 		if (rc < 0)
-			goto fail;
+			return UML_NT_CLONE_TABLE;
 
 		/* Eager runs: alloc_span() reffed them (the child
 		 * owns). Shared runs: ref the source span for this mm. */
 		if (run_off == v->run_off && span_ref(ph, v) < 0)
-			goto fail;
+			return UML_NT_CLONE_REF;
 	}
 	/* brk bookkeeping survives fork (the child's brk == parent's;
 	 * the COW machinery already duplicated the pages it backs) —
@@ -385,10 +394,21 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		dst->nguard = src->nguard;
 	}
 	return 0;
+}
 
-fail:
-	uml_nt_mm_drop(dst, ph);
-	return -1;
+/* Reason-code name for the caller's failure log. */
+const char *uml_nt_clone_reason(int rc)
+{
+	switch (rc) {
+	case UML_NT_CLONE_SPAN:
+		return "stack-span-alloc";
+	case UML_NT_CLONE_TABLE:
+		return "vma-table-full";
+	case UML_NT_CLONE_REF:
+		return "shared-run-refs-zero";
+	default:
+		return "unknown";
+	}
 }
 
 void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph)

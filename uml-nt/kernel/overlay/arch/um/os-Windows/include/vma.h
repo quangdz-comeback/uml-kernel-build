@@ -75,7 +75,15 @@ struct uml_nt_vma {
  * is the ONLY truth for faults — after a COW split's remap the view
  * piece comes up writable, so a guard READ can succeed where Linux
  * would fault (musl never reads its guard; documented divergence). */
-#define UML_NT_GUARD_MAX 16
+#define UML_NT_GUARD_MAX 32
+
+/* uml_nt_mm_clone failure reason codes (positive; the caller logs
+ * them — vma.c stays pure logic for the Linux unit test). */
+#define UML_NT_CLONE_SPAN  1 /* the eager stack span alloc failed */
+#define UML_NT_CLONE_TABLE 2 /* the dst VMA table is full */
+#define UML_NT_CLONE_REF   3 /* a shared run had refs==0 in the table */
+
+const char *uml_nt_clone_reason(int rc);
 
 struct uml_nt_guard {
 	unsigned long long start, end; /* guest VA, end exclusive */
