@@ -469,9 +469,6 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->regs.rsp,
 						c->d->regs.rax,
 						(unsigned)c->d->xstate_flags);
-					uml_nt_diag_slot("death-rsp", c,
-							 c->d->regs.rsp);
-					uml_nt_diag_mm("death", c);
 					os_dump_core();
 				}
 				continue;

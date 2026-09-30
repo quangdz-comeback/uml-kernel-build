@@ -114,93 +114,6 @@ static unsigned long long sys_vfs(unsigned long long nr,
 						      a[3], a[4], a[5]);
 }
 
-/* M5.1c.8 diag (bounded): the busybox sh parent of the net gate
- * resumes into a zeroed return slot after its first external child
- * (fork → exec → exit → SIGCHLD → sigreturn). The kernel-view qword
- * at the trap rsp is sampled at each step, and each mm's run layout is
- * dumped at fork/exec/death, so one run tells a real write (and when)
- * from a kernel/stub view divergence. */
-static int diag_slot_left = 32;
-static int diag_mm_left = 12;
-
-void uml_nt_diag_slot(const char *tag, struct uml_nt_stub_conn *c,
-		      unsigned long long va)
-{
-	long long off;
-	unsigned long long q = 0;
-
-	if (diag_slot_left <= 0 || c == NULL || c->mm == NULL)
-		return;
-	diag_slot_left--;
-	off = uml_nt_vma_translate(c->mm, va, 8);
-	if (off >= 0)
-		memcpy(&q, (char *)uml_boot.physmem_base + off, 8);
-	os_info("diag: slot %s pid %lu va %llx off %llx q %llx\n", tag,
-		(unsigned long)c->pid, va, (unsigned long long)off, q);
-}
-
-void uml_nt_diag_qwords(const char *tag, struct uml_nt_stub_conn *c,
-			unsigned long long va, int n)
-{
-	static int left = 16;
-	int i;
-
-	if (left <= 0 || c == NULL || c->mm == NULL)
-		return;
-	left--;
-	for (i = 0; i < n; i += 4) {
-		unsigned long long q[4] = { 0, 0, 0, 0 };
-		long long off = -1;
-		int j;
-
-		for (j = 0; j < 4 && i + j < n; j++) {
-			off = uml_nt_vma_translate(c->mm, va + (i + j) * 8, 8);
-			if (off >= 0)
-				memcpy(&q[j], (char *)uml_boot.physmem_base +
-				       off, 8);
-		}
-		os_info("diag: q %s pid %lu %llx: %llx %llx %llx %llx\n",
-			tag, (unsigned long)c->pid, va + i * 8, q[0], q[1],
-			q[2], q[3]);
-	}
-}
-
-/* busybox (musl 1.2.4 mallocng): __malloc_context at 0x62032320,
- * free_meta_head at +16 — the list the net gate's sh found broken. */
-static void diag_meta(const char *tag, struct uml_nt_stub_conn *c)
-{
-	unsigned long long head = 0;
-	long long off;
-
-	if (c == NULL || c->mm == NULL)
-		return;
-	uml_nt_diag_qwords(tag, c, 0x62032320ull, 8);
-	off = uml_nt_vma_translate(c->mm, 0x62032330ull, 8);
-	if (off < 0)
-		return;
-	memcpy(&head, (char *)uml_boot.physmem_base + off, 8);
-	if (head != 0)
-		uml_nt_diag_qwords(tag, c, head, 4);
-}
-
-void uml_nt_diag_mm(const char *tag, struct uml_nt_stub_conn *c)
-{
-	int i;
-
-	if (diag_mm_left <= 0 || c == NULL || c->mm == NULL)
-		return;
-	diag_mm_left--;
-	for (i = 0; i < c->mm->nvma; i++) {
-		const struct uml_nt_vma *v = &c->mm->vma[i];
-
-		os_info("diag: mm %s pid %lu [%llx,%llx) run %llx prot %x "
-			"flags %x refs %d\n", tag, (unsigned long)c->pid,
-			v->start, v->end, v->run_off, v->prot, v->flags,
-			c->ph ? uml_nt_phys_refs(c->ph,
-						 (long long)v->run_off) : -1);
-	}
-}
-
 static unsigned linux_prot_to_nt(u32 lprot)
 {
 	if (lprot & SC_PROT_WRITE)
@@ -666,8 +579,6 @@ static unsigned long long sys_fork_real(struct uml_nt_stub_conn *c,
 	uml_nt_fork_disarm();
 	if ((long long)ret >= 0) {
 		uml_nt_fork_reprotect_parent(c);
-		uml_nt_diag_mm("fork-parent", c);
-		diag_meta("fork-meta", c);
 	} else {
 		os_info("[syscall] fork nr=%llu failed: %lld\n", nr,
 			(long long)ret);
@@ -959,8 +870,6 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			ret = sys_vfs(nr, a);
 			c->sig_regs_current = 1;
 			c->push_verbatim = 1;
-			uml_nt_diag_slot("sigreturn-rsp", c,
-					 PT_REGS_SP(current_pt_regs()));
 			break;
 		}
 		ret = SC_RET(SC_ENOSYS);
@@ -1043,13 +952,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			 * child's stack (its userspace() loop serves its
 			 * conn) while the parent waits. The POC hook
 			 * below only serves the probe conns (no task). */
-			uml_nt_diag_slot("wait4-in", c, d->regs.rsp);
 			ret = sys_vfs(nr, a);
-			os_info("diag: wait4 pid %lu ret %lld status_ptr "
-				"%llx\n", (unsigned long)c->pid,
-				(long long)ret, a[1]);
-			uml_nt_diag_slot("wait4-out", c, d->regs.rsp);
-			diag_meta("wait4-meta", c);
 			break;
 		}
 		uml_nt_sys_wait4(c, d, a);
