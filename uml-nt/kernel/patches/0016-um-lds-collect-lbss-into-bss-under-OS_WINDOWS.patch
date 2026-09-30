@@ -1,0 +1,58 @@
+uml-nt: lds — collect .lbss into the bss region (OS_WINDOWS)
+
+clang -mcmodel=large emits big bss objects into .lbss; this bss
+collector (dyn.lds.S — CONFIG_LD_SCRIPT_DYN=y is the uml_nt build)
+names only .dynbss/.bss/COMMON, so .lbss became an ORPHAN section
+placed past _end. Every image-end derivation was then wrong by the
+whole .lbss extent (~166KB): brk_end = UML_ROUND_UP(&_end) landed
+inside live bss (patch 0010), mem_init's memblock_free(brk_end,
+uml_reserved - brk_end) handed the buddy allocator the rest of the
+live kernel bss — swapper_pg_dir, the D19 anchor words
+uml_physmem/high_physmem (0x6043d090/0x6043d0b0), mem_map,
+min_low_pfn/max_pfn all included — while the boot memmap survived
+only because setup_physmem runs before that free and memblock
+allocates top-down.
+
+The S4c2 busybox crash is exactly this: the first order-0-heavy
+alloc_pages window (the /bin/busybox exec — bprm mm pgd +
+copy_strings argv pages) received the anchor page, the
+pagetable/string writes trashed the anchors deterministically
+(physmem=0x400000001, high=0x62000200 — twice in a row), and the
+next virt_to_page walk (freeing the 131KB read's bio pages)
+faulted in kmem_cache_free far from the writer. physmem_size
+stayed clean because it lives in a different page — which is why
+the crash pointed at ubd, not at the corrupting step. The D19
+canary on the os-I/O funnel (5e98421..057ff37) named the first
+trashed observation (run 36649012363) and stays as the permanent
+tripwire for this class of bug.
+
+Collect .lbss (and .sbss for safety) before __bss_stop/_end so
+_end is the real end of loaded memory and the buddy pool starts
+above the image.
+
+Signed-off-by: quangdz-comeback <204571370+quangdz-comeback@users.noreply.github.com>
+---
+ arch/um/kernel/dyn.lds.S | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/um/kernel/dyn.lds.S b/arch/um/kernel/dyn.lds.S
+--- a/arch/um/kernel/dyn.lds.S
++++ b/arch/um/kernel/dyn.lds.S
+@@ -166,6 +166,17 @@
+    . = ALIGN(32 / 8);
+   . = ALIGN(32 / 8);
+   }
++#ifdef CONFIG_OS_WINDOWS
++  /* uml-nt: clang emits large-model bss objects into .lbss. This bss
++   * collector does not name it, so .lbss became an orphan section
++   * placed PAST _end — brk_end/uml_reserved then computed off a fake
++   * image end and min_low_pfn admitted LIVE kernel bss (the D19 anchor
++   * words uml_physmem/high_physmem included) to the buddy free pool:
++   * the busybox exec's bprm mm/copy_strings pages trashed them
++   * deterministically (the S4c2 "kmem_cache_free trash"). Collect it —
++   * _end must be the real end of loaded memory. */
++  .lbss : { *(.lbss .lbss.* .sbss .sbss.*) }
++#endif
+    __bss_stop = .;
+   _end = .;
+   PROVIDE (end = .);
