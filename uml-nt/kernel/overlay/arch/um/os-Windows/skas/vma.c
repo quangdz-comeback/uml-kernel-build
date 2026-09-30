@@ -258,6 +258,38 @@ int uml_nt_vma_span_fits(const struct uml_nt_mm *mm,
 	return 0;
 }
 
+/* M5.4 c2 (see vma.h): FRESH / INSIDE-one-VMA / MIXED for the
+ * 4K-aligned request range. FRESH is judged on the RUN-ROUNDED span
+ * (that is the VMA a fresh map creates — a neighbour anywhere inside
+ * it would be a flank overlap the stub cannot unmap); INSIDE needs
+ * the whole request in ONE VMA (one refill walk, one view). */
+int uml_nt_vma_map_kind(struct uml_nt_mm *mm,
+			unsigned long long start, unsigned long long end,
+			struct uml_nt_vma **inside)
+{
+	unsigned long long rs = start & ~(UML_NT_PHYS_RUN_SIZE - 1);
+	unsigned long long re = (end + UML_NT_PHYS_RUN_SIZE - 1) &
+				~(UML_NT_PHYS_RUN_SIZE - 1);
+	struct uml_nt_vma *hit = 0;
+	int i, any = 0;
+
+	*inside = 0;
+	for (i = 0; i < mm->nvma; i++) {
+		if (mm->vma[i].start >= re || mm->vma[i].end <= rs)
+			continue;
+		any = 1;
+		if (mm->vma[i].start <= start && end <= mm->vma[i].end)
+			hit = &mm->vma[i];
+	}
+	if (!any)
+		return 0;
+	if (hit) {
+		*inside = hit;
+		return 1;
+	}
+	return -1;
+}
+
 /* Ref/unref every run of a VMA's span (VMAs are run multiples —
  * vma.h). */
 static int span_ref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)

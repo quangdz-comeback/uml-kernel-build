@@ -18,7 +18,7 @@ IMAGE_BASE := 0x62000000
 
 all: guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf \
 	heaptest.elf guardtest.elf sysbench.elf netsetup.elf dyn.elf \
-	nettest.elf
+	nettest.elf dynsetup.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
@@ -154,8 +154,19 @@ nettest.elf: nettest.c
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "nettest must be a static ELF" >&2; exit 1; }
 
+# M5.4 cluster 2 (D20): the dynamic-lib proof's starter — static
+# freestanding PID 1 that execve()s the DYNAMIC busybox (musl:
+# PT_INTERP ld-musl + DT_NEEDED libc.so, resolved by the loader
+# against itself). In-window static, same recipe as the others.
+dynsetup.elf: dynsetup.c
+	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "dynsetup must be a static ELF" >&2; exit 1; }
+
 clean:
 	rm -f init.o guest-init.elf step2.elf bench.elf forkwait.elf \
 		sigtest.elf heaptest.elf guardtest.elf sysbench.elf \
-		netsetup.elf dyn.elf nettest.elf
+		netsetup.elf dyn.elf nettest.elf dynsetup.elf
 .PHONY: all clean

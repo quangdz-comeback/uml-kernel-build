@@ -771,6 +771,46 @@ static void test_span_fits(void)
 				   RAM + 4 * RUN - 4) == -1);
 }
 
+/* M5.4 c2: the file-backed mmap target decision — FRESH (no VMA in
+ * the run-rounded span), INSIDE (whole request in ONE VMA), MIXED
+ * (flank overlap — no loader we serve needs it; refuse loud). */
+static void test_map_kind(void)
+{
+	struct uml_nt_mm mm;
+	struct uml_nt_vma *v;
+
+	uml_nt_mm_init(&mm);
+	CHECK(uml_nt_vma_add(&mm, RAM + RUN, RAM + 3 * RUN, 0x100000,
+			     UML_NT_PAGE_EXECUTE_READWRITE,
+			     UML_NT_VMA_FILE) == 0);
+	/* far away: fresh */
+	CHECK(uml_nt_vma_map_kind(&mm, RAM + 6 * RUN, RAM + 7 * RUN, &v)
+	      == 0);
+	/* 4K-aligned sub-range strictly inside: INSIDE, reports the
+	 * VMA (the refill walks its runs) */
+	CHECK(uml_nt_vma_map_kind(&mm, RAM + RUN + 0x1000,
+				  RAM + 2 * RUN + 0x1000, &v) == 1);
+	CHECK(v == uml_nt_vma_find(&mm, RAM + RUN));
+	/* exact VMA bounds: INSIDE too */
+	CHECK(uml_nt_vma_map_kind(&mm, RAM + RUN, RAM + 3 * RUN, &v)
+	      == 1);
+	/* head flank (the run-rounded span reaches below the VMA
+	 * start): MIXED */
+	CHECK(uml_nt_vma_map_kind(&mm, RAM + RUN - 0x1000,
+				  RAM + 2 * RUN, &v) == -1);
+	/* tail flank: MIXED */
+	CHECK(uml_nt_vma_map_kind(&mm, RAM + 2 * RUN, RAM + 3 * RUN + 1,
+				  &v) == -1);
+	/* the 4K request sits in free space but its RUN-ROUNDED fresh
+	 * VMA would flank the neighbour's tail run: MIXED (the
+	 * decision uses the run span, not the request) */
+	CHECK(uml_nt_vma_map_kind(&mm, RAM + 3 * RUN - 0x1000,
+				  RAM + 4 * RUN, &v) == -1);
+	/* free again after the VMA's run-rounded end: fresh */
+	CHECK(uml_nt_vma_map_kind(&mm, RAM + 4 * RUN, RAM + 5 * RUN, &v)
+	      == 0);
+}
+
 /* M4 slice 5: sub-run PROT_NONE guards — add/hit/del semantics, fault
  * kill ('g', never auto-repair), clone/drop survival, and guard ops
  * in the INIT plan (the fork child re-arms its inherited guards). */
@@ -899,6 +939,7 @@ int main(void)
 	test_find_free();
 	test_span_runs();
 	test_span_fits();
+	test_map_kind();
 	test_guard();
 
 	if (fails) {

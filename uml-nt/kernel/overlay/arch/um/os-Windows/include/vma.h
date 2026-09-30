@@ -41,6 +41,17 @@
 
 /* VMA flags. */
 #define UML_NT_VMA_COW 0x1u /* write-fault copies the run (sharing) */
+/* M5.4 c2 (D20): file-backed mapping (the loader's MAP_COPY|MAP_FILE
+ * shape — private). MAP_FIXED re-mappings over it REFILL the bytes
+ * (file content / zeros) instead of replacing VMAs: a run is the
+ * indivisible backing unit, but content is byte-ranged — each
+ * mapping writes exactly the VA bytes it owns at its file offset.
+ * The view prot of a file VMA is the union-privileged RWX: segment
+ * mappings arrive one per PT_LOAD (4K-aligned, mid-run), per-run prot
+ * state would buy nothing boot-critical, and the D20 sweep fires per
+ * exec mapping anyway. Tightening to per-run prot = later slice if a
+ * workload needs W^X honesty. */
+#define UML_NT_VMA_FILE 0x2u
 
 struct uml_nt_vma {
 	unsigned long long start, end; /* guest VA, end exclusive */
@@ -130,6 +141,16 @@ int uml_nt_vma_span_runs(const struct uml_nt_mm *mm,
  * (a flank piece would need view surgery — refuse loud). */
 int uml_nt_vma_span_fits(const struct uml_nt_mm *mm,
 			 unsigned long long start, unsigned long long end);
+
+/* M5.4 c2: the file-backed mmap target decision for the 4K-aligned
+ * request [start, end). Returns 0 = FRESH (no VMA intersects the
+ * run-rounded span — a new VMA + span can be created), 1 = INSIDE
+ * (the whole request sits in ONE VMA, reported through *inside —
+ * bytes refill in place), -1 = MIXED (flank overlap — refuse loud;
+ * no loader we serve needs it). Pure logic — unit-tested. */
+int uml_nt_vma_map_kind(struct uml_nt_mm *mm,
+			unsigned long long start, unsigned long long end,
+			struct uml_nt_vma **inside);
 
 /* mprotect analogue over [start, end) (must be inside VMAs). */
 int uml_nt_vma_chg(struct uml_nt_mm *mm, unsigned long long start,

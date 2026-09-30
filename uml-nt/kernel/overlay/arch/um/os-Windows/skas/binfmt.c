@@ -66,12 +66,14 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
  * a bogus layout from kvmalloc'ing wild). */
 #define UML_NT_ELF_ARG_BLOB_MAX (1ull << 20)
 
-/* S4: read the packed exec-string blob through the new mm's pages
- * (the same generic GUP access copy_strings wrote them with — the
- * stub views never see the bprm stack), split it (elf_split.c) and
- * build the SysV block on OUR stack run. *used_out = bytes consumed
+/* S4: read the packed exec-string blob through the mm whose pages
+ * copy_strings wrote (the bprm mm — the conn's kernel mm; passed
+ * explicitly because the tables build PRE-commit now, where
+ * current->mm is still the OLD mm), split it (elf_split.c) and build
+ * the SysV block on OUR stack run. *used_out = bytes consumed
  * (rsp = stack_top - used_out). `ax` carries the D20 auxv fields. */
-static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
+static int uml_nt_elf_wire_args(struct linux_binprm *bprm,
+				struct mm_struct *mm, char *dst,
 				unsigned long long va_base,
 				unsigned long long cap,
 				const unsigned char *rand16,
@@ -117,7 +119,7 @@ static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
 	 * layer each WARN'd rwsem.h:80 per call on this port, because
 	 * nothing here ever took the lock; the UML mm's rw_semaphore is
 	 * a real, initialized lock — take it like upstream does). */
-	mmap_read_lock(current->mm);
+	mmap_read_lock(mm);
 	while (done < blob_len) {
 		unsigned long long pg_va =
 			((unsigned long long)bprm->p + done) & PAGE_MASK;
@@ -128,7 +130,7 @@ static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
 
 		if (blob_len - done < pg_len)
 			pg_len = blob_len - done;
-		got = get_user_pages_remote(current->mm, pg_va, 1,
+		got = get_user_pages_remote(mm, pg_va, 1,
 					    FOLL_FORCE, &page, &locked);
 		if (got != 1) {
 			os_info("binfmt_umlnt: arg gup va=0x%llx got=%d "
@@ -146,7 +148,7 @@ static int uml_nt_elf_wire_args(struct linux_binprm *bprm, char *dst,
 		put_page(page);
 		done += pg_len;
 	}
-	mmap_read_unlock(current->mm);
+	mmap_read_unlock(mm);
 	if (rc)
 		goto out;
 
@@ -325,8 +327,8 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 
 	/* D20 cluster 1: PT_INTERP — a dynamic binary names its starter.
 	 * Parse + read NOW, while a failure is still recoverable
-	 * (-ENOEXEC keeps the binfmt search honest); the LOAD joins
-	 * the main image after commit. */
+	 * (-ENOEXEC keeps the binfmt search honest); like the main
+	 * image, the LOAD itself runs pre-commit (recoverable). */
 	interp_path[0] = '\0';
 	rc = uml_nt_elf_interp_path(buf, len, interp_path,
 				    sizeof(interp_path));
@@ -346,25 +348,13 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		}
 	}
 
-	/* Commit the exec (de_thread + exec_mmap — upstream binfmt_elf
-	 * order); from here failures are fatal to the task, there is
-	 * no unwinding to the old mm. */
-	rc = begin_new_exec(bprm);
-	if (rc) {
-		kvfree(buf);
-		return rc;
-	}
-	setup_new_exec(bprm);
-	os_info("binfmt_umlnt: exec committed (new conn live)\n");
-	rc = setup_arg_pages(bprm, STACK_TOP, 0 /* non-exec stack */);
-	if (rc)
-		return rc; /* bprm strings stay unwired — S4 */
-
-	set_binfmt(&uml_nt_binfmt);
-
-	/* Load into the conn: spans (D12), bytes through the flat
-	 * view, one VMA per merged region — the loader rolls back
-	 * everything on failure. */
+	/* ---- PRE-COMMIT: every fallible step (upstream elf_map
+	 * parity — the load builds into the bprm mm BEFORE the exec
+	 * commits). On any failure the exec returns, the binfmt search
+	 * continues, and the bprm mm dies with its fresh conn
+	 * (destroy_context → mmctx destroy unrefs every run) — the
+	 * old conn never noticed. Post-commit only the
+	 * upstream-shape infallible tail remains. */
 	memset(&img, 0, sizeof(img));
 	rc = uml_nt_elf_load(&img, c->mm, c->ph, buf, len,
 			     uml_boot.physmem_base);
@@ -405,22 +395,25 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 
 	/* Initial stack block with the REAL argv/envp (S4): read the
 	 * packed string blob copy_strings left in the bprm mm's stack
-	 * pages, split it, and let the tables re-place it on OUR run
-	 * with the guest-VA vectors (the create_elf_tables analogue —
-	 * upstream reads these same pages post-switch). */
+	 * pages (GUP on the bprm mm explicitly — pre-commit,
+	 * current->mm is still the old mm), split it, and let the
+	 * tables re-place it on OUR run with the guest-VA vectors
+	 * (the create_elf_tables analogue). */
 	stk = uml_nt_vma_find(c->mm, stack_top - 1);
 	if (stk == NULL)
 		return -ENOEXEC;
 	get_random_bytes(rnd, sizeof(rnd));
 	/* D20 cluster 1: the auxv a starter needs — AT_BASE points at
-	 * the interp (0 static), AT_ENTRY/AT_PHDR at the MAIN image. */
+	 * the interp (0 static), AT_ENTRY/AT_PHDR at the MAIN image.
+	 * The ids come from bprm->cred (the prepared exec cred —
+	 * current_cred() is still the OLD one pre-commit). */
 	memset(&ax, 0, sizeof(ax));
 	ax.at_base = have_interp ? iimg.base : 0;
 	ax.at_entry = img.entry;
 	ax.at_phdr = img.phdr_va;
 	ax.at_phnum = img.phnum;
 	ax.execfn = bprm->filename;
-	cr = current_cred();
+	cr = bprm->cred;
 	ax.uid = cr->uid.val;
 	ax.euid = cr->euid.val;
 	ax.gid = cr->gid.val;
@@ -428,7 +421,8 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	ax.secure = bprm->secureexec ? 1 : 0;
 	os_info("binfmt_umlnt: wiring stack tables (run_off %#llx)\n",
 		stk->run_off);
-	rc = uml_nt_elf_wire_args(bprm, (char *)uml_boot.physmem_base +
+	rc = uml_nt_elf_wire_args(bprm, bprm->mm,
+				  (char *)uml_boot.physmem_base +
 				  stk->run_off,
 				  stack_top - UML_NT_PHYS_RUN_SIZE,
 				  UML_NT_PHYS_RUN_SIZE, rnd, &ax, &used);
@@ -473,6 +467,20 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	c->mm->heap_start = heap_va;
 	c->mm->heap_end = heap_va + UML_NT_PHYS_RUN_SIZE;
 	c->mm->brk = heap_va;
+
+	/* COMMIT the exec (de_thread + exec_mmap — upstream binfmt_elf
+	 * order): the old conn dies here; only the infallible tail
+	 * follows. */
+	rc = begin_new_exec(bprm);
+	if (rc)
+		return rc;
+	setup_new_exec(bprm);
+	os_info("binfmt_umlnt: exec committed (new conn live)\n");
+	rc = setup_arg_pages(bprm, STACK_TOP, 0 /* non-exec stack */);
+	if (rc)
+		return rc; /* upstream-shape post-commit failure: -ENOMEM
+			    * kills the task, never the kernel */
+	set_binfmt(&uml_nt_binfmt);
 
 	/* start_thread = UML's own (arch/um/kernel/exec.c): entry +
 	 * stack into current->thread.regs — kernel_init returns,

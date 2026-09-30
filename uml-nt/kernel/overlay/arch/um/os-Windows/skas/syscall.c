@@ -23,6 +23,8 @@
  */
 #include <linux/kernel.h>
 #include <linux/binfmts.h>
+#include <linux/file.h>
+#include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/ptrace.h>
 #include <linux/string.h>
@@ -51,6 +53,7 @@ extern int syscall_table_size;
 #define SC_EAGAIN  11
 #define SC_ECHILD  10
 #define SC_ENOTTY  25
+#define SC_EACCES  13
 
 #define SC_RET(e) ((unsigned long long)-(long long)(e))
 
@@ -58,6 +61,7 @@ extern int syscall_table_size;
 #define SC_PROT_READ  0x1u
 #define SC_PROT_WRITE 0x2u
 #define SC_PROT_EXEC  0x4u
+#define SC_MAP_SHARED  0x01u
 #define SC_MAP_PRIVATE 0x02u
 #define SC_MAP_FIXED   0x10u
 #define SC_MAP_ANONYMOUS 0x20u
@@ -274,6 +278,17 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 	return a[0];
 }
 
+/* The c2 file-backed helpers below; sys_mmap's MAP_FIXED branch
+ * delegates the inside-a-file-VMA refill to them. */
+static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
+			    unsigned long long map_start,
+			    unsigned long long len, struct file *f,
+			    unsigned long long off,
+			    unsigned long long fsize, int zero);
+static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
+				   unsigned long long map_start,
+				   unsigned long long len);
+
 /* mmap(2), anonymous|private only: fresh runs (zeroed by the D11
  * backend) + a VMA + a MAP op for the stub's address space. MAP_FIXED
  * must land on a FREE range — silently replacing VMAs would need
@@ -303,6 +318,7 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 	if (flags & SC_MAP_FIXED) {
 		unsigned long long runs[UML_NT_VMA_MAX];
 		unsigned long long req_len = a[1];
+		struct uml_nt_vma *fv;
 		int nfree, i;
 
 		va = addr;
@@ -362,7 +378,37 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 		 * every intersecting VMA lies fully inside the range:
 		 * queue one UNMAP per removed VMA (the op's map_va
 		 * must BE the view base), drop the runs, then map
-		 * fresh. A flank overlap = -ENOMEM loud. */
+		 * fresh. A flank overlap = -ENOMEM loud.
+		 *
+		 * EXCEPTION (M5.4 c2, before the replace machinery):
+		 * a MAP_FIXED range fully INSIDE one FILE VMA refills
+		 * bytes instead — the loader's per-segment mappings
+		 * (and the anon .bss tail: fd == -1 + MAP_ANONYMOUS
+		 * arrives here as a ZERO refill) all sit mid-run,
+		 * 4K-aligned, where a run cannot be split for a view.
+		 * Non-NONE anon sub-run mappings on ANON VMAs keep the
+		 * old semantics below (no refill — nothing maps there
+		 * twice). */
+		if (uml_nt_vma_map_kind(c->mm, addr, addr + len, &fv) == 1 &&
+		    (fv->flags & UML_NT_VMA_FILE)) {
+			int killed = uml_nt_guard_del_range(c->mm, addr,
+							    addr + len);
+
+			if (uml_nt_mmap_fill(c, addr, len, NULL, 0, 0, 1)
+			    < 0)
+				return SC_RET(SC_EFAULT);
+			if (lprot & SC_PROT_EXEC) {
+				long long p = uml_nt_mmap_sweep(c, addr,
+								len);
+
+				if (p < 0)
+					return SC_RET(SC_EFAULT);
+			}
+			os_info("[syscall] mmap MAP_FIXED 0x%llx+%llu "
+				"prot=0x%x: file-VMA refill (%d guard(s) "
+				"cleared)\n", addr, len, lprot, killed);
+			return addr;
+		}
 		if (uml_nt_vma_span_fits(c->mm, va, va + len) < 0) {
 			os_info("[syscall] mmap MAP_FIXED 0x%llx+%llu: "
 				"partial VMA overlap — unsupported\n",
@@ -412,6 +458,238 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 		(unsigned long long)sp,
 		(flags & SC_MAP_FIXED) ? " FIXED" : "");
 	uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, prot, va, len, (unsigned long long)sp);
+	return va;
+}
+
+/* ---- M5.4 c2 (D20): file-backed mmap — the dynamic-loader path ----
+ *
+ * ld.so maps every shared library through here: ONE span mapping
+ * (first segment's prot, no MAP_FIXED — the kernel picks the base),
+ * then one MAP_FIXED mapping per remaining segment (4K-aligned,
+ * mid-run), then anon MAP_FIXED for the .bss tail. Model (vma.h
+ * UML_NT_VMA_FILE note): the run is the backing unit (one view per
+ * VMA), CONTENT is byte-ranged — each mapping refills exactly the VA
+ * bytes it owns (file bytes, EOF-clamped, zeros beyond; the anon bss
+ * mapping zeroes). File VMAs carry the view prot RWX (union-
+ * privileged — segments arrive one per PT_LOAD and per-run prot
+ * state buys nothing boot-critical). MAP_FIXED over a file VMA
+ * REFILLS bytes instead of replacing VMAs (a run cannot be split
+ * for view surgery).
+ *
+ * Every mapping whose prot carries EXEC sweeps its syscalls to ud2
+ * at FIRST map (D20 (a) — the mmap twin of binfmt.c's load-time
+ * uml_nt_patch_image): an unpatched guest `syscall` would be a REAL
+ * host syscall inside the stub. Re-sweeps are idempotent (0F 05 is
+ * gone after the first pass).
+ *
+ * COW scope note: the refill writes physmem directly — correct for
+ * the loader (fresh runs, refs == 1, pre-fork). dlopen-after-fork
+ * would need the uaccess-style COW surgery first (loud log, later
+ * slice). */
+
+/* scan_patch.c (binfmt.c re-declares the same way — no shared header
+ * yet); the mark scratch must be >= len bytes. */
+unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
+				    unsigned long entry_off, void *mark);
+
+/* File bytes at `off` → [map_start, map_start+len), zeros beyond EOF
+ * (everywhere for the anon bss refill). Walks per-VMA pieces — the
+ * range may cross VMAs (each segment mapping does); each piece lands
+ * at ITS VMA's run offset. */
+static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
+			    unsigned long long map_start,
+			    unsigned long long len, struct file *f,
+			    unsigned long long off,
+			    unsigned long long fsize, int zero)
+{
+	unsigned long long cur = map_start, end = map_start + len;
+
+	while (cur < end) {
+		struct uml_nt_vma *v = uml_nt_vma_find(c->mm, cur);
+		unsigned long long piece, dst, want, avail, n;
+		loff_t pos;
+
+		if (v == NULL || v->end <= cur) {
+			os_info("[syscall] mmap fill 0x%llx: unmapped "
+				"mid-range\n", cur);
+			return -1;
+		}
+		piece = (end < v->end) ? end : v->end;
+		dst = v->run_off + (cur - v->start);
+		memset((char *)uml_boot.physmem_base + dst, 0,
+		       piece - cur);
+		if (!zero && f != NULL) {
+			want = off + (cur - map_start);
+			avail = (want < fsize) ? fsize - want : 0;
+			n = (piece - cur < avail) ? piece - cur : avail;
+			if (n > 0) {
+				pos = (loff_t)want;
+				if (kernel_read(f,
+					(char *)uml_boot.physmem_base + dst,
+					n, &pos) != (ssize_t)n) {
+					os_info("[syscall] mmap fill "
+						"0x%llx: short read\n", cur);
+					return -1;
+				}
+			}
+		}
+		cur = piece;
+	}
+	return 0;
+}
+
+/* D20 (a): sweep the exec-able mapping's syscalls at first map. */
+static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
+				   unsigned long long map_start,
+				   unsigned long long len)
+{
+	unsigned long long cur = map_start, end = map_start + len;
+	long long total = 0;
+
+	while (cur < end) {
+		struct uml_nt_vma *v = uml_nt_vma_find(c->mm, cur);
+		unsigned long long piece, off, mk;
+
+		if (v == NULL || v->end <= cur) {
+			os_info("[syscall] mmap sweep 0x%llx: unmapped "
+				"mid-range\n", cur);
+			return -1;
+		}
+		piece = (end < v->end) ? end : v->end;
+		off = v->run_off + (cur - v->start);
+		mk = (unsigned long long)(uintptr_t)
+		     kvmalloc(piece - cur, GFP_KERNEL);
+		if (mk == 0) {
+			os_info("[syscall] mmap sweep 0x%llx: mark alloc "
+				"failed (%llu bytes)\n", cur, piece - cur);
+			return -1;
+		}
+		total += uml_nt_patch_syscalls(
+			(char *)uml_boot.physmem_base + off, piece - cur,
+			0, (void *)(uintptr_t)mk);
+		kvfree((void *)(uintptr_t)mk);
+		cur = piece;
+	}
+	return total;
+}
+
+/* The fd is a GUEST fd in the serving task's files_struct (the same
+ * table every routed sys_vfs call uses). */
+static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
+					const unsigned long long *a)
+{
+	unsigned long long addr = a[0], len = a[1], off = a[5];
+	unsigned long long rs, re, fsize, nruns, sp, va, map_start;
+	struct uml_nt_vma *v = NULL;
+	u32 lprot = (u32)a[2];
+	u32 flags = (u32)a[3];
+	long long fd = (long long)a[4];
+	struct fd fdesc;
+	struct file *f;
+	int kind;
+
+	if (len == 0)
+		return SC_RET(SC_EINVAL);
+	if (flags & SC_MAP_SHARED) {
+		os_info("[syscall] mmap file: MAP_SHARED unsupported (the "
+			"loader uses MAP_COPY|MAP_FILE)\n");
+		return SC_RET(SC_ENOSYS);
+	}
+	if ((addr | off) & (UML_NT_FAULT_PAGE_SIZE - 1)) {
+		os_info("[syscall] mmap file 0x%llx+%llu off=0x%llx: not "
+			"page-aligned\n", addr, len, off);
+		return SC_RET(SC_EINVAL);
+	}
+	fdesc = fdget_raw((unsigned)fd);
+	if (fd_empty(fdesc)) {
+		os_info("[syscall] mmap file: fd %lld not open\n", fd);
+		return SC_RET(SC_EBADF);
+	}
+	f = fd_file(fdesc);
+	if (!(f->f_mode & FMODE_CAN_READ)) {
+		fdput(fdesc);
+		os_info("[syscall] mmap file: fd %lld not readable\n", fd);
+		return SC_RET(SC_EACCES);
+	}
+	fsize = i_size_read(file_inode(f));
+
+	rs = addr & ~(UML_NT_PHYS_RUN_SIZE - 1);
+	re = (addr + len + UML_NT_PHYS_RUN_SIZE - 1) &
+	     ~(UML_NT_PHYS_RUN_SIZE - 1);
+	if (addr + len < addr || re < rs) {
+		fdput(fdesc);
+		return SC_RET(SC_EINVAL);
+	}
+	kind = uml_nt_vma_map_kind(c->mm, addr, addr + len, &v);
+	if (kind < 0) {
+		fdput(fdesc);
+		os_info("[syscall] mmap file 0x%llx+%llu: flank overlap — "
+			"unsupported\n", addr, len);
+		return SC_RET(SC_ENOMEM);
+	}
+
+	if (kind == 0) {
+		/* Fresh span. MAP_FIXED keeps the requested start (the
+		 * VMA is run-rounded around it — the [rs, addr) head
+		 * is a zero hole, run granularity); otherwise the
+		 * mapping IS the VMA base (the file offset belongs to
+		 * it). File VMAs map the view RWX (vma.h note). */
+		unsigned long long slen = re - rs;
+
+		if (flags & SC_MAP_FIXED) {
+			va = rs;
+			map_start = addr;
+		} else {
+			va = uml_nt_vma_find_free(c->mm, slen,
+						  UML_NT_SYSCALLS_BASE,
+						  UML_NT_SYSCALLS_BASE +
+						  uml_boot.physmem_size);
+			if (va == 0) {
+				fdput(fdesc);
+				return SC_RET(SC_ENOMEM);
+			}
+			map_start = va;
+		}
+		nruns = slen / UML_NT_PHYS_RUN_SIZE;
+		sp = (unsigned long long)
+			uml_nt_phys_alloc_span(c->ph, (int)nruns);
+		if ((long long)sp < 0) {
+			fdput(fdesc);
+			return SC_RET(SC_ENOMEM);
+		}
+		if (uml_nt_vma_add(c->mm, va, va + slen, sp,
+				   UML_NT_PAGE_EXECUTE_READWRITE,
+				   UML_NT_VMA_FILE) < 0) {
+			uml_nt_phys_unref(c->ph, (long long)sp);
+			fdput(fdesc);
+			return SC_RET(SC_ENOMEM);
+		}
+		uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
+				   UML_NT_PAGE_EXECUTE_READWRITE, va,
+				   slen, sp);
+	} else {
+		va = addr;
+		map_start = addr;
+	}
+
+	if (uml_nt_mmap_fill(c, map_start, len, f, off, fsize, 0) < 0) {
+		fdput(fdesc);
+		return SC_RET(SC_EFAULT);
+	}
+	fdput(fdesc);
+
+	if (lprot & SC_PROT_EXEC) {
+		long long p = uml_nt_mmap_sweep(c, map_start, len);
+
+		if (p < 0)
+			return SC_RET(SC_EFAULT);
+		os_info("[syscall] mmap exec sweep 0x%llx+%llu: %lld "
+			"syscall(s) patched (D20)\n", map_start, len, p);
+	}
+	os_info("[syscall] mmap file 0x%llx+%llu prot=0x%x -> %s 0x%llx "
+		"off=0x%llx (size %llu)%s\n", map_start, len, lprot,
+		(kind == 0) ? "fresh" : "refill", va, off, fsize,
+		(lprot & SC_PROT_EXEC) ? " EXEC" : "");
 	return va;
 }
 
@@ -494,12 +772,34 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 			"(M4)\n");
 		return SC_RET(SC_ENOSYS);
 	}
+	if (v->flags & UML_NT_VMA_FILE) {
+		/* File VMAs keep the union-privileged RWX view (vma.h
+		 * note): a restriction (glibc's RELRO mprotect) would
+		 * brick later refills and fault repairs for no boot
+		 * benefit — ack the call, change nothing. Guards
+		 * under the range still die (the change wins). */
+		int killed = uml_nt_guard_del_range(c->mm, addr,
+						    addr + len);
+
+		os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x (file "
+			"VMA — view stays RWX, %d guard(s) cleared)\n",
+			addr, len, prot, killed);
+		return 0;
+	}
 	if (addr == v->start && addr + len == v->end) {
 		int killed = uml_nt_guard_del_range(c->mm, addr,
 						    addr + len);
 
 		if (uml_nt_vma_chg(c->mm, addr, addr + len, prot) < 0)
 			return SC_RET(SC_ENOMEM);
+		/* An mprotect that makes a range exec-able for the
+		 * FIRST time sweeps it too (D20 (a) — an unpatched
+		 * guest syscall would be a real host syscall). Anon
+		 * pages sweep to zero patches; file VMAs already
+		 * swept at map (returned above). */
+		if ((a[2] & SC_PROT_EXEC) &&
+		    uml_nt_mmap_sweep(c, addr, len) < 0)
+			return SC_RET(SC_EFAULT);
 		os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x "
 			"(whole VMA, was lprot 0x%llx, %d guard(s) "
 			"cleared)\n", addr, len, prot, a[2], killed);
@@ -510,6 +810,9 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 		if (prot == UML_NT_PAGE_NOACCESS) {
 			if (uml_nt_guard_add(c->mm, addr, addr + len) < 0)
 				return SC_RET(SC_ENOMEM);
+		} else if ((a[2] & SC_PROT_EXEC) &&
+			   uml_nt_mmap_sweep(c, addr, len) < 0) {
+			return SC_RET(SC_EFAULT);
 		}
 		os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x "
 			"(sub-run, was lprot 0x%llx, %d guard(s) %s)\n",
@@ -800,6 +1103,15 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 4: /* stat — musl path resolution (sh /hi.sh) */
 	case 5: /* fstat — musl stdio sizing/ash script fd */
 	case 8: /* lseek — ash reads the script by chunks */
+	case 17: /* pread64 — glibc ld.so reads the ELF headers of the
+		  * libs it maps (M5.4 c2 census, D20) */
+	case 21: /* access — the glibc startup cluster's probe calls */
+	case 273: /* set_robust_list — glibc TCB init (per-task record,
+		   * no guest memory touched at registration) */
+	case 302: /* prlimit64 — glibc stack/rlimit queries at start */
+	case 334: /* rseq — glibc registers the per-task rseq block;
+		   * failure is tolerated by the guest, but the real
+		   * syscall rides the walker fine */
 	case 79: /* getcwd — ash prompt/pwd */
 	case 217: /* getdents64 — ash PATH search, glob */
 	case 20: /* writev — musl __stdio_write IS writev: every byte
@@ -840,8 +1152,12 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		else
 			ret = sys_write(c, a);
 		break;
-	case 9: /* mmap */
-		ret = sys_mmap(c, a);
+	case 9: /* mmap — file-backed (fd != -1) = the dynamic-loader
+		 * path (M5.4 c2, D20); anon stays below */
+		if (!(a[3] & SC_MAP_ANONYMOUS) && a[4] != -1ull)
+			ret = sys_mmap_file(c, a);
+		else
+			ret = sys_mmap(c, a);
 		break;
 	case 10: /* mprotect */
 		ret = sys_mprotect(c, a);

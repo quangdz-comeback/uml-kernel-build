@@ -635,3 +635,31 @@ jobs:
           grep -q "DYNTASK-OK" dyn.log || { echo "ld-musl never jumped to AT_ENTRY / the app never ran (auxv or self-reloc broken? see [syscall] ENOSYS lines)"; exit 1; }
           grep -q "DYNTASK-FAIL" dyn.log && { echo "the dyn app reported failure"; exit 1; }
           echo "M5.4 C1 NATIVE DYNPIE OK: PT_INTERP parsed + interp loaded as second image + full-auxv start to the app"
+
+      # M5.4 cluster 2 (D20): dynamic LIBS — PID 1 (/bin/dynsetup,
+      # static) execve()s the DYNAMIC busybox (/bin/busybox-dyn, musl:
+      # PT_INTERP ld-musl + DT_NEEDED libc.so). The loader resolves
+      # libc.so against itself (musl one-file-both — the DT_NEEDED
+      # handshake end to end), and the app's own console write is the
+      # evidence. The glibc side (ld.so mapping libc.so.6 through the
+      # file-backed mmap + the D20 exec sweep) runs against the PVE
+      # image locally — no image artifact in CI (hard rule).
+      - name: NATIVE dynamic-libs gate (M5.4 c2)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$ROOTFS" "root=98:0" "init=/bin/dynsetup" > dynlib.log 2>&1
+          code=$?
+          set -e
+          cat dynlib.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code (boot hung elsewhere? see log)"; exit 1; }
+          grep -q "binfmt_umlnt: interp /lib/ld-musl-x86_64.so.1 requested" dynlib.log || { echo "the dynamic busybox never reached binfmt_umlnt (exec chain broken? see log)"; exit 1; }
+          grep -q "interp loaded base" dynlib.log || { echo "the interpreter never loaded as the second image for busybox-dyn"; exit 1; }
+          grep -q "DYNBUSY-OK" dynlib.log || { echo "the dynamic busybox never ran (ld-musl DT_NEEDED handshake broken? see [syscall] ENOSYS lines)"; exit 1; }
+          grep -q "DYNSETUP-EXEC-FAIL\|DYNBUSY-FAIL" dynlib.log && { echo "the dyn chain reported failure"; exit 1; }
+          echo "M5.4 C2 NATIVE DYNLIB OK: static PID 1 -> dynamic busybox (ld-musl interp + DT_NEEDED libc.so) ran to its own console write"

@@ -144,6 +144,48 @@ staging/bin/busybox: build/busybox-$(BUSYBOX_VER)/busybox
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "busybox must be a static ELF" >&2; exit 1; }
 
+# M5.4 cluster 2 (D20): the DYNAMIC busybox — same source, second
+# tree, musl-gcc's default DYNAMIC link (no CONFIG_STATIC, no
+# --no-dynamic-linker): PT_INTERP /lib/ld-musl-x86_64.so.1 + DT_NEEDED
+# libc.so. The loader resolves libc.so against ITSELF (musl's
+# one-file-both design — no file mmap on this path; the glibc census
+# rides the PVE image's /bin/true locally). ECHO applet only — the
+# gate's marker is busybox-dyn's own console write.
+build/bb-dyn-$(BUSYBOX_VER)/busybox: build/$(BUSYBOX_VER).tar.bz2
+	@mkdir -p build
+	if [ ! -d build/bb-dyn-$(BUSYBOX_VER) ]; then \
+		tar -xjf build/$(BUSYBOX_VER).tar.bz2 -C build; \
+		mv build/busybox-$(BUSYBOX_VER) build/bb-dyn-$(BUSYBOX_VER); \
+	fi
+	make -C build/bb-dyn-$(BUSYBOX_VER) allnoconfig >/dev/null
+	sed -i -e 's/^# CONFIG_ECHO is not set/CONFIG_ECHO=y/' \
+	       -e 's|^CONFIG_EXTRA_CFLAGS=.*|CONFIG_EXTRA_CFLAGS="-I$(CURDIR)/build/filter-shim"|' \
+	       -e 's/^CONFIG_EXTRA_LDFLAGS=.*/CONFIG_EXTRA_LDFLAGS="-fuse-ld=lld"/' \
+	       build/bb-dyn-$(BUSYBOX_VER)/.config
+	make -C build/bb-dyn-$(BUSYBOX_VER) -j$(shell nproc) \
+		CC=musl-gcc >/dev/null
+	@readelf -dW $@ | grep -q "NEEDED.*libc.so" || \
+		{ echo "busybox-dyn must carry DT_NEEDED libc.so" >&2; exit 1; }
+
+staging/bin/busybox-dyn: build/bb-dyn-$(BUSYBOX_VER)/busybox
+	@mkdir -p staging/bin
+	cp $< $@
+	@file -b $@ | grep -q "statically linked" && \
+		{ echo "busybox-dyn must be a DYNAMIC ELF" >&2; exit 1; } || true
+
+# the interpreter (already staged for c1) — libc.so ships beside it:
+# the loader's reserved-name path never opens it, but the file makes
+# the rootfs honest (the DT_NEEDED name exists).
+staging/lib/libc.so: staging/lib/ld-musl-x86_64.so.1
+	@mkdir -p staging/lib
+	cp /usr/lib/x86_64-linux-musl/libc.so $@
+
+# M5.4 c2: the dynamic-lib gate's starter — PID 1 (init=/bin/dynsetup)
+# execve()s the dynamic busybox onto its echo applet.
+staging/bin/dynsetup: ../guest/dynsetup.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
 # udhcpc execs its helper script via /bin/sh — the one busybox symlink
 # the net gate needs (the other applets are called through /bin/busybox
 # explicitly).
@@ -214,7 +256,9 @@ rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
 	     staging/bin/busybox staging/bin/sh \
 	     staging/etc/udhcpc.script staging/net.sh \
 	     staging/bin/netsetup staging/bin/dyntest \
-	     staging/lib/ld-musl-x86_64.so.1 staging/bin/nettest
+	     staging/lib/ld-musl-x86_64.so.1 staging/bin/nettest \
+	     staging/bin/busybox-dyn staging/lib/libc.so \
+	     staging/bin/dynsetup
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 
