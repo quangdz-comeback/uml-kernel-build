@@ -991,6 +991,23 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 108: /* getegid */
 		ret = 0;
 		break;
+	case 32: /* dup */
+	case 33: /* dup2 — xmove_fd (ping's socket setup) */
+	case 292: /* dup3 */
+		ret = sys_vfs(nr, a);
+		break;
+	case 58: /* vfork — busybox's run_script (udhcpc's lease script).
+		  * The per-stub model has no shared-mm vfork (the generic
+		  * sys_vfork would clone with CLONE_VM): serve it as a
+		  * plain COW fork — the child execs immediately, and COW
+		  * isolation is strictly safer than vfork sharing. */
+		if (c->task_backed) {
+			ret = sys_fork_real(c, d, a, 57);
+			break;
+		}
+		uml_nt_sys_fork(c, d);
+		ret = d->retval;
+		break;
 	case 56: /* clone */
 		if (a[0] & (SC_CLONE_VM | SC_CLONE_THREAD)) {
 			os_info("[syscall] clone(flags=0x%llx): threads "
