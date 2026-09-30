@@ -56,6 +56,9 @@ int is_skas_winch(int pid, int fd, void *data)
 /* GetExitCodeProcess: 259 = STILL_ACTIVE (win32). */
 #define UML_NT_STILL_ACTIVE 259u
 
+/* S4d: one XSTATE-CAPTURED line per boot (the CI gate's evidence). */
+static int xstate_pull_logged;
+
 int start_userspace(struct mm_id *mm_id)
 {
 	struct uml_nt_stub_conn *c;
@@ -148,6 +151,40 @@ static void conn_pull_regs(struct uml_pt_regs *regs,
 		/* upstream: "assume it's not a syscall" */
 		UPT_SYSCALL_NR(regs) = -1;
 	}
+	/* S4d: the FP half of get_fp_registers — the stub captured the
+	 * at-exception XSAVE_FORMAT block into d->xstate (context
+	 * flags gated); the task's fp block is the kernel's live copy
+	 * (signal setup copies it into the sigframe, sigreturn writes
+	 * it back). Zero-size while no capture: INIT rounds and POC
+	 * conns (no task) never wrote it. One log line per boot: the
+	 * CI gate greps it as the round-trip-live evidence. */
+	if (d->xstate_flags & UML_STUB_XS_CAPTURED) {
+		__builtin_memcpy(regs->fp, (const void *)d->xstate,
+				 host_fp_size);
+		if (!xstate_pull_logged) {
+			xstate_pull_logged = 1;
+			os_info("[stubtest] XSTATE-CAPTURED: %lu fp bytes "
+				"round-trip live (fcw=0x%04x)\n",
+				host_fp_size,
+				(unsigned short)*(u16 *)regs->fp);
+		}
+	}
+}
+
+/* S4d: the put_fp_registers half — publish the task's FP block to
+ * the stub and flag the restore. Today the bytes are the capture's
+ * own (the kernel changes regs->fp only via signal delivery /
+ * sigreturn, the next slice); running the identity every round
+ * exercises the full capture→pull→push→restore loop with zero
+ * behavior change. */
+void uml_nt_fp_push(struct uml_nt_stub_conn *c, struct uml_pt_regs *regs)
+{
+	struct uml_nt_stub_data *d = c->d;
+
+	if (!(d->xstate_flags & UML_STUB_XS_CAPTURED))
+		return;
+	__builtin_memcpy((void *)d->xstate, regs->fp, host_fp_size);
+	d->xstate_flags |= UML_STUB_XS_RESTORE;
 }
 
 /* M4.2 fork prep: the generic fork's copy_thread memcpy's
@@ -181,6 +218,11 @@ void userspace(struct uml_pt_regs *regs)
 			os_dump_core();
 		}
 		c = mm_id->nt_conn;
+		/* S4d: the FP round-trip runs in the pump (before the
+		 * answer releases the stub) and needs THIS task's
+		 * pt_regs — record it on the conn every round (the mm
+		 * can switch under execve; the conn dies with it). */
+		c->owner_regs = regs;
 
 		/* current_mm_sync() upstream flushes the pte batch into
 		 * the stub; on NT the conn's VMA tree IS the truth —

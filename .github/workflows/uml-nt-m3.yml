@@ -177,6 +177,17 @@ jobs:
           make -C uml-nt/probes
           ./uml-nt/probes/fsgsbase.exe
 
+      # M4/S4d evidence: FP/XMM state at the VEH trap boundary —
+      # capture validity (CONTEXT.FloatSave), dispatcher clobber,
+      # writeback stickiness, round-trip fidelity. Decides how the
+      # stub captures/restores xstate for guest signals (sigreturn
+      # frame fpstate). Evidence probe, not a gate.
+      - name: XSTATE probe (S4d evidence)
+        shell: msys2 {0}
+        run: |
+          make -C uml-nt/probes
+          ./uml-nt/probes/xstate.exe
+
       - name: Usage gate (no args → exit 2)
         shell: msys2 {0}
         run: |
@@ -405,4 +416,9 @@ jobs:
           grep -q "CHILD-RUN" forkwait.log || { echo "child kernel task never ran (scheduler never switched stacks?)"; exit 1; }
           grep -q "WAIT-OK: child reaped, exit 7" forkwait.log || { echo "wait4 did not reap the child with exit 7 (block path broken?)"; exit 1; }
           grep -q "FORKWAIT-OK" forkwait.log || { echo "fork/wait4 block gate incomplete"; exit 1; }
+          # M4/S4d-a: the FP/XSTATE round-trip is live — the stub
+          # captures the at-exception XSAVE_FORMAT block at every
+          # trap, the kernel pulls it into regs->fp (one log line)
+          # and pushes it back before every answer.
+          grep -q "XSTATE-CAPTURED: 512 fp bytes" forkwait.log || { echo "S4d: xstate fp round-trip never captured (stub capture or protocol v6 broken?)"; exit 1; }
           echo "M4.2 NATIVE FORK-WAIT OK: real child task + blocking wait4 via schedule()"

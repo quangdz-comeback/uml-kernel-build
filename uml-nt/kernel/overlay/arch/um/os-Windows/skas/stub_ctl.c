@@ -636,6 +636,13 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	rc = serve_conn(c);
 	if (rc == 2)
 		return 2; /* exec: c/d are dead — no mb, no evt_out */
+	/* S4d: the FP/XSTATE round-trip rides the answer (upstream
+	 * put_fp_registers parity) — after the handler/dispatch (which
+	 * is what may change regs->fp, e.g. a sigreturn) and before
+	 * the stub resumes. Task-backed conns only: the POC probe
+	 * conns have no owning pt_regs. */
+	if (c->task_backed && c->owner_regs != NULL)
+		uml_nt_fp_push(c, c->owner_regs);
 	mb();
 	nt->NtSetEvent(c->evt_out, NULL);
 	if (c->d->halt || c->d->action == UML_STUB_ACTION_KILL) {

@@ -9,7 +9,7 @@
 # log always carries the evidence for the design decision at hand.
 
 MINGW_CC := x86_64-w64-mingw32-gcc
-PROBES := fsgsbase
+PROBES := fsgsbase xstate
 
 all: $(PROBES:%=%.exe)
 

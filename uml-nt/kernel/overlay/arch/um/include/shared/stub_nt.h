@@ -43,7 +43,7 @@ typedef long long s64_nt;
 
 /* "USTB". */
 #define UML_STUB_MAGIC   0x42545355u
-#define UML_STUB_VERSION 5u /* v5: + fs_base (guest TLS, D18, S4c2) */
+#define UML_STUB_VERSION 6u /* v6: + xstate FP round-trip (S4d) */
 /* Section size (also the map granularity guard). */
 #define UML_STUB_SECTION_SIZE 0x10000u
 
@@ -166,6 +166,37 @@ struct uml_nt_stub_data {
 	 * upstream never re-applies because Linux/Ptrace keeps the
 	 * base in the task regs. */
 	unsigned long long fs_base;
+
+	/* -- v6: FP/XSTATE round-trip (S4d) -------------------------- */
+	/* Upstream UML syncs the guest FP state at EVERY trap:
+	 * get_fp_registers(pid, regs->fp) after each stop,
+	 * put_fp_registers before each continue (os-Linux/skas/
+	 * process.c). Signals copy regs->fp into the sigframe
+	 * (copy_sc_to_user) and sigreturn copies it back. The NT
+	 * analogue: the stub snapshots the at-exception FP state into
+	 * xstate[] at every trap, and applies xstate[] back at resume
+	 * when the kernel flags a restore. Format = XSAVE_FORMAT
+	 * (FXSAVE, 512 bytes) — exactly the x64 CONTEXT.FloatSave
+	 * layout, so capture is a plain copy (probes/xstate, S4d
+	 * evidence: the exception CONTEXT carries the at-exception
+	 * XMM state under CONTEXT_FLOATING_POINT, the dispatcher
+	 * clobbers the LIVE registers before the handler runs, and a
+	 * FloatSave write-back sticks through
+	 * EXCEPTION_CONTINUE_EXECUTION). 512 bytes covers x87 + SSE;
+	 * AVX/YMM state is not in the x64 CONTEXT (extended-context
+	 * API only) — a documented fidelity limit, guest musl/busybox
+	 * code is SSE-only. */
+#define UML_STUB_XS_CAPTURED 0x1u /* stub: xstate[] holds the trap FP state */
+#define UML_STUB_XS_RESTORE  0x2u /* kernel: apply xstate[] at resume */
+#define UML_STUB_XS_VERBATIM 0x4u /* kernel (syscall resume): d->regs.rip is
+				   * the EXACT resume target — no +2, no
+				   * rax=retval override (a signal handler
+				   * was installed over the trap regs) */
+#define UML_STUB_XS_SIZE     512u /* XSAVE_FORMAT bytes */
+	u32_nt xstate_flags;
+	u32_nt _pad_xs;
+	unsigned char xstate[UML_STUB_XS_SIZE]
+		__attribute__((aligned(16)));
 };
 
 #endif /* __UML_STUB_NT_H */

@@ -294,6 +294,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	CONTEXT *c = ep->ContextRecord;
 	int is_syscall = (er->ExceptionCode == STATUS_ILLEGAL_INSTRUCTION);
 	int is_fault = (er->ExceptionCode == STATUS_ACCESS_VIOLATION);
+	int verbatim;
 
 	if (!is_syscall && !is_fault)
 		return EXCEPTION_CONTINUE_SEARCH;
@@ -304,6 +305,19 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	    (uintptr_t)c->Rip >=
 		    (uintptr_t)d->ram_base + d->ram_size)
 		return EXCEPTION_CONTINUE_SEARCH;
+
+	/* S4d: snapshot the at-exception FP state (upstream parity:
+	 * get_fp_registers at every trap). The CONTEXT copy is the
+	 * ONLY at-exception snapshot — probes/xstate measured the
+	 * dispatcher clobbering the live XMMs before this handler
+	 * runs. Plain integer copy: the state is already captured by
+	 * Windows, nothing here may perturb it. */
+	if (c->ContextFlags & CONTEXT_FLOATING_POINT) {
+		memcpy(d->xstate, &c->FloatSave, UML_STUB_XS_SIZE);
+		d->xstate_flags |= UML_STUB_XS_CAPTURED;
+	}
+
+	gp_from_context(c, &d->regs);
 
 	/* D18 fast path: an fs-prefixed guest access that faults below
 	 * the guest span means the TLS base was wiped while the guest
@@ -323,7 +337,6 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
-	gp_from_context(c, &d->regs);
 	if (is_syscall) {
 		d->args[0] = d->regs.rdi; /* guest syscall ABI */
 		d->args[1] = d->regs.rsi;
@@ -344,25 +357,51 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 
 	action_chain();
 
-	/* Kernel answered. Syscall: retval in rax, resume past the ud2.
-	 * Fault: every register verbatim, rip unchanged — the faulting
-	 * instruction re-executes on the now-fixed view. */
+	/* Kernel answered. Syscall: retval in rax, resume past the ud2
+	 * — UNLESS the kernel installed a signal handler over the trap
+	 * regs (VERBATIM: d->regs.rip is already the exact target, rax
+	 * is already what the guest must see). Fault: every register
+	 * verbatim, rip unchanged — the faulting instruction
+	 * re-executes on the now-fixed view (the kernel-pushed SIGSEGV
+	 * handler state from S4d rides the same verbatim shape). */
 	gp_to_context(c, &d->regs);
+
+	/* S4d: apply the kernel's FP/XSTATE (upstream parity:
+	 * put_fp_registers before every continue). Today the bytes
+	 * are the capture's own (identity round-trip — probes/xstate:
+	 * the CONTEXT restore is faithful anyway); the kernel-written
+	 * sigreturn restore lands here too. The flags are consumed
+	 * fresh every round: read them before clearing. */
+	verbatim = (d->xstate_flags & UML_STUB_XS_VERBATIM) ? 1 : 0;
+	if (d->xstate_flags & UML_STUB_XS_RESTORE) {
+		memcpy(&c->FloatSave, d->xstate, UML_STUB_XS_SIZE);
+		c->ContextFlags |= CONTEXT_FLOATING_POINT;
+	}
+	d->xstate_flags &= ~(u32_nt)(UML_STUB_XS_RESTORE |
+				     UML_STUB_XS_VERBATIM);
+
 	if (is_syscall) {
-		c->Rax = (DWORD64)d->retval;
+		unsigned long long target;
+
+		if (verbatim) {
+			target = d->regs.rip; /* signal handler state */
+		} else {
+			c->Rax = (DWORD64)d->retval;
+			target = d->regs.rip + 2; /* past 0F 0B (ud2) */
+		}
 		/* D18: with a TLS base live, resume THROUGH the
 		 * trampoline — the context restore on the way out has
 		 * already zeroed the base, and rcx/r11 are clobbered
 		 * by the syscall contract anyway (the trampoline uses
 		 * r11 as scratch and touches nothing else). Without
-		 * TLS this stays the plain rip+2 resume the
+		 * TLS this stays the plain resume the
 		 * M1.9–M3.7 gates have always run. */
 		if (d->fs_base != 0 && have_fsgsbase) {
 			fs_tramp_base = d->fs_base;
-			fs_tramp_target = d->regs.rip + 2; /* past ud2 */
+			fs_tramp_target = target;
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_sys;
 		} else {
-			c->Rip = d->regs.rip + 2; /* past 0F 0B (ud2) */
+			c->Rip = (DWORD64)target;
 		}
 	}
 	MemoryBarrier();

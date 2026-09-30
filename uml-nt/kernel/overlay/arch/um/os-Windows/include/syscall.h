@@ -77,6 +77,13 @@ struct uml_nt_stub_conn {
 	 * hooks; task-backed conns go through the generic fork/wait4
 	 * (sys_call_table) so blocking waits ride schedule(). */
 	int task_backed;
+	/* S4d: the owning task's pt_regs (current->thread.regs.regs)
+	 * — set by the userspace() loop each round. The FP/XSTATE
+	 * round-trip pulls the trap capture into regs->fp and pushes
+	 * it back before the answer releases; signal delivery (the
+	 * next slice) reads/writes the same block. POC conns stay
+	 * NULL — no task, no FP bookkeeping. */
+	struct uml_pt_regs *owner_regs;
 };
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
@@ -158,6 +165,12 @@ void uml_nt_fork_reprotect_parent(struct uml_nt_stub_conn *c);
  * does for the parent's own resume). */
 void uml_nt_sync_trap_regs(struct uml_pt_regs *regs,
 			   const struct uml_nt_stub_data *d);
+
+/* S4d: push the task's FP block (regs->fp) into the conn's stub_data
+ * xstate[] and flag the stub to apply it at resume — the upstream
+ * put_fp_registers half (the pull is conn_pull_regs, the get half).
+ * Called by the pump before the answer releases the stub. */
+void uml_nt_fp_push(struct uml_nt_stub_conn *c, struct uml_pt_regs *regs);
 
 /* Append one stub op to the conn's plan for the current answer (the
  * syscall dispatch resets the plan at entry; ops accumulate and stream
