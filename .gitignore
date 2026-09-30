@@ -40,7 +40,3 @@ uml-nt/rootfs/build/
 uml-nt/probes/*.exe
 uml-nt/guest/*.o
 uml-nt/guest/*.elf
-
-# Ops docs — local-only (never commit; contains VM/relay internals)
-uml-nt/HANDOFF.md
-uml-nt/STATUS.md
