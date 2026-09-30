@@ -519,6 +519,7 @@ int uml_vector_recvmsg(int fd, void *hdr, int flags)
 int uml_vector_writev(int fd, void *hdr, int iovcount)
 {
 	static unsigned char out[UML_NT_NET_FRAME_MAX]; /* vCPU-only */
+	static int tx_once;
 	const struct iovec *iv = hdr;
 	unsigned int total, off = 0;
 	int i, rc;
@@ -528,6 +529,10 @@ int uml_vector_writev(int fd, void *hdr, int iovcount)
 	total = iov_len_total(iv, iovcount);
 	if (total == 0 || total > UML_NT_NET_FRAME_MAX)
 		return -EINVAL;
+	if (!tx_once) {
+		tx_once = 1;
+		os_info("net: first TX (%u bytes, fd %d)\n", total, fd);
+	}
 	/* The frame = the iovs concatenated (upstream writev sends the
 	 * scatter-gather as ONE datagram on the seqpacket pair; on the
 	 * TCP stream the 2-byte prefix re-marks the boundary). */

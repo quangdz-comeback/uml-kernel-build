@@ -593,6 +593,7 @@ static unsigned long long sys_fork_real(struct uml_nt_stub_conn *c,
  * bails the protocol round — the dead stub gets no evt_out) and the
  * userspace() loop restarts on the new conn. */
 static int exec_pending;
+static int ioctl_once; /* M5.1c.3 diag: the ioctl-done breadcrumb, once */
 
 int uml_nt_syscall_consume_exec(void)
 {
@@ -877,6 +878,11 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		 * net stack is real — the generic bridge serves both;
 		 * a non-tty fd gets the real ENOTTY. */
 		ret = sys_vfs(nr, a);
+		if (!ioctl_once) {
+			ioctl_once = 1;
+			os_info("[syscall] ioctl(0x%llx) -> %lld (done)\n",
+				a[1], (long long)ret);
+		}
 		break;
 	case 39: /* getpid */
 	case 186: /* gettid */
