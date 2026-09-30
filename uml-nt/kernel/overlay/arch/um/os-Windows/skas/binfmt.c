@@ -66,6 +66,17 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
  * a bogus layout from kvmalloc'ing wild). */
 #define UML_NT_ELF_ARG_BLOB_MAX (1ull << 20)
 
+/* The brk heap's VA headroom, carved at the TOP of the guest VA
+ * window (binfmt places the 1-run heap VMA there; sys_brk grows it
+ * upward within the reserve). 64 runs = 4MB — a systemd boot's heap
+ * on Linux peaks ~2-4MB; past it glibc takes its mmap-arena
+ * fallback. The loader's bottom-up find_free fill never reaches the
+ * top of the window in a boot (~20MB of 64 in run 36787150906), so
+ * the heap's growth range stays free — the mid-space island the
+ * identity VA created got surrounded and its first grow failed
+ * "VMA resize failed — kept", twice, in that run. */
+#define UML_NT_HEAP_VA_RESERVE (64ull * UML_NT_PHYS_RUN_SIZE)
+
 /* S4: read the packed exec-string blob through the mm whose pages
  * copy_strings wrote (the bprm mm — the conn's kernel mm; passed
  * explicitly because the tables build PRE-commit now, where
@@ -453,15 +464,35 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 
 	/* The M3.7 brk contract: one pre-reserved, pre-mapped heap run
 	 * (brk past it re-homes the heap in a bigger contiguous span —
-	 * syscall.c sys_brk, M4 slice 4). */
+	 * syscall.c sys_brk, M4 slice 4).
+	 *
+	 * The heap VA is a TOP-OF-SPACE reserve, NOT the identity
+	 * base+phys_off: the buddy's position for the run says nothing
+	 * about VA space, and the loader's find_free fills upward from
+	 * the image — a mid-space heap island got surrounded on both
+	 * sides and the first brk grow failed "VMA resize failed —
+	 * kept" (run 36787150906, twice: the heap never grew past its
+	 * one run, glibc fell to mmap arenas for the rest of the
+	 * boot). At the top with UML_NT_HEAP_VA_RESERVE of headroom,
+	 * the loader's bottom-up fill (which consumed ~20MB of VA in
+	 * that run against a 64MB window) cannot take the heap's
+	 * growth range, and brk grows in place like Linux's
+	 * [heap_start, brk) region does. On reserve exhaustion sys_brk
+	 * keeps the old brk and glibc takes its mmap-arena fallback —
+	 * the path the same run proved works. */
 	heap_off = uml_nt_phys_alloc_span(c->ph, 1);
 	if (heap_off < 0)
 		return -ENOMEM;
-	heap_va = UML_NT_GUEST_VA_BASE + (unsigned long long)heap_off;
-	if (uml_nt_vma_add(c->mm, heap_va, heap_va + UML_NT_PHYS_RUN_SIZE,
+	heap_va = UML_NT_GUEST_VA_BASE + uml_boot.physmem_size -
+		  UML_NT_HEAP_VA_RESERVE;
+	heap_va &= ~(UML_NT_PHYS_RUN_SIZE - 1);
+	if (heap_va <= UML_NT_GUEST_VA_BASE ||
+	    uml_nt_vma_add(c->mm, heap_va, heap_va + UML_NT_PHYS_RUN_SIZE,
 			   (unsigned long long)heap_off,
 			   UML_NT_PAGE_READWRITE, 0) < 0) {
 		uml_nt_phys_unref(c->ph, heap_off);
+		os_info("binfmt_umlnt: heap vma failed at 0x%llx\n",
+			heap_va);
 		return -ENOMEM;
 	}
 	c->mm->heap_start = heap_va;
