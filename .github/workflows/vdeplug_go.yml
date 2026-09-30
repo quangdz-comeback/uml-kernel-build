@@ -41,6 +41,8 @@ jobs:
       - name: Unit + e2e (fleet boot/switching/failover)
         # The e2e test is self-contained: it builds the binary itself and
         # drives fake guests over socketpairs — no UML kernel, no root.
+        # The direct-mode tests drive the D8 TCP wire (kernel role) with
+        # the production link bridge: DHCP lease + NAT44 HTTP round-trip.
         run: go test -timeout 120s -v ./...
         working-directory: vdeplug-go
 
@@ -65,6 +67,14 @@ jobs:
             goos: android
             goarch: arm64
             cgo: 0
+          # M5.1b: netstack.exe — the uml-nt helper (D8 direct TCP wire;
+          # uplink slirp only, no fleet/tap on windows).
+          - target: windows-x86_64
+            runner: ubuntu-24.04
+            goos: windows
+            goarch: amd64
+            cgo: 0
+            out: netstack.exe
     steps:
       - uses: actions/checkout@v7
 
@@ -83,13 +93,14 @@ jobs:
 
       - name: Build static vde_plug (${{ matrix.target }})
         run: |
+          OUT="${{ matrix.out || 'vde_plug' }}"
           CGO_ENABLED=${{ matrix.cgo }} GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -ldflags="-s -w" -o vde_plug .
-          file vde_plug && ls -lh vde_plug
+            go build -trimpath -ldflags="-s -w" -o "$OUT" .
+          file "$OUT" && ls -lh "$OUT"
         working-directory: vdeplug-go
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: vdeplug-go-${{ matrix.target }}
-          path: vdeplug-go/vde_plug
+          path: vdeplug-go/${{ matrix.out || 'vde_plug' }}

@@ -22,13 +22,11 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"uml-kernel-build/vdeplug-go/internal/config"
@@ -51,20 +49,20 @@ func fatalf(f string, a ...any) {
 }
 
 func main() {
-	descr, fd, vnl := parseArgs(os.Args[1:])
-	if fd < 0 {
-		fatalf("no seqpacket fd, nothing to do")
+	descr, fd, tcpListen, vnl := parseArgs(os.Args[1:])
+	if fd < 0 && tcpListen == "" {
+		fatalf("no guest wire (seqpacket://FD or tcplisten://host:port), nothing to do")
 	}
 	params := ""
 	if rest, ok := strings.CutPrefix(vnl, "slirp://"); ok {
 		params = rest
 	}
 
-	// Config lives next to the binary, like the C version resolves it.
 	self, err := os.Executable()
 	if err != nil {
 		fatalf("cannot resolve self: %v", err)
 	}
+	// Config lives next to the binary, like the C version resolves it.
 	cfg, err := config.Load(filepath.Join(filepath.Dir(self), "config.yaml"))
 	if err != nil {
 		fatalf("%v", err)
@@ -75,7 +73,14 @@ func main() {
 		logf("uplink %q", cfg.Uplink)
 	}
 
-	ep := link.New(fd, link.FrameMax-18, vdeMAC)
+	// The guest wire: seqpacket fd (Linux, upstream exec contract) or a
+	// framed TCP connection (D8 — the uml-nt kernel dials in). The
+	// platform split lives in wire_unix.go / wire_windows.go.
+	wire, err := makeGuestWire(fd, tcpListen)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	ep := link.New(wire, link.FrameMax-18, vdeMAC)
 	sw := vswitch.New()
 
 	sockPath := resolveSwitchSocket(cfg, filepath.Dir(self))
@@ -88,11 +93,31 @@ func main() {
 		mode:     cfg.SocketMode,
 		rxErr:    make(chan error, 1),
 	}
-	if !cfg.SwitchEnabled() {
-		f.runInstance(nil, nil) // one guest, one uplink; exits the process
+	if tcpListen != "" || !cfg.SwitchEnabled() {
+		// Direct p2p (upstream vde_plug shape): one guest, one uplink;
+		// no fleet, no switch socket. The local vswitch object is still
+		// the L2 bridge between the guest wire and the uplink.
+		f.runInstance(nil, nil) // exits the process
 		return
 	}
 	f.loop() // DISCOVER → PEER ⇄ HUB; only os.Exit returns
+}
+
+// listenOne binds addr and hands back the FIRST connection (the
+// kernel's dial), then stops accepting: one wire per process, the
+// upstream vde_plug contract.
+func listenOne(addr string) net.Conn {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		fatalf("listen %s: %v", addr, err)
+	}
+	logf("direct: listening on %s (waiting for the kernel dial)", addr)
+	conn, err := ln.Accept()
+	if err != nil {
+		fatalf("accept: %v", err)
+	}
+	ln.Close()
+	return conn
 }
 
 // resolveSwitchSocket follows the C binary's cascade: config `socket:` →
@@ -550,31 +575,6 @@ func peerReader(sw *vswitch.Switch, port vswitch.Port, conn transport.Conn) {
 	}
 }
 
-func waitShutdown(theNAT *nat.NAT, sw *vswitch.Switch, leasePool *dhcp.Pool, rxErr <-chan error, txErr <-chan error) {	sigs := make(chan os.Signal, 2)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
-loop:
-	for {
-		select {
-		case err := <-rxErr:
-			logf("guest link gone: %v", err)
-			break loop
-		case err := <-txErr:
-			logf("netstack pump gone: %v", err)
-			break loop
-		case s := <-sigs:
-			if s == syscall.SIGUSR1 {
-				dumpStats(theNAT, sw, leasePool)
-				continue
-			}
-			logf("received %v, exiting", s)
-			break loop
-		}
-	}
-	if theNAT != nil {
-		theNAT.Close()
-	}
-}
-
 // uplinkSink sends switched frames into netstack, except frames the
 // netstack must not see: DHCP requests (answered at the frame layer) and
 // ARP requests for addresses we don't own. With spoofing enabled,
@@ -672,11 +672,15 @@ func dumpStats(n *nat.NAT, sw *vswitch.Switch, pool *dhcp.Pool) {
 	}
 }
 
-func parseArgs(argv []string) (descr string, fd int, vnl string) {
+func parseArgs(argv []string) (descr string, fd int, tcpListen string, vnl string) {
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
 		if rest, ok := strings.CutPrefix(arg, "seqpacket://"); ok {
 			fd, _ = strconv.Atoi(rest)
+			continue
+		}
+		if rest, ok := strings.CutPrefix(arg, "tcplisten://"); ok {
+			tcpListen = rest
 			continue
 		}
 		if rest, ok := strings.CutPrefix(arg, "--descr"); ok {
@@ -697,5 +701,5 @@ func parseArgs(argv []string) (descr string, fd int, vnl string) {
 			vnl = arg
 		}
 	}
-	return descr, fd, vnl
+	return descr, fd, tcpListen, vnl
 }

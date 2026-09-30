@@ -1,6 +1,8 @@
-// Package transport abstracts the switch socket: a unix SOCK_SEQPACKET
-// socket on one machine, or a length-prefixed TCP socket across machines.
-// The address grammar (shared with config socket_file_location):
+// Package transport abstracts the switch socket AND the guest wire: a
+// unix SOCK_SEQPACKET socket on one machine, or a length-prefixed TCP
+// socket across machines / to the uml-nt kernel (D8: TCP localhost —
+// the kernel dials, the helper listens). The address grammar (shared
+// with config socket_file_location):
 //
 //	/tmp/vde.socket     unix socket file
 //	203.0.113.7:9100    TCP host:port (remote raw socket)
@@ -13,9 +15,8 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-
-	"uml-kernel-build/vdeplug-go/internal/unixseq"
 )
 
 // FrameMax mirrors link.FrameMax (kept local: transport must not depend
@@ -49,20 +50,17 @@ func IsTCP(addr string) bool {
 	return err == nil
 }
 
+// NewConnFromNet wraps a connected TCP stream as a framed Conn — the
+// guest wire the uml-nt kernel dials (2-byte big-endian length prefix
+// per frame, same as the remote-peer protocol).
+func NewConnFromNet(c net.Conn) Conn { return newTCPConn(c) }
+
 // TryConnect joins an existing switch at addr without binding anything.
 func TryConnect(addr string) (Conn, error) {
 	if IsTCP(addr) {
-		c, err := net.DialTimeout("tcp", addr, 3*time.Second)
-		if err != nil {
-			return nil, err
-		}
-		return tcpConn{c.(*net.TCPConn)}, nil
+		return tryConnectTCP(addr)
 	}
-	c, err := unixseq.TryConnect(addr)
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
+	return tryConnectUnix(addr)
 }
 
 // BindOrConnect joins an existing switch at addr, or binds it (becoming
@@ -70,57 +68,60 @@ func TryConnect(addr string) (Conn, error) {
 // conn != nil (peer side).
 func BindOrConnect(addr string, mode uint32) (Listener, Conn, error) {
 	if IsTCP(addr) {
-		if c, err := TryConnect(addr); err == nil {
-			return nil, c, nil
-		}
-		l, err := net.Listen("tcp", addr)
-		if err != nil {
-			return nil, nil, fmt.Errorf("listen %s: %w", addr, err)
-		}
-		return tcpListener{l.(*net.TCPListener)}, nil, nil
+		return bindOrConnectTCP(addr)
 	}
-	ln, conn, err := unixseq.BindOrConnect(addr, mode)
-	if err != nil {
-		return nil, nil, err
-	}
-	if conn != nil {
-		return nil, conn, nil
-	}
-	return unixListener{ln}, nil, nil
+	return bindOrConnectUnix(addr, mode)
 }
 
-// --- unix adapters (the concrete types already have the right shapes) ---
-
-type unixConn struct{ *unixseq.Conn }
-
-type unixListener struct{ l *unixseq.Listener }
-
-func (w unixListener) Accept() (Conn, error) {
-	c, err := w.l.Accept()
+func tryConnectTCP(addr string) (Conn, error) {
+	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	return unixConn{c}, nil
+	return newTCPConn(c.(*net.TCPConn)), nil
 }
 
-func (w unixListener) Close() { w.l.Close() }
+func bindOrConnectTCP(addr string) (Listener, Conn, error) {
+	if c, err := tryConnectTCP(addr); err == nil {
+		return nil, c, nil
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen %s: %w", addr, err)
+	}
+	return tcpListener{l: l.(*net.TCPListener)}, nil, nil
+}
 
 // --- TCP: 2-byte big-endian length prefix per frame ---
+//
+// Writes take a mutex: the switch forwards to the guest wire from more
+// than one goroutine (the netstack TX pump and the frame-layer DHCP
+// replies), and interleaved stream writes would corrupt the framing.
+// The seqpacket wire never needed this (one message = one write).
 
-type tcpConn struct{ c *net.TCPConn }
+type tcpConn struct {
+	c   net.Conn
+	wmu sync.Mutex
+}
 
-func (t tcpConn) SendFrame(b []byte) error {
+func newTCPConn(c net.Conn) *tcpConn { return &tcpConn{c: c} }
+
+func (t *tcpConn) SendFrame(b []byte) error {
 	if len(b) > FrameMax {
 		return fmt.Errorf("frame %d exceeds %d", len(b), FrameMax)
 	}
-	head := make([]byte, 2, 2+len(b))
-	binary.BigEndian.PutUint16(head, uint16(len(b)))
-	head = append(head, b...)
-	_, err := t.c.Write(head)
+	var head [2]byte
+	binary.BigEndian.PutUint16(head[:], uint16(len(b)))
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	if _, err := t.c.Write(head[:]); err != nil {
+		return err
+	}
+	_, err := t.c.Write(b)
 	return err
 }
 
-func (t tcpConn) RecvFrame(buf []byte) (int, error) {
+func (t *tcpConn) RecvFrame(buf []byte) (int, error) {
 	var head [2]byte
 	if _, err := io.ReadFull(t.c, head[:]); err != nil {
 		return 0, err
@@ -138,7 +139,7 @@ func (t tcpConn) RecvFrame(buf []byte) (int, error) {
 	return n, nil
 }
 
-func (t tcpConn) Close() { t.c.Close() }
+func (t *tcpConn) Close() { t.c.Close() }
 
 type tcpListener struct{ l *net.TCPListener }
 
@@ -147,7 +148,7 @@ func (t tcpListener) Accept() (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return tcpConn{c.(*net.TCPConn)}, nil
+	return newTCPConn(c.(*net.TCPConn)), nil
 }
 
 func (t tcpListener) Close() { t.l.Close() }

@@ -1,5 +1,11 @@
-// Package link bridges one SOCK_SEQPACKET fd (the UML vector vde transport)
-// and a gVisor netstack, one Ethernet frame per socket message.
+// Package link bridges one guest wire (the UML vector transport's frame
+// channel) and a gVisor netstack, one Ethernet frame per wire message.
+//
+// The wire is abstracted by the Wire interface: on Linux it is the
+// SOCK_SEQPACKET fd UML execs the helper with (link_unix.go); on
+// Windows — and for TCP-loopback testing everywhere — it is a framed
+// TCP connection (transport.Conn; the kernel dials in, D8). Both carry
+// one frame per message/length-prefix.
 //
 // It wraps channel.Endpoint because that type is raw-IP style: it reports
 // ARPHardwareNone (so netstack would never answer ARP), a zero
@@ -11,13 +17,11 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strings"
 	"sync/atomic"
 
-	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -55,11 +59,21 @@ type Stats struct {
 	Dropped   atomic.Uint64
 }
 
-// EtherEndpoint implements stack.LinkEndpoint over a seqpacket fd.
+// Wire is one guest wire: one frame per SendFrame/RecvFrame call, with
+// per-frame boundaries preserved (seqpacket message or length prefix).
+// transport.Conn satisfies this structurally (framed TCP); the unix
+// seqpacket fd adapter lives in link_unix.go.
+type Wire interface {
+	SendFrame([]byte) error
+	RecvFrame([]byte) (int, error)
+	Close()
+}
+
+// EtherEndpoint implements stack.LinkEndpoint over a guest wire.
 type EtherEndpoint struct {
 	*channel.Endpoint
 
-	fd       int
+	wire     Wire
 	linkAddr tcpip.LinkAddress
 	Stats    Stats
 
@@ -67,11 +81,13 @@ type EtherEndpoint struct {
 	sink     atomic.Pointer[func(frame []byte)] // netstack TX -> switch
 }
 
-// New wraps fd (a connected SOCK_SEQPACKET from UML) as an Ethernet device.
-func New(fd int, mtu uint32, linkAddr tcpip.LinkAddress) *EtherEndpoint {
+// New wraps wire (the connected guest-side frame channel) as an
+// Ethernet device. On Linux the seqpacket fd adapts via NewFD
+// (link_unix.go); the TCP wire comes from transport.NewConnFromNet.
+func New(wire Wire, mtu uint32, linkAddr tcpip.LinkAddress) *EtherEndpoint {
 	return &EtherEndpoint{
 		Endpoint: channel.New(512, mtu, linkAddr),
-		fd:       fd,
+		wire:     wire,
 		linkAddr: linkAddr,
 	}
 }
@@ -183,36 +199,23 @@ func (e *EtherEndpoint) Inject(frame []byte) {
 	e.Stats.RxBytes.Add(uint64(len(frame)))
 }
 
-// SendFrame writes one frame to the guest (blocking; the seqpacket applies
-// natural backpressure).
+// SendFrame writes one frame to the guest wire (blocking; the seqpacket
+// applies natural backpressure, the TCP wire is length-prefixed).
 func (e *EtherEndpoint) SendFrame(b []byte) error {
-	for {
-		err := unix.Sendmsg(e.fd, b, nil, nil, 0)
-		if err == unix.EINTR {
-			continue
-		}
-		return err
-	}
+	return e.wire.SendFrame(b)
 }
 
-// RecvFrame reads one frame from the guest. Blocking; retries EINTR.
-// Returns error when the guest side is gone — including the (0, nil) EOF
-// a SEQPACKET peer close delivers, so no consumer can spin on it.
+// RecvFrame reads one frame from the guest wire. Blocking. Returns an
+// error when the guest side is gone — including the (0, nil) EOF a
+// SEQPACKET peer close delivers and the ReadFull EOF of the TCP wire —
+// so no consumer can spin on it.
 func (e *EtherEndpoint) RecvFrame(buf []byte) (int, error) {
-	for {
-		n, _, _, _, err := unix.Recvmsg(e.fd, buf, nil, 0)
-		if err == unix.EINTR {
-			continue
-		}
-		if n == 0 && err == nil {
-			return 0, io.EOF
-		}
-		if n >= 12 {
-			mac := tcpip.LinkAddress(buf[6:12])
-			e.guestMAC.Store(&mac)
-		}
-		return n, err
+	n, err := e.wire.RecvFrame(buf)
+	if err == nil && n >= 12 {
+		mac := tcpip.LinkAddress(buf[6:12])
+		e.guestMAC.Store(&mac)
 	}
+	return n, err
 }
 
 func linkClosed(err error) error {

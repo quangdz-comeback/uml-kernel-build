@@ -1,7 +1,10 @@
+//go:build unix
+
 // Package unixseq is the SOCK_SEQPACKET unix switch socket: the first
 // vde_plug on a machine binds it and becomes the hub; later ones connect
 // and become plain peer wires. Framing is one Ethernet frame per message,
 // no handshake — same protocol as the C binary's hub.
+// (Windows has no AF_UNIX — D8; the uml-nt kernel speaks TCP localhost.)
 package unixseq
 
 import (

@@ -1,11 +1,14 @@
 // Package elect referees hub failover for the switch socket.
 //
-// The hub seat is a flock on <socket>.lock: the kernel releases it when
+// The hub seat is a lock on <socket>.lock: the kernel releases it when
 // the holder dies (even SIGKILL), so a seat fight needs no election
 // protocol. Peers noticing a dead hub (EOF, or heartbeats gone silent)
 // contend for the lock; the winner binds the socket and becomes the hub,
 // losers reconnect as peers. Split-brain is structurally impossible: the
 // lock is exclusive and the socket is only ever bound while holding it.
+// The lock is platform-specific (flock on unix — elect_unix.go); on
+// Windows there is no fleet (the uml-nt helper runs direct, one guest
+// wire per process) and TryLock always fails.
 //
 // Heartbeats are broadcast frames (ethertype 0x88B5) the hub floods
 // through the switch. They carry the DHCP lease table, so a promoted
@@ -16,29 +19,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-
-	"golang.org/x/sys/unix"
 )
 
 // ErrSeatHeld means another instance holds the hub seat.
 var ErrSeatHeld = errors.New("hub seat already held")
-
-// TryLock takes the hub seat for the switch at socketPath, or fails with
-// ErrSeatHeld. The returned release func drops the lock; the kernel
-// drops it anyway when the process dies. The lock file itself is never
-// removed.
-func TryLock(socketPath string) (release func(), err error) {
-	lockPath := socketPath + ".lock"
-	fd, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", lockPath, err)
-	}
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		unix.Close(fd)
-		return nil, ErrSeatHeld
-	}
-	return func() { unix.Close(fd) }, nil
-}
 
 // BeaconEthertype is an IEEE local-experimental ethertype; guest kernels
 // silently ignore frames carrying it.

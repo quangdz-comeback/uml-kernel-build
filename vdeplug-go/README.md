@@ -9,7 +9,9 @@ pump, no failover, and no isolation between guests.
 ## Layout
 
     main.go               fleet state machine + runInstance (all uplinks)
-    internal/link         seqpacket fd <-> gVisor channel.Endpoint bridge
+    wire_unix.go          guest wire: seqpacket fd (Linux) or framed TCP
+    wire_windows.go       guest wire: framed TCP only (D8)
+    internal/link         guest wire <-> gVisor channel.Endpoint bridge
     internal/vswitch      L2 switch: MAC learning, flood, inline fast path
     internal/nat          netstack NAT (NAT44, NAPT66, ICMP, DNS)
     internal/dhcp         frame-layer DHCP server + lease pool w/ restore
@@ -18,6 +20,24 @@ pump, no failover, and no isolation between guests.
     internal/unixseq      SOCK_SEQPACKET bind/connect/accept helpers
     internal/elect        flock seat + heartbeat/lease-gossip beacons
     e2e_test.go           full fleet failover test, no UML kernel needed
+    e2e_tcp_test.go       direct-mode TCP wire e2e: DHCP lease + NAT HTTP
+
+## Direct mode — the uml-nt kernel wire (`tcplisten://`)
+
+uml-nt (the Windows port) has no AF_UNIX and no exec-with-inherited-fd:
+its kernel dials the helper over **TCP localhost** (D8). Direct mode is
+the upstream vde_plug shape — one process, one guest wire, one uplink,
+no fleet:
+
+    netstack.exe --descr vec0 tcplisten://127.0.0.1:9100 slirp://
+
+The helper listens on 127.0.0.1:9100, accepts the kernel's single
+connection, and bridges it into the netstack (slirp uplink: NAT44 +
+DHCP + DNS). Every frame crosses the wire as a 2-byte big-endian
+length-prefixed buffer — the same protocol the TCP switch transport
+speaks to remote peers. Windows builds (`GOOS=windows`, artifact
+`netstack.exe`) compile the direct path only: no fleet election (flock),
+no tap (tun/tap), no SIGUSR1 stats.
 
 ## Roles and failover
 

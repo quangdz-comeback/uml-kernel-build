@@ -1,7 +1,10 @@
+//go:build unix
+
 // Package tap attaches the switch to a host tap device (uplink
 // "tap:NAME"): the guest joins the host's L2 as-is — no NAT, no DHCP
 // from us; the tap side owns addressing. Creating the device needs
 // CAP_NET_ADMIN (setcap the binary or pre-create persistent taps).
+// There is no tun/tap on Windows (uplink slirp only — D8).
 package tap
 
 import (
