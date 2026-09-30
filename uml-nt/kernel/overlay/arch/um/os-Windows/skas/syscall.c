@@ -803,6 +803,25 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 20: /* writev — musl __stdio_write IS writev: every byte
 		  * busybox prints goes through here (fd 1/2 = the
 		  * real console files of the exec'd task) */
+	case 41: /* socket — M5.1c: AF_PACKET (udhcpc), AF_INET/ICMP
+		  * (ping) — in-guest kernel sockets, no host side */
+	case 42: /* connect */
+	case 43: /* accept */
+	case 44: /* sendto — the DHCP DISCOVER / ICMP echo */
+	case 45: /* recvfrom — the OFFER/ACK / echo reply */
+	case 46: /* sendmsg */
+	case 47: /* recvmsg */
+	case 48: /* shutdown */
+	case 49: /* bind — udhcpc's AF_PACKET sll bind */
+	case 50: /* listen */
+	case 53: /* socketpair */
+	case 54: /* setsockopt — SO_BROADCAST, SO_ATTACH_FILTER */
+	case 55: /* getsockopt */
+	case 7: /* poll — udhcpc waits the lease window in poll() */
+	case 23: /* select */
+	case 270: /* pselect6 */
+	case 35: /* nanosleep — ping interval, retry loops (hrtimer
+		  * machinery: the same clock the sysbench window ran) */
 		ret = sys_vfs(nr, a);
 		break;
 	case 1: /* write */
@@ -851,8 +870,13 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		}
 		ret = SC_RET(SC_ENOSYS);
 		break;
-	case 16: /* ioctl — console is non-tty-interative for now */
-		ret = SC_RET(SC_ENOTTY);
+	case 16: /* ioctl — REAL: the net ioctls (SIOCGIFHWADDR/
+		 * SIOCGIFINDEX/SIOCSIFADDR/SIOCSIFFLAGS/SIOCADDRT —
+		 * ifconfig/udhcpc/ping wiring) plus the tty ioctls
+		 * musl isatty sends. The console IS a real tty and the
+		 * net stack is real — the generic bridge serves both;
+		 * a non-tty fd gets the real ENOTTY. */
+		ret = sys_vfs(nr, a);
 		break;
 	case 39: /* getpid */
 	case 186: /* gettid */

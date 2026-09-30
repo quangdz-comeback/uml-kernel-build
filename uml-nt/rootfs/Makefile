@@ -120,6 +120,10 @@ build/busybox-$(BUSYBOX_VER)/busybox:
 	       -e 's/^# CONFIG_ASH is not set/CONFIG_ASH=y/' \
 	       -e 's/^# CONFIG_ASH_ECHO is not set/CONFIG_ASH_ECHO=y/' \
 	       -e 's/^# CONFIG_ECHO is not set/CONFIG_ECHO=y/' \
+	       -e 's/^# CONFIG_UDHCPC is not set/CONFIG_UDHCPC=y/' \
+	       -e 's/^# CONFIG_IFCONFIG is not set/CONFIG_IFCONFIG=y/' \
+	       -e 's/^# CONFIG_ROUTE is not set/CONFIG_ROUTE=y/' \
+	       -e 's/^# CONFIG_PING is not set/CONFIG_PING=y/' \
 	       -e 's/^CONFIG_EXTRA_LDFLAGS=.*/CONFIG_EXTRA_LDFLAGS="-fuse-ld=lld -static -Wl,--image-base=$(IMAGE_BASE)"/' \
 	       build/busybox-$(BUSYBOX_VER)/.config
 	make -C build/busybox-$(BUSYBOX_VER) -j$(shell nproc) \
@@ -134,11 +138,43 @@ staging/bin/busybox: build/busybox-$(BUSYBOX_VER)/busybox
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "busybox must be a static ELF" >&2; exit 1; }
 
+# udhcpc execs its helper script via /bin/sh — the one busybox symlink
+# the net gate needs (the other applets are called through /bin/busybox
+# explicitly).
+staging/bin/sh: staging/bin/busybox
+	ln -sf busybox $@
+
+# M5.1c: the udhcpc helper script (busybox udhcpc convention: called
+# as <script> <deconfig|bound|renew> with ip/subnet/router in env).
+# bound = configure the interface + default route + the LEASE marker.
+staging/etc/udhcpc.script:
+	@mkdir -p staging/etc
+	printf '#!/bin/sh\ncase "$$1" in\n  bound|renew)\n    /bin/busybox ifconfig $$interface $$ip netmask $${subnet:-255.255.255.0}\n    [ -n "$$router" ] && /bin/busybox route add default gw $$router dev $$interface\n    echo NET-LEASE-OK ip=$$ip gw=$$router\n    ;;\nesac\n' > $@
+	chmod +x $@
+
+# M5.1c: the net gate script — eth0 up (the vector device), DHCP lease
+# through the D8 channel (vector TX + the D19 reader ring), then ping
+# the NAT gateway (10.0.2.2 — vdeplug-go slirp parity). The two markers
+# are the CI gate's evidence: they only print when the lease landed
+# and the gateway answered.
+staging/net.sh:
+	@mkdir -p staging
+	printf '/bin/busybox ifconfig eth0 up\n/bin/busybox udhcpc -i eth0 -n -q -s /etc/udhcpc.script\n/bin/busybox ping -c 2 10.0.2.2 && echo NET-PING-GW-OK\n' > $@
+	chmod +x $@
+
+# M5.1c: the net gate guest — PID 1 (init=/bin/netsetup) execve()s
+# busybox sh onto /net.sh above.
+staging/bin/netsetup: ../guest/netsetup.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
 rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
 	     staging/bin/step2 staging/bin/bench staging/bin/forkwait \
 	     staging/bin/sigtest staging/bin/heaptest \
 	     staging/bin/guardtest staging/bin/sysbench \
-	     staging/bin/busybox
+	     staging/bin/busybox staging/bin/sh \
+	     staging/etc/udhcpc.script staging/net.sh \
+	     staging/bin/netsetup
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 

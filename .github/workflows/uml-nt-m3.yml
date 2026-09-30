@@ -576,3 +576,51 @@ jobs:
           grep -q "NETPROBE-TCP-OK 512 bytes" netprobe.log || { echo "framed round-trip never completed (framing/stream bug? see log)"; exit 1; }
           grep -q "NETPROBE-FAIL" netprobe.log && { echo "probe reported failure"; exit 1; }
           echo "M5.1a NATIVE TCP PROBE OK: freestanding kernel dialed + framed round-trip via ws2_32"
+
+      # M5.1b/c: the netstack helper — vdeplug-go compiled for the
+      # runner (netstack.exe, D8 direct p2p mode: tcplisten:// +
+      # slirp:// uplink). Committed go.mod/go.sum (the known-good
+      # floor; the dedicated vdeplug_go.yml floats deps weekly).
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Build netstack.exe (vdeplug-go, D8 helper)
+        shell: msys2 {0}
+        run: |
+          cd vdeplug-go
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" \
+            -o ../uml-nt/launcher/netstack.exe .
+          ls -lh ../uml-nt/launcher/netstack.exe
+
+      # M5.1c: the vector device end to end — the kernel spawns
+      # netstack.exe (uml_nt_netstack=), dials the D8 TCP channel
+      # (vec0:transport=vde,vnl=...), the guest's udhcpc leases
+      # through it (vector TX ring → helper DHCP → OFFER/ACK → the
+      # D19 reader ring → the guest IP stack) and pings the NAT
+      # gateway (10.0.2.2 — slirp parity). PID 1 = /bin/netsetup,
+      # which execve()s busybox sh onto /net.sh (the applet markers
+      # are the evidence; PID 1 exit = the usual panic exit 1).
+      - name: NATIVE net gate (M5.1c)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          NETSTACK=$(cygpath -w "$(pwd)/netstack.exe")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "uml_nt_netstack=$NETSTACK" \
+            "ubd0=$ROOTFS" "root=98:0" \
+            "vec0:transport=vde,vnl=127.0.0.1:9100" \
+            "init=/bin/netsetup" > net.log 2>&1
+          code=$?
+          set -e
+          cat net.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code (boot hung elsewhere? see log)"; exit 1; }
+          grep -q "net: dialed 127.0.0.1:9100" net.log || { echo "kernel never dialed the netstack channel (helper spawn / D8 dial broken? see log)"; exit 1; }
+          grep -q "NET-LEASE-OK" net.log || { echo "udhcpc never got a lease (vector TX / DHCP path / reader ring broken? see [syscall] ENOSYS lines)"; exit 1; }
+          grep -q "NET-PING-GW-OK" net.log || { echo "ping gateway never answered (ICMP through the NAT broken? see log)"; exit 1; }
+          echo "M5.1c NATIVE NET OK: vec0 up + udhcpc lease + ping gateway through the D8 TCP channel"
