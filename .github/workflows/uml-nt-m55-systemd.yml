@@ -15,9 +15,15 @@ name: "uml-nt M5.5a systemd boot (native referee)"
 #
 # workflow_dispatch only during the iteration loop (CI stays fast on
 # push); flip to a weekly canary once basic.target is green (M5.5).
+# The push trigger lists ONLY this file: GitHub registers a dispatch
+# workflow from the branch when it first lands, but the event itself
+# then never fires on ordinary pushes (paths filter).
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["uml-nt/**"]
+    paths: [".github/workflows/uml-nt-m55-systemd.yml"]
 
 permissions:
   contents: read
