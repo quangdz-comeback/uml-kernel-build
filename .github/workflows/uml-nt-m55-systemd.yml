@@ -125,9 +125,13 @@ jobs:
         run: |
           cd uml-nt/launcher
           set +e
-          timeout 420 ./launcher.exe ../../build/vmlinux \
+          # 900s (was 420): mem=120M boots go deeper than the old cap
+          # could film — the evidence (census lines, the failing
+          # put_user) must land before the kill.
+          timeout 900 ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
+            "mem=120M" \
             "root=98:0" "rw" > systemd.log 2>&1
           code=$?
           set -e
