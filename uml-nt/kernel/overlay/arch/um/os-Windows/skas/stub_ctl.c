@@ -32,7 +32,8 @@
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/sched/signal.h> /* force_sig_fault — the guest SIGSEGV (S4d) */
+#include <linux/sched/signal.h>
+#include <linux/sched/task_stack.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <init.h>
@@ -429,6 +430,59 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 static struct uml_nt_stub_conn *fork_pending_parent;
 static unsigned long long fork_pending_rsp;
 
+/* ---- M5.1c.4: switch-trace ring + the fork_handler birth trace ----
+ *
+ * The M5.1c fault dies at the final retq of um_set_signals_trace with
+ * a garbage return slot, on a vmalloc'd task stack ~146KB away from
+ * the one the ioctl ran on — i.e. the crash window spans several task
+ * switches the log never names. The ring records every switch (pids +
+ * the incoming task's state + stack base); the crash reporter prints
+ * it, so a crash names the task chain that led to it instead of a
+ * naked rsp. The hook calls arrive via patch 0017 (guarded
+ * CONFIG_OS_WINDOWS) — this file already carries the sched headers
+ * (skas/process.c cannot: its user.h include collides). */
+
+static struct uml_nt_switch_rec switch_ring[UML_NT_SWITCH_RING];
+static unsigned int switch_ring_n, switch_ring_i;
+static int stale_task_warned;
+
+unsigned long long uml_nt_switch_ring(const struct uml_nt_switch_rec **out)
+{
+	*out = switch_ring;
+	return switch_ring_n;
+}
+
+void uml_nt_switch_trace(void *from, void *to)
+{
+	struct task_struct *f = from, *t = to;
+
+	/* The "half-baked task in the runqueue" tripwire (039 audit
+	 * item): __schedule() sets TASK_RUNNING on `to` before picking
+	 * it, so anything else here is a stale/zombie context being
+	 * switched to — say so loudly at the switch itself. */
+	if (t->__state != TASK_RUNNING && !stale_task_warned) {
+		stale_task_warned = 1;
+		os_warn("switch: to-task %d state=%ld — not TASK_RUNNING "
+			"at switch time\n", t->pid, (long)t->__state);
+	}
+	switch_ring[switch_ring_i].from_pid = f->pid;
+	switch_ring[switch_ring_i].to_pid = t->pid;
+	switch_ring[switch_ring_i].to_state = (unsigned long)t->__state;
+	switch_ring[switch_ring_i].to_stack =
+		(unsigned long long)(uintptr_t)task_stack_page(t);
+	switch_ring_i = (switch_ring_i + 1) % UML_NT_SWITCH_RING;
+	switch_ring_n++;
+}
+
+void uml_nt_fork_trace(void)
+{
+	/* fork_handler = a task's first breath on its cold vmalloc'd
+	 * stack. One line per task: the log + the crash ring can then
+	 * attribute every stack base to its owner. */
+	os_info("fork_handler: task %d stack %px\n", current->pid,
+		task_stack_page(current));
+}
+
 void uml_nt_fork_arm(struct uml_nt_stub_conn *parent, unsigned long long rsp)
 {
 	fork_pending_parent = parent;
@@ -686,9 +740,20 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * boot conn's trap slot holds bootstrap garbage (rip=2,
 	 * rsp=0xffffffffffffe000) — interrupt_end() on that state is
 	 * meaningless (found on the first wine run: the rsp-fixup
-	 * EFAULTed at frame ffffffffffffe000). */
+	 * EFAULTed at frame ffffffffffffe000).
+	 *
+	 * M5.1c.4 (net gate): the INIT guard was NOT enough — the op-
+	 * streaming rounds (cmd=PROT_DONE, the stub applying INIT/plan
+	 * ops) publish a result WITHOUT touching d->regs, so their
+	 * trap slot is STILL the bootstrap garbage; interrupt_end()
+	 * ran on it, polluted the task's pt_regs via sync_trap_regs
+	 * and EFAULTed the sigframe rsp fixup (frame ffffffffffffe000,
+	 * seen right after the udhcpc-conn INIT round). Deliver only
+	 * on REAL trap rounds (SYSCALL/FAULT publish d->regs); op
+	 * results deliver at the next real trap. */
 	if (c->task_backed && c->owner_regs != NULL &&
-	    c->d->cmd != UML_STUB_CMD_INIT) {
+	    (c->d->cmd == UML_STUB_CMD_SYSCALL ||
+	     c->d->cmd == UML_STUB_CMD_FAULT)) {
 		if (c->plan_left == 0)
 			uml_nt_signal_check(c);
 		uml_nt_fp_push(c, c->owner_regs);

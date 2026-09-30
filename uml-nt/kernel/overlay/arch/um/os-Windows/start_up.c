@@ -9,6 +9,8 @@
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/sched/task_stack.h>
 #include <ntabi.h>
 #include <stub-panic.h>
 
@@ -110,12 +112,16 @@ static void uml_nt_crash_scan_stack(unsigned long long rsp)
 
 	/* RAW window first (M5.1c.3 diagnosis): the smash pattern itself
 	 * (runs of -1, heap pointers, repeated values) names the writer
-	 * even when no text address survives. */
+	 * even when no text address survives. M5.1c.4: start BELOW rsp
+	 * too — a faulted/completed retq's return-address slot sits at
+	 * [rsp-8] (the pop moved rsp past it); without this the slot
+	 * that named the crash was never dumped. */
 	{
 		char line[128];
+		unsigned long long lo = rsp >= 0x200 ? rsp - 0x200 : 0;
 
-		for (va = rsp & ~(unsigned long long)7, n = 0;
-		     n < 24 && va < rsp + 0x200; va += 8, n++) {
+		for (va = lo & ~(unsigned long long)7, n = 0;
+		     n < 72 && va < rsp + 0x200; va += 8, n++) {
 			int m;
 
 			if ((va & ~0xfffULL) != pg) {
@@ -197,13 +203,16 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 
 	n = snprintf(buf, sizeof(buf),
 		     "\numl-nt: KERNEL NATIVE FAULT code=%08x rip=%llx "
-		     "rsp=%llx op=%d info1=%llx tid=%llu — terminating\n",
+		     "rsp=%llx op=%d info1=%llx exaddr=%llx tid=%llu — "
+		     "terminating\n",
 		     r != NULL ? (unsigned int)r->code : 0, rip,
 		     (e != NULL && e->context != NULL) ?
 			     UML_NT_X64_CTX_RSP(e->context) : 0,
 		     (r != NULL && r->nparams > 1) ?
 			     (int)r->info[0] : -1,
 		     (r != NULL && r->nparams > 1) ? r->info[1] : 0,
+		     (r != NULL) ? (unsigned long long)(uintptr_t)
+				     r->address : 0,
 		     uml_nt_current_tid());
 	if (n > 0)
 		uml_nt_crash_write(buf, (unsigned int)n);
@@ -247,6 +256,40 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 		if (n > 0)
 			uml_nt_crash_write(buf, (unsigned int)n);
 		uml_nt_crash_scan_stack(UML_NT_X64_CTX_RSP(e->context));
+	}
+	/* M5.1c.4: WHO was running + the switch chain that led here.
+	 * The TEB bounds above are NOT the kernel's truth (kernel
+	 * contexts run on vmalloc'd task stacks — inbounds=0 is
+	 * normal); the task identity + the last 32 switches are. */
+	{
+		const struct uml_nt_switch_rec *ring;
+		unsigned long long have, i;
+		struct task_struct *t = current;
+
+		n = snprintf(buf, sizeof(buf),
+			     "  task=%d stack=%px state=%ld\n",
+			     t->pid, task_stack_page(t),
+			     (long)t->__state);
+		if (n > 0)
+			uml_nt_crash_write(buf, (unsigned int)n);
+		have = uml_nt_switch_ring(&ring);
+		for (i = 0; i < have && i < UML_NT_SWITCH_RING; i++) {
+			unsigned long long idx =
+				(have <= UML_NT_SWITCH_RING) ?
+					i :
+					(have - UML_NT_SWITCH_RING + i) %
+					UML_NT_SWITCH_RING;
+
+			n = snprintf(buf, sizeof(buf),
+				     "  sw[%llu] %llu -> %llu state=%llu "
+				     "stack=%llx\n",
+				     i, ring[idx].from_pid,
+				     ring[idx].to_pid,
+				     ring[idx].to_state,
+				     ring[idx].to_stack);
+			if (n > 0)
+				uml_nt_crash_write(buf, (unsigned int)n);
+		}
 	}
 	if (nt != NULL)
 		nt->NtTerminateProcess(UML_NT_CURRENT_PROCESS, 1);

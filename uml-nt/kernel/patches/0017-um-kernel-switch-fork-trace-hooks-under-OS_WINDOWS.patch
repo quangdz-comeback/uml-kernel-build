@@ -1,0 +1,61 @@
+uml: kernel switch/fork trace hooks under OS_WINDOWS
+
+The M5.1c native fault dies at the final retq of um_set_signals_trace
+with a garbage return slot, on a vmalloc'd task stack far from the one
+the ioctl ran on — the crash window spans several task switches the
+log never names, and the "half-baked task in the runqueue" question
+(039 audit item) needs the switch chain as evidence. Two minimal hook
+calls; all logic (32-entry ring, stale-task WARN, fork_handler birth
+line) lives in the os-Windows overlay (skas/stub_ctl.c) so the Linux
+build of this file stays untouched.
+
+Why hooks and not instrumenting switch_threads directly: __switch_to
+is the only place that sees the task_structs around the setjmp/longjmp
+(switch_threads sees bare jmp_bufs); fork_handler is "called magically"
+(its address is stuffed into a jmp_buf), so its trace must be inside
+the body. The __switch_to hook sits BEFORE switch_threads: after it,
+this frame only resumes when the task is switched back IN, and the
+from/to args would be stale.
+---
+--- a/arch/um/kernel/process.c	2026-09-30 10:12:44.885197484 +0000
++++ b/arch/um/kernel/process.c	2026-09-30 10:12:50.681338808 +0000
+@@ -28,6 +28,14 @@
+ #include <asm/current.h>
+ #include <asm/mmu_context.h>
+ #include <asm/switch_to.h>
++
++/* M5.1c.4: switch-trace hooks, defined in the os-Windows overlay
++ * (skas/stub_ctl.c). Guarded: no other os backend provides them (D7
++ * ports keep their own diagnostics). */
++#ifdef CONFIG_OS_WINDOWS
++void uml_nt_switch_trace(void *from, void *to);
++void uml_nt_fork_trace(void);
++#endif
+ #include <asm/exec.h>
+ #include <linux/uaccess.h>
+ #include <as-layout.h>
+@@ -75,6 +83,12 @@
+ 	to->thread.prev_sched = from;
+ 	set_current(to);
+ 
++#ifdef CONFIG_OS_WINDOWS
++	/* BEFORE the longjmp: this frame only resumes when the task is
++	 * switched back IN — after switch_threads the from/to args are
++	 * stale. */
++	uml_nt_switch_trace(from, to);
++#endif
+ 	switch_threads(&from->thread.switch_buf, &to->thread.switch_buf);
+ 	arch_switch_to(current);
+ 
+@@ -129,6 +143,11 @@
+ /* Called magically, see new_thread_handler above */
+ static void fork_handler(void)
+ {
++#ifdef CONFIG_OS_WINDOWS
++	/* A task's first breath on its cold vmalloc'd stack — one log
++	 * line attributing every stack base to its owner task. */
++	uml_nt_fork_trace();
++#endif
+ 	schedule_tail(current->thread.prev_sched);
+ 
+ 	/*

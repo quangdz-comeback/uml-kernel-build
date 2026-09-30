@@ -64,4 +64,25 @@ void uml_nt_sigio_flush(void);
  * at thread entry, printed by the crash reporter. */
 extern const char *uml_nt_thread_role;
 
+/* skas/process.c (M5.1c.4): scheduler switch-trace ring. The hooks are
+ * called from arch/um/kernel/process.c (__switch_to / fork_handler)
+ * via patch 0017 under CONFIG_OS_WINDOWS; the crash reporter prints
+ * the ring so a crash names the task chain that led to it (the M5.1c
+ * fault dies on a task stack that is NOT the one the switch history
+ * explains — the ring discriminates stale-task vs switch mid-flush). */
+struct uml_nt_switch_rec {
+	unsigned long long from_pid, to_pid, to_state, to_stack;
+};
+
+#define UML_NT_SWITCH_RING 32
+
+/* Snapshot of the last UML_NT_SWITCH_RECORD switches; *out points at
+ * the ring, the return value = number of valid records (oldest first). */
+unsigned long long uml_nt_switch_ring(const struct uml_nt_switch_rec **out);
+
+/* void task_struct* args: internal.h stays sched.h-free (os modules
+ * include it without kernel/sched types); skas/process.c casts. */
+void uml_nt_switch_trace(void *from, void *to);
+void uml_nt_fork_trace(void);
+
 #endif
