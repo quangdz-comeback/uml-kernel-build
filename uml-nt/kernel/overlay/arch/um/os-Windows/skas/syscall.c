@@ -1313,6 +1313,13 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 334: /* rseq — glibc registers the per-task rseq block;
 		   * failure is tolerated by the guest, but the real
 		   * syscall rides the walker fine */
+	case 80: /* chdir — systemd asserts chdir("/") at start
+		  * (main.c:2906 "Assertion 'chdir("/") == 0' failed
+		  * ... Aborting" ended the previous boot) */
+	case 81: /* fchdir */
+	case 259: /* mknodat — do_static_devnodes creates /dev/null,
+		   * zero, full, random, urandom when /dev/null is
+		   * missing (5 calls named by run 36772786755) */
 	case 79: /* getcwd — ash prompt/pwd */
 	case 217: /* getdents64 — ash PATH search, glob */
 	case 20: /* writev — musl __stdio_write IS writev: every byte
@@ -1373,6 +1380,10 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 159: /* adjtimex */
 	case 162: /* sync */
 	case 247: /* waitid */
+	case 234: /* tgkill — glibc abort()/raise() (the previous boot
+		   * died in the abort retry loop after the chdir assert
+		   * fired; the kernel protects init from fatal
+		   * default-action signals, non-init tasks die right) */
 		ret = sys_vfs(nr, a);
 		break;
 	case 1: /* write — fds 0/1/2 ride the console hand-path (probe
@@ -1418,7 +1429,16 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		}
 		ret = 0;
 		break;
-	case 14: /* rt_sigprocmask */
+	case 14: /* rt_sigprocmask — REAL on task-backed conns: glibc
+		  * abort() unblocks SIGABRT before raising it, and the
+		  * POC ack-only answer below (zero oldset, ignore the
+		  * new mask) would lie about the blocked set the
+		  * delivery machinery consults. POC conns keep the
+		  * ack (bench markers M4.1). */
+		if (c->task_backed) {
+			ret = sys_vfs(nr, a);
+			break;
+		}
 		ret = sys_sigprocmask(c, a);
 		break;
 	case 15: /* rt_sigreturn — the frame is read from the TRAP's

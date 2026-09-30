@@ -150,3 +150,10 @@ jobs:
           echo "M5.5a NATIVE SYSTEMD OK: systemd reached basic.target"
           grep -q "Reached target Multi-User System" systemd.log && \
             echo "M5.5a BONUS: multi-user.target reached"
+
+      - name: Upload systemd.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m55a-systemd-log-${{ github.run_id }}
+          path: uml-nt/launcher/systemd.log
