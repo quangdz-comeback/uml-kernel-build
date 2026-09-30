@@ -213,18 +213,28 @@ static int insn_len(const u8_scan *p, const u8_scan *end)
  * Scan [buf, len) from `entry_off` (plus a sweep from offset 0 — same
  * two-pass trick as S6) and patch every decoded `0F 05` to `0F 0B`.
  * Returns the number of patches applied.
+ *
+ * `markp` = caller-provided scratch of at least `len` bytes. M5.1c.6b:
+ * this used to be `__builtin_alloca(len)` with the note "caller keeps
+ * len small (M2 init)" — the exec loader broke that promise the first
+ * time it loaded a real image (busybox text segment = 0x30000): the
+ * alloca sank rsp ~192KB below the THREAD_SIZE kernel stack, and the
+ * memset over it zeroed the four neighbouring vmalloc task stacks
+ * (the off-CPU pad guard caught the fill at rip 6001d362 = memset_orig,
+ * rdx=0x30000) and sprayed the mark bytes — 0/1 per decoded byte — over
+ * suspended tasks' schedule chains, which killed the net reader
+ * (ret-to-0x1000100) the moment the vector channel went live.
  */
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
-				    unsigned long entry_off)
+				    unsigned long entry_off, void *markp)
 {
 	u8_scan *b = buf, *end = b + len;
-	u8_scan *mark;
+	u8_scan *mark = markp;
 	unsigned long o, patched = 0;
 	int pass;
 
-	if (len < 2)
+	if (len < 2 || markp == 0)
 		return 0;
-	mark = __builtin_alloca(len); /* caller keeps len small (M2 init) */
 	__builtin_memset(mark, 0, len);
 
 	for (pass = 0; pass < 2; pass++) {

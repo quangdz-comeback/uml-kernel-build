@@ -7,7 +7,12 @@
 #include <stdlib.h>
 
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
-				    unsigned long entry_off);
+				    unsigned long entry_off, void *mark);
+
+/* M5.1c.6b: the caller owns the mark scratch (the kernel allocates
+ * it — the old alloca(len) buried neighbouring task stacks on
+ * whole-image execs). */
+static unsigned char mark[8192];
 
 static int fails;
 
@@ -35,7 +40,7 @@ int main(void)
 
 	/* 1: real syscall instruction at a boundary → patched to ud2. */
 	memcpy(buf, blob_syscall, sizeof(blob_syscall));
-	n = uml_nt_patch_syscalls(buf, sizeof(blob_syscall), 0);
+	n = uml_nt_patch_syscalls(buf, sizeof(blob_syscall), 0, mark);
 	check("syscall at boundary patched", n == 1);
 	check("syscall replaced by ud2",
 	      buf[sizeof(blob_syscall) - 3] == 0x0f &&
@@ -46,7 +51,7 @@ int main(void)
 	{
 		unsigned char imm[] = { 0xb8, 0x0f, 0x05, 0x00, 0x00, 0xc3 };
 		memcpy(buf, imm, sizeof(imm));
-		n = uml_nt_patch_syscalls(buf, sizeof(imm), 0);
+		n = uml_nt_patch_syscalls(buf, sizeof(imm), 0, mark);
 		check("0f05 inside immediate untouched", n == 0);
 		check("immediate bytes intact",
 		      buf[1] == 0x0f && buf[2] == 0x05);
@@ -61,7 +66,7 @@ int main(void)
 			0xc3,
 		};
 		memcpy(buf, store, sizeof(store));
-		n = uml_nt_patch_syscalls(buf, sizeof(store), 0);
+		n = uml_nt_patch_syscalls(buf, sizeof(store), 0, mark);
 		check("0f05 in stored imm32 untouched", n == 0);
 		check("stored imm32 bytes intact",
 		      buf[6] == 0x0f && buf[7] == 0x05);
@@ -76,7 +81,7 @@ int main(void)
 			0xc3,
 		};
 		memcpy(buf, two, sizeof(two));
-		n = uml_nt_patch_syscalls(buf, sizeof(two), 5);
+		n = uml_nt_patch_syscalls(buf, sizeof(two), 5, mark);
 		check("entry pass patches the real syscall", n == 1);
 		check("ud2 written at entry",
 		      buf[6] == 0x0b && buf[5] == 0x0f);

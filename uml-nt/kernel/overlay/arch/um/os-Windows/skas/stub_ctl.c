@@ -55,9 +55,15 @@ extern const char nt_guest_init_start[], nt_guest_init_end[];
  * address slots inside the blob. */
 extern const char nt_guest_init_slot0[], nt_guest_init_slot1[];
 
-/* scan_patch.c */
+/* scan_patch.c. M5.1c.6b: `mark` = caller scratch (>= len bytes) —
+ * the patcher's alloca(len) buried the neighbouring task stacks
+ * once the exec loader fed it a whole busybox segment (see
+ * scan_patch.c). These boot-blob sites run before any allocator
+ * exists, so the scratch is static; the blobs are our own M2-era
+ * images (hundreds of bytes, cap is loud). */
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
-				    unsigned long entry_off);
+				    unsigned long entry_off, void *mark);
+static unsigned char uml_nt_patch_mark[0x8000];
 
 /* M3.4: the kernel-side map of the launcher's exec section (the ELF
  * the loader parses). Fixed VA BELOW the stub_data block
@@ -1017,12 +1023,21 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		 * 0F 05 are data, the decoder is for code. */
 		patched = 0;
 		for (si = 0; si < img.nseg; si++) {
+			unsigned long long slen;
+
 			if (!uml_nt_prot_execable(img.seg[si].prot))
 				continue;
+			slen = img.seg[si].end - img.seg[si].start;
+			if (slen > sizeof(uml_nt_patch_mark)) {
+				os_info("[stubtest] seg too big to patch "
+					"(%llu > %zu)\n", slen,
+					sizeof(uml_nt_patch_mark));
+				return 0;
+			}
 			patched += uml_nt_patch_syscalls(
 				uml_boot.physmem_base +
 					img.seg[si].run_off,
-				img.seg[si].end - img.seg[si].start, 0);
+				slen, 0, uml_nt_patch_mark);
 		}
 		nt->NtUnmapViewOfSection(UML_NT_CURRENT_PROCESS, view);
 		entry_va = img.entry;
@@ -1105,8 +1120,15 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 			memcpy(uml_boot.physmem_base + entry_off + off1,
 			       &va1, 8);
 		}
+		if (blob_len > sizeof(uml_nt_patch_mark)) {
+			os_info("[stubtest] blob too big to patch "
+				"(%llu > %zu)\n", blob_len,
+				sizeof(uml_nt_patch_mark));
+			return 0;
+		}
 		patched = uml_nt_patch_syscalls(
-			uml_boot.physmem_base + entry_off, blob_len, 0);
+			uml_boot.physmem_base + entry_off, blob_len, 0,
+			uml_nt_patch_mark);
 		/* The linear sweep must never have eaten a slot byte as
 		 * an instruction (decoder false-positive = wild guest
 		 * pointer). Verify loud. */

@@ -54,9 +54,11 @@
 #include "internal.h"
 
 /* scan_patch.c (stub_ctl.c re-declares the same way — no shared
- * header yet) */
+ * header yet). M5.1c.6b: `mark` = caller scratch (>= len bytes) —
+ * the patcher's alloca(len) buried the neighbouring task stacks on
+ * whole-image execs (see scan_patch.c). */
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
-				    unsigned long entry_off);
+				    unsigned long entry_off, void *mark);
 
 /* Sanity cap for the packed exec-string blob (copy_strings already
  * enforced RLIMIT_STACK + MAX_ARG_STRLEN per string; this only stops
@@ -306,14 +308,28 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	}
 
 	/* Central patch contract §5.1: every `syscall` in exec-only
-	 * regions becomes ud2 before any stub view maps the pages. */
+	 * regions becomes ud2 before any stub view maps the pages.
+	 * M5.1c.6b: the mark scratch is a real allocation — a whole
+	 * busybox text segment is 0x30000, three times the kernel
+	 * stack the old alloca burned through. */
 	patched = 0;
 	for (si = 0; si < img.nseg; si++) {
+		unsigned long long slen, mk;
+
 		if (!uml_nt_prot_execable(img.seg[si].prot))
 			continue;
+		slen = img.seg[si].end - img.seg[si].start;
+		mk = (unsigned long long)(uintptr_t)
+		     kvmalloc(slen, GFP_KERNEL);
+		if (mk == 0) {
+			os_info("binfmt_umlnt: patch mark alloc failed "
+				"(%llu bytes)\n", slen);
+			return -ENOMEM;
+		}
 		patched += uml_nt_patch_syscalls(
 			uml_boot.physmem_base + img.seg[si].run_off,
-			img.seg[si].end - img.seg[si].start, 0);
+			slen, 0, (void *)(uintptr_t)mk);
+		kvfree((void *)(uintptr_t)mk);
 	}
 
 	/* The M3.7 brk contract: one pre-reserved, pre-mapped heap run
