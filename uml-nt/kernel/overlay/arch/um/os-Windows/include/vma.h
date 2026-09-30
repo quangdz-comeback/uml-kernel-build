@@ -96,6 +96,13 @@ int uml_nt_vma_span_runs(const struct uml_nt_mm *mm,
 			 unsigned long long start, unsigned long long end,
 			 unsigned long long *runs, int max);
 
+/* Upstream MAP_FIXED replace check: 0 when every VMA intersecting
+ * [start, end) lies FULLY inside it (whole views — the stub can
+ * unmap exactly those), -1 when any VMA only partially overlaps
+ * (a flank piece would need view surgery — refuse loud). */
+int uml_nt_vma_span_fits(const struct uml_nt_mm *mm,
+			 unsigned long long start, unsigned long long end);
+
 /* mprotect analogue over [start, end) (must be inside VMAs). */
 int uml_nt_vma_chg(struct uml_nt_mm *mm, unsigned long long start,
 		   unsigned long long end, unsigned prot);

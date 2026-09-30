@@ -187,6 +187,25 @@ int uml_nt_vma_span_runs(const struct uml_nt_mm *mm,
 	return n;
 }
 
+/* Upstream MAP_FIXED replace check: the stub's UNMAP releases one
+ * whole view per op (UnmapViewOfFile), so "replace the range" is
+ * only expressible when every intersecting VMA lies fully inside it
+ * — those unmap cleanly; a flank piece (head/tail cut) has no whole
+ * view to release (partial-map surgery = M4). Empty range/disjoint
+ * VMAs fit trivially. */
+int uml_nt_vma_span_fits(const struct uml_nt_mm *mm,
+			 unsigned long long start, unsigned long long end)
+{
+	int i;
+
+	for (i = 0; i < mm->nvma; i++) {
+		if (mm->vma[i].start < end && mm->vma[i].end > start &&
+		    (mm->vma[i].start < start || mm->vma[i].end > end))
+			return -1;
+	}
+	return 0;
+}
+
 /* Ref/unref every run of a VMA's span (VMAs are run multiples —
  * vma.h). */
 static int span_ref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)

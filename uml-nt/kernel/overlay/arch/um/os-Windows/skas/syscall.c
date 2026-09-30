@@ -93,18 +93,6 @@ int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
 	return 0;
 }
 
-static int overlaps(const struct uml_nt_mm *mm, unsigned long long s,
-		    unsigned long long e)
-{
-	int i;
-
-	for (i = 0; i < mm->nvma; i++) {
-		if (s < mm->vma[i].end && e > mm->vma[i].start)
-			return 1;
-	}
-	return 0;
-}
-
 /* Route one VFS-backed syscall through the REAL kernel table —
  * upstream handle_syscall parity (sys_call_table[nr](args...)). This
  * is the M3.8 answer to "bytes nằm trong ext4": getname()'s
@@ -212,12 +200,48 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 	prot = linux_prot_to_nt(lprot);
 
 	if (flags & SC_MAP_FIXED) {
+		unsigned long long runs[UML_NT_VMA_MAX];
+		int nfree, i;
+
 		va = addr;
-		if ((va & (UML_NT_PHYS_RUN_SIZE - 1)) ||
-		    overlaps(c->mm, va, va + len)) {
-			os_info("[syscall] mmap MAP_FIXED 0x%llx+%llu not "
-				"a free run-aligned range\n", va, len);
+		if (va & (UML_NT_PHYS_RUN_SIZE - 1)) {
+			os_info("[syscall] mmap MAP_FIXED 0x%llx: not "
+				"run-aligned\n", va);
+			return SC_RET(SC_EINVAL);
+		}
+		/* Upstream MAP_FIXED REPLACES what is there (unmap the
+		 * range, then create). The stub unmaps one whole view
+		 * per op, so the replace is only expressible when
+		 * every intersecting VMA lies fully inside the range:
+		 * queue one UNMAP per removed VMA (the op's map_va
+		 * must BE the view base), drop the runs, then map
+		 * fresh. A flank overlap = -ENOMEM loud (mallocng's
+		 * arena extends at the brk base are run-aligned whole
+		 * VMAs — the busybox shape; partial surgery = M4). */
+		if (uml_nt_vma_span_fits(c->mm, va, va + len) < 0) {
+			os_info("[syscall] mmap MAP_FIXED 0x%llx+%llu: "
+				"partial VMA overlap — unsupported\n",
+				va, len);
 			return SC_RET(SC_ENOMEM);
+		}
+		nfree = uml_nt_vma_span_runs(c->mm, va, va + len, runs,
+					     UML_NT_VMA_MAX);
+		if (nfree < 0)
+			return SC_RET(SC_ENOMEM);
+		if (nfree > 0) {
+			for (i = 0; i < c->mm->nvma; i++) {
+				unsigned long long s = c->mm->vma[i].start;
+				unsigned long long e = c->mm->vma[i].end;
+
+				if (s >= va + len || e <= va)
+					continue;
+				uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0,
+						   s, e - s, 0);
+			}
+			uml_nt_vma_del(c->mm, va, va + len);
+			for (i = 0; i < nfree; i++)
+				uml_nt_phys_unref(c->ph,
+						  (long long)runs[i]);
 		}
 	} else {
 		va = uml_nt_vma_find_free(c->mm, len, UML_NT_SYSCALLS_BASE,
@@ -540,6 +564,14 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 63: /* uname — busybox sh queries at startup */
 	case 72: /* fcntl — ash dups the script fd high (F_DUPFD*) */
 	case 257: /* openat */
+	case 4: /* stat — musl path resolution (sh /hi.sh) */
+	case 5: /* fstat — musl stdio sizing/ash script fd */
+	case 8: /* lseek — ash reads the script by chunks */
+	case 79: /* getcwd — ash prompt/pwd */
+	case 217: /* getdents64 — ash PATH search, glob */
+	case 20: /* writev — musl __stdio_write IS writev: every byte
+		  * busybox prints goes through here (fd 1/2 = the
+		  * real console files of the exec'd task) */
 		ret = sys_vfs(nr, a);
 		break;
 	case 1: /* write */

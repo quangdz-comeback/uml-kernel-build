@@ -739,6 +739,38 @@ static void test_span_runs(void)
 	CHECK(n == -1);
 }
 
+/* M3.8 S4c3: MAP_FIXED replace semantics — the stub releases one
+ * whole view per UNMAP op, so "replace the range" is only legal
+ * when every intersecting VMA lies fully inside it. A flank piece
+ * (head/tail cut, container VMA) must refuse loud. */
+static void test_span_fits(void)
+{
+	struct uml_nt_mm mm;
+
+	uml_nt_mm_init(&mm);
+	/* empty mm: MAP_FIXED on free space fits */
+	CHECK(uml_nt_vma_span_fits(&mm, RAM, RAM + 2 * RUN) == 0);
+	CHECK(uml_nt_vma_add(&mm, RAM + 2 * RUN, RAM + 4 * RUN, 0x100000,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	/* the VMA is fully inside the probed range: replace ok */
+	CHECK(uml_nt_vma_span_fits(&mm, RAM, RAM + 4 * RUN) == 0);
+	/* exact match: ok */
+	CHECK(uml_nt_vma_span_fits(&mm, RAM + 2 * RUN, RAM + 4 * RUN)
+	      == 0);
+	/* disjoint: ok */
+	CHECK(uml_nt_vma_span_fits(&mm, RAM + 5 * RUN, RAM + 6 * RUN)
+	      == 0);
+	/* straddles the START (head cut): refuse */
+	CHECK(uml_nt_vma_span_fits(&mm, RAM + 3 * RUN, RAM + 5 * RUN)
+	      == -1);
+	/* straddles the END (tail cut): refuse */
+	CHECK(uml_nt_vma_span_fits(&mm, RAM + 1 * RUN, RAM + 3 * RUN)
+	      == -1);
+	/* container VMA (range strictly inside it): refuse */
+	CHECK(uml_nt_vma_span_fits(&mm, RAM + 2 * RUN + 4,
+				   RAM + 4 * RUN - 4) == -1);
+}
+
 int main(void)
 {
 	test_phys();
@@ -748,6 +780,7 @@ int main(void)
 	test_fault();
 	test_find_free();
 	test_span_runs();
+	test_span_fits();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);
