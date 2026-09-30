@@ -201,6 +201,7 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 
 	if (flags & SC_MAP_FIXED) {
 		unsigned long long runs[UML_NT_VMA_MAX];
+		unsigned long long req_len = a[1];
 		int nfree, i;
 
 		va = addr;
@@ -209,15 +210,43 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 				"run-aligned\n", va);
 			return SC_RET(SC_EINVAL);
 		}
+		/* Sub-run MAP_FIXED (page-aligned, inside ONE VMA backed
+		 * by a private run): mallocng's brk guard —
+		 * mmap(brk_base, 4096, PROT_NONE, MAP_FIXED) as an
+		 * overlap tripwire whose return musl ignores. Whole-view
+		 * stub ops cannot express a 4K NOACCESS hole in a live
+		 * run, the VMA geometry contract is run-multiples, and
+		 * the overlap it guards against is impossible in our
+		 * reserved-brk model — so serve the success without
+		 * materializing (loud; page-granular MAP_FIXED = M4).
+		 * The guest must never write the range: the view stays
+		 * writable, and a write there is a guest bug we now
+		 * name in the log. */
+		if (req_len < UML_NT_PHYS_RUN_SIZE) {
+			struct uml_nt_vma *gv = uml_nt_vma_find(c->mm, va);
+
+			if (gv && va + req_len <= gv->end &&
+			    !(va & (UML_NT_FAULT_PAGE_SIZE - 1)) &&
+			    !((va + req_len) &
+			      (UML_NT_FAULT_PAGE_SIZE - 1)) &&
+			    uml_nt_phys_refs(c->ph,
+					     (long long)(gv->run_off +
+							 (va - gv->start))) <= 1) {
+				os_info("[syscall] mmap MAP_FIXED 0x%llx+%llu "
+					"prot=0x%x: sub-run guard inside "
+					"one private VMA — no-op (tripwire "
+					"unmaterialized)\n",
+					va, req_len, lprot);
+				return va;
+			}
+		}
 		/* Upstream MAP_FIXED REPLACES what is there (unmap the
 		 * range, then create). The stub unmaps one whole view
 		 * per op, so the replace is only expressible when
 		 * every intersecting VMA lies fully inside the range:
 		 * queue one UNMAP per removed VMA (the op's map_va
 		 * must BE the view base), drop the runs, then map
-		 * fresh. A flank overlap = -ENOMEM loud (mallocng's
-		 * arena extends at the brk base are run-aligned whole
-		 * VMAs — the busybox shape; partial surgery = M4). */
+		 * fresh. A flank overlap = -ENOMEM loud. */
 		if (uml_nt_vma_span_fits(c->mm, va, va + len) < 0) {
 			os_info("[syscall] mmap MAP_FIXED 0x%llx+%llu: "
 				"partial VMA overlap — unsupported\n",
@@ -262,6 +291,10 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 					  UML_NT_PHYS_RUN_SIZE);
 		return SC_RET(SC_ENOMEM);
 	}
+	os_info("[syscall] mmap 0x%llx+%llu prot=0x%x flags=0x%x "
+		"-> off=0x%llx%s\n", va, len, lprot, flags,
+		(unsigned long long)sp,
+		(flags & SC_MAP_FIXED) ? " FIXED" : "");
 	uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, prot, va, len, (unsigned long long)sp);
 	return va;
 }
@@ -341,6 +374,8 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 	}
 	if (uml_nt_vma_chg(c->mm, addr, addr + len, prot) < 0)
 		return SC_RET(SC_ENOMEM);
+	os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x (was lprot 0x%llx)\n",
+		addr, len, prot, a[2]);
 	uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT, prot, addr,
 		 len, 0);
 	return 0;
