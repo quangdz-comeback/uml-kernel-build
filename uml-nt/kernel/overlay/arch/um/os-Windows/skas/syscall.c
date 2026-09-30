@@ -1347,20 +1347,32 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 285: /* fallocate — journal files */
 	case 28: /* madvise */
 	case 24: /* sched_yield */
-	case 179: /* sysinfo */
-	case 298: /* getrusage */
+	case 99: /* sysinfo */
+	case 98: /* getrusage */
 	case 202: /* futex — guest pthreads (the walker serves the
 		   * guest pointers; hazard-3 fixups apply) */
 	case 230: /* clock_nanosleep — unit timeout arithmetic */
 	case 291: /* epoll_create1 — the systemd event loop */
 	case 233: /* epoll_ctl */
 	case 232: /* epoll_wait — rides the kernel poll backend */
-	case 253: /* timerfd_create */
-	case 254: /* timerfd_settime — unit timers */
+	case 283: /* timerfd_create */
+	case 286: /* timerfd_settime — unit timers */
+	case 287: /* timerfd_gettime */
 	case 289: /* signalfd4 */
 	case 290: /* eventfd2 — the wake channel */
-	case 299: /* open_tree */
+	case 428: /* open_tree */
 	case 437: /* openat2 — the glibc 2.34+ open shape */
+	case 436: /* close_range — systemd closing its fds */
+	case 34: /* pause — MUST block (a busy-looping unit ate 1.4M
+		  * instant ENOSYS returns in one 2.7-minute boot) */
+	case 95: /* umask — systemd sets the boot umask */
+	case 125: /* capget */
+	case 126: /* capset — unit capability drops */
+	case 227: /* clock_settime — systemd corrects the wall clock */
+	case 164: /* settimeofday */
+	case 159: /* adjtimex */
+	case 162: /* sync */
+	case 247: /* waitid */
 		ret = sys_vfs(nr, a);
 		break;
 	case 1: /* write — fds 0/1/2 ride the console hand-path (probe
