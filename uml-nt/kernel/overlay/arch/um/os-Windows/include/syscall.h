@@ -214,5 +214,7 @@ int uml_nt_syscall_consume_exec(void);
 void uml_nt_diag_slot(const char *tag, struct uml_nt_stub_conn *c,
 		      unsigned long long va);
 void uml_nt_diag_mm(const char *tag, struct uml_nt_stub_conn *c);
+void uml_nt_diag_qwords(const char *tag, struct uml_nt_stub_conn *c,
+			unsigned long long va, int n);
 
 #endif /* __UM_OS_WINDOWS_SYSCALL_H */

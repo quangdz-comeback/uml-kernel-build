@@ -282,6 +282,22 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					d->fault_type, d->regs.rip,
 					c->plan.kill_why ?
 					c->plan.kill_why : '?');
+				/* M5.1c.8 diag: the wild deref's operands
+				 * and the busybox mallocng context. */
+				os_info("diag: segv regs rax=%llx rbx=%llx "
+					"rcx=%llx rdx=%llx rsi=%llx rdi=%llx "
+					"rbp=%llx rsp=%llx r12=%llx r13=%llx\n",
+					d->regs.rax, d->regs.rbx, d->regs.rcx,
+					d->regs.rdx, d->regs.rsi, d->regs.rdi,
+					d->regs.rbp, d->regs.rsp, d->regs.r12,
+					d->regs.r13);
+				uml_nt_diag_qwords("segv-rbx", c,
+						   d->regs.rbx, 8);
+				uml_nt_diag_qwords("segv-ctx", c,
+						   0x62032320ull, 16);
+				uml_nt_diag_qwords("segv-ctx-brk", c,
+						   0x62032320ull + 0x380, 8);
+				uml_nt_diag_mm("segv", c);
 				force_sig_fault(SIGSEGV, code,
 					(void __user *)(unsigned long)
 						d->fault_addr);
