@@ -240,12 +240,29 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 					  i * UML_NT_PHYS_RUN_SIZE);
 
 		/* Stub view swap, in this op order: the whole old view
-		 * (base = heap_start) goes, the bigger one arrives. */
+		 * (base = heap_start) goes, the bigger one arrives, and
+		 * any guards inside come back NOACCESS (the fresh MAP
+		 * covers them writable — the guard state is the fault
+		 * truth, the view must match it: vma.h note). */
 		uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0, mm->heap_start,
 				   old_len, old_off);
 		uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, UML_NT_PAGE_READWRITE,
 				   mm->heap_start,
 				   new_end - mm->heap_start, new_off);
+		{
+			int gi;
+
+			for (gi = 0; gi < mm->nguard; gi++) {
+				if (mm->guard[gi].start >= new_end ||
+				    mm->guard[gi].end <= mm->heap_start)
+					continue;
+				uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
+					UML_NT_PAGE_NOACCESS,
+					mm->guard[gi].start,
+					mm->guard[gi].end -
+					mm->guard[gi].start, 0);
+			}
+		}
 		os_info("[syscall] brk grow: heap [0x%llx,0x%llx) -> "
 			"[0x%llx,0x%llx) span off=0x%llx (contents "
 			"kept)\n", mm->heap_start, old_end,
@@ -294,17 +311,14 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 			return SC_RET(SC_EINVAL);
 		}
 		/* Sub-run MAP_FIXED (page-aligned, inside ONE VMA backed
-		 * by a private run): mallocng's brk guard —
-		 * mmap(brk_base, 4096, PROT_NONE, MAP_FIXED) as an
-		 * overlap tripwire whose return musl ignores. Whole-view
-		 * stub ops cannot express a 4K NOACCESS hole in a live
-		 * run, the VMA geometry contract is run-multiples, and
-		 * the overlap it guards against is impossible in our
-		 * reserved-brk model — so serve the success without
-		 * materializing (loud; page-granular MAP_FIXED = M4).
-		 * The guest must never write the range: the view stays
-		 * writable, and a write there is a guest bug we now
-		 * name in the log. */
+		 * by a private run): MATERIALIZED since M4 slice 5 —
+		 * the musl mallocng brk guard
+		 * mmap(brk_base, 4096, PROT_NONE, MAP_FIXED) gets real
+		 * NOACCESS pages in the stub view + kernel guard state
+		 * (a fault inside one is a real SIGSEGV, never
+		 * auto-repaired — vma.h note). A non-NONE sub-run
+		 * mapping (the view is already at the VMA prot) kills
+		 * the guards under it: Linux lets the new mapping win. */
 		if (req_len < UML_NT_PHYS_RUN_SIZE) {
 			struct uml_nt_vma *gv = uml_nt_vma_find(c->mm, va);
 
@@ -315,11 +329,29 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 			    uml_nt_phys_refs(c->ph,
 					     (long long)(gv->run_off +
 							 (va - gv->start))) <= 1) {
+				int killed = uml_nt_guard_del_range(c->mm,
+								 va,
+								 va + req_len);
+
+				if (prot == UML_NT_PAGE_NOACCESS) {
+					if (uml_nt_guard_add(c->mm, va,
+							     va + req_len) < 0)
+						os_info("[syscall] mmap "
+							"MAP_FIXED 0x%llx: "
+							"guard table full — "
+							"unmaterialized\n",
+							va);
+					else
+						uml_nt_sc_plan_add(c,
+							UML_NT_FOP_PROTECT,
+							UML_NT_PAGE_NOACCESS,
+							va, req_len, 0);
+				}
 				os_info("[syscall] mmap MAP_FIXED 0x%llx+%llu "
-					"prot=0x%x: sub-run guard inside "
-					"one private VMA — no-op (tripwire "
-					"unmaterialized)\n",
-					va, req_len, lprot);
+					"prot=0x%x: sub-run %s (%d guard(s) "
+					"cleared)\n", va, req_len, lprot,
+					(prot == UML_NT_PAGE_NOACCESS) ?
+					"guard placed" : "mapping", killed);
 				return va;
 			}
 		}
@@ -429,12 +461,18 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 		return SC_RET(SC_ENOMEM);
 	for (i = 0; i < nruns; i++)
 		uml_nt_phys_unref(c->ph, (long long)runs[i]);
+	uml_nt_guard_del_range(mm, addr, addr + len); /* guards die too */
 	uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0, addr, len, 0);
 	return 0;
 }
 
-/* mprotect(2), POC: single VMA, no COW (a real mprotect(RW) on a COW
- * VMA forces a private copy first — M4 with the signal work). */
+/* mprotect(2): whole-VMA changes keep the wholesale VMA prot (the
+ * fault repair maps back at it). Sub-run changes (page-aligned,
+ * inside ONE VMA) are page-precise: the VMA keeps its base prot,
+ * PROT_NONE arms a guard (kernel state + NOACCESS view op — the
+ * musl mallocng meta-area pattern), any other prot kills the guards
+ * under the range (Linux: the change wins). A real mprotect(RW) on a
+ * COW VMA still forces a private copy first — unsupported (M4). */
 static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 				       const unsigned long long *a)
 {
@@ -455,10 +493,29 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 			"(M4)\n");
 		return SC_RET(SC_ENOSYS);
 	}
-	if (uml_nt_vma_chg(c->mm, addr, addr + len, prot) < 0)
-		return SC_RET(SC_ENOMEM);
-	os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x (was lprot 0x%llx)\n",
-		addr, len, prot, a[2]);
+	if (addr == v->start && addr + len == v->end) {
+		int killed = uml_nt_guard_del_range(c->mm, addr,
+						    addr + len);
+
+		if (uml_nt_vma_chg(c->mm, addr, addr + len, prot) < 0)
+			return SC_RET(SC_ENOMEM);
+		os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x "
+			"(whole VMA, was lprot 0x%llx, %d guard(s) "
+			"cleared)\n", addr, len, prot, a[2], killed);
+	} else {
+		int killed = uml_nt_guard_del_range(c->mm, addr,
+						    addr + len);
+
+		if (prot == UML_NT_PAGE_NOACCESS) {
+			if (uml_nt_guard_add(c->mm, addr, addr + len) < 0)
+				return SC_RET(SC_ENOMEM);
+		}
+		os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x "
+			"(sub-run, was lprot 0x%llx, %d guard(s) %s)\n",
+			addr, len, prot, a[2], killed,
+			(prot == UML_NT_PAGE_NOACCESS) ? "armed" :
+			"cleared");
+	}
 	uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT, prot, addr,
 		 len, 0);
 	return 0;

@@ -12,6 +12,58 @@ void uml_nt_mm_init(struct uml_nt_mm *mm)
 	mm->heap_start = 0;
 	mm->heap_end = 0;
 	mm->brk = 0;
+	mm->nguard = 0;
+}
+
+/* ---- sub-run PROT_NONE guards (M4 slice 5, vma.h note) ---- */
+
+int uml_nt_guard_add(struct uml_nt_mm *mm, unsigned long long start,
+		     unsigned long long end)
+{
+	int i;
+
+	if (mm->nguard >= UML_NT_GUARD_MAX)
+		return -1;
+	if (start >= end ||
+	    (start | end) & (UML_NT_FAULT_PAGE_SIZE - 1))
+		return -1;
+	for (i = 0; i < mm->nguard; i++) {
+		if (start < mm->guard[i].end && end > mm->guard[i].start)
+			return -1; /* overlap */
+	}
+	mm->guard[mm->nguard].start = start;
+	mm->guard[mm->nguard].end = end;
+	mm->nguard++;
+	return 0;
+}
+
+int uml_nt_guard_del_range(struct uml_nt_mm *mm, unsigned long long start,
+			   unsigned long long end)
+{
+	int i, n = 0;
+
+	for (i = mm->nguard - 1; i >= 0; i--) {
+		int j;
+
+		if (start >= mm->guard[i].end || end <= mm->guard[i].start)
+			continue; /* disjoint */
+		for (j = i; j + 1 < mm->nguard; j++)
+			mm->guard[j] = mm->guard[j + 1];
+		mm->nguard--;
+		n++;
+	}
+	return n;
+}
+
+int uml_nt_guard_hit(const struct uml_nt_mm *mm, unsigned long long addr)
+{
+	int i;
+
+	for (i = 0; i < mm->nguard; i++) {
+		if (addr >= mm->guard[i].start && addr < mm->guard[i].end)
+			return 1;
+	}
+	return 0;
 }
 
 /* Insert keeping sort order; overlap rejected (caller's mmap contract). */
@@ -287,10 +339,19 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 			goto fail;
 	}
 	/* brk bookkeeping survives fork (the child's brk == parent's;
-	 * the COW machinery already duplicated the pages it backs). */
+	 * the COW machinery already duplicated the pages it backs) —
+	 * as do the sub-run guards (the child's views re-apply them:
+	 * fault.c init_plan emits the NOACCESS ops). */
 	dst->heap_start = src->heap_start;
 	dst->heap_end = src->heap_end;
 	dst->brk = src->brk;
+	{
+		int gi;
+
+		for (gi = 0; gi < src->nguard; gi++)
+			dst->guard[gi] = src->guard[gi];
+		dst->nguard = src->nguard;
+	}
 	return 0;
 
 fail:
@@ -305,6 +366,7 @@ void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
 	for (i = 0; i < mm->nvma; i++)
 		span_unref(ph, &mm->vma[i]);
 	mm->nvma = 0;
+	mm->nguard = 0;
 }
 
 int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,

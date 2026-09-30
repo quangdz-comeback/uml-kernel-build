@@ -56,8 +56,36 @@ static int plan_op(struct uml_nt_fault_plan *plan, unsigned op, unsigned prot,
 
 /* Every goto kill records its reason — the stub_ctl FATAL print
  * reports it (CI triage: 'w' = the VMA was not in the tree, 'p' =
- * prot mismatch, ...). */
+ * prot mismatch, 'g' = the sub-run PROT_NONE guard tripped, ...). */
 #define KILL(w) do { plan->kill_why = (w); goto kill; } while (0)
+
+/* Re-apply the NOACCESS guards intersecting [s, e) — after any plan
+ * that (re)maps a range's pages writable (COW split pieces, the brk
+ * span swap): the guard STATE is the fault truth, so the view must
+ * match it or the tripwire dies silently. Pieces are run-multiple,
+ * guards page-granular: clamp each guard to the piece it rides. */
+static int plan_guards(const struct uml_nt_mm *mm,
+		       struct uml_nt_fault_plan *plan,
+		       unsigned long long s, unsigned long long e)
+{
+	int i;
+
+	for (i = 0; i < mm->nguard; i++) {
+		unsigned long long gs = mm->guard[i].start;
+		unsigned long long ge = mm->guard[i].end;
+
+		if (gs >= e || ge <= s)
+			continue;
+		if (gs < s)
+			gs = s;
+		if (ge > e)
+			ge = e;
+		if (plan_op(plan, UML_NT_FOP_PROTECT,
+			    UML_NT_PAGE_NOACCESS, gs, ge - gs, 0) < 0)
+			return -1;
+	}
+	return 0;
+}
 
 int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		    unsigned long long addr, unsigned type,
@@ -71,6 +99,12 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	plan->n_ops = 0;
 	plan->copy_src_off = 0;
 	plan->copy_dst_off = 0;
+
+	/* The sub-run PROT_NONE guard (M4 slice 5): ANY access inside
+	 * one is a guest bug the guard exists to catch — real SIGSEGV
+	 * (ACCERR at the delivery), never auto-repair. */
+	if (uml_nt_guard_hit(mm, addr))
+		KILL('g');
 
 	vma = uml_nt_vma_find(mm, addr);
 	if (vma == 0)
@@ -167,6 +201,8 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			    uml_nt_prot_readonly(prot), mid_e, e - mid_e,
 			    span_base + (mid_e - s)) < 0)
 			KILL('o');
+		if (plan_guards(mm, plan, s, e) < 0)
+			KILL('o');
 		return 0;
 	}
 
@@ -194,7 +230,8 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	plan->copy_src_off = 0;
 	plan->copy_dst_off = 0;
 
-	if (mm->nvma > UML_NT_FAULT_MAX_OPS)
+	if (mm->nvma > UML_NT_FAULT_MAX_OPS ||
+	    mm->nvma + mm->nguard > UML_NT_FAULT_MAX_OPS)
 		return -1;
 	for (i = 0; i < mm->nvma; i++) {
 		const struct uml_nt_vma *v = &mm->vma[i];
@@ -204,5 +241,10 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			    v->start, v->end - v->start, v->run_off) < 0)
 			return -1;
 	}
+	/* The fork child inherits the parent's guards (vma.h): the
+	 * fresh views come up at the VMA prots — re-apply NOACCESS so
+	 * the tripwires survive the clone. */
+	if (plan_guards(mm, plan, 0, ~0ull) < 0)
+		return -1;
 	return 0;
 }

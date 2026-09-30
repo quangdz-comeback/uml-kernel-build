@@ -771,6 +771,124 @@ static void test_span_fits(void)
 				   RAM + 4 * RUN - 4) == -1);
 }
 
+/* M4 slice 5: sub-run PROT_NONE guards — add/hit/del semantics, fault
+ * kill ('g', never auto-repair), clone/drop survival, and guard ops
+ * in the INIT plan (the fork child re-arms its inherited guards). */
+static void test_guard(void)
+{
+	struct uml_nt_mm mm;
+	struct uml_nt_phys ph;
+	struct uml_nt_fault_plan plan;
+	const unsigned long long g0 = RAM + 0x3000;
+	long long heap_off, stack_off;
+
+	mock_reset();
+	/* 32 runs: the VMAs below live at run indexes the ph covers;
+	 * the runs themselves must be ALLOCATED through this ph (the
+	 * ref layer refuses to share unallocated runs). */
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+
+	/* misaligned (4K floor) → refuse */
+	CHECK(uml_nt_guard_add(&mm, g0 + 0x800, g0 + 0x1800) == -1);
+	/* empty range → refuse */
+	CHECK(uml_nt_guard_add(&mm, g0, g0) == -1);
+	/* the musl shape: one page inside the heap run */
+	CHECK(uml_nt_guard_add(&mm, g0, g0 + 0x1000) == 0);
+	/* overlap → refuse */
+	CHECK(uml_nt_guard_add(&mm, g0 + 0xc00, g0 + 0x1c00) == -1);
+	/* disjoint adds ok */
+	CHECK(uml_nt_guard_add(&mm, g0 + 0x1000, g0 + 0x2000) == 0);
+
+	CHECK(uml_nt_guard_hit(&mm, g0) == 1);
+	CHECK(uml_nt_guard_hit(&mm, g0 + 0xfff) == 1);
+	CHECK(uml_nt_guard_hit(&mm, g0 + 0x1000) == 1);
+	CHECK(uml_nt_guard_hit(&mm, g0 + 0x2000) == 0); /* beside them */
+	CHECK(uml_nt_guard_hit(&mm, g0 - 1) == 0);
+
+	/* fault inside a guard: kill 'g', no repair ops — ANY class */
+	{
+		heap_off = uml_nt_phys_alloc(&ph);
+		CHECK(heap_off > 0);
+		CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN,
+				     (unsigned long long)heap_off,
+				     UML_NT_PAGE_READWRITE, 0) == 0);
+		CHECK(uml_nt_vma_find(&mm, g0) != NULL);
+		CHECK(uml_nt_mm_fault(&mm, &ph, g0 + 0x40,
+				      UML_NT_FAULT_WRITE, &plan) < 0);
+		CHECK(plan.kill == 1 && plan.kill_why == 'g');
+		CHECK(plan.n_ops == 0);
+		CHECK(uml_nt_mm_fault(&mm, &ph, g0 + 0x40,
+				      UML_NT_FAULT_READ, &plan) < 0);
+		CHECK(plan.kill == 1 && plan.kill_why == 'g');
+	}
+	/* mprotect RW over ONE guard: it dies (the change wins) */
+	CHECK(uml_nt_guard_del_range(&mm, g0, g0 + 0x1000) == 1);
+	CHECK(uml_nt_guard_hit(&mm, g0) == 0);
+	CHECK(uml_nt_guard_hit(&mm, g0 + 0x1000) == 1);
+
+	/* mmap-replace over the survivor (partial overlap kills too —
+	 * an unrecorded NOACCESS region would mis-fault later) */
+	CHECK(uml_nt_guard_del_range(&mm, g0 + 0xc00, g0 + 0x1c00) == 1);
+	CHECK(uml_nt_guard_hit(&mm, g0 + 0x1000) == 0);
+
+	/* INIT plan: guards emit NOACCESS protects after the maps */
+	{
+		int i, nmaps;
+
+		stack_off = uml_nt_phys_alloc(&ph);
+		CHECK(stack_off > 0);
+		CHECK(uml_nt_vma_add(&mm, RAM + 4 * RUN, RAM + 5 * RUN,
+				     (unsigned long long)stack_off,
+				     UML_NT_PAGE_READWRITE, 0) == 0);
+		uml_nt_guard_del_range(&mm, RAM, RAM + 8 * RUN);
+		CHECK(uml_nt_guard_add(&mm, g0, g0 + 0x1000) == 0);
+		CHECK(uml_nt_mm_init_plan(&mm, &ph, &plan) == 0);
+		CHECK(plan.kill == 0 && plan.n_ops == 3);
+		nmaps = 0;
+		for (i = 0; i < plan.n_ops; i++)
+			if (plan.ops[i].op == UML_NT_FOP_MAP)
+				nmaps++;
+		CHECK(nmaps == 2); /* heap + stack */
+		CHECK(plan.ops[2].op == UML_NT_FOP_PROTECT &&
+		      plan.ops[2].prot == UML_NT_PAGE_NOACCESS &&
+		      plan.ops[2].va == g0 &&
+		      plan.ops[2].len == 0x1000);
+	}
+
+	/* fork survival: clone copies the guard (the child's stack VMA
+	 * eager-copies like a real fork; the heap COWs and the guard
+	 * state rides along) */
+	{
+		struct uml_nt_mm child;
+
+		uml_nt_mm_init(&child);
+		CHECK(uml_nt_mm_clone(&child, &mm, &ph,
+				      RAM + 5 * RUN) == 0);
+		CHECK(child.nguard == 1 &&
+		      child.guard[0].start == g0);
+		uml_nt_mm_drop(&child, &ph);
+		CHECK(child.nguard == 0);
+		/* the parent's guards survive the child's drop */
+		CHECK(mm.nguard == 1);
+	}
+
+	/* table full → -1 */
+	{
+		int i;
+
+		uml_nt_mm_init(&mm);
+		for (i = 0; i < UML_NT_GUARD_MAX; i++)
+			CHECK(uml_nt_guard_add(&mm,
+			       RAM + 0x1000ull * (unsigned long long)i,
+			       RAM + 0x1000ull * (unsigned long long)i +
+			       0x1000) == 0);
+		CHECK(uml_nt_guard_add(&mm,
+		       RAM + 0x1000ull * UML_NT_GUARD_MAX,
+		       RAM + 0x1000ull * UML_NT_GUARD_MAX + 0x1000) == -1);
+	}
+}
+
 int main(void)
 {
 	test_phys();
@@ -781,6 +899,7 @@ int main(void)
 	test_find_free();
 	test_span_runs();
 	test_span_fits();
+	test_guard();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);

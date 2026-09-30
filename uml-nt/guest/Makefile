@@ -16,7 +16,8 @@ CC     ?= clang
 LD     ?= ld.lld
 IMAGE_BASE := 0x62000000
 
-all: guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf heaptest.elf
+all: guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf \
+	heaptest.elf guardtest.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
@@ -91,7 +92,20 @@ heaptest.elf: heaptest.c
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "heaptest must be a static ELF" >&2; exit 1; }
 
+# M4 slice 5: the guard tripwire proof — PID 1 (init=/bin/guardtest):
+# mmap(4K, PROT_NONE, MAP_FIXED) inside the heap VMA (the musl
+# mallocng call shape) arms a REAL NOACCESS region; a store into it
+# faults SIGSEGV ACCERR (kernel guard state, never auto-repaired);
+# the handler unprotects via SUB-RUN mprotect (guard killed + view
+# op) and the store replays through sigreturn.
+guardtest.elf: guardtest.c
+	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "guardtest must be a static ELF" >&2; exit 1; }
+
 clean:
 	rm -f init.o guest-init.elf step2.elf bench.elf forkwait.elf \
-		sigtest.elf heaptest.elf
+		sigtest.elf heaptest.elf guardtest.elf
 .PHONY: all clean

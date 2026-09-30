@@ -25,6 +25,10 @@
 
 #define UML_NT_VMA_MAX 64 /* fixed table for the POC; heap later */
 
+#define UML_NT_FAULT_PAGE_SIZE 0x1000ull /* guest page granularity —
+	* owned here (vma geometry: guards are page-granular); fault.h
+	* keeps a compat redefinition guard */
+
 /* NT PAGE_* protection constants (winnt.h values, declared here
  * because the kernel ELF must not include windows.h — D1). */
 #define UML_NT_PAGE_NOACCESS            0x01u
@@ -45,6 +49,24 @@ struct uml_nt_vma {
 	unsigned long long run_off; /* backing run offset (64K aligned) */
 };
 
+/* Sub-run PROT_NONE region (M4 slice 5): the musl mallocng brk guard
+ * is mmap(4K, PROT_NONE, MAP_FIXED) INSIDE a run-backed VMA —
+ * unexpressible as VMA state (VMAs are run multiples) and wrong as a
+ * wholesale VMA protect. Guards are PAGE-granular VA ranges the mm
+ * remembers beside the VMA tree: the stub view is NOACCESS there
+ * (FOP_PROTECT op), a fault inside one is a REAL SIGSEGV (ACCERR —
+ * the tripwire musl wants), and any later mapping/mprotect over the
+ * range kills the guard (Linux: the change wins). The kernel never
+ * auto-repairs a guard fault (the tripwire must fire), but the state
+ * is the ONLY truth for faults — after a COW split's remap the view
+ * piece comes up writable, so a guard READ can succeed where Linux
+ * would fault (musl never reads its guard; documented divergence). */
+#define UML_NT_GUARD_MAX 16
+
+struct uml_nt_guard {
+	unsigned long long start, end; /* guest VA, end exclusive */
+};
+
 /* One guest process address space. VMAs sorted by start, non-overlap
  * (the guest mmap contract). */
 struct uml_nt_mm {
@@ -57,6 +79,11 @@ struct uml_nt_mm {
 	 * swapped, stub ops queued — syscall.c sys_brk). heap_end == 0
 	 * = no heap reserved: brk fails (returns current brk). */
 	unsigned long long heap_start, heap_end, brk;
+	/* Sub-run PROT_NONE guards (M4 slice 5, vma.h note). VA-keyed
+	 * so they survive VMA resizes and COW splits; cloned with the
+	 * mm, cleared on drop. */
+	struct uml_nt_guard guard[UML_NT_GUARD_MAX];
+	int nguard;
 };
 
 void uml_nt_mm_init(struct uml_nt_mm *mm);
@@ -107,6 +134,18 @@ int uml_nt_vma_span_fits(const struct uml_nt_mm *mm,
 /* mprotect analogue over [start, end) (must be inside VMAs). */
 int uml_nt_vma_chg(struct uml_nt_mm *mm, unsigned long long start,
 		   unsigned long long end, unsigned prot);
+
+/* Guard API (M4 slice 5). add: page-aligned non-overlapping region —
+ * 0 or -1 (alignment/overlap/table full). del_range: drop guards the
+ * range fully covers AND partially overlaps (the mapping/mprotect
+ * wins; an unrecorded NOACCESS region would mis-fault later) —
+ * returns how many died (a partial kill is the caller's loud-log
+ * signal). hit: 1 when addr falls inside a guard. */
+int uml_nt_guard_add(struct uml_nt_mm *mm, unsigned long long start,
+		     unsigned long long end);
+int uml_nt_guard_del_range(struct uml_nt_mm *mm, unsigned long long start,
+			   unsigned long long end);
+int uml_nt_guard_hit(const struct uml_nt_mm *mm, unsigned long long addr);
 
 /* Guest VA buffer [va, va+len) → physmem section offset, or -1 when
  * any byte is unmapped or the buffer crosses the VMA end. D11: the

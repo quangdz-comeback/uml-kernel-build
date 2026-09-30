@@ -93,6 +93,14 @@ staging/bin/heaptest: ../guest/heaptest.elf
 	@mkdir -p staging/bin
 	cp $< $@
 
+# M4 slice 5: the guard tripwire proof — PID 1 (init=/bin/guardtest):
+# a sub-run PROT_NONE MAP_FIXED (the musl mallocng shape) materializes
+# NOACCESS for real; a store faults SIGSEGV ACCERR; the handler
+# unprotects via sub-run mprotect and the store replays.
+staging/bin/guardtest: ../guest/guardtest.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
 build/busybox-$(BUSYBOX_VER)/busybox:
 	@mkdir -p build
 	curl -sSL -o build/$(BUSYBOX_VER).tar.bz2 \
@@ -121,7 +129,7 @@ staging/bin/busybox: build/busybox-$(BUSYBOX_VER)/busybox
 rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
 	     staging/bin/step2 staging/bin/bench staging/bin/forkwait \
 	     staging/bin/sigtest staging/bin/heaptest \
-	     staging/bin/busybox
+	     staging/bin/guardtest staging/bin/busybox
 	rm -f $@
 	mke2fs -q -t ext4 -d staging -b 4096 $@ $(IMG_BLOCKS)
 

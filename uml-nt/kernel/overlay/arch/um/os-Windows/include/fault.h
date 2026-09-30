@@ -23,7 +23,9 @@
 
 #include <vma.h>
 
+#ifndef UML_NT_FAULT_PAGE_SIZE /* owned by vma.h since M4 slice 5 */
 #define UML_NT_FAULT_PAGE_SIZE 0x1000ull /* guest page granularity */
+#endif
 
 /* ExceptionInformation[0] access classes for STATUS_ACCESS_VIOLATION
  * (NT exception record contract; 8 = DEP — execute on non-exec page). */
