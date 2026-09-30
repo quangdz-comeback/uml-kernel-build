@@ -233,10 +233,18 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 						   &pbase, &plen,
 						   0x04 /* PAGE_READWRITE */,
 						   &oldp);
+			/* WHO is writing: the running task + its
+			 * io_uring tctx pointer (the observed hits =
+			 * io_uring_del_tctx_node's list_del walking a
+			 * garbage tctx — this names the task that owns
+			 * the garbage pointer and the value itself). */
 			n = snprintf(buf, sizeof(buf),
 				     "guard hit: rip=%llx wrote %llx "
+				     "task=%d iouring=%px tstate=%ld "
 				     "(padding unprotected, resuming)\n",
-				     rip, wrote);
+				     rip, wrote, current->pid,
+				     current->io_uring,
+				     (long)current->__state);
 			if (n > 0)
 				uml_nt_crash_write(buf, (unsigned int)n);
 			return -1; /* EXCEPTION_CONTINUE_EXECUTION */
