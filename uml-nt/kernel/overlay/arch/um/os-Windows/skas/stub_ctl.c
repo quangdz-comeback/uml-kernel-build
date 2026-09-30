@@ -927,9 +927,21 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	if (c->task_backed && c->owner_regs != NULL &&
 	    (c->d->cmd == UML_STUB_CMD_SYSCALL ||
 	     c->d->cmd == UML_STUB_CMD_FAULT)) {
-		if (c->plan_left == 0)
+		if (c->plan_left == 0) {
 			uml_nt_signal_check(c);
-		uml_nt_fp_push(c, c->owner_regs);
+			/* Push only when signal_check pulled THIS trap's
+			 * xstate into regs->fp. With ops in flight the
+			 * pull never ran, so regs->fp is one trap round
+			 * stale — pushing it over the stub's fresh
+			 * capture made the resumed guest replay its
+			 * faulting SSE store with a dead register
+			 * (musl queue()'s movups wrote {0,0} instead of
+			 * {m,m}: the net gate's sh died dequeuing the
+			 * zeroed free-meta node). Left unpushed, the
+			 * CONTEXT restore keeps Windows' own at-
+			 * exception FP state — exactly right. */
+			uml_nt_fp_push(c, c->owner_regs);
+		}
 	}
 	mb();
 	nt->NtSetEvent(c->evt_out, NULL);
