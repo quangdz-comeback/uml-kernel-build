@@ -58,12 +58,13 @@ extern const char nt_guest_init_slot0[], nt_guest_init_slot1[];
 /* scan_patch.c. M5.1c.6b: `mark` = caller scratch (>= len bytes) —
  * the patcher's alloca(len) buried the neighbouring task stacks
  * once the exec loader fed it a whole busybox segment (see
- * scan_patch.c). These boot-blob sites run before any allocator
- * exists, so the scratch is static; the blobs are our own M2-era
- * images (hundreds of bytes, cap is loud). */
+ * scan_patch.c). The stubtest probe runs on an NT aux thread, so the
+ * scratch is static. Loader segments span whole 64KB-granular runs
+ * (guest-init.elf's text segment = 0x10000), not the file size:
+ * the cap covers four runs and stays loud past that. */
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 				    unsigned long entry_off, void *mark);
-static unsigned char uml_nt_patch_mark[0x8000];
+static unsigned char uml_nt_patch_mark[0x40000];
 
 /* M3.4: the kernel-side map of the launcher's exec section (the ELF
  * the loader parses). Fixed VA BELOW the stub_data block
