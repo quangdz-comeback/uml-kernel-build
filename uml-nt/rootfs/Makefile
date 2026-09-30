@@ -126,7 +126,7 @@ build/busybox-$(BUSYBOX_VER)/busybox:
 	       -e 's/^# CONFIG_PING is not set/CONFIG_PING=y/' \
 	       -e 's/^# CONFIG_WGET is not set/CONFIG_WGET=y/' \
 	       -e 's|^CONFIG_EXTRA_CFLAGS=.*|CONFIG_EXTRA_CFLAGS="-I$(CURDIR)/build/filter-shim"|' \
-	       -e 's/^CONFIG_EXTRA_LDFLAGS=.*/CONFIG_EXTRA_LDFLAGS="-fuse-ld=lld -static -Wl,--image-base=$(IMAGE_BASE)"/' \
+	       -e 's/^CONFIG_EXTRA_LDFLAGS=.*/CONFIG_EXTRA_LDFLAGS="-fuse-ld=lld -static -Wl,--image-base=$(IMAGE_BASE) -Wl,--no-dynamic-linker"/' \
 	       build/busybox-$(BUSYBOX_VER)/.config
 	# musl ships no linux/ headers — udhcpc's <linux/filter.h> include
 	# gets the repo shim (SO_ATTACH_FILTER struct defs, x86_64).
