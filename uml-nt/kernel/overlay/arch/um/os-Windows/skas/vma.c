@@ -453,8 +453,10 @@ int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	if (mm->nvma + extra > UML_NT_VMA_MAX)
 		return -1; /* split would overflow the table */
 
-	/* This mm gives up its claim on the faulting run (the sharers
-	 * keep theirs): the refcount tracks contexts, not pieces. */
+	/* This mm gives up its claim on the FAULTING run (the sharers
+	 * keep theirs): the refcount tracks contexts, not pieces. The
+	 * flanking runs' refcounts are untouched — this mm references
+	 * them through the pieces it just grew. */
 	old_run = orig_run +
 		  ((mid_s - orig_start) / UML_NT_PHYS_RUN_SIZE) *
 			  UML_NT_PHYS_RUN_SIZE;
@@ -468,11 +470,21 @@ int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	vma->flags = flags & ~UML_NT_VMA_COW;
 
 	/* Insertions keep the sort order: post above, pre below. Both
-	 * keep the shared run and the COW flag (further writes there
-	 * fault and copy again — correct COW semantics). */
+	 * keep the shared BLOCK and the COW flag (further writes there
+	 * fault and copy again — correct COW semantics); each piece's
+	 * run_off is ITS OWN base within the block — the post piece's
+	 * content lives orig_run + (mid_e - orig_start) on, and every
+	 * consumer (translate, the fault plan's MAP ops, the mm_drop
+	 * unref walk) keys off the piece's run_off. The block base
+	 * here made the child-inherited post piece unref the WRONG
+	 * runs at drop — the parent's faulting run went to 0 while
+	 * its VMA still pointed there (the next fork died
+	 * shared-run-refs-zero, run 36782313512; the POC never saw it:
+	 * every probed VMA was single-run, no post piece existed). */
 	if (orig_end > mid_e) {
-		rc = vma_insert(mm, idx + 1, mid_e, orig_end, orig_run,
-				prot, flags);
+		rc = vma_insert(mm, idx + 1, mid_e, orig_end,
+				orig_run + (mid_e - orig_start), prot,
+				flags);
 		if (rc < 0)
 			return -1;
 	}

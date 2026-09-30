@@ -388,6 +388,71 @@ static void test_vma(void)
 		CHECK(uml_nt_phys_refs(&ph, new_run) == 1);
 	}
 
+	/* cow_split MIDDLE run of a 3-run VMA: BOTH flank pieces
+	 * exist. The post piece's run_off is ITS OWN base within the
+	 * shared block — translate/refcount/mm_drop all key off it.
+	 * The block base here made a forked child's drop unref the
+	 * parent's faulting run to 0 (the next fork died
+	 * shared-run-refs-zero, run 36782313512 — no test caught it:
+	 * the 2-run case above never produces a post piece). */
+	mock_reset();
+	uml_nt_mm_init(&a);
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	r0 = uml_nt_phys_alloc_span(&ph, 3);  /* one block, runs 0..2 */
+	CHECK(r0 == MOCK_BASE);
+	CHECK(uml_nt_phys_ref(&ph, r0) == 2); /* a sharer joins */
+	CHECK(uml_nt_phys_ref(&ph, r0 + RUN) == 2);
+	CHECK(uml_nt_phys_ref(&ph, r0 + 2 * RUN) == 2);
+	CHECK(uml_nt_vma_add(&a, RAM, RAM + 3 * RUN, r0,
+			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
+	{
+		unsigned long long new_run = uml_nt_phys_alloc_span(&ph, 1);
+
+		/* the mock's 3-run span rides a 4-run block — the next
+		 * handout starts after the padding */
+		CHECK(new_run == r0 + 4 * RUN);
+		v = uml_nt_vma_find(&a, RAM + RUN + 0x8000);
+		CHECK(v != 0);
+		CHECK(uml_nt_vma_cow_split(&a, &ph, v, RAM + RUN + 0x8000,
+					   new_run) == 0);
+		CHECK(a.nvma == 3);
+		/* pre: [RAM, RAM+RUN) at the block base, COW kept */
+		v = uml_nt_vma_find(&a, RAM + 0x8000);
+		CHECK(v != 0 && v->run_off == (unsigned long long)r0 &&
+		      v->end == RAM + RUN &&
+		      (v->flags & UML_NT_VMA_COW));
+		/* middle: private, COW cleared */
+		v = uml_nt_vma_find(&a, RAM + RUN + 0x8000);
+		CHECK(v != 0 && v->run_off == (unsigned long long)new_run &&
+		      !(v->flags & UML_NT_VMA_COW));
+		/* post: [RAM+2RUN, RAM+3RUN) at ITS OWN base — the fix */
+		v = uml_nt_vma_find(&a, RAM + 2 * RUN + 0x8000);
+		CHECK(v != 0 && v->start == RAM + 2 * RUN &&
+		      v->run_off == (unsigned long long)(r0 + 2 * RUN) &&
+		      (v->flags & UML_NT_VMA_COW));
+		/* translate continuity: each piece maps to the ORIGINAL
+		 * physical runs (this is the assertion the old code
+		 * failed — the post piece translated to the block base) */
+		CHECK(uml_nt_vma_translate(&a, RAM + 2 * RUN, 0) ==
+		      (long long)(r0 + 2 * RUN));
+		CHECK(uml_nt_vma_translate(&a, RAM + 3 * RUN - 1, 0) ==
+		      (long long)(r0 + 3 * RUN - 1));
+		/* refs: the faulting run's claim moved to new_run, the
+		 * flanks keep theirs (this mm + the sharer) */
+		CHECK(uml_nt_phys_refs(&ph, r0) == 2);
+		CHECK(uml_nt_phys_refs(&ph, r0 + RUN) == 1);
+		CHECK(uml_nt_phys_refs(&ph, r0 + 2 * RUN) == 2);
+		CHECK(uml_nt_phys_refs(&ph, new_run) == 1);
+		/* the drop must unref each run ONCE — the sharer's
+		 * claims survive everywhere; the faulting run keeps
+		 * the sharer's claim (this mm's moved to new_run) */
+		uml_nt_mm_drop(&a, &ph);
+		CHECK(uml_nt_phys_refs(&ph, r0) == 1);
+		CHECK(uml_nt_phys_refs(&ph, r0 + RUN) == 1);
+		CHECK(uml_nt_phys_refs(&ph, r0 + 2 * RUN) == 1);
+		CHECK(uml_nt_phys_refs(&ph, new_run) == 0);
+	}
+
 	/* cow_split of a single-run VMA: no pieces beyond the middle */
 	mock_reset();
 	uml_nt_mm_init(&a);

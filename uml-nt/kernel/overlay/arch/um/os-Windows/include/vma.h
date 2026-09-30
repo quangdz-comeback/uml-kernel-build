@@ -194,7 +194,8 @@ long long uml_nt_vma_translate(const struct uml_nt_mm *mm,
  * handler runs (Linux fixes the page pre-signal; NT has no such
  * step). That VMA eager-copies into a fresh private span (contents
  * are the CALLER's job, through its flat view) and carries no COW
- * flag. Returns 0, -1 on table full / refcount failure (the eager
+ * flag. Returns 0 or a positive UML_NT_CLONE_* reason code (the
+ * caller logs it and owns the dst teardown — vma.c note; the eager
  * span is contiguous by construction — phys alloc_span, D12). */
 int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		    struct uml_nt_phys *ph, unsigned long long rsp);
@@ -208,9 +209,11 @@ void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph);
  * containing `page`; the intersecting piece is repointed to `new_run`
  * (allocated by the caller via uml_nt_phys_alloc, content copied by
  * the integration — kernel memcpy in its own flat view) and loses the
- * COW flag. Flanking pieces keep the shared run + COW flag. The old
- * run's refcount is unchanged (this mm still references it through
- * the flanks). Returns 0, -1 on table full / bad geometry.
+ * COW flag. Flanking pieces keep the shared BLOCK (each at its own
+ * base within it) + the COW flag. The faulting run's refcount drops
+ * by one — this mm's claim moves to new_run; the sharers keep the old
+ * run and the flanks' refcounts are untouched. Returns 0, positive
+ * reason codes are clone-only; -1 on table full / bad geometry.
  */
 int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			 struct uml_nt_vma *vma, unsigned long long page,

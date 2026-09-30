@@ -938,9 +938,10 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 }
 
 /* clock_gettime(2): ns-since-boot (os_nsecs, QPC) split into the
- * timespec the guest asked for. CLOCK_MONOTONIC (1) and CLOCK_REALTIME
- * (0) both map to it — the kernel owns no wall-clock offset (the
- * sysbench gate times a monotonic window). */
+ * timespec the guest asked for. CLOCK_MONOTONIC (1), CLOCK_REALTIME
+ * (0) and CLOCK_BOOTTIME (7) all map to it — the kernel owns no
+ * wall-clock offset (the sysbench gate times a monotonic window) and
+ * this guest never suspends, so boottime == monotonic. */
 static unsigned long long sys_clock_gettime(struct uml_nt_stub_conn *c,
 					    const unsigned long long *a)
 {
@@ -948,7 +949,12 @@ static unsigned long long sys_clock_gettime(struct uml_nt_stub_conn *c,
 	unsigned long long buf[2];
 
 	if (a[0] != 0 /* CLOCK_REALTIME */ &&
-	    a[0] != 1 /* CLOCK_MONOTONIC */)
+	    a[0] != 1 /* CLOCK_MONOTONIC */ &&
+	    a[0] != 7 /* CLOCK_BOOTTIME — == monotonic here: this guest
+		       * never suspends. systemd's now() asserts
+		       * clock_gettime == 0 (src/basic/time-util.c:54);
+		       * the EINVAL aborted PID 1 into the coredump-fork
+		       * spiral (run 36782313512). */)
 		return SC_RET(SC_EINVAL);
 	if (a[1] == 0)
 		return SC_RET(SC_EFAULT);
@@ -1410,6 +1416,15 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		   * died in the abort retry loop after the chdir assert
 		   * fired; the kernel protects init from fatal
 		   * default-action signals, non-init tasks die right) */
+	case 37: /* alarm — the real itimer (SIGALRM to current via the
+		  * M4d delivery machinery); ENOSYS counter 1x/boot
+		  * (run 36782313512) */
+	case 197: /* removexattr — the cgroup/tmpfs xattr cleanup
+		   * systemd does at boot (6x, same run); a missing
+		   * attribute is the real -ENODATA answer */
+	case 303: /* name_to_handle_at — the file-handle probe; real
+		   * VFS answers, systemd takes its graceful fallback
+		   * path on any errno */
 		ret = sys_vfs(nr, a);
 		break;
 	case 1: /* write — fds 0/1/2 ride the console hand-path (probe

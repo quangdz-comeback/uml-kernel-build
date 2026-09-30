@@ -683,6 +683,38 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 			uml_nt_clone_reason(rc_clone),
 			(unsigned long)child->pid, parent->mm->nvma,
 			parent->mm->nguard);
+		/* Name the rot: shared-run-refs-zero means a run the
+		 * parent's table still claims shows 0 refs. Walk every
+		 * backing run so the log points at the VMA (the 015233d
+		 * reason code found the CLASS, this finds the run). */
+		if (rc_clone == UML_NT_CLONE_REF) {
+			int mi;
+
+			for (mi = 0; mi < parent->mm->nvma; mi++) {
+				const struct uml_nt_vma *mv =
+					&parent->mm->vma[mi];
+				unsigned long long mo, me;
+
+				for (mo = mv->run_off,
+				     me = mv->run_off +
+					  (mv->end - mv->start);
+				     mo < me;
+				     mo += UML_NT_PHYS_RUN_SIZE) {
+					int mr = uml_nt_phys_refs(
+						parent->ph,
+						(long long)mo);
+
+					if (mr > 0)
+						continue;
+					os_info("fork: rotten run: vma "
+						"%d [0x%llx,0x%llx) run "
+						"off=0x%llx refs %d prot "
+						"0x%x flags 0x%x\n", mi,
+						mv->start, mv->end, mo, mr,
+						mv->prot, mv->flags);
+				}
+			}
+		}
 		uml_nt_fork_disarm();
 		return -ENOMEM;
 	}
