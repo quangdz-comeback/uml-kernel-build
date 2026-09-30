@@ -586,13 +586,14 @@ jobs:
           go-version: stable
 
       - name: Build netstack.exe (vdeplug-go, D8 helper)
-        shell: msys2 {0}
+        # default (PowerShell) shell — setup-go's PATH doesn't reach
+        # the msys2 login environment, and the msys2 shell below only
+        # consumes the artifact.
         run: |
           cd vdeplug-go
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-            go build -trimpath -ldflags="-s -w" \
-            -o ../uml-nt/launcher/netstack.exe .
-          ls -lh ../uml-nt/launcher/netstack.exe
+          $env:CGO_ENABLED = '0'; $env:GOOS = 'windows'; $env:GOARCH = 'amd64'
+          go build -trimpath -ldflags='-s -w' -o ..\uml-nt\launcher\netstack.exe .
+          Get-Item ..\uml-nt\launcher\netstack.exe
 
       # M5.1c: the vector device end to end — the kernel spawns
       # netstack.exe (uml_nt_netstack=), dials the D8 TCP channel
