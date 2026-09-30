@@ -274,14 +274,31 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			if (c->task_backed && c->owner_regs != NULL) {
 				int code = (c->plan.kill_why == 'w') ?
 					SEGV_MAPERR : SEGV_ACCERR;
+				/* The instruction bytes + the recorded
+				 * TLS base settle the fs=0-vs-wild-
+				 * pointer question from the log alone
+				 * (the 0xfff...feb0 / -1 reads kept
+				 * flip-flopping at the same rip across
+				 * runs 36785701760 / 36786525015). */
+				long long it = uml_nt_vma_translate(
+					c->mm, d->regs.rip, 8);
+				unsigned char ib[8] = { 0x90, 0x90, 0x90,
+					0x90, 0x90, 0x90, 0x90, 0x90 };
 
+				if (it >= 0)
+					memcpy(ib, (char *)uml_boot.
+					       physmem_base + it, 8);
 				os_info("[stubtest] SIGSEGV -> guest pid %lu "
 					"addr=0x%llx type=%u rip=0x%llx "
-					"why=%c\n",
+					"why=%c fs=0x%llx "
+					"insn=%02x%02x%02x%02x%02x%02x%02x%02x\n",
 					(unsigned long)c->pid, d->fault_addr,
 					d->fault_type, d->regs.rip,
 					c->plan.kill_why ?
-					c->plan.kill_why : '?');
+					c->plan.kill_why : '?',
+					d->fs_base,
+					ib[0], ib[1], ib[2], ib[3],
+					ib[4], ib[5], ib[6], ib[7]);
 				force_sig_fault(SIGSEGV, code,
 					(void __user *)(unsigned long)
 						d->fault_addr);

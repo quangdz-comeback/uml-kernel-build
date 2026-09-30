@@ -1419,6 +1419,12 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 37: /* alarm — the real itimer (SIGALRM to current via the
 		  * M4d delivery machinery); ENOSYS counter 1x/boot
 		  * (run 36782313512) */
+	case 62: /* kill — the ABRT cascade of run 36786525015: every
+		  * generator's crash handler forks a coredump child
+		  * whose kill(getpid(), sig) got ENOSYS, so the child
+		  * survived to assert_not_reached (crash-handler.c:85)
+		  * and aborted its parent — the whole system-generators
+		  * phase "terminated by signal ABRT" */
 	case 197: /* removexattr — the cgroup/tmpfs xattr cleanup
 		   * systemd does at boot (6x, same run); a missing
 		   * attribute is the real -ENODATA answer */
