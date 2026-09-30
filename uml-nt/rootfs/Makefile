@@ -71,6 +71,7 @@ build/busybox-$(BUSYBOX_VER)/busybox:
 	make -C build/busybox-$(BUSYBOX_VER) allnoconfig >/dev/null
 	sed -i -e 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' \
 	       -e 's/^# CONFIG_ASH is not set/CONFIG_ASH=y/' \
+	       -e 's/^# CONFIG_ASH_ECHO is not set/CONFIG_ASH_ECHO=y/' \
 	       -e 's/^# CONFIG_ECHO is not set/CONFIG_ECHO=y/' \
 	       -e 's/^CONFIG_EXTRA_LDFLAGS=.*/CONFIG_EXTRA_LDFLAGS="-fuse-ld=lld -static -Wl,--image-base=$(IMAGE_BASE)"/' \
 	       build/busybox-$(BUSYBOX_VER)/.config

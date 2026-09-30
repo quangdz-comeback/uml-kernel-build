@@ -124,21 +124,32 @@ void _start(void)
 	/* Print the content ESCAPED on one line. A raw multi-line
 	 * write leaked the script's own lines into the log ("echo
 	 * BUSYBOX-SHELL-OK" as a standalone line) — the S4c2
-	 * acceptance grep matched the LEAK once, not busybox's echo. */
+	 * acceptance grep matched the LEAK once, not busybox's echo.
+	 * ONE write for the whole marker: the TEMP syscall trace
+	 * interlines every write() with a [syscall] log line, and a
+	 * byte-per-write loop shattered the marker across them (the
+	 * gate's "OPENAT-READ-OK: echo hi" grep lost). */
 	{
-		unsigned long i;
+		static char line[256];
+		unsigned long i, o = 0;
+		const char pre[] = "OPENAT-READ-OK: ";
 
-		sys_write(1, "OPENAT-READ-OK: ", 16);
-		for (i = 0; i < (unsigned long)n; i++) {
+		for (i = 0; i < sizeof(pre) - 1; i++)
+			line[o++] = pre[i];
+		for (i = 0; i < (unsigned long)n && o < sizeof(line) - 3;
+		     i++) {
 			if (buf[i] == '\n') {
-				sys_write(1, "\\n", 2);
+				line[o++] = '\\';
+				line[o++] = 'n';
 			} else if (buf[i] == 0) {
-				sys_write(1, "\\0", 2);
+				line[o++] = '\\';
+				line[o++] = '0';
 			} else {
-				sys_write(1, &buf[i], 1);
+				line[o++] = buf[i];
 			}
 		}
-		sys_write(1, "\n", 1);
+		line[o++] = '\n';
+		sys_write(1, line, o);
 	}
 
 	/* S4c: chain the exec — the dispatch's kernel_execve swaps this
