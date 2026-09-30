@@ -87,6 +87,70 @@ int main(void)
 		      buf[6] == 0x0b && buf[5] == 0x0f);
 	}
 
+	/* 5: every instruction shape the S6-era decoder mis-sized, each
+	 * directly followed by a real `syscall`. A wrong length lands
+	 * the sweep inside the next bytes and the syscall stays raw (the
+	 * M5.1c busybox kept 4 of 115: mprotect, socket, open, futex). */
+	{
+		static const struct {
+			const char *what;
+			unsigned char len;
+			unsigned char insn[8];
+		} cases[] = {
+			{ "81 /4 imm32 needs its ModRM (and rsi,imm32)", 7,
+			  { 0x48, 0x81, 0xe6, 0x00, 0xf0, 0xff, 0xff } },
+			{ "63 MOVSXD (movslq esi,rsi)", 3,
+			  { 0x48, 0x63, 0xf6 } },
+			{ "66 25 imm16 (and ax,imm16)", 4,
+			  { 0x66, 0x25, 0x00, 0xfb } },
+			{ "66 c7 imm16 (movw $2,4(rbx))", 6,
+			  { 0x66, 0xc7, 0x43, 0x04, 0x02, 0x00 } },
+			{ "66 f7 /0 imm16 (test di,imm16)", 5,
+			  { 0x66, 0xf7, 0xc7, 0xc0, 0x0f } },
+			{ "0f ba /4 imm8 (bt eax,11)", 4,
+			  { 0x0f, 0xba, 0xe0, 0x0b } },
+			{ "f0 0f c1 (lock xadd)", 4,
+			  { 0xf0, 0x0f, 0xc1, 0x07 } },
+			{ "0f a4 imm8 (shld)", 5,
+			  { 0x4c, 0x0f, 0xa4, 0xf0, 0x3e } },
+			{ "0f 38 (pshufb)", 5,
+			  { 0x66, 0x0f, 0x38, 0x00, 0xc1 } },
+			{ "0f 3a imm8 (palignr)", 6,
+			  { 0x66, 0x0f, 0x3a, 0x0f, 0xc1, 0x08 } },
+			{ "VEX c5 (vmovdqa xmm0,[rsi])", 4,
+			  { 0xc5, 0xf9, 0x6f, 0x06 } },
+			{ "VEX c4 map 0F3A imm8 (vpalignr)", 6,
+			  { 0xc4, 0xe3, 0x71, 0x0f, 0xc2, 0x08 } },
+			{ "EVEX 62 (vmovdqu64 zmm0,[rsi])", 6,
+			  { 0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x06 } },
+		};
+		unsigned int i;
+
+		for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			unsigned int L = cases[i].len;
+
+			memcpy(buf, cases[i].insn, L);
+			buf[L] = 0x0f;
+			buf[L + 1] = 0x05;
+			buf[L + 2] = 0xc3;
+			n = uml_nt_patch_syscalls(buf, L + 3, 0, mark);
+			check(cases[i].what,
+			      n == 1 && buf[L] == 0x0f && buf[L + 1] == 0x0b &&
+			      memcmp(buf, cases[i].insn, L) == 0);
+		}
+	}
+
+	/* 6: 0x66 shrinks the immediate to 16 bits — a `0F 05` that IS
+	 * the imm16 stays data. */
+	{
+		unsigned char imm16[] = { 0x66, 0x25, 0x0f, 0x05, 0xc3 };
+
+		memcpy(buf, imm16, sizeof(imm16));
+		n = uml_nt_patch_syscalls(buf, sizeof(imm16), 0, mark);
+		check("0f05 as a 66-prefixed imm16 untouched",
+		      n == 0 && buf[2] == 0x0f && buf[3] == 0x05);
+	}
+
 	printf(fails ? "# FAIL\n" : "# all ok\n");
 	return fails != 0;
 }

@@ -445,10 +445,21 @@ void userspace(struct uml_pt_regs *regs)
 				code = 0;
 				nt->GetExitCodeProcess(c->proc, &code);
 				if (code != UML_NT_STILL_ACTIVE) {
+					/* The last published trap is the
+					 * last state the kernel handed or
+					 * saw — after a verbatim push it
+					 * is the resume target itself. */
 					os_info("userspace: stub pid %d "
-						"died silently (%lu)\n",
+						"died silently (%lu) — last "
+						"cmd=%u rip=%llx rsp=%llx "
+						"rax=%llx xs_flags=%x\n",
 						mm_id->pid,
-						(unsigned long)code);
+						(unsigned long)code,
+						(unsigned)c->d->cmd,
+						c->d->regs.rip,
+						c->d->regs.rsp,
+						c->d->regs.rax,
+						(unsigned)c->d->xstate_flags);
 					os_dump_core();
 				}
 				continue;

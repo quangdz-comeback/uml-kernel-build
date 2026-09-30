@@ -289,6 +289,37 @@ static void action_chain(void)
 	}
 }
 
+/* An error-class exception the VEH does not own is about to kill the
+ * stub (no SEH frame catches anything here): the kernel only sees the
+ * exit code ("died silently"). Say where it happened, once — a static
+ * buffer and one WriteFile, because the stack under us may be the
+ * reason. */
+static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
+{
+	static volatile LONG reported;
+	static char line[256];
+	DWORD wrote;
+	int n;
+
+	if ((er->ExceptionCode & 0xC0000000u) != 0xC0000000u ||
+	    InterlockedExchange(&reported, 1) != 0)
+		return;
+	n = snprintf(line, sizeof(line),
+		     "stub: UNOWNED exception %08lx rip=%llx rsp=%llx "
+		     "op=%llu addr=%llx fs_base=%llx last_cmd=%u — "
+		     "process dies\n",
+		     (unsigned long)er->ExceptionCode,
+		     (unsigned long long)c->Rip, (unsigned long long)c->Rsp,
+		     er->NumberParameters > 0 ?
+			     (unsigned long long)er->ExceptionInformation[0] : 0,
+		     er->NumberParameters > 1 ?
+			     (unsigned long long)er->ExceptionInformation[1] : 0,
+		     (unsigned long long)d->fs_base, (unsigned)d->cmd);
+	if (n > 0)
+		WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, (DWORD)n,
+			  &wrote, NULL);
+}
+
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	EXCEPTION_RECORD *er = ep->ExceptionRecord;
@@ -297,15 +328,19 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	int is_fault = (er->ExceptionCode == STATUS_ACCESS_VIOLATION);
 	int verbatim;
 
-	if (!is_syscall && !is_fault)
+	if (!is_syscall && !is_fault) {
+		report_unowned(er, c);
 		return EXCEPTION_CONTINUE_SEARCH;
+	}
 
 	/* Only traps from the guest VA span belong to us (guest code
 	 * executes in per-VMA views inside [ram_base, ram_base+size)). */
 	if ((uintptr_t)c->Rip < (uintptr_t)d->ram_base ||
 	    (uintptr_t)c->Rip >=
-		    (uintptr_t)d->ram_base + d->ram_size)
+		    (uintptr_t)d->ram_base + d->ram_size) {
+		report_unowned(er, c);
 		return EXCEPTION_CONTINUE_SEARCH;
+	}
 
 	/* S4d: snapshot the at-exception FP state (upstream parity:
 	 * get_fp_registers at every trap). The CONTEXT copy is the
