@@ -138,7 +138,7 @@ static void park_forever(void)
  * never does any of this: Linux keeps the base in the task regs
  * across the ptrace round-trip. */
 static volatile unsigned long long fs_tramp_base, fs_tramp_target,
-	fs_save_r11;
+	fs_save_r11, fs_tramp_eflags;
 
 /* D18 CPUID gate (Shelley's ARCHITECTURE.md 44d710e note): wrfsbase
  * #UDs on a CPU without FSGSBASE — the S4c probe measured the runner
@@ -158,14 +158,22 @@ static void fsgsbase_detect(void)
 }
 
 /* syscall resume: rcx/r11 are clobbered by the syscall contract —
- * r11 is free scratch, no register restoration needed. */
+ * r11 is free scratch, but WHAT it holds still matters: it exits
+ * every VEH dispatch into the CONTEXT Windows builds on the guest
+ * stack, and the kernel pulls that slot back as fork-seed state
+ * (the r15/entry-rip poison chain of M5.4 c3, caef34f). Leaving the
+ * resume target in r11 (the pre-fix value) re-created the same
+ * residue class one run later. Real hardware leaves RFLAGS in r11
+ * across syscall — the VEH snapshot's EFlags IS that value, so
+ * reload it here for exact parity (the S4c2a overflow bans pushing
+ * on the guest stack, hence the third global). */
 __attribute__((naked)) static void fs_trampoline_sys(void)
 {
 	__asm__ volatile (
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
-		"movq	fs_tramp_target(%rip), %r11\n\t"
-		"jmp	*%r11\n\t"
+		"movq	fs_tramp_eflags(%rip), %r11\n\t"
+		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
 }
 
@@ -496,6 +504,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		if (d->fs_base != 0 && have_fsgsbase) {
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = target;
+			fs_tramp_eflags = c->EFlags;
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_sys;
 		} else {
 			c->Rip = (DWORD64)target;
