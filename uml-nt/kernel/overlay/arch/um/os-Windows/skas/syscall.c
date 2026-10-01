@@ -1454,6 +1454,7 @@ static void abrt_msg_capture(struct uml_nt_stub_conn *c,
  * gated on the glibc fatal-message family (abrt_text_match) so every
  * normal fd-2 writev stays silent. */
 static void abrt_writev_capture(struct uml_nt_stub_conn *c,
+				const struct uml_nt_stub_data *d,
 				const unsigned long long *a,
 				unsigned long long ret)
 {
@@ -1480,6 +1481,29 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 	os_info("[abrt] libc-message writev(2) -> %lld iovcnt=%llu "
 		"(task %d)\n", (long long)ret, cnt,
 		current ? current->pid : 0);
+	/* The writev trap is the EARLIEST fatal point — abort() has
+	 * not unwound yet, so the callee-saved regs + the frame qwords
+	 * still belong to __libc_message's malloc caller: the chunk
+	 * context for the freelist decode (dump_ptr_at class). */
+	os_info("[abrt] writev-trap regs: rip=0x%llx rsp=0x%llx "
+		"rbx=0x%llx rbp=0x%llx r12=0x%llx r13=0x%llx "
+		"r14=0x%llx r15=0x%llx\n", d->regs.rip, d->regs.rsp,
+		d->regs.rbx, d->regs.rbp, d->regs.r12, d->regs.r13,
+		d->regs.r14, d->regs.r15);
+	for (i = 0; i < 6; i += 3) {
+		long long foff = uml_nt_vma_translate(c->mm,
+						      d->regs.rsp + i * 8,
+						      24);
+
+		if (foff >= 0) {
+			const unsigned long long *q =
+				(const void *)((char *)uml_boot.physmem_base +
+					       foff);
+
+			os_info("[abrt]   [rsp+0x%02x]: 0x%llx 0x%llx "
+				"0x%llx\n", i * 8, q[0], q[1], q[2]);
+		}
+	}
 	for (i = 0; i < (int)cnt; i++) {
 		n = abrt_read_str(c, iov[i].base, s, sizeof(s));
 		if (n < 0)
@@ -1601,7 +1625,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		  * __abort_msg and aborts — signature-gated, silent
 		  * for every normal console writev. */
 		ret = sys_vfs(nr, a);
-		abrt_writev_capture(c, a, ret);
+		abrt_writev_capture(c, d, a, ret);
 		break;
 	case 41: /* socket — M5.1c: AF_PACKET (udhcpc), AF_INET/ICMP
 		  * (ping) — in-guest kernel sockets, no host side */
