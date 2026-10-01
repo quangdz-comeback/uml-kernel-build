@@ -199,32 +199,51 @@ static HANDLE create_physmem_section(unsigned long long size, void **base)
 		exit(2);
 	}
 	*base = at;
-
-	/* Reserve the kernel's OUT-OF-RAM VA band (vmalloc: task stacks,
-	 * vmap'd kernel objects) so nothing else can take it: upstream
-	 * VMALLOC_START = mem-end + VMALLOC_OFFSET (8MiB) — with
-	 * mem=120M that lands at 0x68000000, immediately above this
-	 * view. Without a reservation the NT default heap's segment
-	 * (or any other unplaced allocation) squatting there makes
-	 * every kernel-side block commit fail (run 36793426224:
-	 * "private block @0x68000000 failed" xN → the timer thread
-	 * wrote an unbacked page → kernel fault). Reserved here, at
-	 * launcher start, BEFORE any CRT heap segment can grow this
-	 * low — address space only, no commit charge. 512MiB covers
-	 * band ends for mem= up to the 128MiB section ceiling with
-	 * headroom (mem=128M: band [0x68800000, 0x70800000)). */
-	{
-		unsigned long long band =
-			(uintptr_t)at + size; /* section end = band base */
-		SIZE_T band_size = 512ULL << 20;
-		PVOID r = g_api.VirtualAlloc((PVOID)(uintptr_t)band,
-					     band_size, MEM_RESERVE,
-					     PAGE_NOACCESS);
-		if (r == NULL)
-			die("VirtualAlloc (vmalloc band reserve)",
-			    GetLastError());
-	}
 	return sec;
+}
+
+/* ---- the kernel's out-of-RAM VA band (vmalloc) -------------------------
+ * Reserve EARLY — before any CRT heap allocation can claim the free
+ * region right above the section view. The kernel's out-of-RAM maps
+ * back into this band with private 64K blocks (os_map_memory), and
+ * the band's base is upstream-fixed: VMALLOC_START = mem-end +
+ * VMALLOC_OFFSET (8MiB) — with mem=120M that is 0x68000000,
+ * immediately above the flat view. Run 36793426224: an unplaced
+ * allocation (heap-segment class) squatted there, every block commit
+ * failed and the timer thread wrote an unbacked page. Reserved here
+ * the band is exclusive: address space only, no commit charge;
+ * 512MiB covers band ends for any mem= up to the section ceiling
+ * (mem=128M: band [0x68800000, 0x70800000)). */
+static void reserve_vmalloc_band(void)
+{
+	unsigned long long band = GUEST_RAM_VA + DEFAULT_PHYSMEM;
+	SIZE_T band_size = 512ULL << 20;
+	PVOID r = g_api.VirtualAlloc((PVOID)(uintptr_t)band, band_size,
+				     MEM_RESERVE, PAGE_NOACCESS);
+
+	if (r != NULL)
+		return;
+
+	/* Name the squatter before dying: the region containing the
+	 * band base (State/Protect/Type tell heap vs section vs
+	 * free-but-refusing). */
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+		SIZE_T n = g_api.VirtualQuery((PVOID)(uintptr_t)band,
+					      &mbi, sizeof(mbi));
+
+		fprintf(stderr, "launcher: vmalloc band reserve @0x%llx "
+			"failed (gle=%lu)", band, GetLastError());
+		if (n == sizeof(mbi))
+			fprintf(stderr, " — region base=%p size=%#zx "
+				"state=%#lx protect=%#lx type=%#lx",
+				mbi.BaseAddress, (size_t)mbi.RegionSize,
+				(unsigned long)mbi.State,
+				(unsigned long)mbi.Protect,
+				(unsigned long)mbi.Type);
+		fprintf(stderr, "\n");
+	}
+	exit(2);
 }
 
 /* ---- ELF mapping (S3 recipe, simplified: the guest-RAM view already
@@ -387,6 +406,14 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	/* FIRST acts: the API table (no heap — GetProcAddress only),
+	 * then the vmalloc band — claimed BEFORE any CRT/heap segment
+	 * can grow into the free region above the (yet unmapped)
+	 * guest-RAM window (load_exec_section's fopen below allocates;
+	 * see the function comment). */
+	resolve_api_table();
+	reserve_vmalloc_band();
+
 	/* M3.4: uml_nt_exec=<file> names the guest ELF the kernel-side
 	 * loader will run (the launcher reads it, the kernel parses —
 	 * the file path itself never crosses into kernel code). */
@@ -401,8 +428,6 @@ int main(int argc, char **argv)
 	if (exec_sec != NULL)
 		fprintf(stderr, "[launcher] exec image: %llu bytes\n",
 			exec_size);
-
-	resolve_api_table();
 
 	/* console handles travel to the kernel (early console, D9;
 	 * M3.6 adds stdin for the console reader thread). */
