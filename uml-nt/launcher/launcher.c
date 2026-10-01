@@ -199,6 +199,31 @@ static HANDLE create_physmem_section(unsigned long long size, void **base)
 		exit(2);
 	}
 	*base = at;
+
+	/* Reserve the kernel's OUT-OF-RAM VA band (vmalloc: task stacks,
+	 * vmap'd kernel objects) so nothing else can take it: upstream
+	 * VMALLOC_START = mem-end + VMALLOC_OFFSET (8MiB) — with
+	 * mem=120M that lands at 0x68000000, immediately above this
+	 * view. Without a reservation the NT default heap's segment
+	 * (or any other unplaced allocation) squatting there makes
+	 * every kernel-side block commit fail (run 36793426224:
+	 * "private block @0x68000000 failed" xN → the timer thread
+	 * wrote an unbacked page → kernel fault). Reserved here, at
+	 * launcher start, BEFORE any CRT heap segment can grow this
+	 * low — address space only, no commit charge. 512MiB covers
+	 * band ends for mem= up to the 128MiB section ceiling with
+	 * headroom (mem=128M: band [0x68800000, 0x70800000)). */
+	{
+		unsigned long long band =
+			(uintptr_t)at + size; /* section end = band base */
+		SIZE_T band_size = 512ULL << 20;
+		PVOID r = g_api.VirtualAlloc((PVOID)(uintptr_t)band,
+					     band_size, MEM_RESERVE,
+					     PAGE_NOACCESS);
+		if (r == NULL)
+			die("VirtualAlloc (vmalloc band reserve)",
+			    GetLastError());
+	}
 	return sec;
 }
 

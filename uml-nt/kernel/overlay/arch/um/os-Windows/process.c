@@ -201,8 +201,9 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 					       protect);
 			if (got == NULL) {
 				os_info("os_map_memory: private block "
-					"@%px failed\n",
-					(void *)(uintptr_t)b);
+					"@%px failed win32=%lu\n",
+					(void *)(uintptr_t)b,
+					(unsigned long)nt->RtlGetLastWin32Error());
 				return -1;
 			}
 			if (priv_commits[bi] + n_pages >
