@@ -167,6 +167,33 @@ void uml_nt_plan_issue_op(struct uml_nt_stub_conn *c,
 	issue_plan_op(c, op);
 }
 
+/* M5.4 c3: dump the first n bytes at a guest VA through the mm's VMA
+ * translate — at the SIGSEGV site this decides "the child's view maps
+ * the WRONG run (it reads kernel/foreign bytes as its own data)" vs
+ * "the guest's own logic built the wild pointer" without a debugger
+ * (native referee has none). */
+static void dump_guest_bytes(struct uml_nt_mm *mm, unsigned long long va,
+			     int n, const char *tag)
+{
+	unsigned char buf[48];
+	char line[3 * 48 + 1];
+	long long off;
+	int i;
+
+	if (n > (int)sizeof(buf))
+		n = (int)sizeof(buf);
+	off = uml_nt_vma_translate(mm, va, n);
+	if (off < 0) {
+		os_info("[stubtest]   %s 0x%llx: untranslatable (%lld)\n",
+			tag, va, off);
+		return;
+	}
+	memcpy(buf, (char *)uml_boot.physmem_base + off, n);
+	for (i = 0; i < n; i++)
+		snprintf(line + 3 * i, 4, "%02x ", buf[i]);
+	os_info("[stubtest]   %s 0x%llx: %s\n", tag, va, line);
+}
+
 /* Serve one published request on this conn. Returns 0 on success. */
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
@@ -305,6 +332,37 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					d->regs.rax, d->regs.rdi,
 					d->regs.rsi, d->regs.rdx,
 					c->last_nr, c->last_ret);
+				/* M5.4 c3: the wild-pointer autopsy —
+				 * run 36806296858's victims all die at
+				 * ONE libc rip copying 8 bytes from a
+				 * lib's rodata to the deterministic
+				 * wild 0x3577fffff0003d40 (rax, non-
+				 * canonical: Windows reports addr=-1 —
+				 * the "-EPERM as length" reading was
+				 * wrong). Bytes AT rax + the VMA it
+				 * falls in separate wrong-run-aliasing
+				 * (kernel/foreign garbage in the view)
+				 * from a guest-logic wild pointer. */
+				{
+					struct uml_nt_vma *rv =
+						uml_nt_vma_find(c->mm,
+								d->regs.rax);
+
+					if (rv != NULL)
+						os_info("[stubtest]   rax-vma 0x%llx-0x%llx prot=0x%x off=0x%llx\n",
+							rv->start, rv->end,
+							rv->prot,
+							rv->run_off);
+					else
+						os_info("[stubtest]   rax-vma: none\n");
+					dump_guest_bytes(c->mm,
+							 d->regs.rax &
+							 ~0xfULL, 32,
+							 "at-rax");
+					dump_guest_bytes(c->mm,
+							 d->regs.rsi, 32,
+							 "at-rsi");
+				}
 				force_sig_fault(SIGSEGV, code,
 					(void __user *)(unsigned long)
 						d->fault_addr);
