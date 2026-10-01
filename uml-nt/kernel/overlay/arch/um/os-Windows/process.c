@@ -99,7 +99,10 @@ void os_set_pdeathsig(void)
  * Ledger: one commit count per 64K block over [base, base+512MiB) —
  * the launcher reserves the kernel's out-of-RAM band
  * ([base+section, +256MiB), see below) so nothing else claims it;
- * the ledger window must contain the band for any mem=.
+ * the ledger window must contain the band for any mem=. Commits are
+ * MEM_COMMIT-only sub-ranges of that reservation (the documented
+ * reserve-then-commit pair; run 36795717610: re-passing MEM_RESERVE
+ * into the reservation itself died 487).
  * Consecutive order-0 pages share a block (idempotent re-commit);
  * per-page unmaps decommit, and the block releases only at zero —
  * two vmalloc areas can share one 64K block (the 4K inter-area hole
@@ -203,7 +206,7 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 			}
 			got = nt->VirtualAlloc((PVOID)(uintptr_t)b,
 					       UML_NT_PRIV_BLOCK_SIZE,
-					       MEM_COMMIT | MEM_RESERVE,
+					       MEM_COMMIT,
 					       protect);
 			if (got == NULL) {
 				MEMORY_BASIC_INFORMATION mbi;
