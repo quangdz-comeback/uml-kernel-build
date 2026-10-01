@@ -105,6 +105,17 @@ struct uml_nt_stub_conn {
 	 * correlating census lines across the log. */
 	unsigned long long last_nr;
 	long long last_ret;
+	/* M5.4 c3 (048): destroy stamps DEAD before kfree; consumers
+	 * that reach a conn through a RETAINED pointer (the switch
+	 * hook's re-arm, the co-mapper census, the fork seed) refuse a
+	 * stamped conn instead of walking its freed mm. kzalloc reuse
+	 * zeroes the stamp (a fresh conn is the benign no-vma hole);
+	 * non-zeroed reuse keeps it and is refused. The dispatch ENTRY
+	 * deliberately does NOT check: that check runs out of order
+	 * with the fork seed (d9808b9 regressed fork children into
+	 * unseeded conns — run 36813545490 "INIT pid 4252: 0 map
+	 * op(s)", stub rip=0 — reverted in 631632b). */
+	u32 dead_magic;
 };
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
@@ -130,6 +141,8 @@ struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
  * machinery, one protocol. Returns 0, -1 on failure; conn fields
  * record handles as soon as they exist so a failed spawn cleans up
  * without leaking. */
+#define UML_NT_CONN_DEAD 0xDEADC0DEu
+
 int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 		      unsigned long long stack_va,
 		      const struct uml_nt_gp_regs *init);

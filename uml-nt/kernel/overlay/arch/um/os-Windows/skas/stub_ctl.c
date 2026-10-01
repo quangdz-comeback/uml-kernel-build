@@ -390,7 +390,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								continue;
 							pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
 							if (pc == NULL ||
-							    pc->mm == NULL)
+							    pc->mm == NULL ||
+							    pc->dead_magic ==
+								UML_NT_CONN_DEAD)
 								continue;
 							pv = uml_nt_vma_find(pc->mm, d->regs.rax);
 							if (pv == NULL)
@@ -637,7 +639,24 @@ void uml_nt_switch_trace(void *from, void *to)
 			&t->mm->context.id : NULL;
 		struct uml_nt_stub_conn *c = (id != NULL) ?
 			id->nt_conn : NULL;
+		static int stale_logged;
 
+		if (c != NULL && c->dead_magic == UML_NT_CONN_DEAD) {
+			/* 048: the conn this task's mm points at was
+			 * destroyed (stamped) — its mm/ph are kfree'd.
+			 * Refuse the re-arm (fail-safe: NULL mm + NULL
+			 * sink, the walk EFAULTs) and name the task
+			 * once — the log line is the datum that says
+			 * which path retained the corpse. */
+			if (!stale_logged) {
+				stale_logged = 1;
+				os_info("[switch] STALE-CONN re-arm "
+					"refused: incoming task %d pid "
+					"%lu\n", t->pid,
+					(unsigned long)c->pid);
+			}
+			c = NULL;
+		}
 		if (c != NULL) {
 			struct uml_nt_uacc_sink s;
 
@@ -733,6 +752,17 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 
 	if (parent == NULL)
 		return 0;
+	if (parent->dead_magic == UML_NT_CONN_DEAD) {
+		/* 048 audit: the armed parent conn was destroyed
+		 * between the arm and this seed (its exit beat the
+		 * fork). Cloning its freed mm is the injection class —
+		 * fail the fork loud instead (the generic fork aborts
+		 * with -ENOMEM, the guest sees fork() fail). */
+		os_info("fork: armed parent conn destroyed (pid %lu) "
+			"— seed refused\n", (unsigned long)parent->pid);
+		fork_pending_parent = NULL;
+		return -ENOMEM;
+	}
 
 	/* One phys table per MM CONTEXT would double-count nothing but
 	 * also see nothing: run refcounts must count mm CONTEXTS
