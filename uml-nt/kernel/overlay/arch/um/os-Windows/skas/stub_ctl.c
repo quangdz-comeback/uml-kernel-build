@@ -534,14 +534,16 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					"rbx=0x%llx rbp=0x%llx r12=0x%llx "
 					"r13=0x%llx r14=0x%llx r15=0x%llx "
 					"last_nr=%llu last_ret=%lld "
-					"rax_lo=0x%08x rax_hi=0x%08x\n",
+					"rax_lo=0x%08x rax_hi=0x%08x "
+					"seed_rip=0x%llx\n",
 					d->regs.rbx, d->regs.rbp,
 					d->regs.r12, d->regs.r13,
 					d->regs.r14, d->regs.r15,
 					c->last_nr, c->last_ret,
 					(unsigned int)(d->regs.rax &
 						       0xffffffff),
-					(unsigned int)(d->regs.rax >> 32));
+					(unsigned int)(d->regs.rax >> 32),
+					c->d->init_regs.rip);
 				/* M5.4 c3: the wild-pointer autopsy —
 				 * run 36806296858's victims all die at
 				 * ONE libc rip copying 8 bytes from a
@@ -800,6 +802,15 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	int vi;
 	int rc_clone;
 
+	/* map 053 item 1: the parent's live callee-saved regs at the
+	 * fork round. If the parent EVER carries the fork-resume-RIP
+	 * value (_Fork+0x23) in r12/r13/rbx here, the syscall-round
+	 * save/restore contaminates the parent — bisect there. */
+	os_info("[stubtest] fork round pid %lu: parent rip=0x%llx "
+		"rax=0x%llx rbx=0x%llx rbp=0x%llx r12=0x%llx r13=0x%llx "
+		"r14=0x%llx r15=0x%llx\n",
+		(unsigned long)c->pid, g->rip, g->rax, g->rbx, g->rbp,
+		g->r12, g->r13, g->r14, g->r15);
 	if (k->alive) {
 		os_info("[stubtest] fork: child already exists\n");
 		d->retval = (unsigned long long)-9LL; /* -EBADF */
@@ -840,6 +851,11 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	}
 	k->d->init_regs = *g;
 	k->d->init_regs.rax = 0;
+	os_info("[stubtest] fork seed pid %lu: child rip=0x%llx "
+		"rbx=0x%llx r12=0x%llx r13=0x%llx\n",
+		(unsigned long)k->pid, k->d->init_regs.rip,
+		k->d->init_regs.rbx, k->d->init_regs.r12,
+		k->d->init_regs.r13);
 	/* S4c2/D18: the child shares the TLS block COW and musl never
 	 * re-runs arch_prctl after fork — inherit the base so the
 	 * child's stub re-applies it like the parent's does. */
