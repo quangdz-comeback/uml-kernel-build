@@ -366,7 +366,17 @@ static void valscan_death(struct uml_nt_stub_conn *c, unsigned long long val)
 		(unsigned long)c->pid, hits);
 	for_each_process(p) {
 		struct uml_nt_stub_conn *pc;
-		int is_parent = (p->pid == (int)c->ppid);
+		/* map 056: c->ppid is the HOST stub pid of the parent
+		 * conn — it NEVER equals a kernel task pid, so the pid
+		 * match silently skipped the parent in every run (only
+		 * "valscan self" + "valscan pid 1" lines ever printed —
+		 * run 36848102086). Match the task_struct directly: the
+		 * death round runs on the victim's task (the pump is
+		 * its userspace() loop), real_parent is the fork
+		 * parent. Keep the ppid match as belt-and-braces for
+		 * the POC conns. */
+		int is_parent = (p == current->real_parent ||
+				 p->pid == (int)c->ppid);
 
 		if (p->mm == NULL)
 			continue;
@@ -1221,6 +1231,43 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		}
 no_zero:
 		;
+	}
+	/* map 056 verifier: the poison the child is about to INHERIT.
+	 * The sigframe machinery records trap+2 (the resume rip) in the
+	 * frame's uc_mcontext (signal_check syncs with rip+2); at a
+	 * fork-boundary delivery that is _Fork+0x23 — a value NO live
+	 * frame may carry as data (the _Fork wrapper is a leaf: no
+	 * return address points past its syscall). Scan the live region
+	 * above the fork rsp for exactly that value: hits = the
+	 * parent's own past dead-frame residue sitting above the fork
+	 * rsp, copied into the child as "live" bytes (the below-rsp
+	 * zero cannot reach). With the rt_sigreturn dead-frame zero
+	 * (syscall.c case 15) in place this must read 0 — any hit names
+	 * a surviving source for the next slice. */
+	{
+		struct uml_nt_vma *lv;
+		unsigned long long rip2 = parent->d->regs.rip + 2;
+		unsigned long long va, end;
+		int poison = 0;
+
+		lv = uml_nt_vma_find(child->mm, fork_pending_rsp);
+		if (lv != NULL) {
+			end = fork_pending_rsp + 0x200;
+			if (end > lv->end)
+				end = lv->end;
+			for (va = (fork_pending_rsp + 7) & ~7ull;
+			     va + 8 <= end; va += 8) {
+				unsigned long long v;
+
+				memcpy(&v, uml_boot.physmem_base +
+					    lv->run_off + (va - lv->start),
+				       8);
+				if (v == rip2)
+					poison++;
+			}
+		}
+		os_info("fork: seed poison-scan rip2=0x%llx: %d hit(s) in "
+			"live region\n", rip2, poison);
 	}
 	/* D18: the child shares the TLS block COW and musl never
 	 * re-runs arch_prctl after fork — the child's stub re-applies

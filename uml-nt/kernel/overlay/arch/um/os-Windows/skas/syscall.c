@@ -1570,6 +1570,38 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		if (c->task_backed) {
 			uml_nt_sync_trap_regs(&current_pt_regs()->regs, d);
 			ret = sys_vfs(nr, a);
+			/* M5.4 c3 (map 056): zero the DEAD frame. Upstream
+			 * leaves the bytes too, but nothing may READ them:
+			 * below-rsp is dead by the ABI. Here the residue
+			 * went LIVE — the frame's uc_mcontext.rip (the
+			 * fork-resume rip, trap+2: _Fork+0x23) survived at
+			 * every depth the task ever ran at, deeper forks
+			 * inherited it as "live" caller frames above the
+			 * fork rsp (the seed's below-rsp zero cannot reach
+			 * there), and the exec_child env-merge descending
+			 * to deterministic depths read the mcontext/siginfo
+			 * cluster as strv/vararg pointers — the 56×
+			 * SIGSEGV strcspn signature, self-perpetuating
+			 * (the victim's own SIGSEGV frame re-seeds it).
+			 * Deliberate Linux-parity deviation, same class as
+			 * the fork-seed zero (aca83a6). 0x600 covers the
+			 * frame (pretcode + ucontext + siginfo) plus the
+			 * fpstate block with slack — all dead at this
+			 * point: the restore already read them into
+			 * thread.regs, and the interrupted true_sp sits
+			 * 0x2000 higher. */
+			{
+				unsigned long long frame = d->regs.rsp - 8;
+
+				if (uml_nt_uacc_walk(c->mm,
+						     uml_boot.physmem_base,
+						     frame, 0x600, NULL,
+						     UML_NT_UACC_ZERO_GUEST) <
+				    0)
+					os_info("[syscall] rt_sigreturn: "
+						"dead-frame zero EFAULT "
+						"(frame 0x%llx)\n", frame);
+			}
 			c->sig_regs_current = 1;
 			c->push_verbatim = 1;
 			break;
