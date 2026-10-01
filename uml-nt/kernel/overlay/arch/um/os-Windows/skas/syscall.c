@@ -1358,36 +1358,92 @@ static void abrt_mmap_note(struct uml_nt_stub_conn *c,
 		c->mmap_recent_n++;
 }
 
-/* The tgkill-half capture (primary per Astra §2): read the recent
- * mmap candidates of the aborting conn, dump the one carrying the
- * fatal-text signature. The __abort_msg mapping is the FINAL mmap
- * before abort() raises, so the newest candidate usually hits;
- * the prefix check makes a wrong candidate a harmless skip. */
-static void abrt_msg_capture(struct uml_nt_stub_conn *c)
+/* The glibc fatal-message family (run 36898314217 decoded the OTHER
+ * kind: malloc_printerr's plain strings — "malloc(): smallbin double
+ * linked list corrupted" — carry the predicate in the message itself,
+ * no %s args, and do NOT start with "Fatal glibc error"). */
+static const char *const abrt_pfx[] = {
+	"Fatal glibc ", "malloc():", "free():", "realloc():",
+	"memalign():",
+};
+
+static int abrt_text_match(const char *s, int n)
 {
-	static int ncaptured;
+	int p;
+
+	for (p = 0; p < (int)ARRAY_SIZE(abrt_pfx); p++) {
+		size_t len = strlen(abrt_pfx[p]);
+
+		if (n >= (int)len && strncmp(s, abrt_pfx[p], len) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* The tgkill-half capture (primary per Astra §2). Two routes:
+ *
+ * 1. DIRECT — the raise frame carries the __abort_msg pointer at
+ *    rsp+0x20 (0x605c0000 in BOTH the PID1 decode and every child
+ *    dump): peek the message text there. Printable-ASCII gated.
+ * 2. RING — this conn's recent successful mmap results, prefix-
+ *    matched against the fatal-message family.
+ *
+ * Run 36898314217 (children aborting "malloc(): smallbin double
+ * linked list corrupted") proved the prefix must cover the
+ * malloc_printerr family too — the first capture stayed silent on
+ * exactly those aborts. */
+static void abrt_msg_capture(struct uml_nt_stub_conn *c,
+			     unsigned long long msg_va)
+{
+	static int ncaptured, nmiss;
 	char s[448];
 	int k;
 
-	if (ncaptured >= 3 || !c->task_backed)
+	if (ncaptured >= 3)
 		return;
+	if (msg_va) {
+		int got = abrt_read_str(c, msg_va, s, sizeof(s));
+		int i, printable = got > 8;
+
+		for (i = 0; printable && i < 8; i++)
+			if ((s[i] < 0x20 || s[i] > 0x7e) && s[i] != '\n')
+				printable = 0;
+		if (printable) {
+			ncaptured++;
+			os_info("[abrt] message @0x%llx (frame rsp+0x20, "
+				"task %d)\n", msg_va,
+				current ? current->pid : 0);
+			abrt_dump_text(s, got);
+			return;
+		}
+	}
 	for (k = 0; k < c->mmap_recent_n; k++) {
 		unsigned long long va;
 		int idx, got;
 
 		idx = (c->mmap_recent_head + 3 - k) % 4;
 		va = c->mmap_recent[idx];
-		got = abrt_read_str(c, va, s, 24);
-		if (got < 17 || strncmp(s, "Fatal glibc error", 17) != 0)
-			continue;
 		got = abrt_read_str(c, va, s, sizeof(s));
-		if (got <= 0)
+		if (got <= 0 || !abrt_text_match(s, got))
 			continue;
 		ncaptured++;
 		os_info("[abrt] __abort_msg @0x%llx (mmap candidate %d/%d, "
 			"task %d)\n", va, k + 1, c->mmap_recent_n,
 			current ? current->pid : 0);
 		abrt_dump_text(s, got);
+		return;
+	}
+	/* The miss diag (once): ring contents + the peek verdict — the
+	 * writer hunt reads the NEXT capture's shape from here. */
+	if (nmiss < 1) {
+		nmiss = 1;
+		os_info("[abrt] capture miss: ring n=%d head=%d "
+			"{0x%llx,0x%llx,0x%llx,0x%llx} msg_va=0x%llx "
+			"(task %d)\n", c->mmap_recent_n,
+			c->mmap_recent_head, c->mmap_recent[0],
+			c->mmap_recent[1], c->mmap_recent[2],
+			c->mmap_recent[3], msg_va,
+			current ? current->pid : 0);
 	}
 }
 
@@ -1395,7 +1451,8 @@ static void abrt_msg_capture(struct uml_nt_stub_conn *c)
  * text to fd 2 BEFORE the __abort_msg mmap — this yields the same
  * {function, predicate} pair a round earlier, plus the writev retval
  * that explains why the text never reached the console. Signature-
- * gated on "Fatal glibc " so every normal fd-2 writev stays silent. */
+ * gated on the glibc fatal-message family (abrt_text_match) so every
+ * normal fd-2 writev stays silent. */
 static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 				const unsigned long long *a,
 				unsigned long long ret)
@@ -1417,7 +1474,7 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 	if (!iov[0].base || iov[0].len < 16)
 		return;
 	n = abrt_read_str(c, iov[0].base, s, sizeof(s));
-	if (n < 12 || strncmp(s, "Fatal glibc ", 12) != 0)
+	if (n < 8 || !abrt_text_match(s, n))
 		return;
 	ncaptured++;
 	os_info("[abrt] libc-message writev(2) -> %lld iovcnt=%llu "
@@ -1967,6 +2024,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		 * CALLER's return address at trap_rsp+0x108. Decode
 		 * the qwords offline against the rootfs binaries. */
 		unsigned long long q[36];
+		unsigned long long msg_va = 0;
 		long long off;
 		int i;
 
@@ -1982,16 +2040,16 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 					"0x%llx 0x%llx 0x%llx 0x%llx\n",
 					d->regs.rip, i * 8, q[i], q[i + 1],
 					q[i + 2], q[i + 3]);
+			msg_va = q[4];
 		} else {
 			os_info("[abrt]   rip=0x%llx rsp=0x%llx stack "
 				"untranslatable (%lld)\n", d->regs.rip,
 				d->regs.rsp, off);
 		}
-		/* Astra request §2 — the predicate capture: dump the
-		 * __abort_msg string (the fatal-text mapping built by
-		 * __libc_message before this trap) for the real
-		 * {function, predicate} pair of the malloc assert. */
-		abrt_msg_capture(c);
+		/* Astra request §2 — the predicate capture. msg_va =
+		 * [rsp+0x20] = the __abort_msg pointer (both the PID1
+		 * decode and every child dump agree on that slot). */
+		abrt_msg_capture(c, msg_va);
 	} else if (nr == 13 && a[0] == 6 && c->task_backed)
 		os_info("[abrt] sigaction SIGABRT act=0x%llx -> %lld "
 			"(task %d)\n", a[1], (long long)ret,
