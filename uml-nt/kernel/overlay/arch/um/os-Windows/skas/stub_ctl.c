@@ -837,6 +837,28 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 		       uml_boot.physmem_base + pv->run_off,
 		       cv->end - cv->start);
 	}
+	/* M5.4 c3 (map 053 item 2b): below-rsp residue zeroing — same
+	 * contract as the task-backed seed above (the eager copy hands
+	 * the child the parent's sigframe garbage; below-rsp is dead
+	 * by ABI, the red zone stays). */
+	{
+		struct uml_nt_vma *sv = uml_nt_vma_find(&mm_child, g->rsp);
+		unsigned long long zstart;
+
+		if (g->rsp >= 128) {
+			zstart = g->rsp - 128;
+			if (sv != NULL && zstart > sv->start) {
+				unsigned long long zlen =
+					zstart - sv->start;
+
+				memset(uml_boot.physmem_base +
+					       sv->run_off, 0, zlen);
+				os_info("[stubtest] fork: zeroed child "
+					"stack residue below rsp 0x%llx "
+					"(%llu bytes)\n", g->rsp, zlen);
+			}
+		}
+	}
 	k->mm = &mm_child;
 	k->ph = c->ph;
 	k->ppid = c->pid;
@@ -1164,6 +1186,39 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		memcpy(uml_boot.physmem_base + cv->run_off,
 		       uml_boot.physmem_base + pv->run_off,
 		       cv->end - cv->start);
+	}
+	/* M5.4 c3 (map 053 item 2b): the eager stack copy hands the
+	 * child the parent's BELOW-RSP residue — sigframes (SIGCHLD
+	 * storm: mcontext rip = _Fork+0x23 + callee-saved) PID 1's
+	 * kernel wrote under earlier trap rsps. The fork child's
+	 * exec_child env assembly (_strv_env_merge) descends to the
+	 * same deterministic depths, reads the cluster as strv
+	 * entries and dies in strcspn — the self-perpetuating
+	 * signature. Below-rsp is dead by the ABI (red zone = 128
+	 * bytes); give the child a clean slab instead of the parent's
+	 * garbage. Deliberate Linux-parity deviation, documented:
+	 * real Linux inherits the bytes too, but nothing may READ
+	 * them — here the deterministic depth overlap makes the
+	 * residue live. */
+	{
+		struct uml_nt_vma *sv;
+		unsigned long long zstart;
+
+		if (fork_pending_rsp < 128)
+			goto no_zero;
+		sv = uml_nt_vma_find(child->mm, fork_pending_rsp);
+		zstart = fork_pending_rsp - 128;
+		if (sv != NULL && zstart > sv->start) {
+			unsigned long long zlen = zstart - sv->start;
+
+			memset(uml_boot.physmem_base + sv->run_off, 0,
+			       zlen);
+			os_info("fork: zeroed child stack residue below "
+				"rsp 0x%llx (%llu bytes)\n",
+				fork_pending_rsp, zlen);
+		}
+no_zero:
+		;
 	}
 	/* D18: the child shares the TLS block COW and musl never
 	 * re-runs arch_prctl after fork — the child's stub re-applies
