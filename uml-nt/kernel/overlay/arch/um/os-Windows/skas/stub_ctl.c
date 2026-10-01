@@ -194,6 +194,31 @@ static void dump_guest_bytes(struct uml_nt_mm *mm, unsigned long long va,
 	os_info("[stubtest]   %s 0x%llx: %s\n", tag, va, line);
 }
 
+/* v5: read one guest qword at slot_va and dump the bytes it points
+ * to — the strv slots and the frame chain decode themselves into the
+ * log (the walker's saved regs ARE the env strv / merge state). */
+static void dump_ptr_at(struct uml_nt_mm *mm, unsigned long long slot,
+			const char *tag)
+{
+	unsigned char b[8];
+	long long off;
+	long long v = 0;
+	int i;
+
+	off = uml_nt_vma_translate(mm, slot, 8);
+	if (off < 0) {
+		os_info("[stubtest]   %s 0x%llx: slot untranslatable "
+			"(%lld)\n", tag, slot, off);
+		return;
+	}
+	memcpy(b, (char *)uml_boot.physmem_base + off, 8);
+	for (i = 7; i >= 0; i--)
+		v = (v << 8) | b[i];
+	os_info("[stubtest]   %s [0x%llx] -> 0x%llx\n", tag, slot, v);
+	if (v > 0x1000 && v < 0x800000000000ull)
+		dump_guest_bytes(mm, (unsigned long long)v, 32, tag);
+}
+
 /* Serve one published request on this conn. Returns 0 on success. */
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
@@ -393,6 +418,27 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					dump_guest_bytes(c->mm,
 							 d->fs_base, 48,
 							 "at-fs");
+					/* v5: the walker frame's slots
+					 * ARE the strv pointers (run
+					 * 36828973188: saved rdi =
+					 * the heap strv, saved r12/
+					 * rbx = the 704KB pthread
+					 * arena) — dump the arrays
+					 * they name + the frame chain
+					 * + the pointer guard. */
+					dump_ptr_at(c->mm, d->regs.rsp + 8,
+						    "frame-slot8");
+					dump_ptr_at(c->mm, d->regs.rsp + 0x18,
+						    "frame-slot18");
+					dump_ptr_at(c->mm, d->regs.rsp + 0x30,
+						    "frame-slot30");
+					dump_ptr_at(c->mm, d->regs.rbp,
+						    "frame-rbp");
+					dump_ptr_at(c->mm, d->regs.rbp + 8,
+						    "frame-ret");
+					dump_guest_bytes(c->mm,
+							 d->fs_base + 48, 16,
+							 "at-fs2");
 					/* v2: run-ownership census at
 					 * the wild pointer. Run
 					 * 36808917963's victims die on
