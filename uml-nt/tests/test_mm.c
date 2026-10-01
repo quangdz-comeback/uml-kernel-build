@@ -223,6 +223,54 @@ static void test_translate(void)
 	      (long long)(r1 + RUN + 0x1234));
 }
 
+/* 048: the translate boundary is the PHYSMEM WINDOW, not the guest
+ * VA base — a rotten VMA (freed-then-reused mm) whose run_off lands
+ * between the section end and the VA base must refuse, not inject. */
+static void test_translate_boundary(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	unsigned long long r0, saved;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 8 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	r0 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + 2 * RUN, r0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+
+	saved = uml_nt_vma_phys_limit;
+	/* window tight INSIDE the VMA: limit = mid-span, so the
+	 * boundary (not the VMA-end rule) is what refuses */
+	uml_nt_vma_phys_limit = r0 + RUN + 0x1000;
+
+	/* below the boundary: fine */
+	CHECK(uml_nt_vma_translate(&mm, RAM + RUN, 0x800) ==
+	      (long long)(r0 + RUN));
+	CHECK(uml_nt_vma_translate(&mm, RAM + RUN + 0x800, 0x800) ==
+	      (long long)(r0 + RUN + 0x800));
+	/* AT the boundary: refused — and this offset is ~1 MB, far
+	 * below the VA base: the e938b68 bound let it THROUGH */
+	CHECK(uml_nt_vma_translate(&mm, RAM + RUN + 0x1000, 0x800) == -1);
+	CHECK(uml_nt_vma_translate(&mm, RAM + 2 * RUN - 1, 1) == -1);
+
+	/* the rotten run_off classes: a VMA whose base itself sits
+	 * at/above the window (kernel-slab-shaped garbage below the
+	 * VA base, and the absolute-VA shape as a bonus) */
+	mm.vma[0].run_off = r0 + RUN + 0x1000;
+	CHECK(uml_nt_vma_translate(&mm, RAM, 1) == -1);
+	mm.vma[0].run_off = UML_NT_GUEST_VA_BASE - RUN;
+	CHECK(uml_nt_vma_translate(&mm, RAM, 1) == -1);
+	mm.vma[0].run_off = UML_NT_GUEST_VA_BASE;
+	CHECK(uml_nt_vma_translate(&mm, RAM, 1) == -1);
+
+	/* restore: the same VA translates again (no sticky state) */
+	mm.vma[0].run_off = r0;
+	uml_nt_vma_phys_limit = saved;
+	CHECK(uml_nt_vma_translate(&mm, RAM + 0x1234, 8) ==
+	      (long long)(r0 + 0x1234));
+}
+
 static void test_vma(void)
 {
 	struct uml_nt_phys ph;
@@ -1000,6 +1048,7 @@ int main(void)
 	test_span();
 	test_vma();
 	test_translate();
+	test_translate_boundary();
 	test_fault();
 	test_find_free();
 	test_span_runs();

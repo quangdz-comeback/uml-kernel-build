@@ -179,6 +179,13 @@ int uml_nt_guard_del_range(struct uml_nt_mm *mm, unsigned long long start,
 			   unsigned long long end);
 int uml_nt_guard_hit(const struct uml_nt_mm *mm, unsigned long long addr);
 
+/* The translate boundary (048): a physmem section offset is only
+ * valid BELOW this line. The kernel pins it to uml_boot.physmem_size
+ * at boot (no allocation can hand out a run at/above it); the
+ * default keeps the historical e938b68 VA-base bound so a walk
+ * before the pin is refused-safe, not unbounded. */
+extern unsigned long long uml_nt_vma_phys_limit;
+
 /* Guest VA buffer [va, va+len) → physmem section offset, or -1 when
  * any byte is unmapped or the buffer crosses the VMA end. D11: the
  * syscall path (write/… buffers) MUST translate through this — the

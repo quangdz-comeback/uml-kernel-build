@@ -14,6 +14,7 @@
 #include <linux/types.h>
 #include <ntabi.h>
 #include <os.h>
+#include <vma.h>
 #include "boot-info.h"
 #include "internal.h"
 
@@ -55,6 +56,12 @@ void nt_main(struct uml_boot_info *bi)
 
 	/* Copy the handoff out of the launcher-controlled stack area. */
 	uml_boot = *bi;
+
+	/* The translate boundary is the physmem window itself (048):
+	 * every legit run offset lives below physmem_size by
+	 * construction — the phys run table covers exactly that many
+	 * bytes. Anything at/above it is a rotten-VMA read. */
+	uml_nt_vma_phys_limit = uml_boot.physmem_size;
 
 	linux_main(uml_boot.argc, uml_boot.argv, uml_boot.envp);
 

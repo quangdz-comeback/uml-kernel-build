@@ -146,11 +146,13 @@ static void uacc_trace_efault(unsigned long long va, unsigned long n)
 				v->run_off);
 			return;
 		}
-		if (v->run_off >= UML_NT_GUEST_VA_BASE) {
-			/* The translate refused an ABSOLUTE run_off (the
-			 * double-base class — vma.c returns -1 for it).
-			 * Print the offending VMA: the [syscall] lines
-			 * around it name the creator. */
+		if (v->run_off >= uml_nt_vma_phys_limit) {
+			/* The translate refused a run_off beyond the
+			 * physmem window (the 048 bound — superset of
+			 * the e938b68 absolute-VA class; the window is
+			 * far below the guest VA base). Print the
+			 * offending VMA: the [syscall] lines around it
+			 * name the creator. */
 			os_info("[uacc] to_user EFAULT #%d: va=0x%llx "
 				"len=%lu task=%d reason=bad-run-off "
 				"vma=[0x%llx,0x%llx) run_off=0x%llx\n",

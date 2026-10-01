@@ -6,6 +6,14 @@
  */
 #include <vma.h>
 
+/* The translate boundary (048): a physmem section offset is only
+ * valid BELOW this line. Boot pins it to uml_boot.physmem_size
+ * (main.c) — no allocation can ever hand out a run at/above it, so
+ * any translate result there is a rotten-VMA read, not memory we
+ * own. The default keeps the historical e938b68 VA-base bound so a
+ * walk before the pin is refused-safe, not unbounded. */
+unsigned long long uml_nt_vma_phys_limit = UML_NT_GUEST_VA_BASE;
+
 void uml_nt_mm_init(struct uml_nt_mm *mm)
 {
 	mm->nvma = 0;
@@ -519,15 +527,21 @@ long long uml_nt_vma_translate(const struct uml_nt_mm *mm,
 		return -1;
 	if (len != 0 && (len > v->end - va))
 		return -1;
-	/* A translate result is a PHYSMEM SECTION OFFSET — always far
-	 * below the guest VA window (physmem <= 128 MiB vs base
-	 * 0x60000000). An offset at/above the base = a run_off that
-	 * carries an ABSOLUTE address (the double-base bug: run
-	 * 36803515813's VMA [0x60670000,0x60680000) walked as
-	 * off=0x6069ff10 and the walker's own memcpy deref'd base+off
-	 * = 0xc069ff10). Refuse instead of faulting the kernel. */
+	/* A translate result is a PHYSMEM SECTION OFFSET — it must land
+	 * inside the physmem window itself, not merely below the guest
+	 * VA base. The e938b68 bound (>= UML_NT_GUEST_VA_BASE) caught
+	 * the ABSOLUTE run_off class (run 36803515813's VMA
+	 * [0x60670000,0x60680000) walked as off=0x6069ff10, the
+	 * walker's own memcpy deref'd base+off = 0xc069ff10) — but the
+	 * freed-then-reused-mm walks (report 048) also emit run_off
+	 * values BETWEEN the section end and the VA base; those
+	 * translated fine and WROTE into a wrong guest run (the
+	 * "STREAM=7"-in-a-pointer-slot / wild 0x3577fffff0003d40
+	 * injection class in the SIGSEGV victims). The correct boundary
+	 * is the physmem limit: one compare, no fork-seed interaction
+	 * (every legit VMA's run_off lives below it by construction). */
 	if ((unsigned long long)(v->run_off + (va - v->start)) >=
-	    UML_NT_GUEST_VA_BASE)
+	    uml_nt_vma_phys_limit)
 		return -1;
 	return (long long)(v->run_off + (va - v->start));
 }
