@@ -856,21 +856,29 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								pv->end,
 								pv->prot,
 								pv->run_off);
-							if (pc != c &&
-							    pc->ppid ==
-								c->pid) {
-								dump_guest_bytes(pc->mm, d->regs.rax & ~0xfULL, 16, "at-rax-parent");
-								/* v3: the TCB
-								 * comparison — the
-								 * child inherits
-								 * fs (D18); a
-								 * diverged parent
-								 * page = the COW
-								 * split itself
-								 * planted the
-								 * wild bytes. */
-								dump_guest_bytes(pc->mm, d->fs_base, 48, "at-fs-parent");
-							}
+							/* runs 36922613566
+							 * + 36925403121:
+							 * the wild slot
+							 * 0x607a3ce8 holds a
+							 * DIFFERENT value per
+							 * boot while rax/rsi
+							 * stay deterministic —
+							 * compare the SAME
+							 * bytes through every
+							 * co-mapper's run:
+							 * wild only in the
+							 * victim's run = a
+							 * post-fork writer in
+							 * the child's own
+							 * path; wild in all =
+							 * inherited from the
+							 * common parent. */
+							dump_guest_bytes(
+								pc->mm,
+								d->regs.rax &
+									~0xfULL,
+								16,
+								"at-rax-comap");
 						}
 					}
 				}
