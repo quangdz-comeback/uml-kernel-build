@@ -42,6 +42,14 @@ static unsigned long long uacc_bstrnlen(const char *s,
 static struct uml_nt_uacc_sink uacc_sink;
 
 unsigned long uml_nt_uacc_fixups;
+/* M5.4 c3 (map 057): the last cow-fixup's coordinates (header comment).
+ * Recorded at the fixup, logged by the conn layer's counter-delta. */
+unsigned long long uml_nt_uacc_fixup_va;
+unsigned long long uml_nt_uacc_fixup_page;
+unsigned long long uml_nt_uacc_fixup_vma_start;
+unsigned long long uml_nt_uacc_fixup_vma_end;
+unsigned long long uml_nt_uacc_fixup_old_run;
+unsigned long long uml_nt_uacc_fixup_new_run;
 
 /* Sink peeks (see uaccess_walk.h) — the kernel-side EFAULT tracer
  * needs the channel's shape without being able to reach the static
@@ -165,15 +173,16 @@ char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 	 * the shared run's bytes, then the caller's write lands on it. */
 	uacc_bcopy(base + new_run, base + old_run, UACC_RUN);
 	uml_nt_uacc_fixups++; /* the conn layer logs the delta */
-	/* M5.4 c3 (map 057): name the fixed VMA + the write target —
-	 * the fork-residue cluster re-appearing in the victim's stack
-	 * round-correlated with this fixup (run 36854409213); this
-	 * line says WHICH shared run got the parent's current bytes
-	 * and for whose write. Rare (first boot fired once). */
-	os_info("[stubtest]   cow-fixup: vma [0x%llx,0x%llx) "
-		"run_off=0x%llx -> new 0x%llx (write va=0x%llx "
-		"page=0x%llx)\n", vma->start, vma->end, vma->run_off,
-		new_run, va, page);
+	/* M5.4 c3 (map 057): record the fixup's coordinates for the
+	 * conn layer's delta log — this file is PURE (no os_info; the
+	 * Linux CI unit tests compile it standalone — the implicit
+	 * os_info broke D5a run 36855226377). */
+	uml_nt_uacc_fixup_va = va;
+	uml_nt_uacc_fixup_page = page;
+	uml_nt_uacc_fixup_vma_start = vma->start;
+	uml_nt_uacc_fixup_vma_end = vma->end;
+	uml_nt_uacc_fixup_old_run = old_run;
+	uml_nt_uacc_fixup_new_run = new_run;
 
 	if (uml_nt_vma_cow_split((struct uml_nt_mm *)mm, uacc_sink.ph, vma,
 				 page, new_run) < 0) {

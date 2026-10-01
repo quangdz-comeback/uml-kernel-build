@@ -89,6 +89,18 @@ long long uml_nt_uacc_strnlen(const struct uml_nt_mm *mm, char *base,
  * syscall.c own os_info; this file stays unit-testable on Linux),
  * which turns the delta into the CI gate line. */
 extern unsigned long uml_nt_uacc_fixups;
+/* M5.4 c3 (map 057): the LAST cow-fixup's coordinates, recorded by the
+ * walker (pure data — uaccess_walk.c stays log-free for the Linux CI
+ * unit tests) and logged by the conn layer when the fixup counter
+ * moves (syscall.c has os_info). Run 36854409213 round-correlated the
+ * fork-residue cluster with this fixup; these name the target VMA and
+ * the write that caused it. */
+extern unsigned long long uml_nt_uacc_fixup_va;
+extern unsigned long long uml_nt_uacc_fixup_page;
+extern unsigned long long uml_nt_uacc_fixup_vma_start;
+extern unsigned long long uml_nt_uacc_fixup_vma_end;
+extern unsigned long long uml_nt_uacc_fixup_old_run;
+extern unsigned long long uml_nt_uacc_fixup_new_run;
 
 char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 			    unsigned long long va);

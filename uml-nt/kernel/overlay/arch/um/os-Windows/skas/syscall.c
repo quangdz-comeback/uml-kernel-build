@@ -1819,6 +1819,18 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		uacc_fixups_seen = uml_nt_uacc_fixups;
 		os_info("[stubtest] uacc COW fixup: run(s) copied private "
 			"(total %lu)\n", uacc_fixups_seen);
+		/* M5.4 c3 (map 057): the walker records WHERE (pure
+		 * globals — uaccess_walk.c can't log). Round-correlated
+		 * with the fork-residue cluster in run 36854409213. */
+		os_info("[stubtest]   cow-fixup: vma [0x%llx,0x%llx) "
+			"run 0x%llx -> 0x%llx (write va=0x%llx "
+			"page=0x%llx)\n",
+			uml_nt_uacc_fixup_vma_start,
+			uml_nt_uacc_fixup_vma_end,
+			uml_nt_uacc_fixup_old_run,
+			uml_nt_uacc_fixup_new_run,
+			uml_nt_uacc_fixup_va,
+			uml_nt_uacc_fixup_page);
 	}
 out:
 	uml_nt_uacc_set_mm(uacc_prev_mm);
