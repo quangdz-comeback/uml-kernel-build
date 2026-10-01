@@ -1628,6 +1628,46 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 						q[4], q[5], q[6], q[7]);
 				}
 			}
+			/* WRITER-HUNT (068 suppl. 5): run
+			 * 36936671540's dump — entries[1] =
+			 * entries[2] = 0x5f444d455455245a =
+			 * "Z$UTMED_" twice among mangled-sane
+			 * pointers: a TEXT fragment over two bin
+			 * heads. Offline grep: no rodata in the
+			 * rootfs image nor vmlinux/launcher
+			 * carries it — runtime string. When the
+			 * head slot is text-shaped, scan the
+			 * dying space + PID 1 + parent for the
+			 * fragment itself (read-only, valscan
+			 * machinery). entries[] start at
+			 * data+0x80; entries[1] = data+0x88. */
+			{
+				unsigned long long frag = 0;
+				long long foff =
+					uml_nt_vma_translate(c->mm,
+						0x67c00010 + 0x88, 8);
+
+				if (foff >= 0) {
+					const unsigned char *b;
+					int i;
+
+					memcpy(&frag, (char *)
+					       uml_boot.physmem_base +
+					       foff, 8);
+					b = (const unsigned char *)
+					    &frag;
+					for (i = 0; i < 8; i++)
+						if (b[i] < 0x20 ||
+						    b[i] > 0x7e)
+							break;
+					if (i == 8) {
+						os_info("[abrt] fragscan pattern %016llx (\"%.8s\")\n",
+							frag, b);
+						uml_nt_stub_frag_scan(c,
+								      b);
+					}
+				}
+			}
 		} else {
 			os_info("[abrt] tcache: no VMA at 0x67c00010 "
 				"(nvma %d)\n", c->mm->nvma);

@@ -199,6 +199,14 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d);
 void uml_nt_sys_wait4(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d,
 		      const unsigned long long *a);
 
+/* WRITER-HUNT (068 suppl. 5): at the abort capture, scan the dying
+ * task + PID 1 + the fork parent for the 8-byte TEXT fragment found
+ * poisoning the tcache entries ("Z$UTMED_" class — runtime string,
+ * matches no binary rodata). Read-only provenance scan (the valscan
+ * machinery). */
+void uml_nt_stub_frag_scan(struct uml_nt_stub_conn *c,
+			   const unsigned char *pat);
+
 /* ---- M4.2: real fork through the scheduler (task-backed conns) ---- */
 
 /* Arm the pending-fork handoff for the NEXT init_new_context: the

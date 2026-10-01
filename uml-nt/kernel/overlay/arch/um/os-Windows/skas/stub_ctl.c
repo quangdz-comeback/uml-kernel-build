@@ -401,6 +401,47 @@ static void valscan_death(struct uml_nt_stub_conn *c, unsigned long long val)
 	}
 }
 
+/* WRITER-HUNT (068 suppl. 5): the tcache dump caught the poison in
+ * the raw — entries[1] = entries[2] = 0x5f444d455455245a, ASCII
+ * "Z$UTMED_" twice among mangled-sane pointers: a string/buffer
+ * write landed at the wrong offset. Offline grep: the fragment
+ * matches no rodata in the rootfs image nor vmlinux/launcher —
+ * a runtime-built string (same class as the R8 "STREAM=7" window of
+ * the env template JOURNAL_STREAM=%lu:%lu in libsystemd-core). Scan
+ * the dying space + PID 1 + fork parent for the fragment itself:
+ * every hit = a live copy of the poisoned text (env block? stack
+ * residue? heap struct?) — the provenance map for the string
+ * source. Read-only, the valscan machinery; the caller supplies the
+ * pattern (no hardcoded constant). */
+void uml_nt_stub_frag_scan(struct uml_nt_stub_conn *c,
+			   const unsigned char *pat)
+{
+	struct task_struct *p;
+	int hits;
+
+	hits = scan_mm_value(c->mm, pat, 8);
+	os_info("[abrt] fragscan self pid %lu: %d hit(s)\n",
+		(unsigned long)c->pid, hits);
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		int is_parent = (p == current->real_parent ||
+				 p->pid == (int)c->ppid);
+
+		if (p->mm == NULL)
+			continue;
+		if (p->pid != 1 && !is_parent)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			continue;
+		hits = scan_mm_value(pc->mm, pat, 8);
+		os_info("[abrt] fragscan pid %d%s: %d hit(s)\n",
+			p->pid, is_parent ? " (fork parent)" : "",
+			hits);
+	}
+}
+
 /* M5.4 c3 (map 057): the residue-watch scan. Armed by the fork seed
  * with the parent's trap+2 (the fork-resume rip) — a value NO live
  * frame may carry as data (_Fork is a leaf: nothing returns past its
