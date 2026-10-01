@@ -120,7 +120,8 @@ jobs:
           # artifact was alive and well).
           RID=$("$GH" api \
             "repos/${{ github.repository }}/actions/artifacts?name=uml-base-debian-bookworm&per_page=100" \
-            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | .[-1].run_id')
+            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | .[-1].workflow_run.id')
+          echo "artifact lookup: ${RID:-EMPTY}"
           if [ -z "$RID" ]; then
             echo "no live uml-base-debian-bookworm artifact — re-run base_image.yml first" >&2
             exit 1
