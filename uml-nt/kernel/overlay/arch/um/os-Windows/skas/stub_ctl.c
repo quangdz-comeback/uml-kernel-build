@@ -291,14 +291,20 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				os_info("[stubtest] SIGSEGV -> guest pid %lu "
 					"addr=0x%llx type=%u rip=0x%llx "
 					"why=%c fs=0x%llx "
-					"insn=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+					"insn=%02x%02x%02x%02x%02x%02x%02x%02x "
+					"rax=0x%llx rdi=0x%llx rsi=0x%llx "
+					"rdx=0x%llx last_nr=%llu "
+					"last_ret=%lld\n",
 					(unsigned long)c->pid, d->fault_addr,
 					d->fault_type, d->regs.rip,
 					c->plan.kill_why ?
 					c->plan.kill_why : '?',
 					d->fs_base,
 					ib[0], ib[1], ib[2], ib[3],
-					ib[4], ib[5], ib[6], ib[7]);
+					ib[4], ib[5], ib[6], ib[7],
+					d->regs.rax, d->regs.rdi,
+					d->regs.rsi, d->regs.rdx,
+					c->last_nr, c->last_ret);
 				force_sig_fault(SIGSEGV, code,
 					(void __user *)(unsigned long)
 						d->fault_addr);

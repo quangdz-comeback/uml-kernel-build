@@ -1666,6 +1666,10 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	}
 	d->retval = ret;
 	d->err = ((long long)ret < 0 && (long long)ret > -512) ? 1 : 0;
+	/* M5.4 c3 diag: feed the SIGSEGV print (stub_ctl.c) — see the
+	 * conn field comment. */
+	c->last_nr = nr;
+	c->last_ret = ret;
 	/* M5.4 c3: the negative-retval census. Run 36800430061's
 	 * dominant kill (28 SIGSEGVs, all at one libc memmove/strlen
 	 * rip, faulting through a 0xffffffffffffffff pointer/length)

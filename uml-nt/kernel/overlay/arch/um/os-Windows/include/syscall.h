@@ -99,6 +99,12 @@ struct uml_nt_stub_conn {
 	u32 pdeathsig;
 	int dumpable;
 	int no_new_privs;
+	/* M5.4 c3 diag: the last syscall round this conn served. The
+	 * SIGSEGV print names it — a retval the guest consumed as a
+	 * pointer/length is attributable at the death site without
+	 * correlating census lines across the log. */
+	unsigned long long last_nr;
+	long long last_ret;
 };
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
