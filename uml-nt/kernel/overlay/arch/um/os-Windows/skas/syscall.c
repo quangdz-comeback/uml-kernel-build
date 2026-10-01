@@ -1764,9 +1764,12 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		 * chain is the only witness left. glibc abort() ->
 		 * raise() -> tgkill trap puts abort()'s caller (the
 		 * code that DECIDED to abort) one frame up the guest
-		 * stack. Dump [rsp, rsp+0x40) at the trap; decode
-		 * the qwords offline against the rootfs binaries. */
-		unsigned long long q[8];
+		 * stack. Dump [rsp, rsp+0x100) at the trap — abort()'s
+		 * frame alone is 0xb8 deep (push rbp/rbx + sub 0xa8)
+		 * plus raise/pthread_kill below it, so the caller's
+		 * return address sits near rsp+0xe8; decode the
+		 * qwords offline against the rootfs binaries. */
+		unsigned long long q[32];
 		long long off;
 		int i;
 
@@ -1777,7 +1780,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		if (off >= 0) {
 			memcpy(q, (char *)uml_boot.physmem_base + off,
 			       sizeof(q));
-			for (i = 0; i < 8; i += 4)
+			for (i = 0; i < 32; i += 4)
 				os_info("[abrt]   rip=0x%llx [rsp+0x%02x]: "
 					"0x%llx 0x%llx 0x%llx 0x%llx\n",
 					d->regs.rip, i * 8, q[i], q[i + 1],
