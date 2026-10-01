@@ -166,18 +166,20 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 			x != 0);
 	}
 
-	/* PAGE_* from rwx bits — every rwx combination is a valid NT
-	 * protection (same table the section path used). */
-	if (r && w && x)
-		protect = 0x40;              /* PAGE_EXECUTE_READWRITE */
-	else if (r && x)
-		protect = 0x20;              /* PAGE_EXECUTE_READ */
-	else if (w)
-		protect = 0x04;              /* PAGE_READWRITE */
-	else if (r)
-		protect = 0x02;              /* PAGE_READONLY */
-	else
-		protect = 0x01;              /* PAGE_NOACCESS */
+	/* PAGE_* from the rwx bits — for the LEDGER LOG only. The COMMIT
+	 * is UNCONDITIONALLY RWX: these VAs are the kernel's own direct
+	 * memory (the vmalloc band — no stub/guest isolation boundary
+	 * exists above the section), and upstream's kern_map prot dance
+	 * (tlb.c update_pte_range: !pte_young zeroes r+w, !pte_dirty
+	 * zeroes w) is cosmetic for the guest-view sync — a clean pte
+	 * (w=0) must NOT materialize as a read-only or no-access block
+	 * or the kernel's next write to its own stack faults c0000005
+	 * (run 36796131915: timer task, rip in uml_nt_switch_trace,
+	 * write to its own band stack's next block). In the flat-alias
+	 * era the prot never mattered: the section view underneath is
+	 * RWX and the per-map calls were skipped entirely. */
+	(void)r; (void)w; (void)x;
+	protect = 0x40;              /* PAGE_EXECUTE_READWRITE */
 
 	{
 		unsigned long long end = (v + len + 0xFFFull) & ~0xFFFull;
