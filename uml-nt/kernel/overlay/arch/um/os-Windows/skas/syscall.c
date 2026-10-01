@@ -1644,6 +1644,15 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 108: /* getegid */
 		ret = 0;
 		break;
+	case 135: /* personality — see the conn field comment (systemd
+		  * LockPersonality=yes units died 228/SECCOMP on
+		  * ENOSYS and journald restart-looped, run
+		  * 36869737934). glibc passes the get sentinel as
+		  * 0xffffffff (upper 32 zeroed by the mov). */
+		ret = (long long)c->persona;
+		if (a[0] != 0xffffffffULL)
+			c->persona = a[0];
+		break;
 	case 32: /* dup */
 	case 33: /* dup2 — xmove_fd (ping's socket setup) */
 	case 292: /* dup3 */

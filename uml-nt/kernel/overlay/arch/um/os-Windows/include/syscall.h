@@ -99,6 +99,16 @@ struct uml_nt_stub_conn {
 	u32 pdeathsig;
 	int dumpable;
 	int no_new_privs;
+	/* M5.4 c3 (systemd): personality(2) cell. journald/udevd ship
+	 * LockPersonality=yes; execute.c locks via a
+	 * personality(0xffffffff) read + set pair and kills the child
+	 * (status 228/SECCOMP) on ENOSYS — run 36869737934 restart-
+	 * looped journald on exactly that, keeping the M5.5a gate
+	 * red with SIGSEGV=0. Get returns the stored persona, set
+	 * stores and returns the previous (PER_LINUX=0 init: the
+	 * persona bits are no-ops on this port — loads are
+	 * fixed-position, so ADDR_NO_RANDOMIZE changes nothing). */
+	unsigned long long persona;
 	/* M5.4 c3 diag: the last syscall round this conn served. The
 	 * SIGSEGV print names it — a retval the guest consumed as a
 	 * pointer/length is attributable at the death site without
