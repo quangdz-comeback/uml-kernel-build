@@ -180,8 +180,12 @@ void uml_nt_plan_issue_op(struct uml_nt_stub_conn *c,
 static void dump_guest_bytes(struct uml_nt_mm *mm, unsigned long long va,
 			     int n, const char *tag)
 {
-	unsigned char buf[48];
-	char line[3 * 48 + 1];
+	/* map 059: 128 bytes per call (the residue-ctx window), printed
+	 * in 64-byte rows — os_info truncates at 256, a 128-byte hex
+	 * row (384+ chars) would be cut mid-line and the struct shape
+	 * lost exactly where it matters. */
+	unsigned char buf[128];
+	char line[3 * 64 + 1];
 	long long off;
 	int i;
 
@@ -194,9 +198,14 @@ static void dump_guest_bytes(struct uml_nt_mm *mm, unsigned long long va,
 		return;
 	}
 	memcpy(buf, (char *)uml_boot.physmem_base + off, n);
-	for (i = 0; i < n; i++)
-		snprintf(line + 3 * i, 4, "%02x ", buf[i]);
-	os_info("[stubtest]   %s 0x%llx: %s\n", tag, va, line);
+	for (i = 0; i < n; i += 64) {
+		int chunk = (n - i < 64) ? n - i : 64;
+		int j;
+
+		for (j = 0; j < chunk; j++)
+			snprintf(line + 3 * j, 4, "%02x ", buf[i + j]);
+		os_info("[stubtest]   %s 0x%llx: %s\n", tag, va + i, line);
+	}
 }
 
 /* v5: read one guest qword at slot_va and dump the bytes it points
@@ -421,10 +430,23 @@ static void uml_nt_residue_watch(struct uml_nt_stub_conn *c)
 			    (va - v->start), 8);
 		if (x == c->watch_val) {
 			if (hits < 8) {
+				/* map 059: a 0x100-byte window around
+				 * the hit — the writer is a WHOLE
+				 * struct (the dispatch CONTEXT); the
+				 * old 48-byte peek could not span its
+				 * qword rows. Clamp to the VMA: the
+				 * translate is all-or-nothing. */
+				unsigned long long lo = va - 0x80;
+				unsigned long long len = 0x100;
+
 				os_info("[stubtest]   residue-hit "
 					"@0x%llx (vma run_off=0x%llx)\n",
 					va, v->run_off);
-				dump_guest_bytes(c->mm, va - 16, 48,
+				if (lo < v->start)
+					lo = v->start;
+				if (lo + len > v->end)
+					len = v->end - lo;
+				dump_guest_bytes(c->mm, lo, (int)len,
 						 "residue-ctx");
 			}
 			hits++;
@@ -432,13 +454,21 @@ static void uml_nt_residue_watch(struct uml_nt_stub_conn *c)
 	}
 	if (hits == 0)
 		return;
+	/* map 059: two lines (os_info cuts at 256) — main carries the
+	 * round identity + the VOLATILE slots that discriminate the
+	 * writer (rcx = the seed-rcx/VEH-CONTEXT slot, r11 = the
+	 * rflags slot); the callee row mirrors the SIGSEGV part-2
+	 * line for byte-exact seed comparison. */
 	os_info("[stubtest] RESIDUE-WATCH pid %lu: %d hit(s) of 0x%llx "
 		"after nr=%llu ret=%lld rip=0x%llx rsp=0x%llx "
-		"rbx=0x%llx r12=0x%llx r13=0x%llx r14=0x%llx cmd=%d\n",
+		"rcx=0x%llx r11=0x%llx cmd=%d\n",
 		(unsigned long)c->pid, hits, c->watch_val, c->last_nr,
 		c->last_ret, c->d->regs.rip, c->d->regs.rsp,
-		c->d->regs.rbx, c->d->regs.r12, c->d->regs.r13,
-		c->d->regs.r14, c->d->cmd);
+		c->d->regs.rcx, c->d->regs.r11, c->d->cmd);
+	os_info("[stubtest] RESIDUE-WATCH pid %lu callee: rbx=0x%llx "
+		"r12=0x%llx r13=0x%llx r14=0x%llx r15=0x%llx\n",
+		(unsigned long)c->pid, c->d->regs.rbx, c->d->regs.r12,
+		c->d->regs.r13, c->d->regs.r14, c->d->regs.r15);
 	c->watch_val = 0;
 }
 
@@ -935,11 +965,15 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	}
 	k->d->init_regs = *g;
 	k->d->init_regs.rax = 0;
+	/* map 059 fix F: same contract as conn_bootstrap's fork-child
+	 * half — the seed rcx is ABI garbage that would ride every
+	 * VEH dispatch CONTEXT back onto the guest stack. */
+	k->d->init_regs.rcx = 0;
 	os_info("[stubtest] fork seed pid %lu: child rip=0x%llx "
-		"rbx=0x%llx r12=0x%llx r13=0x%llx\n",
+		"rcx=0x%llx rbx=0x%llx r12=0x%llx r13=0x%llx\n",
 		(unsigned long)k->pid, k->d->init_regs.rip,
-		k->d->init_regs.rbx, k->d->init_regs.r12,
-		k->d->init_regs.r13);
+		k->d->init_regs.rcx, k->d->init_regs.rbx,
+		k->d->init_regs.r12, k->d->init_regs.r13);
 	/* S4c2/D18: the child shares the TLS block COW and musl never
 	 * re-runs arch_prctl after fork — inherit the base so the
 	 * child's stub re-applies it like the parent's does. */

@@ -113,6 +113,26 @@ static void conn_bootstrap(struct uml_nt_stub_conn *c,
 	g->r15 = REGS_R15(regs->gp);
 	g->rip = REGS_IP(regs->gp);
 	g->rflags = REGS_EFLAGS(regs->gp);
+	/* M5.4 c3 (map 059, fix F): the fork seed's rcx is the parent's
+	 * live rcx at the clone trap — ABI garbage (the syscall
+	 * contract clobbers rcx; no code past the fork-resume rip
+	 * reads it). Upstream inherits the same garbage harmlessly:
+	 * nothing snapshots registers onto the guest stack on a
+	 * syscall. Here EVERY trap leaves Windows' dispatch state
+	 * (EXCEPTION_RECORD + full CONTEXT + xstate, ~12KB below the
+	 * trap rsp — see uml_nt_signal_check's exc_stack note) on the
+	 * guest stack, carrying the seed rcx at the CONTEXT's rcx
+	 * slot: the fork-resume rip (_Fork+0x23 = 0x606a4353)
+	 * re-entered the child's stack as data at its FIRST syscall
+	 * (nr=273 set_robust_list, residue-watch run 36856047706) and
+	 * the deterministic env-merge depth read it as a strv entry.
+	 * Zero it at the seed so no VEH CONTEXT ever carries the
+	 * poison: exec conns arrive with rcx=0 anyway (ELF_PLAT_INIT
+	 * parity, 9fcdb9a) and POC conns memset it — this is the
+	 * fork-child half of the same contract. Callee-saved stay
+	 * verbatim (fork semantics); r11 stays as-is until the watch
+	 * names it (only rcx is implicated by the decode). */
+	g->rcx = 0;
 	c->d->entry_va = REGS_IP(regs->gp);
 	c->d->stack_va = REGS_SP(regs->gp);
 	/* D18 fork: the fork seed records the inherited base in the
@@ -133,9 +153,13 @@ static void conn_bootstrap(struct uml_nt_stub_conn *c,
 	 * binfmt.c) — any cluster value there = the entry-regs
 	 * residue vector alive. (c->pid = the stub pid — unique per
 	 * conn; task-backed conns report the kernel pid via getpid.) */
-	os_info("conn_bootstrap: stub-pid %lu rip=0x%llx rbx=0x%llx "
-		"r12=0x%llx r13=0x%llx\n", (unsigned long)c->pid,
-		g->rip, g->rbx, g->r12, g->r13);
+	/* map 059: seed vs residue byte-compare needs the FULL gp row
+	 * the watch's callee line prints (r12-r15) plus rcx (the
+	 * ABI-garbage slot zeroed above). */
+	os_info("conn_bootstrap: stub-pid %lu rip=0x%llx rcx=0x%llx "
+		"rbx=0x%llx r12=0x%llx r13=0x%llx r14=0x%llx "
+		"r15=0x%llx\n", (unsigned long)c->pid,
+		g->rip, g->rcx, g->rbx, g->r12, g->r13, g->r14, g->r15);
 }
 
 /* get_stub_state analogue: pull the trap regs back into the task.
