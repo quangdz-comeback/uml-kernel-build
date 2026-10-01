@@ -660,9 +660,26 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 	if (len == 0)
 		return SC_RET(SC_EINVAL);
 	if (flags & SC_MAP_SHARED) {
-		os_info("[syscall] mmap file: MAP_SHARED unsupported (the "
-			"loader uses MAP_COPY|MAP_FILE)\n");
-		return SC_RET(SC_ENOSYS);
+		/* M5.5a gate: journald mmaps its seqnum + journal
+		 * files MAP_SHARED and exits(1) when the open fails
+		 * (run 36872271305: "Failed to open runtime journal:
+		 * Function not implemented" -> status=1/FAILURE,
+		 * restart loop -> start-limit-hit). The file view is
+		 * already RWX with writes landing directly in the
+		 * run, so SINGLE-MAPPER shared semantics hold for
+		 * free. What this does NOT give: a second mapper of
+		 * the same file gets its own eager copy (no page
+		 * cache to share through) and nothing is ever
+		 * written back at msync/munmap/exit — the file on
+		 * disk stays untouched. Acceptable for the boot
+		 * gate (journald is the only mapper; its reads go
+		 * through the same runs), but this is NOT real
+		 * MAP_SHARED — writeback + cross-mapper coherence
+		 * are the M5.5b slice. Loud log on every map so the
+		 * semantics are visible in the boot log. */
+		os_info("[syscall] mmap file: MAP_SHARED as "
+			"single-mapper, NO writeback (M5.5b owes the "
+			"real semantics)\n");
 	}
 	if ((addr | off) & (UML_NT_FAULT_PAGE_SIZE - 1)) {
 		os_info("[syscall] mmap file 0x%llx+%llu off=0x%llx: not "
