@@ -1365,6 +1365,12 @@ static void abrt_mmap_note(struct uml_nt_stub_conn *c,
 static const char *const abrt_pfx[] = {
 	"Fatal glibc ", "malloc():", "free():", "realloc():",
 	"memalign():",
+	/* glibc 2.36 malloc_printerr strings WITHOUT a function prefix
+	 * (verified in the image's libc.so.6: 0x19805d = "corrupted
+	 * double-linked list") — run 36919012169's task-1 abort fired
+	 * through the writev (iov {libc+0x19805d, 28} in the raise
+	 * dump) while the table missed it silently. */
+	"corrupted", "invalid", "munmap", "unknown",
 };
 
 static int abrt_text_match(const char *s, int n)
