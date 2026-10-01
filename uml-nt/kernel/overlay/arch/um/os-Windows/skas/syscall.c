@@ -1579,6 +1579,60 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 			abrt_dump_text(s, n);
 		}
 	}
+	/* Writer hunt: the tcache_perthread_struct — run 32907's rbp
+	 * chain named the DETECTOR: [rbp+0x18] = 0x98c2c = ret into
+	 * __libc_malloc's fastpath tcache_get, i.e. the tcache HEAD
+	 * entry (mangled, safe-linked) for some index was unaligned.
+	 * The struct is the first chunk of the task's main arena: its
+	 * heap VMA is deterministic ([0x67c00000,..) every conn —
+	 * fixed-position layout), data at start+0x10: counts[64] then
+	 * entries[64]. Dump 0x280 bytes; offline decode: raw =
+	 * mangled ^ (slot_va >> 12), compared against the SEGV-family
+	 * wilds (0x7c9f8f0b93be870a / 0xf5aaec5571e07789). */
+	{
+		struct uml_nt_vma *hv = uml_nt_vma_find(c->mm,
+							0x67c00010);
+
+		if (hv != NULL) {
+			int row;
+
+			os_info("[abrt] tcache @0x67c00010 (vma "
+				"[0x%llx,0x%llx) off=0x%llx):\n",
+				hv->start, hv->end, hv->run_off);
+			for (row = 0; row < 10; row++) {
+				long long foff =
+					uml_nt_vma_translate(c->mm,
+						0x67c00010 + row * 64,
+						64);
+
+				if (foff < 0) {
+					os_info("[abrt]   row %d: "
+						"untranslatable (%lld)\n",
+						row, foff);
+					continue;
+				}
+				{
+					const unsigned long long *q =
+						(const void *)((
+						char *)uml_boot.physmem_base +
+						foff);
+
+					os_info("[abrt]   +0x%03x: "
+						"%016llx %016llx "
+						"%016llx %016llx\n",
+						row * 64, q[0], q[1],
+						q[2], q[3]);
+					os_info("[abrt]          "
+						"%016llx %016llx "
+						"%016llx %016llx\n",
+						q[4], q[5], q[6], q[7]);
+				}
+			}
+		} else {
+			os_info("[abrt] tcache: no VMA at 0x67c00010 "
+				"(nvma %d)\n", c->mm->nvma);
+		}
+	}
 }
 
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
