@@ -211,13 +211,17 @@ static HANDLE create_physmem_section(unsigned long long size, void **base)
  * immediately above the flat view. Run 36793426224: an unplaced
  * allocation (heap-segment class) squatted there, every block commit
  * failed and the timer thread wrote an unbacked page. Reserved here
- * the band is exclusive: address space only, no commit charge;
- * 512MiB covers band ends for any mem= up to the section ceiling
- * (mem=128M: band [0x68800000, 0x70800000)). */
+ * the band is exclusive: address space only, no commit charge; see
+ * band_size below for the sizing vs the 2GiB line. */
 static void reserve_vmalloc_band(void)
 {
 	unsigned long long band = GUEST_RAM_VA + DEFAULT_PHYSMEM;
-	SIZE_T band_size = 512ULL << 20;
+	/* 256MiB: the free gap under the 2GiB line is 384MiB minus the
+	 * KUSER_SHARED_DATA page at 0x7FFE0000 (a 512MiB request
+	 * crossed it — gle=487, run 36794554367); 256MiB covers band
+	 * ends for any mem= up to the section ceiling (mem=128M: band
+	 * [0x68800000, 0x70800000)) with 120MiB spare. */
+	SIZE_T band_size = 256ULL << 20;
 	PVOID r = g_api.VirtualAlloc((PVOID)(uintptr_t)band, band_size,
 				     MEM_RESERVE, PAGE_NOACCESS);
 

@@ -96,7 +96,10 @@ void os_set_pdeathsig(void)
  * aliased the WRONG section offsets (VA 0x65000000 ↔ section byte
  * 80MiB, not the page's own offset) for every boot and worked.
  *
- * Ledger: one commit count per 64K block over [base, base+256MiB).
+ * Ledger: one commit count per 64K block over [base, base+512MiB) —
+ * the launcher reserves the kernel's out-of-RAM band
+ * ([base+section, +256MiB), see below) so nothing else claims it;
+ * the ledger window must contain the band for any mem=.
  * Consecutive order-0 pages share a block (idempotent re-commit);
  * per-page unmaps decommit, and the block releases only at zero —
  * two vmalloc areas can share one 64K block (the 4K inter-area hole
@@ -104,7 +107,10 @@ void os_set_pdeathsig(void)
  * (a stale block stays reserved — address space only, no charge). */
 #define UML_NT_PRIV_BLOCK_SHIFT 16
 #define UML_NT_PRIV_BLOCK_SIZE  (1ull << UML_NT_PRIV_BLOCK_SHIFT)
-#define UML_NT_PRIV_BLOCKS      4096 /* 256 MiB window */
+#define UML_NT_PRIV_BLOCKS      8192 /* 512 MiB window [base, base+512M) —
+	* the launcher reserves the band [base+section, base+section+256M)
+	* (2GiB-line bound), the ledger window must contain it for ANY
+	* mem= up to the ceiling */
 #define UML_NT_PRIV_PAGES       16   /* 64K / 4K */
 
 static unsigned char priv_commits[UML_NT_PRIV_BLOCKS];
