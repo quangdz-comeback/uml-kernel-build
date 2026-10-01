@@ -420,9 +420,13 @@ static void uml_nt_residue_watch(struct uml_nt_stub_conn *c)
 		memcpy(&x, uml_boot.physmem_base + v->run_off +
 			    (va - v->start), 8);
 		if (x == c->watch_val) {
-			if (hits < 8)
+			if (hits < 8) {
 				os_info("[stubtest]   residue-hit "
-					"@0x%llx\n", va);
+					"@0x%llx (vma run_off=0x%llx)\n",
+					va, v->run_off);
+				dump_guest_bytes(c->mm, va - 16, 48,
+						 "residue-ctx");
+			}
 			hits++;
 		}
 	}
@@ -1330,6 +1334,19 @@ no_zero:
 	child->watch_val = parent->d->regs.rip + 2;
 	child->watch_rsp = fork_pending_rsp;
 	child->watch_left = 512;
+	{
+		struct uml_nt_vma *wv = uml_nt_vma_find(child->mm,
+							fork_pending_rsp);
+
+		os_info("fork: residue-watch armed pid %lu val=0x%llx "
+			"rsp=0x%llx vma=[0x%llx,0x%llx) "
+			"run_off=0x%llx\n",
+			(unsigned long)child->pid, child->watch_val,
+			fork_pending_rsp,
+			wv != NULL ? wv->start : 0,
+			wv != NULL ? wv->end : 0,
+			wv != NULL ? wv->run_off : 0);
+	}
 	fork_pending_parent = NULL;
 	fork_pending_rsp = 0;
 	os_info("fork: child conn pid %lu seeded (%d vma(s), parent "

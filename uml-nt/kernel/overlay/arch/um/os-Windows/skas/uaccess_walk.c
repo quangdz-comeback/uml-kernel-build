@@ -165,6 +165,15 @@ char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 	 * the shared run's bytes, then the caller's write lands on it. */
 	uacc_bcopy(base + new_run, base + old_run, UACC_RUN);
 	uml_nt_uacc_fixups++; /* the conn layer logs the delta */
+	/* M5.4 c3 (map 057): name the fixed VMA + the write target —
+	 * the fork-residue cluster re-appearing in the victim's stack
+	 * round-correlated with this fixup (run 36854409213); this
+	 * line says WHICH shared run got the parent's current bytes
+	 * and for whose write. Rare (first boot fired once). */
+	os_info("[stubtest]   cow-fixup: vma [0x%llx,0x%llx) "
+		"run_off=0x%llx -> new 0x%llx (write va=0x%llx "
+		"page=0x%llx)\n", vma->start, vma->end, vma->run_off,
+		new_run, va, page);
 
 	if (uml_nt_vma_cow_split((struct uml_nt_mm *)mm, uacc_sink.ph, vma,
 				 page, new_run) < 0) {
