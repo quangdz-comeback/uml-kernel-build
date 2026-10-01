@@ -319,7 +319,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					       physmem_base + it, 8);
 				os_info("[stubtest] SIGSEGV -> guest pid %lu "
 					"addr=0x%llx type=%u rip=0x%llx "
-					"why=%c fs=0x%llx "
+					"why=%c fs=0x%llx rsp=0x%llx "
 					"insn=%02x%02x%02x%02x%02x%02x%02x%02x "
 					"rax=0x%llx rdi=0x%llx rsi=0x%llx "
 					"rdx=0x%llx last_nr=%llu "
@@ -328,7 +328,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					d->fault_type, d->regs.rip,
 					c->plan.kill_why ?
 					c->plan.kill_why : '?',
-					d->fs_base,
+					d->fs_base, d->regs.rsp,
 					ib[0], ib[1], ib[2], ib[3],
 					ib[4], ib[5], ib[6], ib[7],
 					d->regs.rax, d->regs.rdi,
@@ -364,6 +364,26 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					dump_guest_bytes(c->mm,
 							 d->regs.rsi, 32,
 							 "at-rsi");
+					/* v3: the caller chain + the TCB.
+					 * Run 36823383637's victims all
+					 * die in glibc's SSE2 strcasecmp
+					 * body (rip = the movdqa under
+					 * the tolower-table shuffle —
+					 * at-rsi IS the identity+0xff
+					 * table; every service, the SAME
+					 * wild rdi 0x3577fffff0003d40).
+					 * The stack at rsp names the
+					 * caller (return addresses are
+					 * libc/lib vaddrs); the TCB at
+					 * fs shows what the child
+					 * inherited vs the parent's
+					 * dump below. */
+					dump_guest_bytes(c->mm,
+							 d->regs.rsp, 48,
+							 "at-rsp");
+					dump_guest_bytes(c->mm,
+							 d->fs_base, 48,
+							 "at-fs");
 					/* v2: run-ownership census at
 					 * the wild pointer. Run
 					 * 36808917963's victims die on
@@ -411,6 +431,16 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 							    pc->ppid ==
 								c->pid) {
 								dump_guest_bytes(pc->mm, d->regs.rax & ~0xfULL, 16, "at-rax-parent");
+								/* v3: the TCB
+								 * comparison — the
+								 * child inherits
+								 * fs (D18); a
+								 * diverged parent
+								 * page = the COW
+								 * split itself
+								 * planted the
+								 * wild bytes. */
+								dump_guest_bytes(pc->mm, d->fs_base, 48, "at-fs-parent");
 							}
 						}
 					}
