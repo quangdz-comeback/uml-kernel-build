@@ -187,6 +187,14 @@ staging/bin/dynsetup: ../guest/dynsetup.elf
 	@mkdir -p staging/bin
 	cp $< $@
 
+# M5.4 c3 (048 item 3): the fork/COW/recycled-run canary — PID 1
+# (init=/bin/canary). Freestanding: reproduces the systemd corruption
+# surfaces (fork-seed copy, parent re-protect, recycled runs) without
+# systemd; markers CANARY-* decide recycled-run vs guest-logic.
+staging/bin/canary: ../guest/canary.elf
+	@mkdir -p staging/bin
+	cp $< $@
+
 # M5.4 c2 cluster glibc (D20 cluster 2): the REAL glibc startup —
 # the build machine's own /bin/true + its loader and libc (Ubuntu
 # 24.04 CI runner = glibc 2.39; this host matches). Copying the
@@ -285,6 +293,7 @@ rootfs.ext4: staging/sbin/init staging/dev staging/hi.sh \
 	     staging/lib/ld-musl-x86_64.so.1 staging/bin/nettest \
 	     staging/bin/busybox-dyn staging/lib/libc.so \
 	     staging/bin/dynsetup \
+	     staging/bin/canary \
 	     staging/bin/true staging/lib64/ld-linux-x86-64.so.2 \
 	     staging/lib/x86_64-linux-gnu/libc.so.6
 	rm -f $@

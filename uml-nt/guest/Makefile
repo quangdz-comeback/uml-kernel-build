@@ -18,7 +18,7 @@ IMAGE_BASE := 0x62000000
 
 all: guest-init.elf step2.elf bench.elf forkwait.elf sigtest.elf \
 	heaptest.elf guardtest.elf sysbench.elf netsetup.elf dyn.elf \
-	nettest.elf dynsetup.elf
+	nettest.elf dynsetup.elf canary.elf
 
 guest-init.elf: init.S
 	$(CC) --target=x86_64-linux-gnu -c init.S -o init.o
@@ -165,8 +165,21 @@ dynsetup.elf: dynsetup.c
 	@file -b $@ | grep -q "statically linked" || \
 		{ echo "dynsetup must be a static ELF" >&2; exit 1; }
 
+# M5.4 c3 (048 item 3): the fork/COW/recycled-run canary — PID 1
+# (init=/bin/canary): anon-mmap fresh-zero contract (a recycled run
+# leaking bytes = the 044 family, caught WITHOUT systemd) + 8
+# fork rounds where the child verifies the fork-seed copy, rewrites
+# with its own magic and the parent re-verifies its arena after every
+# reap (child bytes in the parent = the "STREAM=7" injection class).
+canary.elf: canary.c
+	$(CC) --target=x86_64-linux-gnu -static -nostdlib -no-pie -O1 \
+		-fuse-ld=lld \
+		-Wall -Wl,--image-base=$(IMAGE_BASE) -o $@ $<
+	@file -b $@ | grep -q "statically linked" || \
+		{ echo "canary must be a static ELF" >&2; exit 1; }
+
 clean:
 	rm -f init.o guest-init.elf step2.elf bench.elf forkwait.elf \
 		sigtest.elf heaptest.elf guardtest.elf sysbench.elf \
-		netsetup.elf dyn.elf nettest.elf dynsetup.elf
+		netsetup.elf dyn.elf nettest.elf dynsetup.elf canary.elf
 .PHONY: all clean

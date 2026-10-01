@@ -392,6 +392,36 @@ jobs:
           grep -q "XSTATE-CAPTURED: 512 fp bytes" forkwait.log || { echo "S4d: xstate fp round-trip never captured (stub capture or protocol v6 broken?)"; exit 1; }
           echo "M4.2 NATIVE FORK-WAIT OK: real child task + blocking wait4 via schedule()"
 
+      # M5.4 c3 (048 item 3): the fork/COW/recycled-run canary —
+      # /bin/canary as PID 1, freestanding (NO systemd). Reproduces
+      # the corruption surfaces the M5.5a SIGSEGV autopsy left open:
+      # anon mmap must read back ZERO on every munmap/mmap recycle
+      # cycle (a recycled run leaking bytes = the 044 family), and 8
+      # fork rounds verify both directions of the COW contract (the
+      # child sees the seed copy intact; the parent's arena never
+      # carries the child's bytes — the "STREAM=7"-in-a-pointer-slot
+      # injection class). A red canary with green markers above
+      # closes recycled-run vs guest-logic from the log alone.
+      - name: NATIVE fork/COW canary gate (M5.4 c3)
+        shell: msys2 {0}
+        run: |
+          cd uml-nt/launcher
+          ROOTFS=$(cygpath -w "$(pwd)/../../rootfs/rootfs.ext4")
+          export MSYS2_ARG_CONV_EXCL="*"
+          set +e
+          timeout 180 ./launcher.exe ../../build/vmlinux \
+            "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
+            "ubd0=$ROOTFS" "root=98:0" "init=/bin/canary" > canary.log 2>&1
+          code=$?
+          set -e
+          cat canary.log
+          [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code (guest died on its own? see SIGSEGV lines)"; exit 1; }
+          grep -q "CANARY-INIT-OK" canary.log || { echo "canary: the fresh arena never verified (mmap/anon broken?)"; exit 1; }
+          grep -q "CANARY-RECYCLE-OK" canary.log || { echo "canary: recycle cycles failed (recycled run leaked bytes = 044 family, or zero-contract broken)"; exit 1; }
+          grep -q "CANARY-FORK-OK" canary.log || { echo "canary: fork/COW rounds failed (fork-seed copy torn or parent re-protect missing = the injection class)"; exit 1; }
+          grep -q "CANARY-OK" canary.log || { echo "canary: incomplete"; exit 1; }
+          echo "M5.4 C3 NATIVE CANARY OK: fresh-zero recycles + 8 fork/COW rounds verified both directions"
+
       # M4/S4d-b: signal fidelity — /bin/sigtest runs as PID 1: a NULL
       # store with magic XMM state faults; the kernel delivers a REAL
       # guest SIGSEGV (force_sig_fault → do_signal → setup_signal_
