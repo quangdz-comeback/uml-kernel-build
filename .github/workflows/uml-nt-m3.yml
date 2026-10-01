@@ -446,7 +446,7 @@ jobs:
           cat sigtest.log
           [ "$code" -eq 1 ] || [ "$code" -eq 124 ] || { echo "unexpected exit $code"; exit 1; }
           grep -q "SIGTEST-ARM" sigtest.log || { echo "sigtest never armed (init=/bin/sigtest failed to exec?)"; exit 1; }
-          grep -q "SIGSEGV -> guest pid" sigtest.log || { echo "the NULL store never became a guest SIGSEGV (fault kill path unchanged?)"; exit 1; }
+          grep -q "SIGSEGV victim #" sigtest.log || { echo "the NULL store never became a guest SIGSEGV (fault kill path unchanged?)"; exit 1; }
           grep -q "SIGTEST-HANDLER" sigtest.log || { echo "the SIGSEGV handler never ran (delivery broken?)"; exit 1; }
           grep -q "SIGTEST-SI-OK" sigtest.log || { echo "siginfo code/addr wrong (force_sig_fault mapping?)"; exit 1; }
           grep -q "SIGTEST-FRAME-FP-OK" sigtest.log || { echo "the sigframe fpstate does not carry the trap's XMM state (fp capture → frame broken?)"; exit 1; }
