@@ -1530,6 +1530,38 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 				"0x%llx\n", i * 8, q[0], q[1], q[2]);
 		}
 	}
+	/* Writer hunt (065 item 3): the rbp chain. Run 36910037327's
+	 * window stopped at rsp+0x30 — 0xd0 short of rbp. Frame math
+	 * against the image's libc 2.36 (base 0x605d0000): trap rip
+	 * 0x7f353 = the INLINE writev syscall inside __libc_message
+	 * (frameless wrappers — trap rsp IS __libc_message's alloca'd
+	 * rsp), rbp = its frame base; malloc_printerr (0x94850) is
+	 * frameless with ONE call, so [rbp+8] = ret into malloc_
+	 * printerr (0x9486a) and [rbp+0x10] = ret into the DETECTING
+	 * malloc function (0x980b3 = tcache path in _int_malloc vs
+	 * 0x98c27 = __libc_malloc fast path) — the one qword that
+	 * names the detector. Read through the trap regs' rbp, no
+	 * layout assumption at runtime. */
+	for (i = 0; i < 4; i += 4) {
+		long long foff = uml_nt_vma_translate(c->mm,
+						      d->regs.rbp + i * 8,
+						      32);
+
+		if (foff < 0) {
+			os_info("[abrt]   [rbp+0x%02x]: untranslatable "
+				"(%lld)\n", i * 8, foff);
+			continue;
+		}
+		{
+			const unsigned long long *q =
+				(const void *)((char *)uml_boot.physmem_base +
+					       foff);
+
+			os_info("[abrt]   [rbp+0x%02x]: 0x%llx 0x%llx "
+				"0x%llx 0x%llx\n", i * 8, q[0], q[1],
+				q[2], q[3]);
+		}
+	}
 	for (i = 0; i < (int)cnt; i++) {
 		n = abrt_read_str(c, iov[i].base, s, sizeof(s));
 		if (n < 0)
