@@ -366,17 +366,19 @@ static void valscan_death(struct uml_nt_stub_conn *c, unsigned long long val)
 		(unsigned long)c->pid, hits);
 	for_each_process(p) {
 		struct uml_nt_stub_conn *pc;
+		int is_parent = (p->pid == (int)c->ppid);
 
-		if (p->mm == NULL || p->pid == (int)c->pid)
+		if (p->mm == NULL)
+			continue;
+		if (p->pid != 1 && !is_parent)
 			continue;
 		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
 		if (pc == NULL || pc->mm == NULL ||
 		    pc->dead_magic == UML_NT_CONN_DEAD)
 			continue;
-		if (p->pid != 1)
-			continue;
 		hits = scan_mm_value(pc->mm, pat, 16);
-		os_info("[stubtest]   valscan pid 1: %d hit(s)\n", hits);
+		os_info("[stubtest]   valscan pid %d%s: %d hit(s)\n",
+			p->pid, is_parent ? " (fork parent)" : "", hits);
 	}
 }
 
