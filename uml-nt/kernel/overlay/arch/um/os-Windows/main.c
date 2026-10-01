@@ -63,6 +63,11 @@ void nt_main(struct uml_boot_info *bi)
 	 * bytes. Anything at/above it is a rotten-VMA read. */
 	uml_nt_vma_phys_limit = uml_boot.physmem_size;
 
+	/* Map 049: phys refcount events (block free / unbalanced drop /
+	 * backend double-alloc) go to the console log — the run
+	 * 0x28b0000 double-claim class names its thief this way. */
+	uml_nt_phys_event = uml_nt_phys_event_log;
+
 	linux_main(uml_boot.argc, uml_boot.argv, uml_boot.envp);
 
 	/* linux_main runs start_uml() → start_kernel() → (M1) panic

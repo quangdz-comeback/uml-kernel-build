@@ -489,8 +489,14 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 	}
 	nruns = (unsigned)(len / UML_NT_PHYS_RUN_SIZE);
 	sp = uml_nt_phys_alloc_span(c->ph, (int)nruns);
-	if (sp < 0)
+	if (sp < 0) {
+		/* Exhaustion or the backend double-alloc reject (the
+		 * [phys] alloc-reject line names it) — never silent:
+		 * the guest service dies 127 here otherwise. */
+		os_info("[syscall] mmap 0x%llx+%llu: span of %u run(s) "
+			"failed\n", va, len, nruns);
 		return SC_RET(SC_ENOMEM);
+	}
 	if (uml_nt_vma_add(c->mm, va, va + len, (unsigned long long)sp,
 			   prot, 0) < 0) {
 		for (i = 0; i < nruns; i++)
@@ -1670,6 +1676,21 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	 * conn field comment. */
 	c->last_nr = nr;
 	c->last_ret = ret;
+	/* Map 049 item 3 — the ABRT census: init dies "Caught <ABRT>
+	 * (si_pid=1)" with NO assert text anywhere on the console
+	 * (SYSTEMD_LOG_TARGET=console confirmed nothing routes past
+	 * it). glibc abort()/raise() reach the kernel as tgkill(234)/
+	 * kill(62) with sig==6, and every aborter installs SIGABRT
+	 * (rt_sigaction 13) first — name the raiser's task + the
+	 * syscall round in the log. */
+	if ((nr == 234 && a[2] == 6) || (nr == 62 && a[1] == 6))
+		os_info("[abrt] raise: nr=%llu a0=0x%llx a1=0x%llx -> %lld "
+			"(task %d)\n", nr, a[0], a[1], (long long)ret,
+			current ? current->pid : 0);
+	else if (nr == 13 && a[0] == 6 && c->task_backed)
+		os_info("[abrt] sigaction SIGABRT act=0x%llx -> %lld "
+			"(task %d)\n", a[1], (long long)ret,
+			current ? current->pid : 0);
 	/* M5.4 c3: the negative-retval census. Run 36800430061's
 	 * dominant kill (28 SIGSEGVs, all at one libc memmove/strlen
 	 * rip, faulting through a 0xffffffffffffffff pointer/length)

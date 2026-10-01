@@ -85,4 +85,21 @@ int uml_nt_phys_ref(struct uml_nt_phys *p, long long off);
 int uml_nt_phys_unref(struct uml_nt_phys *p, long long off);
 int uml_nt_phys_refs(struct uml_nt_phys *p, long long off);
 
+/* Refcount event hook (map 049: the run 0x28b0000 double-claim — a
+ * live TLS block whose refs reached 0 through SOME path that unref'd
+ * without a matching ref; the buddy re-listed the block and the next
+ * anon mmap got the TCB's pages). Pure-file neutrality: the pointer
+ * stays NULL in unit tests; the kernel pins it at boot (main.c →
+ * stub_ctl.c os_info). Fires for:
+ *   "free"          — a block returned to the backend (off = base)
+ *   "unref-refused" — an unref on a 0-ref run: an unbalanced claim
+ *                     drop (THEFT signal — somebody dropped a claim
+ *                     they never held; the surviving owner loses the
+ *                     block on the NEXT drop)
+ *   "alloc-reject"  — the backend handed runs this table still counts
+ *                     (double-__free_pages signature) */
+typedef void (*uml_nt_phys_event_fn)(const char *kind, long long off,
+				     int nruns, int refs);
+extern uml_nt_phys_event_fn uml_nt_phys_event;
+
 #endif /* __UM_OS_WINDOWS_PHYSALLOC_H */

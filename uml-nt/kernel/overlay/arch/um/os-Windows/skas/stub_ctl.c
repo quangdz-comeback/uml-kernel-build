@@ -738,6 +738,23 @@ void uml_nt_fork_arm(struct uml_nt_stub_conn *parent, unsigned long long rsp)
 	fork_pending_rsp = rsp;
 }
 
+/* Map 049: the phys refcount event log (physalloc.h for the fire
+ * sites). Run 36816338737 proved the disease class: run 0x28b0000
+ * was allocated to the live TLS block (line 421) AND re-allocated to
+ * a fresh anon mmap (line 4154) while fs still pointed into it — the
+ * block's refs reached 0 through SOME unbalanced drop, the buddy
+ * re-listed it, and every later write to the "new" 64KB trashed the
+ * TCB of PID 1 and all its COW children (the deterministic
+ * "STREAM=7"/wild-pointer SIGSEGVs; the isolated canary never saw
+ * it). These lines name the free / the unbalanced drop / the backend
+ * double-alloc the moment they happen. */
+void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
+			   int refs)
+{
+	os_info("[phys] %s off=0x%llx runs=%d refs=%d\n", kind,
+		(unsigned long long)off, nruns, refs);
+}
+
 void uml_nt_fork_disarm(void)
 {
 	fork_pending_parent = NULL;

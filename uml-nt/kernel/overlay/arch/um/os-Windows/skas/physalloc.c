@@ -9,6 +9,9 @@
 
 #define RUNS(p) ((int)((p)->size >> UML_NT_PHYS_RUN_SHIFT))
 
+/* Event hook (physalloc.h) — NULL in unit tests, pinned by main.c. */
+uml_nt_phys_event_fn uml_nt_phys_event = (uml_nt_phys_event_fn)0;
+
 static int run_index(struct uml_nt_phys *p, long long off)
 {
 	long long i;
@@ -55,8 +58,15 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns)
 	if (i < 0 || i + nruns > RUNS(p) || pg == (void *)0)
 		goto reject;
 	for (k = 0; k < nruns; k++) {
-		if (p->refs[i + k] != 0)
+		if (p->refs[i + k] != 0) {
+			/* Backend double-allocated: loud (the hook is
+			 * the ONLY witness — the caller sees -ENOMEM). */
+			if (uml_nt_phys_event !=
+			    (uml_nt_phys_event_fn)0)
+				uml_nt_phys_event("alloc-reject", off,
+						  nruns, p->refs[i + k]);
 			goto reject; /* backend double-allocated: loud */
+		}
 	}
 	p->refs[i] = 1;
 	p->pages[i] = pg;   /* the block's one handle lives on the owner */
@@ -100,8 +110,14 @@ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
 	int i = run_index(p, off);
 	int o, n, k;
 
-	if (i < 0 || p->refs[i] == 0)
+	if (i < 0 || p->refs[i] == 0) {
+		/* An unbalanced drop (no claim held) is the theft
+		 * signal: the LAST legit owner loses the block when
+		 * ITS drop lands. Loud through the hook. */
+		if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
+			uml_nt_phys_event("unref-refused", off, 1, 0);
 		return -1;
+	}
 	if (--p->refs[i] != 0)
 		return p->refs[i];
 
@@ -112,6 +128,10 @@ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
 			return 0; /* block still referenced — keep it */
 	}
 	uml_nt_phys_backend_free(p->pages[o], n);
+	if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
+		uml_nt_phys_event("free",
+				  (long long)o * UML_NT_PHYS_RUN_SIZE,
+				  n, 0);
 	for (k = 0; k < n; k++) {
 		p->pages[o + k] = (void *)0;
 		p->span_len[o + k] = 0;

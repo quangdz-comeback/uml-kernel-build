@@ -105,4 +105,11 @@ void uml_nt_net_ring_info(unsigned long long *addr,
  * (stack VA -> vmalloc_to_page -> pfn -> section offset). */
 void uml_nt_alias_scan(unsigned long long lo, unsigned long long hi);
 
+/* stub_ctl.c (map 049): the phys refcount event log — pinned as
+ * uml_nt_phys_event in nt_main. One os_info line per block free,
+ * unref-refused (the claim-theft signal) and alloc-reject (the
+ * double-free signature). */
+void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
+			   int refs);
+
 #endif
