@@ -1129,6 +1129,128 @@ static void test_fault_stolen(void)
 	CHECK(plan.kill_why == 'z');
 }
 
+/* c00000fd fix (archive 065): the VEH dispatch window re-assert —
+ * [rsp - GROW_AHEAD, rsp-page-end) clamped into the writable VMA
+ * holding rsp-1, guards excluded, EFFECTIVE prot (COW-shared stays
+ * read-only), stolen (refs==0) refused. */
+static void test_stack_window(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	struct uml_nt_fault_op win[8];
+	unsigned long long run;
+
+	/* deep rsp near the BOTTOM of a 1-run stack VMA: one merged
+	 * RW op, the window clamped at the VMA start */
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	run = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, run,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_stack_window_plan(&mm, &ph, RAM + 0x3028,
+				       win, 8) == 1);
+	CHECK(win[0].op == UML_NT_FOP_PROTECT);
+	CHECK(win[0].prot == UML_NT_PAGE_READWRITE);
+	CHECK(win[0].va == RAM);
+	CHECK(win[0].va + win[0].len == RAM + 0x4000);
+
+	/* mid-stack rsp: full 5-page window [rsp-16K, rsp-page-end) */
+	CHECK(uml_nt_stack_window_plan(&mm, &ph, RAM + 0x6028,
+				       win, 8) == 1);
+	CHECK(win[0].va == RAM + 0x2000);
+	CHECK(win[0].va + win[0].len == RAM + 0x7000);
+
+	/* rsp at the very top byte: the page holding rsp-1 is the
+	 * window's top page */
+	CHECK(uml_nt_stack_window_plan(&mm, &ph, RAM + RUN,
+				       win, 8) == 1);
+	CHECK(win[0].va == RAM + RUN - 0x4000);
+	CHECK(win[0].va + win[0].len == RAM + RUN);
+
+	/* a guard inside the window splits it and keeps its NOACCESS
+	 * range untouched (prot semantics = the fault truth) */
+	CHECK(uml_nt_guard_add(&mm, RAM + 0x4000, RAM + 0x5000) == 0);
+	CHECK(uml_nt_stack_window_plan(&mm, &ph, RAM + 0x6028,
+				       win, 8) == 2);
+	CHECK(win[0].va == RAM + 0x2000 && win[0].len == 0x2000);
+	CHECK(win[0].prot == UML_NT_PAGE_READWRITE);
+	CHECK(win[1].va == RAM + 0x5000 && win[1].len == 0x2000);
+	CHECK(win[1].prot == UML_NT_PAGE_READWRITE);
+	CHECK(uml_nt_guard_del_range(&mm, RAM + 0x4000, RAM + 0x5000) == 1);
+
+	/* COW-shared run: the assertion carries the EFFECTIVE
+	 * (read-only) prot — re-asserting RW would break fork sharing */
+	CHECK(uml_nt_phys_ref(&ph, run) == 2);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, run,
+			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == -1);
+	{
+		/* rebuild the mm with the COW flag (the add above
+		 * rejected the overlap) */
+		struct uml_nt_mm mm2;
+
+		uml_nt_mm_init(&mm2);
+		CHECK(uml_nt_vma_add(&mm2, RAM, RAM + RUN, run,
+				     UML_NT_PAGE_READWRITE,
+				     UML_NT_VMA_COW) == 0);
+		CHECK(uml_nt_stack_window_plan(&mm2, &ph, RAM + 0x6028,
+					       win, 8) == 1);
+		CHECK(win[0].prot == UML_NT_PAGE_READONLY);
+	}
+
+	/* no writable VMA at rsp: nothing to assert */
+	{
+		struct uml_nt_mm mm3;
+
+		uml_nt_mm_init(&mm3);
+		CHECK(uml_nt_stack_window_plan(&mm3, &ph, RAM + 0x6028,
+					       win, 8) == 0);
+	}
+
+	/* read-only VMA at rsp: nothing to assert (not a stack) */
+	{
+		struct uml_nt_mm mm4;
+
+		uml_nt_mm_init(&mm4);
+		CHECK(uml_nt_vma_add(&mm4, RAM, RAM + RUN, run,
+				     UML_NT_PAGE_READONLY, 0) == 0);
+		CHECK(uml_nt_stack_window_plan(&mm4, &ph, RAM + 0x6028,
+					       win, 8) == 0);
+	}
+
+	/* stolen window run (refs==0): refused loud (-1) */
+	CHECK(uml_nt_phys_unref(&ph, run) == 1);
+	CHECK(uml_nt_phys_unref(&ph, run) == 0);
+	CHECK(uml_nt_stack_window_plan(&mm, &ph, RAM + 0x6028,
+				       win, 8) == -1);
+
+	/* segment overflow: max_ops smaller than the guard-split
+	 * segment count → -2 (the caller skips, never truncates) */
+	{
+		struct uml_nt_mm mm5;
+
+		uml_nt_mm_init(&mm5);
+		mock_reset();
+		CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+		run = uml_nt_phys_alloc(&ph);
+		CHECK(uml_nt_vma_add(&mm5, RAM, RAM + RUN, run,
+				     UML_NT_PAGE_READWRITE, 0) == 0);
+		CHECK(uml_nt_guard_add(&mm5, RAM + 0x2000, RAM + 0x3000) == 0);
+		CHECK(uml_nt_guard_add(&mm5, RAM + 0x4000, RAM + 0x5000) == 0);
+		CHECK(uml_nt_guard_add(&mm5, RAM + 0x6000, RAM + 0x7000) == 0);
+		/* window [0x4000,0x9000): pages 0x4000(g) 0x5000(f)
+		 * 0x6000(g) 0x7000(f) 0x8000(f) → segments
+		 * [0x5000,0x6000) + [0x7000,0x9000) = 2 ops */
+		CHECK(uml_nt_stack_window_plan(&mm5, &ph, RAM + 0x8028,
+					       win, 1) == -2);
+		/* and the full answer with a big-enough budget */
+		CHECK(uml_nt_stack_window_plan(&mm5, &ph, RAM + 0x8028,
+					       win, 8) == 2);
+		CHECK(win[0].va == RAM + 0x5000 && win[0].len == 0x1000);
+		CHECK(win[1].va == RAM + 0x7000 && win[1].len == 0x2000);
+	}
+}
+
 int main(void)
 {
 	test_phys();
@@ -1144,6 +1266,7 @@ int main(void)
 	test_map_kind();
 	test_guard();
 	test_fault_stolen();
+	test_stack_window();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);

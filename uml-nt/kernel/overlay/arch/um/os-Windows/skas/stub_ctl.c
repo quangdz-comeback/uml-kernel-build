@@ -473,6 +473,71 @@ static void uml_nt_residue_watch(struct uml_nt_stub_conn *c)
 }
 
 /* Serve one published request on this conn. Returns 0 on success. */
+
+/* c00000fd fix (archive 065 greenlight): re-assert the VEH dispatch
+ * window at every OP-CARRYING answer. Only kernel-queued ops change
+ * the stub's views, so only these rounds can leave the committed
+ * (RW) extent below the trap rsp smaller than the ~12KB dispatch
+ * state + the handler's own do_action frames — the shape that dies
+ * "UNOWNED exception c00000fd" mid-op-stream (rsp=0x6006dc58 with a
+ * 12KB RW window, 3 byte-identical sightings, runs 36901177086 /
+ * 36902413478 / 36905053855-era). The window ops ride the SAME
+ * answer, INSERTED AT PLAN HEAD: they must land before the handler's
+ * own ops (the fork reprotect's UNMAP/MAP pairs, mmap fresh views) —
+ * the stub executes each op INSIDE the VEH handler, pushing below
+ * the trap rsp while it works. Op-free answers change no view: the
+ * last assertion still holds, so they pay nothing (the M4.1 bench
+ * RTT gate stays untouched). Spawn needs nothing: the INIT plan maps
+ * whole VMAs, so a fresh conn's stack run starts fully RW.
+ * Prot semantics preserved by construction: the ops carry the VMA's
+ * EFFECTIVE prot (COW-shared runs re-assert READ-ONLY) and guard
+ * ranges are never covered. Pure logic lives in
+ * uml_nt_stack_window_plan (fault.c, unit-tested). */
+static int stack_window_logged;
+
+static void stack_window_reassert(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_fault_op win[8];
+	unsigned long long rsp = c->d->regs.rsp;
+	int nwin, i, shift;
+
+	if (c->plan.n_ops <= 0)
+		return;
+	nwin = uml_nt_stack_window_plan(c->mm, c->ph, rsp, win, 8);
+	if (nwin == 0)
+		return;
+	if (nwin < 0) {
+		if (stack_window_logged < 8) {
+			stack_window_logged++;
+			os_info("[stack-window] pid %lu rsp=0x%llx: "
+				"refused (%d) — stolen window run?\n",
+				(unsigned long)c->pid, rsp, nwin);
+		}
+		return;
+	}
+	if (c->plan.n_ops + nwin > UML_NT_FAULT_MAX_OPS)
+		return; /* never drop handler ops for the window */
+	shift = c->plan.n_ops;
+	memmove(&c->plan.ops[nwin], &c->plan.ops[0],
+		(size_t)shift * sizeof(c->plan.ops[0]));
+	for (i = 0; i < nwin; i++)
+		c->plan.ops[i] = win[i];
+	c->plan.n_ops += nwin;
+	c->plan_next = 0;
+	c->plan_left = c->plan.n_ops;
+	if (stack_window_logged < 8) {
+		stack_window_logged++;
+		os_info("[stack-window] pid %lu rsp=0x%llx re-assert %d "
+			"op(s) ahead of %d plan op(s)\n",
+			(unsigned long)c->pid, rsp, nwin,
+			c->plan.n_ops - nwin);
+		for (i = 0; i < nwin; i++)
+			os_info("[stack-window]   prot=0x%x "
+				"[0x%llx,0x%llx)\n", win[i].prot,
+				win[i].va, win[i].va + win[i].len);
+	}
+}
+
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
@@ -848,6 +913,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				       c->plan.copy_src_off,
 			       UML_NT_PHYS_RUN_SIZE);
 		}
+		stack_window_reassert(c);
 		c->plan_next = 0;
 		c->plan_left = c->plan.n_ops;
 		issue_plan_op(c, &c->plan.ops[0]);
@@ -875,6 +941,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * on the new conn. */
 		return 2;
 	}
+	stack_window_reassert(c);
 	if (c->plan_left > 0)
 		issue_plan_op(c, &c->plan.ops[c->plan_next]);
 	return 0;

@@ -59,6 +59,24 @@
  * COW run fixed mid-syscall). */
 #define UML_NT_FAULT_MAX_OPS 256
 
+/* The VEH dispatch window (c00000fd fix, archive 065 work order):
+ * Windows builds the exception dispatch state (EXCEPTION_RECORD +
+ * full CONTEXT + xstate, ~12KB) on the guest stack BELOW the trap
+ * rsp at EVERY trap, and the stub's own VEH handler + do_action
+ * frames push deeper still (ntdll MapViewOfFileEx/VirtualProtect run
+ * mid-answer). When the committed (RW) extent below the trap rsp is
+ * smaller than that, the dispatch machinery itself faults and NT
+ * latches STATUS_STACK_OVERFLOW (c00000fd) — an exception class the
+ * stub's VEH does not own ("UNOWNED exception c00000fd", 3/8 runs of
+ * session R15/R16, byte-identical: RW region = [rsp-page, stack top),
+ * everything below non-RW inside the very same mapped view). Only
+ * kernel-queued OPS change stub views, so only op-carrying rounds
+ * can break the window: the kernel re-asserts it at every
+ * op-carrying answer (uml_nt_stack_window_plan, called from
+ * serve_conn). Spawn needs nothing extra: the INIT plan maps whole
+ * VMAs, so a fresh conn's stack run starts fully RW. */
+#define UML_NT_STACK_GROW_AHEAD 0x4000ull /* 16KB below the trap rsp */
+
 struct uml_nt_fault_op {
 	unsigned op;   /* UML_NT_FOP_* */
 	unsigned prot; /* MAP/PROTECT: NT PAGE_* */
@@ -94,6 +112,26 @@ struct uml_nt_fault_plan {
 int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		    unsigned long long addr, unsigned type,
 		    struct uml_nt_fault_plan *plan);
+
+/*
+ * Re-assert the VEH dispatch window below `rsp` as PROTECT ops
+ * (grow-ahead — the c00000fd fix; see UML_NT_STACK_GROW_AHEAD).
+ * Pure logic. The window is [rsp - GROW_AHEAD, rsp-page-end) clamped
+ * into the WRITABLE VMA containing rsp-1 (M3.3: rsp = the first byte
+ * PAST the stack); guard ranges keep their NOACCESS (prot semantics
+ * are the fault truth — the segments split around them). Ops carry
+ * the VMA's EFFECTIVE protection: a COW-shared run re-asserts
+ * READ-ONLY (re-asserting RW there would break fork sharing — that
+ * state is an invariant sighting for the log, not something to hide).
+ * Fills up to max_ops ops; returns the op count, 0 when there is
+ * nothing to assert (no writable VMA at rsp — e.g. a POC bootstrap
+ * rsp), -1 when the window's run shows 0 refs (stolen — the map-049
+ * contract; the caller logs once and skips), -2 when the segments
+ * exceed max_ops.
+ */
+int uml_nt_stack_window_plan(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			     unsigned long long rsp,
+			     struct uml_nt_fault_op *ops, int max_ops);
 
 /*
  * Build the INIT plan for a (fresh or forked) stub: MAP every VMA

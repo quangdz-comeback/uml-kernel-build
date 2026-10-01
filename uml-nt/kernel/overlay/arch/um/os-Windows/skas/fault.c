@@ -227,6 +227,85 @@ kill:
 	return -1;
 }
 
+int uml_nt_stack_window_plan(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			     unsigned long long rsp,
+			     struct uml_nt_fault_op *ops, int max_ops)
+{
+	struct uml_nt_vma *vma;
+	unsigned long long lo, hi, cur, run;
+	unsigned prot;
+	int n = 0;
+
+	/* The stack VMA owns [start, rsp) — find it by rsp-1, the last
+	 * stack byte (M3.3 lesson: a naive "contains rsp" test puts
+	 * the fork rsp into the guard run). */
+	if (rsp < 2)
+		return 0;
+	vma = uml_nt_vma_find(mm, rsp - 1);
+	if (vma == 0 || !uml_nt_prot_writable(vma->prot))
+		return 0;
+
+	/* Effective prot: a COW-shared stack run re-asserts READ-ONLY
+	 * (fork semantics — the first write must fault into the COW
+	 * machinery); the M3.3 eager stack copy makes this the
+	 * non-case for the rsp VMA at fork time, so a RO assertion
+	 * here is an invariant sighting the caller logs. */
+	prot = uml_nt_vma_effective_prot(vma, ph);
+
+	/* The window: GROW_AHEAD below the trap rsp (the dispatch
+	 * state + the handler's own frames live there), through the
+	 * page containing rsp-1 — clamped into the VMA. */
+	lo = (rsp >= UML_NT_STACK_GROW_AHEAD) ?
+		rsp - UML_NT_STACK_GROW_AHEAD : 0;
+	lo &= ~(UML_NT_FAULT_PAGE_SIZE - 1);
+	if (lo < vma->start)
+		lo = vma->start;
+	hi = ((rsp - 1) & ~(UML_NT_FAULT_PAGE_SIZE - 1)) +
+		UML_NT_FAULT_PAGE_SIZE;
+	if (hi > vma->end)
+		hi = vma->end;
+	if (lo >= hi)
+		return 0;
+
+	/* Map-049 ownership: every run the window touches must show
+	 * refs > 0 — a PROTECT op would not read/write bytes, but a
+	 * zero-ref window is exactly the stolen-run shape (an
+	 * unbalanced drop freed the backing under a live mm). */
+	for (run = vma->run_off + ((lo - vma->start) /
+				   UML_NT_PHYS_RUN_SIZE) *
+			  UML_NT_PHYS_RUN_SIZE;
+	     run < vma->run_off + (hi - vma->start);
+	     run += UML_NT_PHYS_RUN_SIZE) {
+		if (uml_nt_phys_refs(ph, (long long)run) == 0)
+			return -1;
+	}
+
+	/* Emit the guard-free segments as merged PROTECT ops (guards
+	 * keep their NOACCESS: the guard state is the fault truth, the
+	 * view must match it — vma.h note; the decider's own
+	 * plan_guards re-apply runs after these in the COW plans). */
+	for (cur = lo; cur < hi;) {
+		unsigned long long seg_end = cur + UML_NT_FAULT_PAGE_SIZE;
+
+		if (uml_nt_guard_hit(mm, cur)) {
+			cur = seg_end;
+			continue;
+		}
+		while (seg_end < hi && !uml_nt_guard_hit(mm, seg_end))
+			seg_end += UML_NT_FAULT_PAGE_SIZE;
+		if (n < max_ops) {
+			ops[n].op = UML_NT_FOP_PROTECT;
+			ops[n].prot = prot;
+			ops[n].va = cur;
+			ops[n].len = seg_end - cur;
+			ops[n].off = 0;
+		}
+		n++;
+		cur = seg_end;
+	}
+	return (n > max_ops) ? -2 : n;
+}
+
 int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			struct uml_nt_fault_plan *plan)
 {
