@@ -112,9 +112,19 @@ jobs:
           # gh.exe is on the runner but NOT on the msys2 PATH.
           GH="/c/Program Files/GitHub CLI/gh.exe"
           [ -x "$GH" ] || GH="$(command -v gh)"
-          RID=$("$GH" run list -R "${{ github.repository }}" \
-            --workflow base_image.yml --status success \
-            --json databaseId --jq '.[0].databaseId')
+          # Pick the newest NON-EXPIRED uml-base-debian-bookworm artifact
+          # via the artifacts API. `gh run list --workflow` filters by the
+          # current git branch under the hood and can return a base_image
+          # run that never uploaded this artifact (run 36841223033 died
+          # here with "no valid artifacts found" while the 2026-09-28
+          # artifact was alive and well).
+          RID=$("$GH" api \
+            "repos/${{ github.repository }}/actions/artifacts?name=uml-base-debian-bookworm&per_page=100" \
+            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | .[-1].run_id')
+          if [ -z "$RID" ]; then
+            echo "no live uml-base-debian-bookworm artifact — re-run base_image.yml first" >&2
+            exit 1
+          fi
           echo "base_image run: $RID"
           "$GH" run download "$RID" -R "${{ github.repository }}" \
             -n uml-base-debian-bookworm -D rootfs-img
