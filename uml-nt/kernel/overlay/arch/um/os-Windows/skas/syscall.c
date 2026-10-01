@@ -1676,24 +1676,39 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	 * = a guest consumer feeding a syscall's -1 into a length.
 	 * glibc's own wrappers check (unsigned jae -4095), so the
 	 * suspect is a raw-syscall user fed an unexpected errno. Log
-	 * every failed round's identity — bounded, one line each —
-	 * the next run's log then names the nr pattern around each
-	 * SIGSEGV instead of a third guess. */
+	 * every DISTINCT (nr, errno) pair once — run 36804503133
+	 * burned all 32 lines on init's routine openat/newfstatat
+	 * ENOENT probing because the consecutive-pair dedup never
+	 * fired on an alternating pattern; a global seen-table
+	 * collapses that to a handful and the budget survives to the
+	 * interesting tail of the boot. */
 	{
-		static int neg_logged;
-		static unsigned long long last_nr, last_err;
+		static unsigned long long seen[32][2];
+		static int nseen, nlogged;
 
-		if ((long long)ret < 0 && (long long)ret > -512 &&
-		    neg_logged < 32 &&
-		    (nr != last_nr ||
-		     (unsigned long long)(-(long long)ret) != last_err)) {
-			last_nr = nr;
-			last_err = (unsigned long long)(-(long long)ret);
-			neg_logged++;
-			os_info("[syscall] neg-retval #%d: nr=%llu -> "
-				"%lld (task %d)\n",
-				neg_logged, nr, (long long)ret,
-				current ? current->pid : 0);
+		if ((long long)ret < 0 && (long long)ret > -512) {
+			unsigned long long err =
+				(unsigned long long)(-(long long)ret);
+			int i, found = 0;
+
+			for (i = 0; i < nseen; i++) {
+				if (seen[i][0] == nr && seen[i][1] == err) {
+					found = 1;
+					break;
+				}
+			}
+			if (!found && nlogged < 32) {
+				if (nseen < 32) {
+					seen[nseen][0] = nr;
+					seen[nseen][1] = err;
+					nseen++;
+				}
+				nlogged++;
+				os_info("[syscall] neg-retval #%d: nr=%llu "
+					"-> %lld (task %d)\n",
+					nlogged, nr, (long long)ret,
+					current ? current->pid : 0);
+			}
 		}
 	}
 	if (c->plan_left > 0) {

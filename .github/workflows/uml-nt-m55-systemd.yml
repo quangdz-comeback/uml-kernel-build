@@ -128,11 +128,19 @@ jobs:
           # 900s (was 420): mem=120M boots go deeper than the old cap
           # could film — the evidence (census lines, the failing
           # put_user) must land before the kill.
+          # SYSTEMD_LOG_TARGET=console: init's assert/emergency text
+          # defaults to the journald socket — silent when that path
+          # misbehaves, which is exactly the "Caught <ABRT> from our
+          # own process" with NO assertion line before it (run
+          # 36804503133). Console target + code location put the
+          # failing assert on the log we actually read.
           timeout 900 ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
             "mem=120M" \
-            "root=98:0" "rw" > systemd.log 2>&1
+            "root=98:0" "rw" \
+            "SYSTEMD_LOG_TARGET=console" "SYSTEMD_LOG_LOCATION=1" \
+            > systemd.log 2>&1
           code=$?
           set -e
           echo "launcher exit: $code (124 = still running at timeout — expected while systemd boots)"
