@@ -1516,6 +1516,24 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		  * back */
 	case 192: /* lgetxattr (no-follow) */
 	case 193: /* fgetxattr (fd-based) */
+	case 190: /* fsetxattr — journald sets the journal-file attrs in
+		   * its open path (run 36889953754: the MAP_SHARED
+		   * single-mapper map succeeded, then fsetxattr +
+		   * pwrite64 both ENOSYS'd → "Failed to open runtime
+		   * journal" → restart loop). fd-based twin of
+		   * 191/192/193. */
+	case 18: /* pwrite64 — journald writes the journal header +
+		  * seqnum right after the MAP_SHARED map (same run);
+		  * the explicit-offset twin of write/pread64. */
+	case 116: /* setgroups — systemd's "Failed at step GROUP
+		   * spawning systemd-networkd" (execute.c:5314,
+		   * "Failed to determine supplementary groups" — the
+		   * initgroups tail; archive m5.4-c3 recorded it as
+		   * "networkd chết 216/GROUP (setgroups?)" — this is
+		   * the answer: the nr was never routed) */
+	case 204: /* sched_getaffinity — systemd's CPU-shaping probe
+		   * (1x in run 36889953754); the honest answer here
+		   * is 1 CPU (CPUs=1) */
 	case 288: /* accept4 — socket activation (the AF_UNIX
 		   * journald listeners are kernel-internal, D8 only
 		   * bans the kernel<->helper channel) */
