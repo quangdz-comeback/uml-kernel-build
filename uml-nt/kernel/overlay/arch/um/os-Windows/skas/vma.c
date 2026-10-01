@@ -161,10 +161,21 @@ int uml_nt_vma_del(struct uml_nt_mm *mm, unsigned long long start,
 				mm->vma[j] = mm->vma[j + 1];
 			mm->nvma--;
 		} else if (s >= start) {
-			/* head cut: [end, e) survives */
+			/* head cut: [end, e) survives. Its run base
+			 * SHIFTS by the cut size — translate keys off
+			 * the piece's own start, so keeping run_off
+			 * would slide the survivor's whole window back
+			 * onto the removed head's runs (the 5c2f8d7
+			 * family: cow_split's post piece made the same
+			 * mistake). LATENT today (sys_munmap refuses
+			 * partial cuts; MAP_FIXED replace pre-checks
+			 * span_fits) — fixed while auditing map 049,
+			 * with the continuity tests in test_mm. */
 			mm->vma[i].start = end;
+			mm->vma[i].run_off += end - s;
 		} else if (e <= end) {
-			/* tail cut: [s, start) survives */
+			/* tail cut: [s, start) survives — run_off keys
+			 * off the unchanged start: correct as-is. */
 			mm->vma[i].end = start;
 		} else {
 			/* middle hole: [s, start) + [end, e) survive */
@@ -173,7 +184,8 @@ int uml_nt_vma_del(struct uml_nt_mm *mm, unsigned long long start,
 			unsigned flags = mm->vma[i].flags;
 			int rc;
 
-			rc = vma_insert(mm, i + 1, end, e, run, prot, flags);
+			rc = vma_insert(mm, i + 1, end, e,
+					run + (end - s), prot, flags);
 			if (rc < 0)
 				return -1;
 			mm->vma[i].end = start;

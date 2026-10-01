@@ -271,6 +271,63 @@ static void test_translate_boundary(void)
 	      (long long)(r0 + 0x1234));
 }
 
+/* map 049: a vma_del CUT must keep translate continuity for the
+ * survivor pieces — a piece's run_off keys off ITS OWN start, so a
+ * head cut shifts the survivor's run base by the cut size and a
+ * middle hole shifts the post piece. Both were latent (sys_munmap
+ * refuses partial cuts; MAP_FIXED replace pre-checks span_fits) —
+ * the same run_off-keying mistake cow_split's post piece made
+ * (5c2f8d7). */
+static void test_vma_del_pieces(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	unsigned long long r0;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 8 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	r0 = uml_nt_phys_alloc(&ph);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + 4 * RUN, r0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+
+	/* head cut [RAM, RAM+RUN): survivor [RAM+RUN, RAM+4*RUN) must
+	 * translate EXACTLY like the original VMA did */
+	CHECK(uml_nt_vma_translate(&mm, RAM + RUN + 0x1234, 8) ==
+	      (long long)(r0 + RUN + 0x1234));
+	CHECK(uml_nt_vma_del(&mm, RAM, RAM + RUN) == 0);
+	CHECK(mm.nvma == 1 && mm.vma[0].start == RAM + RUN);
+	CHECK(uml_nt_vma_translate(&mm, RAM + RUN + 0x1234, 8) ==
+	      (long long)(r0 + RUN + 0x1234));
+
+	/* middle hole [RAM+2*RUN, RAM+3*RUN) in the survivor: the post
+	 * piece [RAM+3*RUN, RAM+4*RUN) keeps the original mapping */
+	CHECK(uml_nt_vma_translate(&mm, RAM + 3 * RUN + 0x1234, 8) ==
+	      (long long)(r0 + 3 * RUN + 0x1234));
+	CHECK(uml_nt_vma_del(&mm, RAM + 2 * RUN,
+			     RAM + 3 * RUN) == 0);
+	CHECK(mm.nvma == 2);
+	CHECK(uml_nt_vma_translate(&mm, RAM + RUN + 0x1234, 8) ==
+	      (long long)(r0 + RUN + 0x1234));
+	CHECK(uml_nt_vma_translate(&mm, RAM + 3 * RUN + 0x1234, 8) ==
+	      (long long)(r0 + 3 * RUN + 0x1234));
+	/* the hole is unmapped */
+	CHECK(uml_nt_vma_translate(&mm, RAM + 2 * RUN, 1) == -1);
+
+	/* tail cut: the head survivor's run_off is untouched (the
+	 * original correct case) */
+	CHECK(uml_nt_vma_del(&mm, RAM + 3 * RUN + 0x8000,
+			     RAM + 4 * RUN) == 0);
+	CHECK(mm.nvma == 2);
+	CHECK(uml_nt_vma_translate(&mm, RAM + RUN + 0x1234, 8) ==
+	      (long long)(r0 + RUN + 0x1234));
+	/* the post survivor keeps [3*RUN, 3*RUN+0x8000): its first
+	 * byte translates, the cut tail is unmapped */
+	CHECK(uml_nt_vma_translate(&mm, RAM + 3 * RUN, 1) ==
+	      (long long)(r0 + 3 * RUN));
+	CHECK(uml_nt_vma_translate(&mm, RAM + 3 * RUN + 0x8000, 1) == -1);
+}
+
 static void test_vma(void)
 {
 	struct uml_nt_phys ph;
@@ -1047,6 +1104,7 @@ int main(void)
 	test_phys();
 	test_span();
 	test_vma();
+	test_vma_del_pieces();
 	test_translate();
 	test_translate_boundary();
 	test_fault();
