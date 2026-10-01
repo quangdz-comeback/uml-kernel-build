@@ -115,6 +115,16 @@ struct uml_nt_stub_conn {
 	 * correlating census lines across the log. */
 	unsigned long long last_nr;
 	long long last_ret;
+	/* M5.4 c3 diag (Astra request, archive
+	 * astra-m55a-oneshot-blocked-d21 §2): the last 4 SUCCESSFUL
+	 * mmap results of this conn. glibc __libc_message() mmaps the
+	 * __abort_msg copy as the final mapping before abort() ->
+	 * raise() reaches the tgkill trap (run 36891891282: the mmap
+	 * landed at 0x605c0000); the ABRT tripwire reads its
+	 * candidates from this ring — prefix-checked, so no hardcoded
+	 * VA and no libc symbol table. kzalloc init is the reset. */
+	unsigned long long mmap_recent[4];
+	int mmap_recent_n, mmap_recent_head;
 	/* M5.4 c3 (map 057): residue-watch. Armed by the fork seed
 	 * with the parent's trap+2 (the fork-resume rip — a value no
 	 * live frame may carry as data) and the fork rsp (names the
