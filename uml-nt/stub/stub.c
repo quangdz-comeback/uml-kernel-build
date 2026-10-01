@@ -557,7 +557,21 @@ static void jump_to_guest(struct uml_nt_gp_regs *ir,
 		"jz	1f\n\t"
 		"wrfsbase %r11\n\t"
 		"1:\n\t"
-		"movq	%r8, %r15\n\t"	/* entry, saved first */
+		/* M5.4 c3 (map 059, ROOT CAUSE): the entry target lives
+		 * in MEMORY, not in %r15. The first version kept it in
+		 * r15 and NEVER loaded init_regs.r15 — every conn was
+		 * born with its entry rip in a CALLEE-SAVED register.
+		 * For a fork child that entry rip IS the fork-resume
+		 * rip (_Fork+0x23): libc preserves r15 all the way to
+		 * the child's first trap, whose VEH dispatch CONTEXT
+		 * (written on the guest stack, see signal_check's
+		 * exc_stack note) then carries the poison at its R15
+		 * slot — residue-watch run 36860061327: seed r15=0x40,
+		 * first-trap r15=0x606a4353 = the watched value. Apply
+		 * the seed's r15 (true fork parity — upstream
+		 * copy_thread memcpy's pt_regs) and jump memory-
+		 * indirect like the trampolines do. */
+		"movq	%r8, fs_tramp_target(%rip)\n\t"
 		"movq	%rdx, %rsp\n\t"	/* switch stack now */
 		"movq	0(%rcx), %rax\n\t"
 		"movq	16(%rcx), %rdx\n\t"
@@ -572,8 +586,9 @@ static void jump_to_guest(struct uml_nt_gp_regs *ir,
 		"movq	96(%rcx), %r12\n\t"
 		"movq	104(%rcx), %r13\n\t"
 		"movq	112(%rcx), %r14\n\t"
+		"movq	120(%rcx), %r15\n\t"
 		"movq	8(%rcx), %rcx\n\t"
-		"jmp	*%r15\n\t"
+		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
 	(void)ir;
 	(void)stack_va;
