@@ -322,8 +322,10 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					"why=%c fs=0x%llx rsp=0x%llx "
 					"insn=%02x%02x%02x%02x%02x%02x%02x%02x "
 					"rax=0x%llx rdi=0x%llx rsi=0x%llx "
-					"rdx=0x%llx last_nr=%llu "
-					"last_ret=%lld\n",
+					"rdx=0x%llx "
+					"rbx=0x%llx rbp=0x%llx r12=0x%llx "
+					"r13=0x%llx r14=0x%llx r15=0x%llx "
+					"last_nr=%llu last_ret=%lld\n",
 					(unsigned long)c->pid, d->fault_addr,
 					d->fault_type, d->regs.rip,
 					c->plan.kill_why ?
@@ -333,6 +335,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					ib[4], ib[5], ib[6], ib[7],
 					d->regs.rax, d->regs.rdi,
 					d->regs.rsi, d->regs.rdx,
+					d->regs.rbx, d->regs.rbp,
+					d->regs.r12, d->regs.r13,
+					d->regs.r14, d->regs.r15,
 					c->last_nr, c->last_ret);
 				/* M5.4 c3: the wild-pointer autopsy —
 				 * run 36806296858's victims all die at
@@ -381,6 +386,10 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					dump_guest_bytes(c->mm,
 							 d->regs.rsp, 48,
 							 "at-rsp");
+					dump_guest_bytes(c->mm,
+							 d->regs.rsp + 48,
+							 48,
+							 "at-rsp2");
 					dump_guest_bytes(c->mm,
 							 d->fs_base, 48,
 							 "at-fs");
