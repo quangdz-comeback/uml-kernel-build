@@ -125,6 +125,17 @@ static void conn_bootstrap(struct uml_nt_stub_conn *c,
 	 * killed the sd-executor in run 36777774115). Publish the
 	 * conn's base for the stub's first resume. */
 	c->d->fs_base = c->fs_base;
+	/* M5.4 c3 (map 053 item 1): the entry state every conn is
+	 * born with. A fork child's line carries the parent's
+	 * fork-round snapshot (rip = _Fork+0x23 + the live
+	 * callee-saved — correct fork semantics). An EXEC conn's line
+	 * must show ZEROES in rbx/rbp/r12-r15 (ELF_PLAT_INIT parity,
+	 * binfmt.c) — any cluster value there = the entry-regs
+	 * residue vector alive. (c->pid = the stub pid — unique per
+	 * conn; task-backed conns report the kernel pid via getpid.) */
+	os_info("conn_bootstrap: stub-pid %lu rip=0x%llx rbx=0x%llx "
+		"r12=0x%llx r13=0x%llx\n", (unsigned long)c->pid,
+		g->rip, g->rbx, g->r12, g->r13);
 }
 
 /* get_stub_state analogue: pull the trap regs back into the task.

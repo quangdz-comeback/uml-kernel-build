@@ -544,6 +544,38 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	 * d->init_regs + entry_va → stub applies after the INIT plan
 	 * streams). D20: the entry is the INTERP's for a dynamic
 	 * binary — the starter runs first and jumps to AT_ENTRY. */
+	/* ELF_PLAT_INIT parity (upstream arch/x86/um/asm/elf.h zeroes
+	 * BX,CX,DX,SI,DI,BP,AX,R8-R15 before START_THREAD at exec;
+	 * fs/binfmt_elf.c:1375). binfmt_umlnt skipped it: conn_bootstrap
+	 * fills the exec conn's init_regs from these very pt_regs, so a
+	 * fork+exec child started its new image with the exec'ing
+	 * task's live callee-saved regs — for a fork child, the PARENT
+	 * fork-moment state (rip=_Fork+0x23's register cluster among
+	 * them). Stack and heap are fresh-zeroed at exec (D11/D12), so
+	 * registers were the ONLY fork residue that crossed the exec
+	 * boundary; spilled by the new image's early frames, they are
+	 * the deterministic _strv_env_merge/strcspn SIGSEGV cluster
+	 * (M5.4 c3). Zero them like upstream — the SysV ABI promises
+	 * the new image nothing about incoming GPRs. */
+	{
+		struct uml_pt_regs *r = &current_pt_regs()->regs;
+
+		REGS_BX(r->gp) = 0;
+		REGS_CX(r->gp) = 0;
+		REGS_DX(r->gp) = 0;
+		REGS_SI(r->gp) = 0;
+		REGS_DI(r->gp) = 0;
+		REGS_BP(r->gp) = 0;
+		REGS_AX(r->gp) = 0;
+		REGS_R8(r->gp) = 0;
+		REGS_R9(r->gp) = 0;
+		REGS_R10(r->gp) = 0;
+		REGS_R11(r->gp) = 0;
+		REGS_R12(r->gp) = 0;
+		REGS_R13(r->gp) = 0;
+		REGS_R14(r->gp) = 0;
+		REGS_R15(r->gp) = 0;
+	}
 	start_thread(current_pt_regs(), entry, stack_top - used);
 
 	os_info("binfmt_umlnt: init loaded: %d region(s)%s, entry 0x%llx, "

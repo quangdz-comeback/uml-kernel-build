@@ -1009,11 +1009,38 @@ static unsigned long long sys_fork_real(struct uml_nt_stub_conn *c,
 					unsigned long long nr)
 {
 	unsigned long long ret;
+	/* map 053 item 1, task-backed path (the POC hook's diag never
+	 * fires for systemd): the parent's live regs at the fork
+	 * round — the child seeds from this snapshot. If the parent
+	 * ever carries _Fork+0x23's cluster in a callee-saved reg
+	 * here, the save/restore path is the vector; if the values
+	 * CHANGE across the round, the round smeared them. */
+	struct uml_pt_regs *pr = &current_pt_regs()->regs;
+	unsigned long long rbx = REGS_BX(pr->gp);
+	unsigned long long rbp = REGS_BP(pr->gp);
+	unsigned long long r12 = REGS_R12(pr->gp);
+	unsigned long long r13 = REGS_R13(pr->gp);
+	unsigned long long r14 = REGS_R14(pr->gp);
+	unsigned long long r15 = REGS_R15(pr->gp);
 
 	uml_nt_sync_trap_regs(&current_pt_regs()->regs, d);
+	os_info("[syscall] fork round nr=%llu: parent rip=0x%llx "
+		"rbx=0x%llx rbp=0x%llx r12=0x%llx r13=0x%llx r14=0x%llx "
+		"r15=0x%llx\n", nr, REGS_IP(pr->gp), rbx, rbp, r12, r13,
+		r14, r15);
 	uml_nt_fork_arm(c, d->regs.rsp);
 	ret = sys_vfs(nr, a); /* generic fork/clone → copy_process */
 	uml_nt_fork_disarm();
+	if (REGS_BX(pr->gp) != rbx || REGS_BP(pr->gp) != rbp ||
+	    REGS_R12(pr->gp) != r12 || REGS_R13(pr->gp) != r13 ||
+	    REGS_R14(pr->gp) != r14 || REGS_R15(pr->gp) != r15)
+		os_info("[syscall] fork round SMEARED parent regs: "
+			"rbx 0x%llx->0x%llx rbp 0x%llx->0x%llx "
+			"r12 0x%llx->0x%llx r13 0x%llx->0x%llx "
+			"r14 0x%llx->0x%llx r15 0x%llx->0x%llx\n",
+			rbx, REGS_BX(pr->gp), rbp, REGS_BP(pr->gp),
+			r12, REGS_R12(pr->gp), r13, REGS_R13(pr->gp),
+			r14, REGS_R14(pr->gp), r15, REGS_R15(pr->gp));
 	if ((long long)ret >= 0) {
 		uml_nt_fork_reprotect_parent(c);
 	} else {
