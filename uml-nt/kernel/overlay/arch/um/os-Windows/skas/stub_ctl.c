@@ -82,6 +82,11 @@ static unsigned long long probe_guard_va0, probe_guard_va1;
 /* wait4 bookkeeping (uml_nt_sys_wait4): one child conn, reaped once. */
 static int child_reaped;
 
+/* v6: running count of guest SIGSEGVs — the 56 victims of run
+ * 36823383637 share one signature; the counter makes the log
+ * navigable and proves the signature census at a glance. */
+static int sigsegv_victims;
+
 static struct uml_nt_stub_conn conn_parent, conn_child;
 static struct uml_nt_mm mm_parent, mm_child;
 static struct uml_nt_phys probe_phys;
@@ -215,8 +220,59 @@ static void dump_ptr_at(struct uml_nt_mm *mm, unsigned long long slot,
 	for (i = 7; i >= 0; i--)
 		v = (v << 8) | b[i];
 	os_info("[stubtest]   %s [0x%llx] -> 0x%llx\n", tag, slot, v);
-	if (v > 0x1000 && v < 0x800000000000ull)
+	if (v > 0x1000 && v < 0x800000000000ull) {
 		dump_guest_bytes(mm, (unsigned long long)v, 32, tag);
+	} else if (v != 0) {
+		/* v6: a slot can hold a NON-pointer (the wild
+		 * 0x3577fffff0003d40 is non-canonical — it fails every
+		 * magnitude guard). Print the {lo,hi} split inline so
+		 * the log decodes the constant itself (051 task 4). */
+		os_info("[stubtest]     (non-ptr: lo=0x%08x hi=0x%08x)\n",
+			(unsigned int)(v & 0xffffffff),
+			(unsigned int)(v >> 32));
+	}
+}
+
+/* v6 (051 task 2): dump the strv array AROUND the walker's cursor.
+ * The dead caller (_strv_env_merge's static env walker) keeps its
+ * strv cursor in r13 (the walker's original rdx) — the garbage ENTRY
+ * is the slot it loads or a neighbour. Which INDEX rots (head/tail/
+ * middle), what the live slots hold (heap string pointers vs
+ * pointers into the pthread arena) and whether the terminator moved
+ * is the shape evidence a single slot value can't give. */
+static void dump_strv_slots(struct uml_nt_mm *mm, unsigned long long cursor)
+{
+	int i;
+
+	for (i = -4; i <= 3; i++) {
+		char tag[16];
+		long long delta = i * 8;
+
+		snprintf(tag, sizeof(tag), "strv[%+d]", i);
+		dump_ptr_at(mm, cursor + delta, tag);
+	}
+}
+
+/* v6 (051 task 3): the pthread arena head. Every victim's r12 and
+ * saved-rbp slot point INTO the 704KB stack mmap (arena+0x10 /
+ * arena+0x40) it dies right after; run-aligned base = r12 & ~0xffff
+ * (the arena VA is 64K-aligned — it comes from sys_mmap). The first
+ * 256 bytes show the co-tenants (TCB? list heads? guard?) and
+ * whether the wild value lives in the ARENA itself or only in the
+ * strv that points into it. */
+static void dump_arena_head(struct uml_nt_mm *mm, unsigned long long r12)
+{
+	unsigned long long base;
+	int i;
+
+	if (r12 <= 0x1000 || r12 >= 0x800000000000ull)
+		return;
+	base = r12 & ~0xffffull;
+	for (i = 0; i < 256; i += 48) {
+		int n = (256 - i < 48) ? 256 - i : 48;
+
+		dump_guest_bytes(mm, base + i, n, "arena");
+	}
 }
 
 /* Serve one published request on this conn. Returns 0 on success. */
@@ -342,15 +398,24 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				if (it >= 0)
 					memcpy(ib, (char *)uml_boot.
 					       physmem_base + it, 8);
-				os_info("[stubtest] SIGSEGV -> guest pid %lu "
-					"addr=0x%llx type=%u rip=0x%llx "
-					"why=%c fs=0x%llx rsp=0x%llx "
+				/* v6 (051 task 1): os_info's buffer is
+				 * 256 bytes (util.c) — the one-line
+				 * version died at ~249 chars, mid-
+				 * "r12=0x613", losing r13/r14/r15/
+				 * last_nr/last_ret (the callee-saved
+				 * regs ARE the walker's strv/arena
+				 * state). Split: main regs above,
+				 * callee-saved + last-syscall below
+				 * (each line < 255). */
+				sigsegv_victims++;
+				os_info("[stubtest] SIGSEGV victim #%d "
+					"pid %lu addr=0x%llx type=%u "
+					"rip=0x%llx why=%c fs=0x%llx "
+					"rsp=0x%llx "
 					"insn=%02x%02x%02x%02x%02x%02x%02x%02x "
 					"rax=0x%llx rdi=0x%llx rsi=0x%llx "
-					"rdx=0x%llx "
-					"rbx=0x%llx rbp=0x%llx r12=0x%llx "
-					"r13=0x%llx r14=0x%llx r15=0x%llx "
-					"last_nr=%llu last_ret=%lld\n",
+					"rdx=0x%llx\n",
+					sigsegv_victims,
 					(unsigned long)c->pid, d->fault_addr,
 					d->fault_type, d->regs.rip,
 					c->plan.kill_why ?
@@ -359,11 +424,19 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					ib[0], ib[1], ib[2], ib[3],
 					ib[4], ib[5], ib[6], ib[7],
 					d->regs.rax, d->regs.rdi,
-					d->regs.rsi, d->regs.rdx,
+					d->regs.rsi, d->regs.rdx);
+				os_info("[stubtest]   callee: "
+					"rbx=0x%llx rbp=0x%llx r12=0x%llx "
+					"r13=0x%llx r14=0x%llx r15=0x%llx "
+					"last_nr=%llu last_ret=%lld "
+					"rax_lo=0x%08x rax_hi=0x%08x\n",
 					d->regs.rbx, d->regs.rbp,
 					d->regs.r12, d->regs.r13,
 					d->regs.r14, d->regs.r15,
-					c->last_nr, c->last_ret);
+					c->last_nr, c->last_ret,
+					(unsigned int)(d->regs.rax &
+						       0xffffffff),
+					(unsigned int)(d->regs.rax >> 32));
 				/* M5.4 c3: the wild-pointer autopsy —
 				 * run 36806296858's victims all die at
 				 * ONE libc rip copying 8 bytes from a
@@ -439,6 +512,16 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					dump_guest_bytes(c->mm,
 							 d->fs_base + 48, 16,
 							 "at-fs2");
+					/* v6 (051 tasks 2+3): the strv
+					 * array around the walker's
+					 * cursor + the pthread arena
+					 * head — the slot CONTEXT the
+					 * value-only dumps couldn't
+					 * give. */
+					dump_strv_slots(c->mm,
+							d->regs.r13);
+					dump_arena_head(c->mm,
+							d->regs.r12);
 					/* v2: run-ownership census at
 					 * the wild pointer. Run
 					 * 36808917963's victims die on
