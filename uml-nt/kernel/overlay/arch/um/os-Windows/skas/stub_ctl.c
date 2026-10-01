@@ -503,6 +503,42 @@ void uml_nt_switch_trace(void *from, void *to)
 	switch_ring_i = (switch_ring_i + 1) % UML_NT_SWITCH_RING;
 	switch_ring_n++;
 
+	/* Re-arm the uaccess context for the INCOMING task. The
+	 * dispatch's save/restore discipline (M4.2) only covers
+	 * NESTED HANDLER RETURNS — but a task that exits through
+	 * do_exit never unwinds its dispatch, and a task woken by a
+	 * stack switch resumes INSIDE its blocked handler
+	 * (wait_task_zombie's put_user), not at a dispatch boundary.
+	 * Between those, uacc_mm/uacc_sink still name the LAST
+	 * dispatched conn — commonly the just-exited child whose mm
+	 * was destroyed and its kzalloc reused (zeroed: nvma 0). The
+	 * woken parent's status writeback then walks that corpse:
+	 * "waitpid() failed: Bad address" (EFAULT, census reason=
+	 * no-vma hole=(0x0,0x0), run 36798157639 #9-#13) and init
+	 * freezes. The stack switch is the one boundary every path
+	 * crosses: install the incoming task's conn mm + fixup
+	 * channel here, NULL-safe (kthreads and conn-less tasks fail
+	 * safe). Content-identical to what the incoming dispatch
+	 * would install, so re-entry stays coherent. */
+	{
+		struct mm_id *id = (t->mm != NULL) ?
+			&t->mm->context.id : NULL;
+		struct uml_nt_stub_conn *c = (id != NULL) ?
+			id->nt_conn : NULL;
+
+		if (c != NULL) {
+			struct uml_nt_uacc_sink s;
+
+			uml_nt_uacc_set_mm(c->mm);
+			s.ph = c->ph;
+			s.plan = &c->plan;
+			(void)uml_nt_uacc_set_sink(&s);
+		} else {
+			uml_nt_uacc_set_mm(NULL);
+			(void)uml_nt_uacc_set_sink(NULL);
+		}
+	}
+
 	/* The M5.1c.5 off-CPU smash tripwire is GONE: it wrote a
 	 * per-task magic into the vmalloc area's tail qword believing
 	 * that tail was committed dead padding. It is the vmalloc
