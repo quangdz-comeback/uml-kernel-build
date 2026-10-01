@@ -390,9 +390,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								continue;
 							pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
 							if (pc == NULL ||
-							    pc->mm == NULL ||
-							    pc->dead_magic ==
-								UML_NT_CONN_DEAD)
+							    pc->mm == NULL)
 								continue;
 							pv = uml_nt_vma_find(pc->mm, d->regs.rax);
 							if (pv == NULL)
@@ -639,21 +637,7 @@ void uml_nt_switch_trace(void *from, void *to)
 			&t->mm->context.id : NULL;
 		struct uml_nt_stub_conn *c = (id != NULL) ?
 			id->nt_conn : NULL;
-		static int stale_logged;
 
-		if (c != NULL && c->dead_magic == UML_NT_CONN_DEAD) {
-			/* The switch-hook refusers: this is the path
-			 * that retained a destroyed conn — name it
-			 * once, then serve nothing from it. */
-			if (!stale_logged) {
-				stale_logged = 1;
-				os_info("[switch] STALE-CONN re-arm "
-					"refused: incoming task %d pid "
-					"%lu\n", t->pid,
-					(unsigned long)c->pid);
-			}
-			c = NULL;
-		}
 		if (c != NULL) {
 			struct uml_nt_uacc_sink s;
 

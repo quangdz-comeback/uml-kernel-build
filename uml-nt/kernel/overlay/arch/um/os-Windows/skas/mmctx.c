@@ -186,12 +186,6 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	kfree(c->mm);
 	if (!c->ph_shared)
 		kfree(c->ph);
-	/* Stamp BEFORE kfree: any consumer still reaching this conn
-	 * through a retained pointer must see DEAD and refuse the
-	 * walk (run 36804503133's census caught walks through
-	 * freed-then-reused mm structs — the VMA table carried
-	 * pointer-shaped garbage: the injection class). */
-	c->dead_magic = UML_NT_CONN_DEAD;
 	kfree(c);
 	id->nt_conn = NULL;
 	id->pid = -1;

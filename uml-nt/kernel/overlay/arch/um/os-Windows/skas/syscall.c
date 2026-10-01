@@ -1247,21 +1247,6 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	struct uml_nt_mm *uacc_prev_mm;
 	struct uml_nt_uacc_sink uacc_prev_sink;
 
-	/* M5.4 c3: a destroy-stamped conn must not serve — its mm/ph
-	 * are kfree'd; the walk would translate through reused memory
-	 * (the census's rotten-VMA class). The holder's identity is
-	 * the datum: this line names the path that retained the conn. */
-	if (c->dead_magic == UML_NT_CONN_DEAD) {
-		os_info("[syscall] STALE-CONN dispatch refused: nr=%llu "
-			"task=%d pid=%lu — conn destroyed but still "
-			"referenced\n",
-			nr, current ? current->pid : 0,
-			(unsigned long)c->pid);
-		d->retval = SC_RET(SC_EFAULT);
-		d->err = 1;
-		return;
-	}
-
 	uacc_prev_mm = uml_nt_uacc_set_mm(c->mm);
 	/* The write-fixup channel (hazard 3): the handler's to_user/
 	 * clear_user/futex writes force COW-shared runs private and
