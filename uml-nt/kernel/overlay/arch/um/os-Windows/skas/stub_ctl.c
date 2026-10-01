@@ -1303,6 +1303,15 @@ void uml_nt_alias_scan(unsigned long long lo, unsigned long long hi)
 
 void uml_nt_fork_arm(struct uml_nt_stub_conn *parent, unsigned long long rsp)
 {
+	/* fork-handoff trace (poller 070): run 36941397893 died the
+	 * R7 fatal mode — a fork's child conn spawned with an EMPTY mm
+	 * (INIT 0 map ops, stub dead at first access) and NO "child
+	 * conn seeded" line: the pending handoff never reached the
+	 * seed. Log every arm; with the disarm trace below, the next
+	 * recurrence names its losing round (arm missing = route hole;
+	 * arm + disarm-pending-set = consumed-by-nobody race). */
+	os_info("fork-handoff: arm parent pid %lu rsp=0x%llx\n",
+		(unsigned long)parent->pid, rsp);
 	fork_pending_parent = parent;
 	fork_pending_rsp = rsp;
 }
@@ -1326,6 +1335,15 @@ void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 
 void uml_nt_fork_disarm(void)
 {
+	/* fork-handoff trace (poller 070): disarm while the pending is
+	 * STILL SET = the seed never consumed the handoff — this fork's
+	 * child conn is about to spawn unseeded (the fatal mode of run
+	 * 36941397893). Silent when NULL: the seed consumed it (the
+	 * normal path — every seeded fork disarms empty). */
+	if (fork_pending_parent != NULL)
+		os_info("fork-handoff: disarm with PENDING STILL SET "
+			"(parent pid %lu) — seed never consumed\n",
+			(unsigned long)fork_pending_parent->pid);
 	fork_pending_parent = NULL;
 	fork_pending_rsp = 0;
 }
