@@ -1416,6 +1416,32 @@ static void abrt_msg_capture(struct uml_nt_stub_conn *c,
 			abrt_dump_text(s, got);
 			return;
 		}
+		/* The peek verdict (hex, first 32 bytes): the
+		 * __abort_msg copy is a WRITE INTO A FRESH ANON RUN —
+		 * a zero/garbage read-back here would make the
+		 * abort_msg path a live witness of the same
+		 * fresh-mapping consistency class the heap corruption
+		 * suspects (run 36905053855: the peek failed with the
+		 * ring holding the mapping — say WHY). */
+		if (nmiss < 1) {
+			nmiss = 1;
+			if (got < 0)
+				os_info("[abrt] peek 0x%llx: walk failed "
+					"(got=%d) — the abort_msg VMA is "
+					"gone/unmapped at tgkill\n",
+					msg_va, got);
+			else {
+				os_info("[abrt] peek 0x%llx got=%d hex:",
+					msg_va, got);
+				for (i = 0; i < 32; i += 8)
+					os_info(" "
+					"%02x%02x%02x%02x%02x%02x%02x%02x",
+					s[i], s[i + 1], s[i + 2],
+					s[i + 3], s[i + 4], s[i + 5],
+					s[i + 6], s[i + 7]);
+				os_info("\n");
+			}
+		}
 	}
 	for (k = 0; k < c->mmap_recent_n; k++) {
 		unsigned long long va;
