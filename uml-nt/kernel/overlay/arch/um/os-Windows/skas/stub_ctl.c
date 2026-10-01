@@ -392,6 +392,52 @@ static void valscan_death(struct uml_nt_stub_conn *c, unsigned long long val)
 	}
 }
 
+/* M5.4 c3 (map 057): the residue-watch scan. Armed by the fork seed
+ * with the parent's trap+2 (the fork-resume rip) — a value NO live
+ * frame may carry as data (_Fork is a leaf: nothing returns past its
+ * syscall). The seed's own checks read clean (below-rsp zero + live
+ * window, run 36850929441: 22/22 forks 0 hit(s)), yet the victim's
+ * stack carried 7 hits at death — the writer acts post-seed, inside
+ * the child's own address space. This per-round whole-VMA scan names
+ * the round that first re-introduces the value: nr/retval + the trap
+ * regs + up to 8 hit VAs. One-shot (disarm on first hit or expiry). */
+static void uml_nt_residue_watch(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_vma *v;
+	unsigned long long va, end;
+	int hits = 0;
+
+	v = uml_nt_vma_find(c->mm, c->watch_rsp);
+	if (v == NULL) {
+		/* Stack VMA gone (exec teardown) — nothing to watch. */
+		c->watch_val = 0;
+		return;
+	}
+	for (va = (v->start + 7) & ~7ull, end = v->end;
+	     va + 8 <= end; va += 8) {
+		unsigned long long x;
+
+		memcpy(&x, uml_boot.physmem_base + v->run_off +
+			    (va - v->start), 8);
+		if (x == c->watch_val) {
+			if (hits < 8)
+				os_info("[stubtest]   residue-hit "
+					"@0x%llx\n", va);
+			hits++;
+		}
+	}
+	if (hits == 0)
+		return;
+	os_info("[stubtest] RESIDUE-WATCH pid %lu: %d hit(s) of 0x%llx "
+		"after nr=%llu ret=%lld rip=0x%llx rsp=0x%llx "
+		"rbx=0x%llx r12=0x%llx r13=0x%llx r14=0x%llx cmd=%d\n",
+		(unsigned long)c->pid, hits, c->watch_val, c->last_nr,
+		c->last_ret, c->d->regs.rip, c->d->regs.rsp,
+		c->d->regs.rbx, c->d->regs.r12, c->d->regs.r13,
+		c->d->regs.r14, c->d->cmd);
+	c->watch_val = 0;
+}
+
 /* Serve one published request on this conn. Returns 0 on success. */
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
@@ -1275,6 +1321,15 @@ no_zero:
 	child->fs_base = parent->fs_base;
 	if (child->d != NULL)
 		child->d->fs_base = parent->fs_base;
+	/* M5.4 c3 (map 057): arm the residue-watch — the per-round
+	 * whole-stack-VMA scan that names the round re-introducing
+	 * the fork-resume value into the child's stack (seed proven
+	 * clean two lines above; the writer acts post-seed). 512
+	 * rounds is far past the victims' death depth (INIT + a
+	 * handful of faults + the arena mmap). */
+	child->watch_val = parent->d->regs.rip + 2;
+	child->watch_rsp = fork_pending_rsp;
+	child->watch_left = 512;
 	fork_pending_parent = NULL;
 	fork_pending_rsp = 0;
 	os_info("fork: child conn pid %lu seeded (%d vma(s), parent "
@@ -1513,6 +1568,20 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			 * CONTEXT restore keeps Windows' own at-
 			 * exception FP state — exactly right. */
 			uml_nt_fp_push(c, c->owner_regs);
+		}
+	}
+	/* M5.4 c3 (map 057): residue-watch — after the round's service
+	 * AND signal delivery (a sigframe written by signal_check is
+	 * exactly one of the suspects), before the answer releases.
+	 * Expiry is logged once so the window itself is auditable. */
+	if (c->watch_val != 0 && c->watch_left > 0) {
+		c->watch_left--;
+		uml_nt_residue_watch(c);
+		if (c->watch_left == 0 && c->watch_val != 0) {
+			os_info("[stubtest] residue-watch pid %lu expired "
+				"clean (last nr=%llu)\n",
+				(unsigned long)c->pid, c->last_nr);
+			c->watch_val = 0;
 		}
 	}
 	mb();

@@ -356,6 +356,20 @@ void uml_nt_signal_check(struct uml_nt_stub_conn *c)
 		uml_nt_plan_issue_op(c, &c->plan.ops[0]);
 	}
 
+	/* M5.4 c3 (map 057): a delivery ON A WATCHED CONN is one of
+	 * the two candidate writers of the fork-residue cluster (the
+	 * sigframe's mcontext records trap+2 = the fork-resume rip
+	 * when the interrupted state is still the seed). rip_before
+	 * IS the value that landed in uc_mcontext.rip; REGS_SP is
+	 * the frame placement. Correlate with the residue-watch
+	 * scan's first-hit round in the same log. */
+	if (REGS_IP(regs->gp) != rip_before && c->watch_val != 0)
+		os_info("[sig] delivered on watched conn pid %lu: "
+			"trap-rip=0x%llx frame=0x%llx true-sp=0x%llx\n",
+			(unsigned long)c->pid, rip_before,
+			(unsigned long long)REGS_SP(regs->gp),
+			true_sp);
+
 	if (REGS_IP(regs->gp) != rip_before || c->push_verbatim) {
 		/* Delivered (or restored): regs = the exact resume
 		 * state. Push the GP snapshot verbatim — the FP push

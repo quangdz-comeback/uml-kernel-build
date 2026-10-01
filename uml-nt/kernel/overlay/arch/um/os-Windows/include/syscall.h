@@ -105,6 +105,18 @@ struct uml_nt_stub_conn {
 	 * correlating census lines across the log. */
 	unsigned long long last_nr;
 	long long last_ret;
+	/* M5.4 c3 (map 057): residue-watch. Armed by the fork seed
+	 * with the parent's trap+2 (the fork-resume rip — a value no
+	 * live frame may carry as data) and the fork rsp (names the
+	 * stack VMA). The pump scans that VMA per round while armed;
+	 * the FIRST round whose stack re-introduces the value is the
+	 * cluster writer — log its nr/retval/regs, disarm (one-shot).
+	 * The seed itself proved clean (below-rsp zero + live-window
+	 * scan both read 0 in run 36850929441), so any hit here is
+	 * strictly post-seed. Zero = disarmed (kzalloc init). */
+	unsigned long long watch_val;
+	unsigned long long watch_rsp;
+	int watch_left;
 	/* M5.4 c3 (048): destroy stamps DEAD before kfree; consumers
 	 * that reach a conn through a RETAINED pointer (the switch
 	 * hook's re-arm, the co-mapper census, the fork seed) refuse a
