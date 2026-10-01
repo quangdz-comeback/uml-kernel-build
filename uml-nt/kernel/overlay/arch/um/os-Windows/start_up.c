@@ -205,95 +205,14 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 			asm volatile("");
 	}
 
-	/* M5.1c.5: the FORGIVING guard-hit path. The switch-guard
-	 * leaves freed-stack padding pages read-only; a writer there
-	 * (the smash hunter's whole point) faults with op=write into
-	 * the vmalloc band. LOG THE RIP (names the writer), restore
-	 * the page writable, resume the faulting instruction — the
-	 * boot continues and the log collects every culprit. Anything
-	 * outside this narrow shape falls through to the fatal
-	 * report. The band = VMALLOC_START..the section end (0x6400
-	 * 0000 = physmem top, 0x68000000 = the launcher's 128 MiB
-	 * ceiling — the launcher's section view covers it, so
-	 * unprotecting is always safe). */
-	if (r != NULL && r->code == 0xc0000005U && r->nparams > 1 &&
-	    r->info[0] == 1 /* write */) {
-		/* NT's ExceptionAddress for an AV = the RIP; the data
-		 * address = info[1]. Check the DATA address. */
-		unsigned long long wrote =
-			(unsigned long long)r->info[1];
-
-		if (wrote >= 0x64000000ULL && wrote < 0x68000000ULL) {
-			void *pbase = (void *)(unsigned long)
-				(wrote & ~(unsigned long long)0xfff);
-			unsigned long long plen = 0x1000;
-			ULONG oldp;
-
-			nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
-						   &pbase, &plen,
-						   0x04 /* PAGE_READWRITE */,
-						   &oldp);
-			/* WHO is writing: rip 6001d362 = memset_orig
-			 * (the REP STOSB loop), NOT io_uring — the
-			 * early hot-text layout (kernel_setjmp/memcpy/
-			 * memmove/memset) is fixed at _stext in every
-			 * CI build, and the run-36717541886 vmlinux has
-			 * NO io_uring at all while the crash still
-			 * reproduces byte-identical. A byte-fill loop
-			 * faulting on four different pad pages = the
-			 * 0/1-array writer itself. Name it: the fill
-			 * args (src=rsi/count=rdx) and the caller
-			 * chain parked at [rsp]. (The io_uring tctx
-			 * print from M5.1c.6 stays: the field only
-			 * exists with CONFIG_IO_URING, which patch 0018
-			 * turned off for OS_WINDOWS.) */
-#ifdef CONFIG_IO_URING
-			void *iouring = current->io_uring;
-#else
-			void *iouring = NULL;
-#endif
-			unsigned long long frsp =
-				(e->context != NULL) ?
-				UML_NT_X64_CTX_RSP(e->context) : 0;
-			int ri;
-
-			n = snprintf(buf, sizeof(buf),
-				     "guard hit: rip=%llx wrote %llx "
-				     "task=%d iouring=%px tstate=%ld "
-				     "rsi=%llx rdx=%llx (memset args; "
-				     "padding unprotected, resuming)\n",
-				     rip, wrote, current->pid,
-				     iouring,
-				     (long)current->__state,
-				     (e->context != NULL) ?
-					     UML_NT_X64_CTX_RSI(e->context) :
-					     0,
-				     (e->context != NULL) ?
-					     UML_NT_X64_CTX_RDX(e->context) :
-					     0);
-			if (n > 0)
-				uml_nt_crash_write(buf, (unsigned int)n);
-			for (ri = 0; ri < 6; ri++) {
-				unsigned long long va = frsp + 8ULL * ri;
-				unsigned long long v;
-
-				if (!uml_nt_page_readable(va & ~0xfffULL))
-					break;
-				v = *(unsigned long long *)va;
-				/* kernel text only — the return chain */
-				if (v < 0x60001000ull ||
-				    v >= 0x60400000ull)
-					continue;
-				n = snprintf(buf, sizeof(buf),
-					     "  ret[%d] rsp=%llx -> %llx\n",
-					     ri, va, v);
-				if (n > 0)
-					uml_nt_crash_write(buf,
-							   (unsigned int)n);
-			}
-			return -1; /* EXCEPTION_CONTINUE_EXECUTION */
-		}
-	}
+	/* The M5.1c.5 "forgiving guard-hit" path is GONE with its only
+	 * producer: the switch-guard tripwire (uml_nt_switch_trace)
+	 * that left stack-tail pages read-only. Its VA gate
+	 * [0x64000000, 0x68000000) was the mem=64M-era band anyway —
+	 * with the launcher's band reserve at [0x68000000, 0x78000000)
+	 * it could no longer see what it was built for. Every write
+	 * fault now takes the fatal report below, which prints the
+	 * same forensic data without unprotecting anything. */
 
 	in_crash_report = 1;
 
