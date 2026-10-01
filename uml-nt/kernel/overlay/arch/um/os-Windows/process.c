@@ -206,10 +206,24 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 					       MEM_COMMIT | MEM_RESERVE,
 					       protect);
 			if (got == NULL) {
+				MEMORY_BASIC_INFORMATION mbi;
+				SIZE_T q = nt->VirtualQuery(
+					(PVOID)(uintptr_t)b, &mbi,
+					sizeof(mbi));
+
 				os_info("os_map_memory: private block "
-					"@%px failed win32=%lu\n",
+					"@%px failed win32=%lu "
+					"(region: base=%px size=%#lx "
+					"state=%#lx protect=%#lx "
+					"type=%lx q=%lu)\n",
 					(void *)(uintptr_t)b,
-					(unsigned long)nt->RtlGetLastWin32Error());
+					(unsigned long)nt->RtlGetLastWin32Error(),
+					mbi.BaseAddress,
+					(unsigned long)mbi.RegionSize,
+					(unsigned long)mbi.State,
+					(unsigned long)mbi.Protect,
+					(unsigned long)mbi.Type,
+					(unsigned long)q);
 				return -1;
 			}
 			if (priv_commits[bi] + n_pages >

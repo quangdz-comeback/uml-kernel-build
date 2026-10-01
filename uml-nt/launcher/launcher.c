@@ -225,8 +225,12 @@ static void reserve_vmalloc_band(void)
 	PVOID r = g_api.VirtualAlloc((PVOID)(uintptr_t)band, band_size,
 				     MEM_RESERVE, PAGE_NOACCESS);
 
-	if (r != NULL)
+	if (r != NULL) {
+		fprintf(stderr, "[launcher] vmalloc band reserved "
+			"[0x%llx, 0x%llx)\n",
+			band, band + (unsigned long long)band_size);
 		return;
+	}
 
 	/* Name the squatter before dying: the region containing the
 	 * band base (State/Protect/Type tell heap vs section vs
