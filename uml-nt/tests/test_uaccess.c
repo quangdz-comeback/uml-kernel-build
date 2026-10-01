@@ -87,6 +87,7 @@ static void fill_pattern(unsigned char *b, unsigned long n)
 }
 
 static void test_cow_fixup(void);
+static void test_stolen_run(void);
 
 int main(void)
 {
@@ -194,6 +195,9 @@ int main(void)
 	/* Hazard 3: the write fixups (COW surgery + remap ops + the
 	 * audit's prot check). */
 	test_cow_fixup();
+
+	/* Map 049 item 2: the stolen-run ownership guard. */
+	test_stolen_run();
 
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
@@ -355,5 +359,59 @@ static void test_cow_fixup(void)
 	}
 	/* The fail-safe paths (RO VMA, no sink) never surgery. */
 	CHECK(uml_nt_uacc_fixups == 1);
+	uml_nt_uacc_set_sink(NULL);
+}
+
+/* Map 049 item 2: a live VMA whose run the refcount table no longer
+ * counts = a STOLEN run (an unbalanced drop freed the backing under
+ * this mm — the run 0x28b0000 double-claim class). The walker must
+ * refuse reads AND writes of it (kernel-side accesses would return/
+ * plant foreign bytes) instead of translating into nobody's memory. */
+static void test_stolen_run(void)
+{
+	struct uml_nt_mm mm;
+	struct uml_nt_phys ph;
+	struct uml_nt_fault_plan plan;
+	struct uml_nt_uacc_sink sink;
+	char buf[32];
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 4 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	CHECK(uml_nt_phys_alloc(&ph) == 0);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, 0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	fill_pattern(flat, RUN);
+
+	memset(&plan, 0, sizeof(plan));
+	sink.ph = &ph;
+	sink.plan = &plan;
+	uml_nt_uacc_set_sink(&sink);
+
+	/* healthy: the read + the str walk serve normally */
+	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 16, buf,
+			       UML_NT_UACC_FROM_GUEST) == 0);
+	CHECK(uml_nt_uacc_strnlen(&mm, (char *)flat, RAM, 64) == 0);
+
+	/* THEFT: drop the mm's own claim behind its back — the table
+	 * says 0 while the VMA lives (the unref-refused [phys] event
+	 * would fire for any FURTHER drop kernel-side). */
+	CHECK(uml_nt_phys_unref(&ph, 0) == 0);
+	CHECK(uml_nt_phys_refs(&ph, 0) == 0);
+
+	/* reads refuse (-EFAULT / fault-class), the flat bytes stay */
+	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 16, buf,
+			       UML_NT_UACC_FROM_GUEST) < 0);
+	CHECK(uml_nt_uacc_strnlen(&mm, (char *)flat, RAM, 64) == 0);
+	CHECK(uml_nt_uacc_strncpy(buf, &mm, (char *)flat, RAM, 32) < 0);
+
+	/* writes refuse, nothing lands */
+	memset(buf, 0x5a, sizeof(buf));
+	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 16, buf,
+			       UML_NT_UACC_TO_GUEST) < 0);
+	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 16, NULL,
+			       UML_NT_UACC_ZERO_GUEST) < 0);
+	CHECK(flat[0] == (unsigned char)3); /* pattern byte intact */
+
 	uml_nt_uacc_set_sink(NULL);
 }

@@ -233,8 +233,10 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * appends NOACCESS protects for the parent's guard
 		 * pages (the fault-probe seed). */
 		if (uml_nt_mm_init_plan(c->mm, c->ph, &c->plan) < 0) {
-			os_info("[stubtest] INIT plan overflow (pid %lu)\n",
-				(unsigned long)c->pid);
+			os_info("[stubtest] INIT plan refused (pid %lu, "
+				"why=%c — 'z' = a VMA's run shows 0 refs: "
+				"stolen)\n", (unsigned long)c->pid,
+				c->plan.kill_why ? c->plan.kill_why : '?');
 			d->action = UML_STUB_ACTION_KILL;
 			d->err = 1;
 			return -1;

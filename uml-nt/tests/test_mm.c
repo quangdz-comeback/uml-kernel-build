@@ -1099,6 +1099,36 @@ static void test_guard(void)
 	}
 }
 
+/* map 049 item 2: a fault on a STOLEN run (live VMA, refs==0) kills
+ * 'z' — every repair would read/write foreign bytes. */
+static void test_fault_stolen(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	struct uml_nt_fault_plan plan;
+	unsigned long long run;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	run = uml_nt_phys_alloc(&ph);
+	CHECK(run == MOCK_BASE); /* the mock never hands the head */
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, run,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+
+	CHECK(uml_nt_phys_unref(&ph, (long long)run) == 0); /* the theft */
+	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x1234, UML_NT_FAULT_WRITE,
+			      &plan) < 0);
+	CHECK(plan.kill == 1 && plan.kill_why == 'z');
+	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x1234, UML_NT_FAULT_READ,
+			      &plan) < 0);
+	CHECK(plan.kill == 1 && plan.kill_why == 'z');
+
+	/* the INIT plan refuses to map the stolen VMA (why='z') */
+	CHECK(uml_nt_mm_init_plan(&mm, &ph, &plan) == -1);
+	CHECK(plan.kill_why == 'z');
+}
+
 int main(void)
 {
 	test_phys();
@@ -1113,6 +1143,7 @@ int main(void)
 	test_span_fits();
 	test_map_kind();
 	test_guard();
+	test_fault_stolen();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);

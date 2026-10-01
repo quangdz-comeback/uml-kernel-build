@@ -136,9 +136,19 @@ char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 	 * "private page, restore write protection") — a direct write
 	 * is safe; the stub's read-only view doesn't bind the kernel's
 	 * flat view, and the guest's own write still faults into the
-	 * normal COW machinery. */
-	if (uml_nt_phys_refs(uacc_sink.ph, (long long)old_run) <= 1)
-		return base + byte_off;
+	 * normal COW machinery. ZERO references = a STOLEN run (an
+	 * unbalanced drop freed the backing under this mm — map 049's
+	 * run 0x28b0000 class): the buddy may re-home it to the next
+	 * alloc, so writing it writes foreign memory. Refuse. */
+	{
+		int r = uml_nt_phys_refs(uacc_sink.ph,
+					 (long long)old_run);
+
+		if (r == 0)
+			return (char *)0;
+		if (r == 1)
+			return base + byte_off;
+	}
 
 	if (uacc_sink.plan == (struct uml_nt_fault_plan *)0)
 		return (char *)0;
@@ -207,6 +217,17 @@ int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 		off = uml_nt_vma_translate(mm, va, chunk);
 		if (off < 0)
 			return -1;
+		/* Map 049 item 2 — ownership guard: a live VMA whose
+		 * backing run the refcount table no longer counts is
+		 * a STOLEN run (freed under this mm by an unbalanced
+		 * drop). Kernel-side reads of it return foreign
+		 * bytes; refuse (-EFAULT class). The sink's ph is the
+		 * dispatching conn's own table; NULL outside a
+		 * handler keeps the fail-safe default. */
+		if (uacc_sink.ph != (struct uml_nt_phys *)0 &&
+		    uml_nt_phys_refs(uacc_sink.ph,
+				     off & ~(UACC_RUN - 1)) == 0)
+			return -1;
 		switch (op) {
 		case UML_NT_UACC_FROM_GUEST:
 			uacc_bcopy(buf, base + off, chunk);
@@ -250,6 +271,12 @@ static long long uacc_str_walk(char *dst, const struct uml_nt_mm *mm,
 			chunk = maxlen - done;
 		off = uml_nt_vma_translate(mm, va, chunk);
 		if (off < 0)
+			return want_nul_incl ? 0 : -1;
+		/* Stolen run (map 049 item 2): same ownership guard as
+		 * the byte walk — refuse the read. */
+		if (uacc_sink.ph != (struct uml_nt_phys *)0 &&
+		    uml_nt_phys_refs(uacc_sink.ph,
+				     off & ~(UACC_RUN - 1)) == 0)
 			return want_nul_incl ? 0 : -1;
 		n = (long long)uacc_bstrnlen(base + off, chunk);
 		if (n < (long long)chunk) {

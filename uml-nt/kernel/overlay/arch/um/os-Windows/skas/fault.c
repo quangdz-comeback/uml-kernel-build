@@ -114,6 +114,14 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	if (page < vma->start || page + UML_NT_FAULT_PAGE_SIZE > vma->end)
 		KILL('b'); /* run-multiple VMAs make this unreachable */
 
+	/* Map 049 item 2 — ownership guard: a live VMA whose backing
+	 * run shows 0 refs is a STOLEN run (an unbalanced drop freed
+	 * it under this mm — the run 0x28b0000 double-claim class).
+	 * Every repair below would read/write foreign bytes: kill
+	 * loud. The [phys] event lines name the thief. */
+	if (uml_nt_phys_refs(ph, (long long)page_run_off(vma, page)) == 0)
+		KILL('z');
+
 	switch (type) {
 	case UML_NT_FAULT_READ:
 		/* Reads never copy: restore the effective protection.
@@ -236,6 +244,14 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	for (i = 0; i < mm->nvma; i++) {
 		const struct uml_nt_vma *v = &mm->vma[i];
 
+		/* Map 049 item 2: refuse to map a VMA whose run the
+		 * table no longer counts (stolen at an unbalanced
+		 * drop) — the child would boot on foreign bytes.
+		 * kill_why='z' for the caller's log. */
+		if (uml_nt_phys_refs(ph, (long long)v->run_off) == 0) {
+			plan->kill_why = 'z';
+			return -1;
+		}
 		if (plan_op(plan, UML_NT_FOP_MAP,
 			    uml_nt_vma_effective_prot(v, ph),
 			    v->start, v->end - v->start, v->run_off) < 0)

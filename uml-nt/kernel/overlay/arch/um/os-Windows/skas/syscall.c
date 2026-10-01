@@ -149,6 +149,16 @@ static unsigned long long sys_write(struct uml_nt_stub_conn *c,
 	off = uml_nt_vma_translate(c->mm, a[1], a[2]);
 	if (off < 0)
 		return SC_RET(SC_EFAULT);
+	/* Map 049 item 2: a console write whose backing run nobody
+	 * refs is a stolen run (the run 0x28b0000 class) — EFAULT, and
+	 * the [phys] lines name the thief. */
+	if (uml_nt_phys_refs(c->ph,
+			     off & ~(long long)(UML_NT_PHYS_RUN_SIZE - 1)) ==
+	    0) {
+		os_info("[syscall] write 0x%llx: run off=0x%llx unowned "
+			"(stolen VMA)\n", a[1], (unsigned long long)off);
+		return SC_RET(SC_EFAULT);
+	}
 	nt_console_write((char *)uml_boot.physmem_base + off,
 			 (unsigned int)a[2]);
 	/* M4.1: the bench markers ride the console path — exact-match
