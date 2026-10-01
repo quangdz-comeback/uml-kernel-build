@@ -275,6 +275,111 @@ static void dump_arena_head(struct uml_nt_mm *mm, unsigned long long r12)
 	}
 }
 
+/* v7 (map 052a): qword-decode a VA range of the death frame chain.
+ * The walker's rbp is a merge-frame local pointer and its ret slot is
+ * already garbage (0x3000000030) — decoding [rsp-0x40, rbp+0x140) as
+ * raw qwords shows EVERY saved-register slot of the strcspn/walker/
+ * merge frames at once: which slot holds the _Fork+0x23 value and
+ * what the neighbouring slots are (string pointers? frame chain?
+ * more code addresses?). delta = slot_va - rsp for greppability. */
+static void dump_qword_range(struct uml_nt_mm *mm, unsigned long long va,
+			     unsigned long long len, unsigned long long rsp)
+{
+	unsigned long long slot;
+	int i;
+
+	for (i = 0, slot = va; i < 80 && slot + 8 <= va + len;
+	     i++, slot += 8) {
+		long long off = uml_nt_vma_translate(mm, slot, 8);
+		long long delta = (long long)(slot - rsp);
+		unsigned long long v = 0;
+
+		if (off < 0)
+			continue; /* hole — the addresses still tell it */
+		memcpy(&v, (char *)uml_boot.physmem_base + off, 8);
+		os_info("[stubtest]   frameq rsp%+lld 0x%llx: 0x%llx\n",
+			delta, slot, v);
+	}
+}
+
+/* v7 (map 052b): scan ONE mm's every VMA for an 8-byte value at
+ * absolute 8-aligned VAs, through the flat view. Returns hits (capped
+ * — a hot value must not flood the log). */
+static int scan_mm_value(struct uml_nt_mm *mm, const unsigned char *pat,
+			 int max_hits)
+{
+	int vi, hits = 0;
+
+	for (vi = 0; vi < mm->nvma && hits < max_hits; vi++) {
+		unsigned long long va = mm->vma[vi].start;
+		unsigned long long end = mm->vma[vi].end;
+
+		/* absolute 8-alignment so slots never straddle a
+		 * chunk edge unexamined */
+		va = (va + 7) & ~7ull;
+		while (va + 8 <= end && hits < max_hits) {
+			unsigned long long chunk = 4096 - (va & 0xfff);
+			long long off;
+			unsigned long long k, start;
+
+			if (va + chunk > end)
+				chunk = end - va;
+			off = uml_nt_vma_translate(mm, va, chunk);
+			if (off < 0) {
+				va += chunk;
+				continue;
+			}
+			start = va & ~7ull;
+			for (k = start - va; k + 8 <= chunk; k += 8) {
+				if (memcmp((char *)uml_boot.physmem_base +
+						   off + k, pat, 8) == 0) {
+					os_info("[stubtest]   valscan HIT pid-side vma[%d] 0x%llx-0x%llx @0x%llx\n",
+						vi, mm->vma[vi].start,
+						mm->vma[vi].end, va + k);
+					dump_guest_bytes(mm, va + k - 16, 48,
+							 "valscan-ctx");
+					hits++;
+					if (hits >= max_hits)
+						break;
+				}
+			}
+			va += chunk;
+		}
+	}
+	return hits;
+}
+
+/* v7 (map 052b): the VALUE hunt at SIGSEGV — scan the dying child's
+ * whole address space plus PID 1's (the manager whose long-lived
+ * strvs the executor children inherit) for the walker's cursor value
+ * (r13 = _Fork+0x23 here). A hit in PID 1's heap = long-lived slot
+ * corruption; hits only in the child's stack = own-fork residue. */
+static void valscan_death(struct uml_nt_stub_conn *c, unsigned long long val)
+{
+	struct task_struct *p;
+	unsigned char pat[8];
+	int hits;
+
+	memcpy(pat, &val, 8);
+	hits = scan_mm_value(c->mm, pat, 16);
+	os_info("[stubtest]   valscan self pid %lu: %d hit(s)\n",
+		(unsigned long)c->pid, hits);
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+
+		if (p->mm == NULL || p->pid == (int)c->pid)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			continue;
+		if (p->pid != 1)
+			continue;
+		hits = scan_mm_value(pc->mm, pat, 16);
+		os_info("[stubtest]   valscan pid 1: %d hit(s)\n", hits);
+	}
+}
+
 /* Serve one published request on this conn. Returns 0 on success. */
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
@@ -522,6 +627,33 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 							d->regs.r13);
 					dump_arena_head(c->mm,
 							d->regs.r12);
+					/* v7 (map 052 a+b): the death
+					 * frame chain qword-decode +
+					 * the VALUE hunt for the
+					 * walker's cursor (r13 =
+					 * _Fork+0x23 here) — self +
+					 * PID 1. First 3 victims only:
+					 * the 19 share one signature
+					 * and the scan walks
+					 * megabytes. */
+					if (sigsegv_victims <= 3 &&
+					    d->regs.r13 > 0x1000 &&
+					    d->regs.r13 <
+					    0x800000000000ull &&
+					    d->regs.rbp > d->regs.rsp) {
+						unsigned long long lo =
+							d->regs.rsp - 0x40;
+						unsigned long long hi =
+							d->regs.rbp + 0x140;
+
+						if (hi - lo > 0x400)
+							hi = lo + 0x400;
+						dump_qword_range(c->mm, lo,
+								 hi - lo,
+								 d->regs.rsp);
+						valscan_death(c,
+							      d->regs.r13);
+					}
 					/* v2: run-ownership census at
 					 * the wild pointer. Run
 					 * 36808917963's victims die on
