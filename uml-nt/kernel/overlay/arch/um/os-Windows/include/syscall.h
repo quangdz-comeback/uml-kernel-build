@@ -105,6 +105,13 @@ struct uml_nt_stub_conn {
 	 * correlating census lines across the log. */
 	unsigned long long last_nr;
 	long long last_ret;
+	/* M5.4 c3: destroy stamps DEAD before kfree; every consumer
+	 * that reaches a conn through a retained pointer (the switch
+	 * hook, the dispatch entry, the co-mapper walk) refuses a
+	 * stamped conn instead of walking its freed mm. kzalloc reuse
+	 * zeroes the stamp (a fresh conn = the benign no-vma hole);
+	 * non-zeroed reuse keeps it and gets refused. */
+	u32 dead_magic;
 };
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
@@ -130,6 +137,8 @@ struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
  * machinery, one protocol. Returns 0, -1 on failure; conn fields
  * record handles as soon as they exist so a failed spawn cleans up
  * without leaking. */
+#define UML_NT_CONN_DEAD 0xDEADC0DEu
+
 int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 		      unsigned long long stack_va,
 		      const struct uml_nt_gp_regs *init);
