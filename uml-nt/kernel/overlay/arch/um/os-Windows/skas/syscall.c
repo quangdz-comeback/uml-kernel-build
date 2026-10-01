@@ -1438,6 +1438,23 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 303: /* name_to_handle_at — the file-handle probe; real
 		   * VFS answers, systemd takes its graceful fallback
 		   * path on any errno */
+	case 27: /* mincore — residency probe; the generic impl walks
+		  * the task's real kernel mm and answers (or -ENOMEM
+		  * where nothing is mapped — callers tolerate) */
+	case 73: /* flock — the guest's own file locks (kernel-
+		  * internal; D13's no-op os_lock_file is the HOST
+		  * layer, different thing) */
+	case 131: /* sigaltstack — glibc's crash-handler setup on
+		   * every pthread start; the kernel records the
+		   * stack (delivery uses it via the M4d machinery) */
+	case 191: /* getxattr — the GET side of the setxattr traffic:
+		  * systemd reads the security/user namespaces' attrs
+		  * back */
+	case 192: /* lgetxattr (no-follow) */
+	case 193: /* fgetxattr (fd-based) */
+	case 288: /* accept4 — socket activation (the AF_UNIX
+		   * journald listeners are kernel-internal, D8 only
+		   * bans the kernel<->helper channel) */
 		ret = sys_vfs(nr, a);
 		break;
 	case 1: /* write — fds 0/1/2 ride the console hand-path (probe
@@ -1649,6 +1666,27 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	}
 	d->retval = ret;
 	d->err = ((long long)ret < 0 && (long long)ret > -512) ? 1 : 0;
+	/* M5.4 c3: the negative-retval census. Run 36800430061's
+	 * dominant kill (28 SIGSEGVs, all at one libc memmove/strlen
+	 * rip, faulting through a 0xffffffffffffffff pointer/length)
+	 * = a guest consumer feeding a syscall's -1 into a length.
+	 * glibc's own wrappers check (unsigned jae -4095), so the
+	 * suspect is a raw-syscall user fed an unexpected errno. Log
+	 * every failed round's identity — bounded, one line each —
+	 * the next run's log then names the nr pattern around each
+	 * SIGSEGV instead of a third guess. */
+	{
+		static int neg_logged;
+
+		if ((long long)ret < 0 && (long long)ret > -512 &&
+		    neg_logged < 32) {
+			neg_logged++;
+			os_info("[syscall] neg-retval #%d: nr=%llu -> "
+				"%lld (task %d)\n",
+				neg_logged, nr, (long long)ret,
+				current ? current->pid : 0);
+		}
+	}
 	if (c->plan_left > 0) {
 		/* The syscall carries stub ops: park the return value —
 		 * the op results travel through d->retval and the plan
