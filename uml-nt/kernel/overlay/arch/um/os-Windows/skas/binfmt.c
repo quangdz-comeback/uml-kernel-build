@@ -372,6 +372,13 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	kvfree(buf);
 	if (rc != UML_NT_ELF_OK) {
 		os_info("binfmt_umlnt: load failed rc=%d\n", rc);
+		/* D21: NOMEM is a resource failure, not a format one —
+		 * execve must report -ENOMEM. Converting it to -ENOEXEC
+		 * masks the physalloc root cause AND breaks systemd's
+		 * exec retry logic (ENOEXEC means "no handler for this
+		 * file"; ENOMEM means retry/later may succeed). */
+		if (rc == UML_NT_ELF_NOMEM)
+			return -ENOMEM;
 		return -ENOEXEC;
 	}
 	os_info("binfmt_umlnt: elf mapped %d region(s), entry 0x%llx\n",
@@ -391,6 +398,8 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		if (rc != UML_NT_ELF_OK) {
 			os_info("binfmt_umlnt: interp load failed rc=%d\n",
 				rc);
+			if (rc == UML_NT_ELF_NOMEM)
+				return -ENOMEM;
 			return -ENOEXEC;
 		}
 		os_info("binfmt_umlnt: interp loaded base 0x%llx entry "
