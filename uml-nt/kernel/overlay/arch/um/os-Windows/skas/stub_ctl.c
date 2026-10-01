@@ -362,6 +362,54 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					dump_guest_bytes(c->mm,
 							 d->regs.rsi, 32,
 							 "at-rsi");
+					/* v2: run-ownership census at
+					 * the wild pointer. Run
+					 * 36808917963's victims die on
+					 * a VMA whose run holds ANOTHER
+					 * allocation's residue
+					 * ("STREAM=7" as a pointer
+					 * slot) — the 044 recycle
+					 * family. The co-mapper walk
+					 * (same VA across every live
+					 * mm) + the parent's bytes
+					 * decide shared-stale (parent
+					 * shows the same content) vs
+					 * recycled (nobody else claims
+					 * this run_off). The pump runs
+					 * on the one vCPU thread, so
+					 * the task list cannot mutate
+					 * under the walk. */
+					{
+						struct task_struct *p;
+
+						for_each_process(p) {
+							struct uml_nt_stub_conn *pc;
+							struct uml_nt_vma *pv;
+
+							if (p->mm == NULL)
+								continue;
+							pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+							if (pc == NULL ||
+							    pc->mm == NULL)
+								continue;
+							pv = uml_nt_vma_find(pc->mm, d->regs.rax);
+							if (pv == NULL)
+								continue;
+							os_info("[stubtest]   co-mapper pid %d%s: vma 0x%llx-0x%llx prot=0x%x off=0x%llx\n",
+								p->pid,
+								(pc == c) ?
+									" (self)" : "",
+								pv->start,
+								pv->end,
+								pv->prot,
+								pv->run_off);
+							if (pc != c &&
+							    pc->ppid ==
+								c->pid) {
+								dump_guest_bytes(pc->mm, d->regs.rax & ~0xfULL, 16, "at-rax-parent");
+							}
+						}
+					}
 				}
 				force_sig_fault(SIGSEGV, code,
 					(void __user *)(unsigned long)
