@@ -1677,9 +1677,14 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	 * SIGSEGV instead of a third guess. */
 	{
 		static int neg_logged;
+		static unsigned long long last_nr, last_err;
 
 		if ((long long)ret < 0 && (long long)ret > -512 &&
-		    neg_logged < 32) {
+		    neg_logged < 32 &&
+		    (nr != last_nr ||
+		     (unsigned long long)(-(long long)ret) != last_err)) {
+			last_nr = nr;
+			last_err = (unsigned long long)(-(long long)ret);
 			neg_logged++;
 			os_info("[syscall] neg-retval #%d: nr=%llu -> "
 				"%lld (task %d)\n",

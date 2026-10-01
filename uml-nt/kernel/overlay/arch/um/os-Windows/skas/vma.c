@@ -519,6 +519,16 @@ long long uml_nt_vma_translate(const struct uml_nt_mm *mm,
 		return -1;
 	if (len != 0 && (len > v->end - va))
 		return -1;
+	/* A translate result is a PHYSMEM SECTION OFFSET — always far
+	 * below the guest VA window (physmem <= 128 MiB vs base
+	 * 0x60000000). An offset at/above the base = a run_off that
+	 * carries an ABSOLUTE address (the double-base bug: run
+	 * 36803515813's VMA [0x60670000,0x60680000) walked as
+	 * off=0x6069ff10 and the walker's own memcpy deref'd base+off
+	 * = 0xc069ff10). Refuse instead of faulting the kernel. */
+	if ((unsigned long long)(v->run_off + (va - v->start)) >=
+	    UML_NT_GUEST_VA_BASE)
+		return -1;
 	return (long long)(v->run_off + (va - v->start));
 }
 

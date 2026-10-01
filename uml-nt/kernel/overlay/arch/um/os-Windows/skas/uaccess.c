@@ -146,6 +146,18 @@ static void uacc_trace_efault(unsigned long long va, unsigned long n)
 				v->run_off);
 			return;
 		}
+		if (v->run_off >= UML_NT_GUEST_VA_BASE) {
+			/* The translate refused an ABSOLUTE run_off (the
+			 * double-base class — vma.c returns -1 for it).
+			 * Print the offending VMA: the [syscall] lines
+			 * around it name the creator. */
+			os_info("[uacc] to_user EFAULT #%d: va=0x%llx "
+				"len=%lu task=%d reason=bad-run-off "
+				"vma=[0x%llx,0x%llx) run_off=0x%llx\n",
+				traced, va, n, task, v->start, v->end,
+				v->run_off);
+			return;
+		}
 
 		ph = uml_nt_uacc_sink_phys();
 		plan = uml_nt_uacc_sink_plan();
@@ -184,8 +196,15 @@ unsigned long raw_copy_from_user(void *to, const void __user *from,
 {
 	if (uml_nt_uacc_walk(uacc_mm, uml_boot.physmem_base,
 			     (unsigned long long)(unsigned long)from, n,
-			     to, UML_NT_UACC_FROM_GUEST) < 0)
+			     to, UML_NT_UACC_FROM_GUEST) < 0) {
+		/* Same census as the write side: the READ path hit the
+		 * bad-VMA class first (run 36803515813's kernel fault
+		 * came out of a copy FROM a translated-garbage flat
+		 * pointer) — the read side needs its failures named
+		 * just as much. */
+		uacc_trace_efault((unsigned long long)(uintptr_t)from, n);
 		return n;
+	}
 	return 0;
 }
 
