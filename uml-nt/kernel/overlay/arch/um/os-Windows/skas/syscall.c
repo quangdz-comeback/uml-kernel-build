@@ -1756,11 +1756,38 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	 * kill(62) with sig==6, and every aborter installs SIGABRT
 	 * (rt_sigaction 13) first — name the raiser's task + the
 	 * syscall round in the log. */
-	if ((nr == 234 && a[2] == 6) || (nr == 62 && a[1] == 6))
+	if ((nr == 234 && a[2] == 6) || (nr == 62 && a[1] == 6)) {
+		/* Follow-up (run 36863167824): init STILL aborts with
+		 * no assert or malloc text — the kmsg relay surfaced
+		 * 2 systemd[1]: lines all boot, so the text is
+		 * presumed lost in transit and the return-address
+		 * chain is the only witness left. glibc abort() ->
+		 * raise() -> tgkill trap puts abort()'s caller (the
+		 * code that DECIDED to abort) one frame up the guest
+		 * stack. Dump [rsp, rsp+0x40) at the trap; decode
+		 * the qwords offline against the rootfs binaries. */
+		unsigned long long q[8];
+		long long off;
+		int i;
+
 		os_info("[abrt] raise: nr=%llu a0=0x%llx a1=0x%llx -> %lld "
 			"(task %d)\n", nr, a[0], a[1], (long long)ret,
 			current ? current->pid : 0);
-	else if (nr == 13 && a[0] == 6 && c->task_backed)
+		off = uml_nt_vma_translate(c->mm, d->regs.rsp, sizeof(q));
+		if (off >= 0) {
+			memcpy(q, (char *)uml_boot.physmem_base + off,
+			       sizeof(q));
+			for (i = 0; i < 8; i += 4)
+				os_info("[abrt]   rip=0x%llx [rsp+0x%02x]: "
+					"0x%llx 0x%llx 0x%llx 0x%llx\n",
+					d->regs.rip, i * 8, q[i], q[i + 1],
+					q[i + 2], q[i + 3]);
+		} else {
+			os_info("[abrt]   rip=0x%llx rsp=0x%llx stack "
+				"untranslatable (%lld)\n", d->regs.rip,
+				d->regs.rsp, off);
+		}
+	} else if (nr == 13 && a[0] == 6 && c->task_backed)
 		os_info("[abrt] sigaction SIGABRT act=0x%llx -> %lld "
 			"(task %d)\n", a[1], (long long)ret,
 			current ? current->pid : 0);
