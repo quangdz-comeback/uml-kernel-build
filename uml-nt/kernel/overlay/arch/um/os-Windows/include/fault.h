@@ -57,6 +57,14 @@ extern int uml_nt_cowbreak_refs;
 extern int uml_nt_cowbreak_faults;
 extern unsigned int uml_nt_cowbreak_prot, uml_nt_cowbreak_flags;
 
+/* 098 δ: kernel-direct write census. Called by every bulk-write site
+ * (fork seed/eager copies, the brk re-home, the sweep patcher, the
+ * zero fills) with the physmem offset + length it is about to write;
+ * prints when the range touches a cowwatch-armed run. stub_ctl.c
+ * owns the ring. */
+void uml_nt_cowwatch_touch(unsigned long long off, unsigned long long len,
+			   const char *what);
+
 /* UNMAP + up to 3 MAP pieces (COW split), or an INIT plan: one MAP
  * per VMA + guard NOACCESS protects. The plan is kernel-side only
  * (the stub sees ONE op per round-trip), so the cap is memory, not

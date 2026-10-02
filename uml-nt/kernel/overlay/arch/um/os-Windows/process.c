@@ -332,6 +332,18 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 			     pp < (unsigned int)((p1 - b) >> 12);
 			     pp++)
 				priv_pages[bi][pp] = 1;
+			/* 098 ζ: R17 escalation ledger — block 2048 is
+			 * where the untracked-page guard keeps firing
+			 * (0x6800f000, page 15). Trace every claim in
+			 * this one block for the whole boot: the pair
+			 * claim/refusal names the map that never
+			 * claimed its last page. */
+			if (bi == 2048)
+				os_info("[r17-ledger] block 2048 claim "
+					"va=0x%llx len=%llu pages "
+					"[%u,%u)\n", v, len,
+					(unsigned int)((p0 - b) >> 12),
+					(unsigned int)((p1 - b) >> 12));
 			b = b_end;
 		}
 	}
@@ -437,6 +449,9 @@ int os_unmap_memory(void *addr, int len)
 		return -1;
 	}
 	priv_pages[idx][pi] = 0;
+	if (idx == 2048)
+		os_info("[r17-ledger] block 2048 decommit va=0x%llx "
+			"page %d\n", v, pi);
 	vmr_push(v, 0x1000, 1, (unsigned char)priv_block_cnt(idx));
 	if (!priv_block_live(idx) &&
 	    !nt->VirtualFree((PVOID)(uintptr_t)va0, 0, MEM_RELEASE)) {
@@ -445,6 +460,9 @@ int os_unmap_memory(void *addr, int len)
 		uml_nt_vmr_dump("release failed", 24);
 		return -1;
 	}
+	if (idx == 2048 && !priv_block_live(idx))
+		os_info("[r17-ledger] block 2048 release (all pages "
+			"gone)\n");
 	return 0;
 }
 

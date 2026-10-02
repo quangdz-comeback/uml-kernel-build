@@ -248,6 +248,11 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 		}
 		memcpy((char *)uml_boot.physmem_base + new_off,
 		       (char *)uml_boot.physmem_base + old_off, old_len);
+		/* 098 δ: the re-home reads the OLD heap runs (possibly
+		 * cowwatch-armed: the sharers' data) and writes the
+		 * fresh span — census both ends. */
+		uml_nt_cowwatch_touch(old_off, old_len, "brk-rehome-src");
+		uml_nt_cowwatch_touch(new_off, old_len, "brk-rehome-dst");
 
 		if (uml_nt_vma_del(mm, mm->heap_start, old_end) < 0 ||
 		    uml_nt_vma_add(mm, mm->heap_start, new_end, new_off,
@@ -670,6 +675,9 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 		total += uml_nt_patch_syscalls(
 			(char *)uml_boot.physmem_base + off, piece - cur,
 			0, (void *)(uintptr_t)mk);
+		/* 098 δ: the sweep PATCHES guest code in place — a
+		 * cowwatch-armed run touched here is the writer. */
+		uml_nt_cowwatch_touch(off, piece - cur, "sweep-patch");
 		kvfree((void *)(uintptr_t)mk);
 		cur = piece;
 	}
@@ -1544,12 +1552,19 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 	if (!iov[0].base || iov[0].len < 16)
 		return;
 	n = abrt_read_str(c, iov[0].base, s, sizeof(s));
-	if (n < 8 || !abrt_text_match(s, n))
+	/* 098 ε: fd 2 IS the abort channel — glibc writes every fatal
+	 * message here, and the task-49/54 aborts died message-less
+	 * because their texts didn't match the malloc family. Budget
+	 * (3/boot) is the only spam guard; capture whatever stderr
+	 * says. */
+	if (n < 8)
 		return;
 	ncaptured++;
 	os_info("[abrt] libc-message writev(2) -> %lld iovcnt=%llu "
 		"(task %d)\n", (long long)ret, cnt,
 		current ? current->pid : 0);
+	os_info("[abrt]   message class: %s\n",
+		abrt_text_match(s, n) ? "malloc-family" : "OTHER");
 	/* The writev trap is the EARLIEST fatal point — abort() has
 	 * not unwound yet, so the callee-saved regs + the frame qwords
 	 * still belong to __libc_message's malloc caller: the chunk

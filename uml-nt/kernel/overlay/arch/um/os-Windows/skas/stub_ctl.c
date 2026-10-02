@@ -112,6 +112,7 @@ struct uml_nt_cowwatch {
 	unsigned long long owner_va;  /* the run's VA in the OWNER mm */
 	unsigned long owner_pid;
 	unsigned char armed;
+	unsigned char seen;           /* 098: the pattern landed once */
 	unsigned long rounds;
 };
 
@@ -181,15 +182,17 @@ static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
 				continue;
 			w->armed = 0;
 			os_info("[cowwatch] HIT run=0x%llx at +0x%llx "
-				"(owner %lu@0x%llx) — writer round: "
+				"(owner %lu@0x%llx)%s — writer round: "
 				"pid %lu nr=%llu ret=%lld rip=0x%llx "
 				"rsp=0x%llx rcx=0x%llx cmd=%d\n",
 				w->run_off, off - base,
 				w->owner_pid, w->owner_va,
+				w->seen ? " (repeat)" : " (first-see)",
 				(unsigned long)c->pid, c->last_nr,
 				c->last_ret, c->d->regs.rip,
 				c->d->regs.rsp, c->d->regs.rcx,
 				c->d->cmd);
+			w->seen = 1;
 			/* The WRITER-side VA: this conn's mapping of
 			 * the same run — a fixed per-mm offset (both
 			 * 37014552047 hits: +0xb6b0) = the write
@@ -230,6 +233,35 @@ static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
 			}
 			break;
 		}
+	}
+}
+
+/* 098 δ: kernel-direct write census — every bulk write the KERNEL
+ * makes into guest RAM reports if it touches a cowwatch-armed run.
+ * The 097 verdict: stomp writes land with NO fault through RO views
+ * (verify_prot = 0 mismatches, fork-sync proves the views applied),
+ * so the writer must be a path that bypasses the stub's VEH
+ * machinery entirely — the seed/eager copies, the brk re-home, the
+ * sweep patcher, the zero fills. A census line in the same run as a
+ * cowwatch HIT names the writer; census silence across a poisoned
+ * boot EXCLUDES every kernel-direct path and re-points the hunt at
+ * the views. Log-only: no behavior change. */
+void uml_nt_cowwatch_touch(unsigned long long off, unsigned long long len,
+			   const char *what)
+{
+	unsigned int i;
+
+	for (i = 0; i < UML_NT_COWWATCH_N; i++) {
+		struct uml_nt_cowwatch *w = &cowwatchs[i];
+
+		if (!w->armed)
+			continue;
+		if (off + len <= w->run_off ||
+		    off >= w->run_off + UML_NT_PHYS_RUN_SIZE)
+			continue;
+		os_info("[cowwatch] kernel-write %s run=0x%llx touch "
+			"[0x%llx,+0x%llx) owner=%lu\n", what, w->run_off,
+			off, len, w->owner_pid);
 	}
 }
 
@@ -1291,6 +1323,14 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			       uml_boot.physmem_base +
 				       c->plan.copy_src_off,
 			       UML_NT_PHYS_RUN_SIZE);
+			uml_nt_cowwatch_touch(
+				(unsigned long long)
+				c->plan.copy_src_off,
+				UML_NT_PHYS_RUN_SIZE, "cow-copy-src");
+			uml_nt_cowwatch_touch(
+				(unsigned long long)
+				c->plan.copy_dst_off,
+				UML_NT_PHYS_RUN_SIZE, "cow-copy-dst");
 		/* WRITER-HUNT (M5.6a) provenance ledger: the run-copy
 		 * traffic is small and the fire dumps name their run —
 		 * this line maps a poisoned run back to the copy (and
@@ -1438,6 +1478,12 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 		memcpy(uml_boot.physmem_base + cv->run_off,
 		       uml_boot.physmem_base + pv->run_off,
 		       cv->end - cv->start);
+		uml_nt_cowwatch_touch((unsigned long long)pv->run_off,
+				      cv->end - cv->start,
+				      "poc-eager-src");
+		uml_nt_cowwatch_touch((unsigned long long)cv->run_off,
+				      cv->end - cv->start,
+				      "poc-eager-dst");
 		os_info("[eager] poc-fork vma %d src=0x%llx dst=0x%llx "
 			"len=%llu\n", vi, pv->run_off, cv->run_off,
 			cv->end - cv->start);
@@ -1472,6 +1518,10 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 				else {
 					memset(uml_boot.physmem_base +
 					       sv->run_off, 0, zlen);
+					uml_nt_cowwatch_touch(
+						(unsigned long long)
+						sv->run_off, zlen,
+						"residue-zero");
 					os_info("[stubtest] fork: zeroed "
 						"child stack residue "
 						"below rsp 0x%llx (%llu "
@@ -1919,6 +1969,12 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		memcpy(uml_boot.physmem_base + cv->run_off,
 		       uml_boot.physmem_base + pv->run_off,
 		       cv->end - cv->start);
+		uml_nt_cowwatch_touch((unsigned long long)pv->run_off,
+				      cv->end - cv->start,
+				      "seed-eager-src");
+		uml_nt_cowwatch_touch((unsigned long long)cv->run_off,
+				      cv->end - cv->start,
+				      "seed-eager-dst");
 		/* WRITER-HUNT (M5.6a): same generation-grade ledger as
 		 * [cowcopy] — refs both ends + source tail-16 fp. */
 		{
@@ -1983,6 +2039,9 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 			else {
 				memset(uml_boot.physmem_base +
 				       sv->run_off, 0, zlen);
+				uml_nt_cowwatch_touch(
+					(unsigned long long)sv->run_off,
+					zlen, "seed-residue-zero");
 				os_info("fork: zeroed child stack "
 					"residue below rsp 0x%llx "
 					"(%llu bytes)\n",
