@@ -104,8 +104,8 @@ static struct uml_nt_phys probe_phys;
  * conn enumeration = free via the round loop). One-shot per
  * entry + round expiry + oldest-overwrite. Scan-only: no
  * behavior change. */
-#define UML_NT_COWWATCH_N      8
-#define UML_NT_COWWATCH_ROUNDS 1024
+#define UML_NT_COWWATCH_N      64
+#define UML_NT_COWWATCH_ROUNDS 8192
 
 struct uml_nt_cowwatch {
 	unsigned long long run_off;
@@ -118,14 +118,27 @@ static unsigned int cowwatch_cursor;
 
 static void uml_nt_cowwatch_arm(unsigned long long run_off)
 {
-	struct uml_nt_cowwatch *w = &cowwatchs[cowwatch_cursor];
+	unsigned int i;
 
-	w->run_off = run_off;
-	w->armed = 1;
-	w->rounds = UML_NT_COWWATCH_ROUNDS;
-	cowwatch_cursor = (cowwatch_cursor + 1) % UML_NT_COWWATCH_N;
+	/* Dedup: a run already armed keeps its older (longer-lived)
+	 * budget — re-arming the same run would churn the ring. */
+	for (i = 0; i < UML_NT_COWWATCH_N; i++)
+		if (cowwatchs[i].armed &&
+		    cowwatchs[i].run_off == run_off)
+			return;
+	for (i = 0; i < UML_NT_COWWATCH_N; i++)
+		if (!cowwatchs[i].armed)
+			break;
+	if (i == UML_NT_COWWATCH_N) {
+		i = cowwatch_cursor;
+		cowwatch_cursor = (cowwatch_cursor + 1) %
+				  UML_NT_COWWATCH_N;
+	}
+	cowwatchs[i].run_off = run_off;
+	cowwatchs[i].armed = 1;
+	cowwatchs[i].rounds = UML_NT_COWWATCH_ROUNDS;
 	os_info("[cowwatch] armed run=0x%llx (slot %u)\n",
-		run_off, (unsigned int)(w - cowwatchs));
+		run_off, i);
 }
 
 static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
@@ -1981,6 +1994,32 @@ no_zero:
 	}
 	fork_pending_parent = NULL;
 	fork_pending_rsp = 0;
+	/* cowwatch sweep (M5.6a): the clone JUST bumped the refs of
+	 * every COW-shared run — arm each run that is NOW shared
+	 * (refs >= 2): the poison class writes into a shared run
+	 * after the copy (fp-at-copy clean, run 37005701588). The
+	 * COW-split arm at the [cowcopy] print catches the moment a
+	 * piece splits; THIS sweep catches the sharing event itself
+	 * (run 37011596048's rot run 0xcf0000 was never armed — its
+	 * last copy had refs=1). */
+	{
+		int vi2;
+
+		for (vi2 = 0; vi2 < parent->mm->nvma; vi2++) {
+			const struct uml_nt_vma *pv =
+				&parent->mm->vma[vi2];
+			unsigned long long po, pe;
+
+			for (po = pv->run_off,
+			     pe = pv->run_off +
+				  (pv->end - pv->start);
+			     po < pe;
+			     po += UML_NT_PHYS_RUN_SIZE)
+				if (uml_nt_phys_refs(parent->ph,
+					    (long long)po) >= 2)
+					uml_nt_cowwatch_arm(po);
+		}
+	}
 	os_info("fork: child conn pid %lu seeded (%d vma(s), parent "
 		"pid %lu)\n", (unsigned long)child->pid,
 		child->mm->nvma, (unsigned long)parent->pid);
