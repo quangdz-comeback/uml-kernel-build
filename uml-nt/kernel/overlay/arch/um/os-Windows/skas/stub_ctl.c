@@ -119,6 +119,58 @@ struct uml_nt_cowwatch {
 static struct uml_nt_cowwatch cowwatchs[UML_NT_COWWATCH_N];
 static unsigned int cowwatch_cursor;
 
+/* [cowtrap] (M5.6a, report 106): the poison page's write-watch. The
+ * scan snapshots proved too late — run 37036034612's two hits sat at
+ * the SAME guest VA (0x67d0e910) across two run generations with
+ * rips that were parked syscall sites, never the writer. The trap
+ * flips the pattern's ONE page NOACCESS on the owner's view (the
+ * guard op shape — page-granular PROTECT, no view rebuild); the
+ * next access faults back with LIVE regs = the writer named. The
+ * fault then repairs through the normal flow (a COW-shared run
+ * copies out, a private run just PROTECTs back), so the trap costs
+ * one log line and one round-trip, never the guest's life.
+ * Discriminator: a trip = a real writer at that rip; silence past
+ * the next abort = the pattern was never written (unzeroed recycled
+ * backing — the zero-fill hole). */
+static struct uml_nt_stub_conn *cowtrap_conn;
+static unsigned long long cowtrap_lo, cowtrap_hi;
+static int cowtrap_pending;
+
+static void uml_nt_cowtrap_arm(struct uml_nt_stub_conn *c,
+			       unsigned long long owner_va,
+			       unsigned long long hit_va,
+			       unsigned long long run_off)
+{
+	unsigned long long tv = hit_va & ~(UML_NT_FAULT_PAGE_SIZE - 1);
+	if (cowtrap_conn != NULL)
+		return; /* one live trap — the log names re-arms */
+	if (uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
+			       UML_NT_PAGE_NOACCESS, tv,
+			       UML_NT_FAULT_PAGE_SIZE, 0) < 0)
+		return;
+	cowtrap_conn = c;
+	cowtrap_lo = tv;
+	cowtrap_hi = tv + UML_NT_FAULT_PAGE_SIZE;
+	cowtrap_pending = 1;
+	os_info("[cowtrap] ARMED page 0x%llx pid %lu (run 0x%llx) — "
+		"next access names the writer\n", tv,
+		(unsigned long)c->pid, run_off);
+}
+
+/* The arm rides a serve-round tail, where the next dispatch's plan
+ * reset would eat the op — both answer carriers re-queue it right
+ * after their reset (the syscall entry, the fault handler). */
+void uml_nt_cowtrap_pending(struct uml_nt_stub_conn *c)
+{
+	if (cowtrap_conn != c || !cowtrap_pending)
+		return;
+	if (uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
+			       UML_NT_PAGE_NOACCESS, cowtrap_lo,
+			       UML_NT_FAULT_PAGE_SIZE, 0) < 0)
+		return;
+	cowtrap_pending = 0;
+}
+
 static void uml_nt_cowwatch_arm(unsigned long long run_off,
 				unsigned long long owner_va,
 				unsigned long owner_pid)
@@ -210,6 +262,14 @@ static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
 						wv->start, wv->end,
 						wv->run_off);
 			}
+			/* [cowtrap]: arm the write-watch on the
+			 * pattern's page — the owner's own round
+			 * (c == the owner conn) is the only vantage
+			 * that can flip ITS view. */
+			if (c->pid == w->owner_pid)
+				uml_nt_cowtrap_arm(c, w->owner_va,
+					w->owner_va + (off - base),
+					w->run_off);
 			/* ±0x40 context, 8 qwords a row — the 0x100
 			 * window of map 059, phys-side. */
 			dumped = 0;
@@ -971,6 +1031,25 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		int rc;
 		static int cowbreak_seen;
 
+		/* [cowtrap] trip: the trapped page's accessor = the
+		 * writer, with LIVE regs (the scan snapshots were
+		 * always post-hoc). The fault then repairs through
+		 * the normal mm_fault flow — the log line is the
+		 * whole cost. */
+		if (cowtrap_conn == c &&
+		    d->fault_addr >= cowtrap_lo &&
+		    d->fault_addr < cowtrap_hi) {
+			cowtrap_conn = NULL;
+			cowtrap_pending = 0;
+			os_info("[cowtrap] WRITER CAUGHT pid %lu "
+				"rip=0x%llx rsp=0x%llx rcx=0x%llx "
+				"addr=0x%llx type=%u nr=%llu "
+				"ret=%lld\n",
+				(unsigned long)c->pid, d->regs.rip,
+				d->regs.rsp, d->regs.rcx,
+				d->fault_addr, d->fault_type,
+				c->last_nr, c->last_ret);
+		}
 		rc = uml_nt_mm_fault(c->mm, c->ph, d->fault_addr,
 				     d->fault_type, &c->plan);
 		/* COW-BREAK FAULT witness (fault.h): the restore-W
@@ -1834,9 +1913,20 @@ static void release_vma_sweep(const char *kind, long long off, int nruns,
 void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 			   int refs, const void *owner)
 {
-	os_info("[phys] %s off=0x%llx runs=%d refs=%d owner=%s\n", kind,
-		(unsigned long long)off, nruns, refs,
-		owner == (const void *)0 ? "none" : "tagged");
+	/* The tag identity = the mis-tag witness (the prior hunt
+	 * round's ask): a park/free whose owner is NOT the conn
+	 * whose mm still maps the run = the free-while-mapped
+	 * alias reborn. Print the owner's PID, not a bare tag. */
+	if (owner != (const void *)0) {
+		os_info("[phys] %s off=0x%llx runs=%d refs=%d "
+			"owner=pid %lu\n", kind,
+			(unsigned long long)off, nruns, refs,
+			(unsigned long)((const struct uml_nt_stub_conn *)
+					owner)->pid);
+		return;
+	}
+	os_info("[phys] %s off=0x%llx runs=%d refs=%d owner=none\n",
+		kind, (unsigned long long)off, nruns, refs);
 	/* WRITER-HUNT (M5.6a) run 36984940632: the rot generation
 	 * chain (heap piece <- cowcopy dst <- recycled run) says a
 	 * live conn's drop was PARKED under a FOREIGN tag — the D22

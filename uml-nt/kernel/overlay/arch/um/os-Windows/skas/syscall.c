@@ -2064,6 +2064,10 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	c->plan_next = 0;
 	c->plan_left = 0;
 	c->plan_has_retval = 0;
+	/* [cowtrap] carrier: re-queue the armed page's NOACCESS op
+	 * right after the plan reset (the serve-round tail where the
+	 * arm appended it would be wiped by THIS reset). */
+	uml_nt_cowtrap_pending(c);
 
 	switch (nr) {
 	case 60: /* exit */

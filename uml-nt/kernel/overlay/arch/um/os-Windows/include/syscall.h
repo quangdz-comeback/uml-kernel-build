@@ -272,6 +272,11 @@ int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
 		       unsigned long long va, unsigned long long len,
 		       unsigned long long off);
 
+/* [cowtrap] (M5.6a): re-queue the armed poison-page NOACCESS op after
+ * a plan reset (the syscall entry and the fault handler both call
+ * this). Defined in stub_ctl.c next to the cowwatch machinery. */
+void uml_nt_cowtrap_pending(struct uml_nt_stub_conn *c);
+
 /* Consume the execve conn-switch flag (serve_conn, right after the
  * handler): 1 = the syscall exec'd successfully — the conn (and its
  * stub_data d) were destroyed mid-round (exec_mmap → mmctx_destroy);
