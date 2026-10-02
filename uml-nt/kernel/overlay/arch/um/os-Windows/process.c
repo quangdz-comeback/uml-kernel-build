@@ -133,6 +133,66 @@ static int priv_block_idx(unsigned long long v)
  * task stack). */
 static int priv_logged;
 
+/* R17 DIAG (vmalloc stale-PTE + timer text-fault pair, run
+ * 36984931372): ring of ledger-window ops. The WARN
+ * __vmap_pages_range_noflush !pte_none (mm/vmalloc.c:542) and the
+ * timer c0000005 fetch-fault inside get_free_pages (console_
+ * unlock path — printing the WARN itself) both beg the question
+ * WHO last mapped/unmapped window VAs around the victims. Two
+ * poison shapes live in os_unmap_memory (NO flat-view guard):
+ * (a) a flat-view block (guest RAM / kernel text!) holding
+ * priv_commits > 0 gets its pages MEM_DECOMMIT'd — the launcher's
+ * own image page dies; (b) a flat-view VA with commits == 0 falls
+ * to NtUnmapViewOfSection — which unmaps the ENTIRE 128M section
+ * view. Neither may ever happen; the tripwires dump the ring when
+ * they do, naming the previous window ops. */
+#define UML_NT_VMR_RING_N 128
+struct uml_nt_vmr_ent {
+	unsigned long long v;
+	unsigned long long len;
+	unsigned char op;	/* 0 = map, 1 = unmap */
+	unsigned char commits;	/* block ledger count after the op */
+};
+static struct uml_nt_vmr_ent vmr_ring[UML_NT_VMR_RING_N];
+static unsigned int vmr_head;
+static unsigned int vmr_count;
+
+static void vmr_push(unsigned long long v, unsigned long long len,
+		     int op, unsigned char commits)
+{
+	struct uml_nt_vmr_ent *e = &vmr_ring[vmr_head];
+
+	e->v = v;
+	e->len = len;
+	e->op = (unsigned char)op;
+	e->commits = commits;
+	vmr_head = (vmr_head + 1) % UML_NT_VMR_RING_N;
+	if (vmr_count < UML_NT_VMR_RING_N)
+		vmr_count++;
+}
+
+void uml_nt_vmr_dump(const char *why, unsigned int n)
+{
+	unsigned int i, k;
+
+	if (vmr_count == 0) {
+		os_info("[vmr] %s: ring empty\n", why);
+		return;
+	}
+	if (n > vmr_count)
+		n = vmr_count;
+	os_info("[vmr] %s: last %u of %u window ops\n", why, n,
+		vmr_count);
+	for (i = 0; i < n; i++) {
+		k = (vmr_head + UML_NT_VMR_RING_N - 1 - i) %
+		    UML_NT_VMR_RING_N;
+		os_info("[vmr]   -%u: %s 0x%llx len=0x%llx commits=%u\n",
+			i, vmr_ring[k].op == 0 ? "map" : "unmap",
+			vmr_ring[k].v, vmr_ring[k].len,
+			vmr_ring[k].commits);
+	}
+}
+
 int os_map_memory(void *virt, int fd, unsigned long long off,
 		  unsigned long len, int r, int w, int x)
 {
@@ -241,6 +301,12 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 			b = b_end;
 		}
 	}
+	{
+		int bi0 = priv_block_idx(v);
+
+		vmr_push(v, len, 0,
+			 bi0 >= 0 ? priv_commits[bi0] : 0);
+	}
 	return 0;
 }
 
@@ -267,7 +333,40 @@ int os_unmap_memory(void *addr, int len)
 {
 	unsigned long long v = (unsigned long long)(uintptr_t)addr;
 	unsigned long long va0 = v & ~(UML_NT_PRIV_BLOCK_SIZE - 1);
+	unsigned long long flat_end =
+		(unsigned long long)(uintptr_t)uml_boot.physmem_base +
+		uml_boot.physmem_size;
 	int idx = priv_block_idx(v);
+	static int vmr_tripw;
+
+	/* R17 DIAG tripwires — BOTH shapes must be impossible (see
+	 * the ring comment above). Log-only: behavior is untouched
+	 * until Shelley rules on the guard. */
+	if (v < flat_end && idx >= 0) {
+		if (priv_commits[idx] > 0) {
+			if (vmr_tripw < 2)
+				uml_nt_vmr_dump("TRIPWIRE flat-view "
+						"block with private "
+						"commits — decommit "
+						"would kill launcher "
+						"image/RAM page", 24);
+			vmr_tripw++;
+			os_info("[vmr] TRIPWIRE flat decommit "
+				"@%px commits=%u (fire #%d)\n",
+				addr, priv_commits[idx], vmr_tripw);
+		} else {
+			if (vmr_tripw < 2)
+				uml_nt_vmr_dump("TRIPWIRE flat-view VA "
+						"falls to NtUnmapView"
+						"OfSection — whole 128M "
+						"section view would "
+						"vanish", 24);
+			vmr_tripw++;
+			os_info("[vmr] TRIPWIRE flat whole-view "
+				"unmap @%px (fire #%d)\n",
+				addr, vmr_tripw);
+		}
+	}
 
 	/* Private-backed range (see the ledger comment in os_map_
 	 * memory): decommit the pages — NtUnmapViewOfSection cannot
@@ -286,6 +385,7 @@ int os_unmap_memory(void *addr, int len)
 		}
 		if (priv_commits[idx] < 0xff)
 			priv_commits[idx]--;
+		vmr_push(v, 0x1000, 1, priv_commits[idx]);
 		if (priv_commits[idx] == 0 &&
 		    !nt->VirtualFree((PVOID)(uintptr_t)va0, 0,
 				     MEM_RELEASE)) {
@@ -296,6 +396,8 @@ int os_unmap_memory(void *addr, int len)
 		return 0;
 	}
 
+	vmr_push(v, (unsigned long long)(unsigned)len, 1,
+		 idx >= 0 ? priv_commits[idx] : 0);
 	return nt->NtUnmapViewOfSection(UML_NT_CURRENT_PROCESS, addr) < 0 ?
 		-1 : 0;
 }

@@ -115,4 +115,10 @@ void uml_nt_alias_scan(unsigned long long lo, unsigned long long hi);
 void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 			   int refs, const void *owner);
 
+/* process.c (R17 DIAG): dump the vmalloc-band ledger ring — the
+ * last n os_map_memory/os_unmap_memory window ops. Callers: the
+ * flat-view tripwires in os_unmap_memory and the sweep mark-buffer
+ * alloc failure (the stale-PTE WARN precedent, run 36984931372). */
+void uml_nt_vmr_dump(const char *why, unsigned int n);
+
 #endif

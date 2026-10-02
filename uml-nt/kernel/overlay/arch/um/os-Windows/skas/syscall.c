@@ -655,6 +655,14 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 		mk = (unsigned long long)(uintptr_t)
 		     kvmalloc(piece - cur, GFP_KERNEL);
 		if (mk == 0) {
+			/* R17 DIAG: a NULL here right after the
+			 * __vmap_pages_range_noflush !pte_none WARN
+			 * (mm/vmalloc.c:542, run 36984931372) = the
+			 * stale-PTE hit — dump the band ledger ring
+			 * (read-only) to name the previous window
+			 * ops around the victim VA. */
+			uml_nt_vmr_dump("sweep mark-buffer alloc "
+					"failed", 24);
 			os_info("[syscall] mmap sweep 0x%llx: mark alloc "
 				"failed (%llu bytes)\n", cur, piece - cur);
 			return -1;
