@@ -725,3 +725,19 @@ jobs:
           grep -q "Attempted to kill init! exitcode=0x00000000" glibc.log || { echo "/bin/true did not exit 0 (glibc startup failed mid-way? see the error lines + [syscall] ENOSYS lines in the log)"; exit 1; }
           grep -q "cannot\|error while loading" glibc.log && { echo "the glibc loader reported failure"; exit 1; }
           echo "M5.4 C2 NATIVE GLIBC OK: ld-linux + libc.so.6 through the file-backed mmap + D20 sweep + TLS, /bin/true exit 0"
+
+      # Shelley (vận hành): the real-machine user needs a matching-
+      # version download — every run uploads the SAME binaries that
+      # just passed these gates (launcher + stub + netstack), next to
+      # the kernel job's vmlinux.elf. always() = the set ships even
+      # when a late gate went red (the binaries still built).
+      - name: Upload windows binaries (launcher + stub + netstack)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uml-nt-windows-bin
+          path: |
+            uml-nt/launcher/launcher.exe
+            uml-nt/launcher/netstack.exe
+            uml-nt/stub/stub.exe
+          if-no-files-found: error
