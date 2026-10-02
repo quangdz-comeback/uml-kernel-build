@@ -303,6 +303,11 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 			"[0x%llx,0x%llx) span off=0x%llx (contents "
 			"kept)\n", mm->heap_start, old_end,
 			mm->heap_start, new_end, new_off);
+		/* [cowtrap] alloc-side arm: the re-homed heap's FIRST
+		 * page (the tcache/malloc-metadata head) watches its
+		 * first write (report 106). */
+		uml_nt_cowtrap_arm_alloc(c, mm->heap_start, new_end -
+					 mm->heap_start, new_off);
 		mm->heap_end = new_end;
 	}
 	mm->brk = a[0];
@@ -541,6 +546,10 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 		(unsigned long long)sp,
 		(flags & SC_MAP_FIXED) ? " FIXED" : "");
 	uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, prot, va, len, (unsigned long long)sp);
+	/* [cowtrap] alloc-side arm: the first WRITE into a multi-run
+	 * anon span names the poison-writer (report 106). */
+	if (nruns >= 2)
+		uml_nt_cowtrap_arm_alloc(c, va, len, (unsigned long long)sp);
 	return va;
 }
 

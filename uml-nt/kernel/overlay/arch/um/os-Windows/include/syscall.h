@@ -277,6 +277,20 @@ int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
  * this). Defined in stub_ctl.c next to the cowwatch machinery. */
 void uml_nt_cowtrap_pending(struct uml_nt_stub_conn *c);
 
+/* [cowtrap] alloc-side arm (the closing slice): READ-ONLY the first
+ * page of a freshly allocated multi-run anon span / re-homed heap so
+ * the run's FIRST write faults back with the writer's live regs.
+ * Call right after the alloc's MAP op is queued. */
+void uml_nt_cowtrap_arm_alloc(struct uml_nt_stub_conn *c,
+			      unsigned long long va,
+			      unsigned long long len,
+			      unsigned long long run_off);
+
+/* [cowtrap] trip check at the fault handler: names the first write's
+ * rip and retires the slot; the repair stays the normal flow. */
+void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,
+			 struct uml_nt_stub_data *d);
+
 /* Consume the execve conn-switch flag (serve_conn, right after the
  * handler): 1 = the syscall exec'd successfully — the conn (and its
  * stub_data d) were destroyed mid-round (exec_mmap → mmctx_destroy);

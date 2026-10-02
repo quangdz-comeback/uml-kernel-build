@@ -202,6 +202,73 @@ static void uml_nt_cowwatch_arm(unsigned long long run_off,
 		"(slot %u)\n", run_off, owner_pid, owner_va, i);
 }
 
+/* The alloc-side arm (report 106's closing slice): the poison is
+ * always already there when the cowwatch first sights it, so the
+ * sighting-time trap can never name its writer. Arm at ALLOC instead:
+ * every multi-run anon span (the malloc-arena class) and every brk
+ * re-home gets its FIRST page READ-ONLY — the run's first WRITE is
+ * the writer, with live regs. The buddy zeroes every backend alloc,
+ * so a trip on the fill-less fresh span names a real write path;
+ * the repair rides the normal mm_fault flow and the slot retires. */
+#define UML_NT_COWTRAP_N 8
+struct uml_nt_cowtrap {
+	struct uml_nt_stub_conn *conn;
+	unsigned long long lo, hi;  /* trapped guest VA range */
+	unsigned long long run_off;
+};
+static struct uml_nt_cowtrap cowtraps[UML_NT_COWTRAP_N];
+static unsigned int cowtrap_cursor;
+
+void uml_nt_cowtrap_arm_alloc(struct uml_nt_stub_conn *c,
+			      unsigned long long va,
+			      unsigned long long len,
+			      unsigned long long run_off)
+{
+	struct uml_nt_cowtrap *t;
+	unsigned int i;
+
+	for (i = 0; i < UML_NT_COWTRAP_N; i++)
+		if (cowtraps[i].conn != NULL &&
+		    cowtraps[i].conn == c &&
+		    cowtraps[i].lo == va)
+			return; /* re-homed onto a trapped range */
+	if (uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
+			       UML_NT_PAGE_READONLY, va,
+			       UML_NT_FAULT_PAGE_SIZE, 0) < 0)
+		return;
+	t = &cowtraps[cowtrap_cursor];
+	cowtrap_cursor = (cowtrap_cursor + 1) % UML_NT_COWTRAP_N;
+	t->conn = c;
+	t->lo = va;
+	t->hi = va + UML_NT_FAULT_PAGE_SIZE;
+	t->run_off = run_off;
+	os_info("[cowtrap] ARMED(alloc) page 0x%llx pid %lu "
+		"(run 0x%llx, %llu run(s)) — the first WRITE names "
+		"the writer\n", va, (unsigned long)c->pid, run_off,
+		len / UML_NT_PHYS_RUN_SIZE);
+}
+
+void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,
+			 struct uml_nt_stub_data *d)
+{
+	unsigned int i;
+	for (i = 0; i < UML_NT_COWTRAP_N; i++) {
+		struct uml_nt_cowtrap *t = &cowtraps[i];
+		if (t->conn != c || d->fault_addr < t->lo ||
+		    d->fault_addr >= t->hi)
+			continue;
+		os_info("[cowtrap] FIRST-WRITE CAUGHT pid %lu "
+			"rip=0x%llx rsp=0x%llx rcx=0x%llx addr=0x%llx "
+			"type=%u nr=%llu ret=%lld (run 0x%llx) — "
+			"restoring, write replays\n",
+			(unsigned long)c->pid, d->regs.rip,
+			d->regs.rsp, d->regs.rcx, d->fault_addr,
+			d->fault_type, c->last_nr, c->last_ret,
+			t->run_off);
+		t->conn = NULL;
+	}
+}
+
 static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
 {
 	unsigned int i;
@@ -1038,6 +1105,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * always post-hoc). The fault then repairs through
 		 * the normal mm_fault flow — the log line is the
 		 * whole cost. */
+		uml_nt_cowtrap_trip(c, d);
 		if (cowtrap_conn == c &&
 		    d->fault_addr >= cowtrap_lo &&
 		    d->fault_addr < cowtrap_hi) {
