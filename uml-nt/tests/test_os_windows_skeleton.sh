@@ -21,7 +21,8 @@ command -v "$CC" >/dev/null 2>&1 || { echo "clang not found"; exit 1; }
 
 EXPECTED=(file.c start_up.c mem.c process.c execvp.c helper.c umid.c \
 signal.c util.c time.c irq.c sigio.c tty.c registers.c main.c \
-user_syms.c stub-impl.c ubd_user.c console.c net_win.c vector_user.c \
+user_syms.c stub-impl.c ubd_user.c console.c console_status.c \
+net_win.c vector_user.c \
 skas/mem.c \
 skas/process.c skas/scan_patch.c skas/stub_ctl.c skas/fault.c \
 skas/vma.c skas/elf.c skas/elf_split.c \
