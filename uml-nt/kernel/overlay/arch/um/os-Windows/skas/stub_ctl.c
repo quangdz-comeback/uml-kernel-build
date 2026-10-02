@@ -209,8 +209,18 @@ static void uml_nt_cowwatch_arm(unsigned long long run_off,
  * re-home gets its FIRST page READ-ONLY — the run's first WRITE is
  * the writer, with live regs. The buddy zeroes every backend alloc,
  * so a trip on the fill-less fresh span names a real write path;
- * the repair rides the normal mm_fault flow and the slot retires. */
-#define UML_NT_COWTRAP_N 8
+ * the repair rides the normal mm_fault flow and the slot retires.
+ *
+ * Report 108 (run 37069739489) rewrote the coverage: the head page
+ * burns on glibc's own first write every time (top-chunk header,
+ * nr=12, 20/24 catches), while the poison landed 268 pages deep at
+ * the heap TAIL — 0x67d0e580, a page born fresh in a brk grow
+ * ([0x67d00000,0x67d10000) of the ->0x67d10000 grow), written once,
+ * then never touched again (the sighting-time re-arm stayed silent
+ * to the abort). Cold tail pages are exactly where a once-only
+ * writer lives: arm head + the last UML_NT_COWTRAP_TAIL pages. */
+#define UML_NT_COWTRAP_N 64
+#define UML_NT_COWTRAP_TAIL 16
 struct uml_nt_cowtrap {
 	struct uml_nt_stub_conn *conn;
 	unsigned long long lo, hi;  /* trapped guest VA range */
@@ -225,26 +235,44 @@ void uml_nt_cowtrap_arm_alloc(struct uml_nt_stub_conn *c,
 			      unsigned long long run_off)
 {
 	struct uml_nt_cowtrap *t;
-	unsigned int i;
+	unsigned int i, armed = 0;
+	unsigned long long page;
 
+	/* A grow (and any MAP_FIXED replace) UNMAP+MAPs the span: trap
+	 * slots on this range watched views that no longer exist. A
+	 * stale slot can never trip — and the old dedup let it BLOCK
+	 * the re-arm onto the fresh view. Retire them first. */
 	for (i = 0; i < UML_NT_COWTRAP_N; i++)
-		if (cowtraps[i].conn != NULL &&
-		    cowtraps[i].conn == c &&
-		    cowtraps[i].lo == va)
-			return; /* re-homed onto a trapped range */
-	if (uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
-			       UML_NT_PAGE_READONLY, va,
-			       UML_NT_FAULT_PAGE_SIZE, 0) < 0)
-		return;
-	t = &cowtraps[cowtrap_cursor];
-	cowtrap_cursor = (cowtrap_cursor + 1) % UML_NT_COWTRAP_N;
-	t->conn = c;
-	t->lo = va;
-	t->hi = va + UML_NT_FAULT_PAGE_SIZE;
-	t->run_off = run_off;
-	os_info("[cowtrap] ARMED(alloc) page 0x%llx pid %lu "
-		"(run 0x%llx, %llu run(s)) — the first WRITE names "
-		"the writer\n", va, (unsigned long)c->pid, run_off,
+		if (cowtraps[i].conn == c &&
+		    cowtraps[i].lo >= va && cowtraps[i].lo < va + len)
+			cowtraps[i].conn = NULL;
+
+	for (page = va; page < va + len;
+	     page += UML_NT_FAULT_PAGE_SIZE) {
+		unsigned long long off = page - va;
+
+		/* head page + the last UML_NT_COWTRAP_TAIL pages
+		 * (spans smaller than that arm every page). */
+		if (off != 0 &&
+		    off < len - (unsigned long long)UML_NT_COWTRAP_TAIL *
+			          UML_NT_FAULT_PAGE_SIZE)
+			continue;
+		if (uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
+				       UML_NT_PAGE_READONLY, page,
+				       UML_NT_FAULT_PAGE_SIZE, 0) < 0)
+			continue;
+		t = &cowtraps[cowtrap_cursor];
+		cowtrap_cursor = (cowtrap_cursor + 1) % UML_NT_COWTRAP_N;
+		t->conn = c;
+		t->lo = page;
+		t->hi = page + UML_NT_FAULT_PAGE_SIZE;
+		t->run_off = run_off;
+		armed++;
+	}
+	os_info("[cowtrap] ARMED(alloc) %u page(s) (head+tail) of "
+		"[0x%llx,0x%llx) pid %lu (run 0x%llx, %llu run(s)) — "
+		"each page's first WRITE names the writer\n", armed, va,
+		va + len, (unsigned long)c->pid, run_off,
 		len / UML_NT_PHYS_RUN_SIZE);
 }
 
