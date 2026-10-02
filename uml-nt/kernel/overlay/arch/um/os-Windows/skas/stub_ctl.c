@@ -109,6 +109,8 @@ static struct uml_nt_phys probe_phys;
 
 struct uml_nt_cowwatch {
 	unsigned long long run_off;
+	unsigned long long owner_va;  /* the run's VA in the OWNER mm */
+	unsigned long owner_pid;
 	unsigned char armed;
 	unsigned long rounds;
 };
@@ -116,7 +118,9 @@ struct uml_nt_cowwatch {
 static struct uml_nt_cowwatch cowwatchs[UML_NT_COWWATCH_N];
 static unsigned int cowwatch_cursor;
 
-static void uml_nt_cowwatch_arm(unsigned long long run_off)
+static void uml_nt_cowwatch_arm(unsigned long long run_off,
+				unsigned long long owner_va,
+				unsigned long owner_pid)
 {
 	unsigned int i;
 
@@ -135,10 +139,12 @@ static void uml_nt_cowwatch_arm(unsigned long long run_off)
 				  UML_NT_COWWATCH_N;
 	}
 	cowwatchs[i].run_off = run_off;
+	cowwatchs[i].owner_va = owner_va;
+	cowwatchs[i].owner_pid = owner_pid;
 	cowwatchs[i].armed = 1;
 	cowwatchs[i].rounds = UML_NT_COWWATCH_ROUNDS;
-	os_info("[cowwatch] armed run=0x%llx (slot %u)\n",
-		run_off, i);
+	os_info("[cowwatch] armed run=0x%llx owner=%lu@0x%llx "
+		"(slot %u)\n", run_off, owner_pid, owner_va, i);
 }
 
 static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
@@ -175,17 +181,32 @@ static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
 				continue;
 			w->armed = 0;
 			os_info("[cowwatch] HIT run=0x%llx at +0x%llx "
-				"phys=0x%llx — writer round: pid %lu "
-				"nr=%llu ret=%lld rip=0x%llx "
+				"(owner %lu@0x%llx) — writer round: "
+				"pid %lu nr=%llu ret=%lld rip=0x%llx "
 				"rsp=0x%llx rcx=0x%llx cmd=%d\n",
 				w->run_off, off - base,
-				(unsigned long long)
-				(unsigned long)
-				uml_boot.physmem_base + off,
+				w->owner_pid, w->owner_va,
 				(unsigned long)c->pid, c->last_nr,
 				c->last_ret, c->d->regs.rip,
 				c->d->regs.rsp, c->d->regs.rcx,
 				c->d->cmd);
+			/* The WRITER-side VA: this conn's mapping of
+			 * the same run — a fixed per-mm offset (both
+			 * 37014552047 hits: +0xb6b0) = the write
+			 * landed through the writer's OWN mapping. */
+			{
+				struct uml_nt_vma *wv =
+					uml_nt_vma_find(c->mm,
+						c->d->regs.rip);
+
+				if (wv != NULL)
+					os_info("[cowwatch] writer "
+						"mm: rip in vma "
+						"[0x%llx,0x%llx) "
+						"run_off=0x%llx\n",
+						wv->start, wv->end,
+						wv->run_off);
+			}
 			/* ±0x40 context, 8 qwords a row — the 0x100
 			 * window of map 059, phys-side. */
 			dumped = 0;
@@ -1266,11 +1287,14 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				hex);
 			/* cowwatch arm: a SHARED src run = the poison
 			 * target class (the writer writes after the
-			 * copy — see the cowwatch block comment). */
+			 * copy — see the cowwatch block comment).
+			 * Owner VA unknown at this site (0) — the
+			 * post-clone sweep arms with the real one. */
 			if (uml_nt_phys_refs(c->ph,
 			    (long long)c->plan.copy_src_off) >= 2)
 				uml_nt_cowwatch_arm(
-					c->plan.copy_src_off);
+					c->plan.copy_src_off, 0,
+					(unsigned long)c->pid);
 		}
 		}
 		stack_window_reassert(c);
@@ -2017,7 +2041,9 @@ no_zero:
 			     po += UML_NT_PHYS_RUN_SIZE)
 				if (uml_nt_phys_refs(parent->ph,
 					    (long long)po) >= 2)
-					uml_nt_cowwatch_arm(po);
+					uml_nt_cowwatch_arm(po,
+			pv->start + (po - pv->run_off),
+			(unsigned long)parent->pid);
 		}
 	}
 	os_info("fork: child conn pid %lu seeded (%d vma(s), parent "
