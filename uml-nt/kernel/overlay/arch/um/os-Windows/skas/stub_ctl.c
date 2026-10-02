@@ -91,6 +91,114 @@ static struct uml_nt_stub_conn conn_parent, conn_child;
 static struct uml_nt_mm mm_parent, mm_child;
 static struct uml_nt_phys probe_phys;
 
+/* ---- the cowcopy residue watch (M5.6a, run 37005701588) --------
+ * The heap-trasher poison = a DETERMINISTIC foreign pair in a
+ * glibc free chunk: fd=0x1a bk=0x8000 (5 runs: 36984940632,
+ * 36987612985, 36994732694, 37003166709, 37005701588) — never a
+ * glibc-written link (bins hold guest/libc VAs, never small
+ * ints), so the pair IS the writer's fingerprint. fp-at-copy
+ * scans clean (all-zero) → the write lands AFTER the fork copy,
+ * into a SHARED (refs>1) run — a write that bypassed the COW
+ * fault path. Arm: at every [cowcopy] whose SRC run is shared.
+ * Check: each conn's round scans the armed runs (the task-backed
+ * conn enumeration = free via the round loop). One-shot per
+ * entry + round expiry + oldest-overwrite. Scan-only: no
+ * behavior change. */
+#define UML_NT_COWWATCH_N      8
+#define UML_NT_COWWATCH_ROUNDS 1024
+
+struct uml_nt_cowwatch {
+	unsigned long long run_off;
+	unsigned char armed;
+	unsigned long rounds;
+};
+
+static struct uml_nt_cowwatch cowwatchs[UML_NT_COWWATCH_N];
+static unsigned int cowwatch_cursor;
+
+static void uml_nt_cowwatch_arm(unsigned long long run_off)
+{
+	struct uml_nt_cowwatch *w = &cowwatchs[cowwatch_cursor];
+
+	w->run_off = run_off;
+	w->armed = 1;
+	w->rounds = UML_NT_COWWATCH_ROUNDS;
+	cowwatch_cursor = (cowwatch_cursor + 1) % UML_NT_COWWATCH_N;
+	os_info("[cowwatch] armed run=0x%llx (slot %u)\n",
+		run_off, (unsigned int)(w - cowwatchs));
+}
+
+static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
+{
+	unsigned int i;
+
+	for (i = 0; i < UML_NT_COWWATCH_N; i++) {
+		struct uml_nt_cowwatch *w = &cowwatchs[i];
+		unsigned long long off, base;
+		int dumped;
+
+		if (!w->armed)
+			continue;
+		if (w->rounds-- == 0) {
+			w->armed = 0;
+			os_info("[cowwatch] run=0x%llx expired\n",
+				w->run_off);
+			continue;
+		}
+		base = w->run_off;
+		for (off = base;
+		     off + 16 <= base + UML_NT_PHYS_RUN_SIZE;
+		     off += 8) {
+			unsigned long long fd, bk, q;
+			int k;
+
+			memcpy(&fd, (char *)uml_boot.physmem_base +
+			       off, 8);
+			if (fd != 0x1a)
+				continue;
+			memcpy(&bk, (char *)uml_boot.physmem_base +
+			       off + 8, 8);
+			if (bk != 0x8000)
+				continue;
+			w->armed = 0;
+			os_info("[cowwatch] HIT run=0x%llx at +0x%llx "
+				"phys=0x%llx — writer round: pid %lu "
+				"nr=%llu ret=%lld rip=0x%llx "
+				"rsp=0x%llx rcx=0x%llx cmd=%d\n",
+				w->run_off, off - base,
+				(unsigned long long)
+				(unsigned long)
+				uml_boot.physmem_base + off,
+				(unsigned long)c->pid, c->last_nr,
+				c->last_ret, c->d->regs.rip,
+				c->d->regs.rsp, c->d->regs.rcx,
+				c->d->cmd);
+			/* ±0x40 context, 8 qwords a row — the 0x100
+			 * window of map 059, phys-side. */
+			dumped = 0;
+			for (k = -8, q = off - 64;
+			     k < 8 && !dumped;
+			     k++, q += 8) {
+				unsigned long long x;
+
+				if (q < base ||
+				    q + 8 > base +
+				    UML_NT_PHYS_RUN_SIZE)
+					continue;
+				memcpy(&x, (char *)
+				       uml_boot.physmem_base + q, 8);
+				os_info("[cowwatch]   %s0x%llx: "
+					"0x%llx\n",
+					q < off ? " " : ">",
+					q, x);
+				if (q >= off)
+					dumped = 1;
+			}
+			break;
+		}
+	}
+}
+
 static char stub_path[512];
 static int have_stub_path;
 
@@ -1143,6 +1251,13 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				uml_nt_phys_refs(c->ph,
 					(long long)c->plan.copy_dst_off),
 				hex);
+			/* cowwatch arm: a SHARED src run = the poison
+			 * target class (the writer writes after the
+			 * copy — see the cowwatch block comment). */
+			if (uml_nt_phys_refs(c->ph,
+			    (long long)c->plan.copy_src_off) >= 2)
+				uml_nt_cowwatch_arm(
+					c->plan.copy_src_off);
 		}
 		}
 		stack_window_reassert(c);
@@ -2118,6 +2233,10 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			c->watch_val = 0;
 		}
 	}
+	/* M5.6a cowwatch: the armed shared runs — the same per-round
+	 * audit point as the residue-watch (post-service, post-signal,
+	 * pre-release); the round identity on a hit = the writer. */
+	uml_nt_cowwatch_round(c);
 	mb();
 	nt->NtSetEvent(c->evt_out, NULL);
 	if (c->d->halt || c->d->action == UML_STUB_ACTION_KILL) {
