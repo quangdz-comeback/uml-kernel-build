@@ -203,22 +203,22 @@ jobs:
           # it, run 36804503133). Console target puts the failing
           # assert on the log we actually read.
           #
-          # M5.5b-1: paced login session fed to the console's stdin
-          # reader (console.c NtReadFile thread). Delay first so the
-          # queue survives getty's initial line discipline setup; the
-          # canonical tty buffer holds the rest until a reader comes.
-          # Pipe close (EOF) after the last line = the designed
-          # "park loud" CI input state — AFTER the marker printed.
+          # M5.5b-1: TRICKLE the login attempt every ~25s. Run
+          # 37009489525: a t=60s feed was GONE before the t~9min
+          # "uml login:" prompt (agetty's line setup flushes the
+          # queue) — pre-prompt attempts are flushed harmlessly, the
+          # first attempt after the prompt logs in, later ones are
+          # shell noise (echo LOGIN-OK is idempotent). The designed
+          # EOF "park loud" lands when the launcher dies.
           {
-            sleep 60
-            printf 'root\n'
-            sleep 5
-            printf 'root\n'
-            sleep 5
-            printf 'echo LOGIN-OK\n'
-            sleep 5
-            printf 'uname -a\n'
-            sleep 10
+            i=0
+            while [ $i -lt 36 ]; do
+              printf 'root\n'; sleep 1
+              printf 'root\n'; sleep 1
+              printf 'echo LOGIN-OK\n'
+              sleep 23
+              i=$((i+1))
+            done
           } | timeout 900 ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
