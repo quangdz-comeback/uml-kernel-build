@@ -376,11 +376,24 @@ int os_unmap_memory(void *addr, int len)
 		BOOLEAN ok;
 
 		(void)len; /* per-page decommit; len is a page here */
+		/* R17 DIAG: decommitting a page the ledger never
+		 * counted (saturated map added 0) wraps 0 -> 255 and
+		 * the block never releases; the mirror shape — a
+		 * block whose LAST COUNTED page dies while an
+		 * uncounted one is still live — releases the block
+		 * UNDER a live mapping (run 36994732672: "private
+		 * release failed" @0x680d0000, the timer-stack
+		 * block). Dump the ring at both shapes. */
+		if (priv_commits[idx] == 0)
+			uml_nt_vmr_dump("underflow: decommit of "
+					"uncounted page (0 -> 255 "
+					"wrap ahead)", 24);
 		ok = nt->VirtualFree((PVOID)(uintptr_t)v, 0x1000,
 				     0x00004000UL /* MEM_DECOMMIT */);
 		if (!ok) {
 			os_info("os_unmap_memory: private decommit "
 				"@%px failed\n", addr);
+			uml_nt_vmr_dump("decommit failed", 24);
 			return -1;
 		}
 		if (priv_commits[idx] < 0xff)
@@ -390,7 +403,11 @@ int os_unmap_memory(void *addr, int len)
 		    !nt->VirtualFree((PVOID)(uintptr_t)va0, 0,
 				     MEM_RELEASE)) {
 			os_info("os_unmap_memory: private release "
-				"@%px failed\n", addr);
+				"@%px failed (block still holds "
+				"committed pages the ledger lost "
+				"count of)\n", addr);
+			uml_nt_vmr_dump("release failed — ledger "
+					"drift", 24);
 			return -1;
 		}
 		return 0;
