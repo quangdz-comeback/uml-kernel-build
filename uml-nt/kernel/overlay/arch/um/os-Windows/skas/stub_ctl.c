@@ -1054,6 +1054,12 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		}
 		rc = uml_nt_mm_fault(c->mm, c->ph, d->fault_addr,
 				     d->fault_type, &c->plan);
+		/* [cowtrap] carrier (the fault path): mm_fault reset
+		 * the plan above — re-queue the armed page's op so a
+		 * fault-storm boot cannot starve the trap forever
+		 * (run 37057247578: the op never applied, the "trip"
+		 * was the guest's own read fault on that page). */
+		uml_nt_cowtrap_pending(c);
 		/* COW-BREAK FAULT witness (fault.h): the restore-W
 		 * remap hit a SHARED run — the stomp itself. This
 		 * round = the writer (the fault = its write). */
