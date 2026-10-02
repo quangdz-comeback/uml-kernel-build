@@ -291,6 +291,11 @@ void uml_nt_cowtrap_arm_alloc(struct uml_nt_stub_conn *c,
 void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,
 			 struct uml_nt_stub_data *d);
 
+/* [fork-entry] audit: the pid of the fork handoff pending right now
+ * (-1 = none). mmctx's spawn print pairs it with the child's mm
+ * nvma so an unseeded birth names its branch in the same boot. */
+int uml_nt_fork_pending_pid(void);
+
 /* Consume the execve conn-switch flag (serve_conn, right after the
  * handler): 1 = the syscall exec'd successfully — the conn (and its
  * stub_data d) were destroyed mid-round (exec_mmap → mmctx_destroy);

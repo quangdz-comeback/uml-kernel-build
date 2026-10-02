@@ -1742,6 +1742,17 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
  * and the child's do_exit wakes it — upstream parity end to end. */
 
 static struct uml_nt_stub_conn *fork_pending_parent;
+
+/* [fork-entry] audit (107/108): who owns a fork handoff right now?
+ * -1 = none. mmctx's spawn print pairs this with the child's mm so
+ * an unseeded birth (0 map ops → rip=0, conn 3124's death) names its
+ * branch in the same boot. */
+int uml_nt_fork_pending_pid(void)
+{
+	if (fork_pending_parent == NULL)
+		return -1;
+	return (int)fork_pending_parent->pid;
+}
 static unsigned long long fork_pending_rsp;
 
 /* ---- M5.1c.4: switch-trace ring + the fork_handler birth trace ----

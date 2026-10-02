@@ -129,8 +129,15 @@ int uml_nt_mmctx_init(struct mm_id *id)
 
 	id->nt_conn = c;
 	id->pid = (int)c->pid;
-	os_info("mmctx: stub spawned pid %d (suspended, entry pending)\n",
-		id->pid);
+	/* [fork-entry] audit (107/108): the two birth classes must be
+	 * tellable apart in the log — a fork-seeded conn carries the
+	 * cloned mirror, an exec/bprm conn starts empty and waits for
+	 * the binfmt. Conn 3124's "INIT: 0 map op(s)" death = one of
+	 * these two never completing; this line names which. */
+	os_info("mmctx: stub spawned pid %d (suspended, entry pending)%s "
+		"fork-pending pid %d, mm nvma=%d\n", id->pid,
+		uml_nt_fork_pending_pid() >= 0 ? " fork-seeded;" : " exec/bprm;",
+		uml_nt_fork_pending_pid(), mm->nvma);
 	return 0;
 
 fail:

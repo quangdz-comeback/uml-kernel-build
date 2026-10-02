@@ -639,6 +639,18 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		img.nseg,
 		have_interp ? " + interp" : "",
 		entry, stack_top - used, patched, heap_va);
+	/* [fork-entry] audit (107/108): the conn this load filled —
+	 * its mirror nvma IS the INIT plan's map-op count. nvma=0
+	 * while the exec proceeds = the empty-conn death's smoking
+	 * line (conn 3124: INIT 0 map ops → rip=0). */
+	{
+		struct uml_nt_stub_conn *bc =
+			current->mm != NULL ?
+			current->mm->context.id.nt_conn : NULL;
+		os_info("[fork-entry] binfmt done: conn-pid=%d mirror "
+			"nvma=%d\n", bc != NULL ? (int)bc->pid : -1,
+			bc != NULL ? bc->mm->nvma : -1);
+	}
 	return 0;
 }
 

@@ -2554,6 +2554,16 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		ret = sys_clock_gettime(c, a);
 		break;
 	default:
+		/* [fork-entry] audit: a fork-class nr that reaches the
+		 * default = the child's conn spawns WITHOUT the arm/
+		 * seed wrapper — an empty mirror at birth ("INIT: 0
+		 * map op(s)" → rip=0, conn 3124's death). Loud here so
+		 * the log names the branch; the generic sys_vfs below
+		 * still runs (upstream parity). */
+		if (nr == 56 || nr == 57 || nr == 58 || nr == 435)
+			os_info("[fork-entry] nr=%llu hit the DEFAULT "
+				"dispatch — arm/seed will MISS (child "
+				"spawns unseeded)\n", nr);
 		os_info("[syscall] nr=%llu not implemented → ENOSYS "
 			"(add it: STATUS M3.7 order)\n", nr);
 		ret = SC_RET(SC_ENOSYS);
