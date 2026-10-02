@@ -26,6 +26,12 @@ int uml_nt_cowbreak_audit_count;
 unsigned long long uml_nt_cowbreak_va, uml_nt_cowbreak_run;
 int uml_nt_cowbreak_refs;
 
+/* COW-BREAK FAULT witness (fault.h): the restore-W rounds that hit a
+ * SHARED run — the stomp itself (the mm = mid-fault; the caller owns
+ * the round identity). */
+int uml_nt_cowbreak_faults;
+unsigned int uml_nt_cowbreak_prot, uml_nt_cowbreak_flags;
+
 /* The faulting page's run: VMAs are run multiples (vma.h contract),
  * so run index k = (page - start) / RUN and the shared run's section
  * offset is run_off + k * RUN. */
@@ -163,6 +169,27 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 
 		if (!(vma->flags & UML_NT_VMA_COW) ||
 		    uml_nt_phys_refs(ph, (long long)page_run_off(vma, page)) <= 1) {
+			/* COW-BREAK WITNESS (M5.6a): the private-page
+			 * path restores WRITING on the run — legal ONLY
+			 * when the run is truly private (refs <= 1). A
+			 * non-COW VMA (the flag lost somewhere) on a
+			 * SHARED run reaches here and the restore-W
+			 * remap hands the sharer's memory to this
+			 * guest's writes — the heap-trasher stomp.
+			 * Pure file: record for the caller's log. */
+			if (uml_nt_phys_refs(ph,
+			    (long long)page_run_off(vma, page)) >= 2) {
+				uml_nt_cowbreak_faults++;
+				uml_nt_cowbreak_va = page;
+				uml_nt_cowbreak_run =
+					page_run_off(vma, page);
+				uml_nt_cowbreak_refs =
+					uml_nt_phys_refs(ph,
+					    (long long)
+					    page_run_off(vma, page));
+				uml_nt_cowbreak_prot = vma->prot;
+				uml_nt_cowbreak_flags = vma->flags;
+			}
 			/* Private page: restore write protection. The
 			 * section is fully committed (pagefile-section
 			 * analogue of upstream's memfd: untouched pages

@@ -50,6 +50,13 @@ extern int uml_nt_cowbreak_audit_count;
 extern unsigned long long uml_nt_cowbreak_va, uml_nt_cowbreak_run;
 extern int uml_nt_cowbreak_refs;
 
+/* The FAULT-side witness: a write fault on a non-COW VMA whose run is
+ * SHARED (refs >= 2) = the restore-W remap stomps the sharer's memory
+ * (the heap-trasher stomp itself). The caller (owning the round:
+ * pid/nr/ret/rip) prints when uml_nt_cowbreak_faults increments. */
+extern int uml_nt_cowbreak_faults;
+extern unsigned int uml_nt_cowbreak_prot, uml_nt_cowbreak_flags;
+
 /* UNMAP + up to 3 MAP pieces (COW split), or an INIT plan: one MAP
  * per VMA + guard NOACCESS protects. The plan is kernel-side only
  * (the stub sees ONE op per round-trip), so the cap is memory, not

@@ -928,9 +928,27 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	}
 	if (d->cmd == UML_STUB_CMD_FAULT) {
 		int rc;
+		static int cowbreak_seen;
 
 		rc = uml_nt_mm_fault(c->mm, c->ph, d->fault_addr,
 				     d->fault_type, &c->plan);
+		/* COW-BREAK FAULT witness (fault.h): the restore-W
+		 * remap hit a SHARED run — the stomp itself. This
+		 * round = the writer (the fault = its write). */
+		if (uml_nt_cowbreak_faults != cowbreak_seen) {
+			cowbreak_seen = uml_nt_cowbreak_faults;
+			os_info("[cowbreak-fault] pid %lu: write 0x%llx "
+				"run=0x%llx refs=%d prot=0x%x "
+				"flags=0x%x non-COW — restore-W stomps "
+				"the sharer (fault #%d)\n",
+				(unsigned long)c->pid,
+				uml_nt_cowbreak_va,
+				uml_nt_cowbreak_run,
+				uml_nt_cowbreak_refs,
+				uml_nt_cowbreak_prot,
+				uml_nt_cowbreak_flags,
+				uml_nt_cowbreak_faults);
+		}
 		if (rc < 0 || c->plan.kill) {
 			int vi;
 

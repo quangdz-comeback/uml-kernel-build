@@ -925,6 +925,21 @@ static void test_fault(void)
 	CHECK(uml_nt_cowbreak_va == RAM &&
 	      uml_nt_cowbreak_run == (unsigned long long)r0 &&
 	      uml_nt_cowbreak_refs == 2);
+
+	/* FAULT-side witness: a write fault on a NON-COW VMA whose run
+	 * is shared = the restore-W remap stomps the sharer — the
+	 * stomp counted, the recorded identity exact. */
+	uml_nt_cowbreak_faults = 0;
+	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x800, UML_NT_FAULT_WRITE,
+			      &plan) == 0);
+	CHECK(uml_nt_cowbreak_faults == 1);
+	CHECK(uml_nt_cowbreak_va == RAM); /* the PAGE (0x800 is in it) */
+	CHECK(uml_nt_cowbreak_run == (unsigned long long)r0);
+	CHECK(uml_nt_cowbreak_refs == 2);
+	/* and the plan itself = the stomp: a bare PROTECT-W, no copy */
+	CHECK(plan.n_ops == 1 &&
+	      plan.ops[0].op == UML_NT_FOP_PROTECT &&
+	      plan.ops[0].prot == UML_NT_PAGE_READWRITE);
 }
 
 /* M3.7: first-gap placement (mmap without a hint) + brk bookkeeping
