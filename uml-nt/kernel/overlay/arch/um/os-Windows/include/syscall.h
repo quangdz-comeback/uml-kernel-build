@@ -296,6 +296,17 @@ void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,
  * nvma so an unseeded birth names its branch in the same boot. */
 int uml_nt_fork_pending_pid(void);
 
+/* [copyver] (run 37073260886 decode): every kernel-side bulk copy
+ * into guest memory — COW repair, brk re-home fill, fork seed eager
+ * copy — reads back byte-exact. The trap census only sees stub-view
+ * (guest-CPU) writes; a kernel copy that lands stale bytes corrupts
+ * guest allocator metadata with NO fault and NO catch (the task 49
+ * "unaligned tcache chunk" boot had zero tcwatch/trap anomalies).
+ * Mismatch = loud with the first differing byte; copy happened, the
+ * caller's flow is untouched — log-only. */
+int uml_nt_copy_verify(char *dst, const char *src, unsigned long long len,
+		       const char *what);
+
 /* Consume the execve conn-switch flag (serve_conn, right after the
  * handler): 1 = the syscall exec'd successfully — the conn (and its
  * stub_data d) were destroyed mid-round (exec_mmap → mmctx_destroy);

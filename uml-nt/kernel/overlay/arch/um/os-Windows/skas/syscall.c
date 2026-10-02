@@ -246,8 +246,10 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 				new_off, old_len, mm->brk);
 			return mm->brk;
 		}
-		memcpy((char *)uml_boot.physmem_base + new_off,
-		       (char *)uml_boot.physmem_base + old_off, old_len);
+		uml_nt_copy_verify((char *)uml_boot.physmem_base + new_off,
+				   (const char *)uml_boot.physmem_base +
+								   old_off,
+				   old_len, "brk-rehome-fill");
 		/* 098 δ: the re-home reads the OLD heap runs (possibly
 		 * cowwatch-armed: the sharers' data) and writes the
 		 * fresh span — census both ends. */

@@ -297,6 +297,36 @@ void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,
 	}
 }
 
+/* [copyver] (see syscall.h): memcpy + read-back verify for the
+ * kernel-side bulk copies into guest memory. The trap census only
+ * sees stub-view writes — a bad kernel copy is invisible to it, and
+ * it lands precisely in allocator-metadata territory. */
+int uml_nt_copy_verify(char *dst, const char *src, unsigned long long len,
+		       const char *what)
+{
+	unsigned long long i;
+
+	memcpy(dst, src, len);
+	if (memcmp(dst, src, len) == 0)
+		return 0;
+	for (i = 0; i + 8 <= len; i++)
+		if (dst[i] != src[i])
+			break;
+	os_info("[copyver] %s: MISMATCH len=%llu first-diff at +%llu: "
+		"src=%02x%02x%02x%02x%02x%02x%02x%02x "
+		"dst=%02x%02x%02x%02x%02x%02x%02x%02x — the copy did "
+		"not land\n", what, len, i, (unsigned char)src[i],
+		(unsigned char)src[i + 1], (unsigned char)src[i + 2],
+		(unsigned char)src[i + 3], (unsigned char)src[i + 4],
+		(unsigned char)src[i + 5], (unsigned char)src[i + 6],
+		(unsigned char)src[i + 7], (unsigned char)dst[i],
+		(unsigned char)dst[i + 1], (unsigned char)dst[i + 2],
+		(unsigned char)dst[i + 3], (unsigned char)dst[i + 4],
+		(unsigned char)dst[i + 5], (unsigned char)dst[i + 6],
+		(unsigned char)dst[i + 7]);
+	return -1;
+}
+
 static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
 {
 	unsigned int i;
@@ -986,7 +1016,14 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 		 * non-NULL head with a zero count, is impossible in a
 		 * quiescent cache. */
 		bad = (counts[i] > UML_NT_TCACHE_LIMIT) ||
-		      ((entries[i] == 0) != (counts[i] == 0));
+		      ((entries[i] == 0) != (counts[i] == 0)) ||
+		      ((entries[i] & 0xF) != 0);
+		/* The alignment term (run 37073260886): glibc's OWN
+		 * conviction is aligned_OK(e) — "unaligned tcache chunk
+		 * detected" — and an unaligned-but-count-consistent
+		 * entry passed the two checks above all boot (0 tcwatch
+		 * lines) while glibc died on it. An unaligned head IS
+		 * the corrupting write's fingerprint. */
 		if (!bad)
 			continue;
 		c->tcache_fired = 1;
@@ -1501,11 +1538,12 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				d->err = 1;
 				return -1;
 			}
-			memcpy(uml_boot.physmem_base +
-				       c->plan.copy_dst_off,
-			       uml_boot.physmem_base +
-				       c->plan.copy_src_off,
-			       UML_NT_PHYS_RUN_SIZE);
+			uml_nt_copy_verify(uml_boot.physmem_base +
+					   c->plan.copy_dst_off,
+					   uml_boot.physmem_base +
+					   c->plan.copy_src_off,
+					   UML_NT_PHYS_RUN_SIZE,
+					   "cow-repair");
 			uml_nt_cowwatch_touch(
 				(unsigned long long)
 				c->plan.copy_src_off,
@@ -1658,9 +1696,9 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 			d->err = 1;
 			return;
 		}
-		memcpy(uml_boot.physmem_base + cv->run_off,
-		       uml_boot.physmem_base + pv->run_off,
-		       cv->end - cv->start);
+		uml_nt_copy_verify(uml_boot.physmem_base + cv->run_off,
+				   uml_boot.physmem_base + pv->run_off,
+				   cv->end - cv->start, "poc-eager");
 		uml_nt_cowwatch_touch((unsigned long long)pv->run_off,
 				      cv->end - cv->start,
 				      "poc-eager-src");
@@ -2171,9 +2209,9 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 			uml_nt_fork_disarm();
 			return -ENOMEM;
 		}
-		memcpy(uml_boot.physmem_base + cv->run_off,
-		       uml_boot.physmem_base + pv->run_off,
-		       cv->end - cv->start);
+		uml_nt_copy_verify(uml_boot.physmem_base + cv->run_off,
+				   uml_boot.physmem_base + pv->run_off,
+				   cv->end - cv->start, "seed-eager");
 		uml_nt_cowwatch_touch((unsigned long long)pv->run_off,
 				      cv->end - cv->start,
 				      "seed-eager-src");
