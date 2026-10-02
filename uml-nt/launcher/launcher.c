@@ -485,6 +485,15 @@ int main(int argc, char **argv)
 			      (no_early ? 0 : strlen("earlyprintk") + 1) +
 			      strlen(UML_NT_LPJ) + 1 +
 			      strlen("PATH=C:\\Windows\\System32") + 1;
+		int ni;
+
+		/* fix dd5531e: the generic packer copies the USER args
+		 * into the packed block too (the old code kept the
+		 * launcher's-stack pointers) — their bytes were never
+		 * in `need` and the push overflowed (M3 segfault,
+		 * run 37043758107). Count them. */
+		for (ni = 0; ni < n; ni++)
+			need += strlen(argv[2 + ni]) + 1;
 		char *strs2;
 		char *w;
 
