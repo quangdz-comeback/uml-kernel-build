@@ -398,8 +398,33 @@ int os_unmap_memory(void *addr, int len)
 	 * mirror). With per-page bits, a clear bit means no live
 	 * claim of ours — refusing is the only sound answer. */
 	if (idx < 0 || priv_pages[idx][pi] == 0) {
+		static int nuntracked_refused;
+
+		nuntracked_refused++;
 		os_info("os_unmap_memory: untracked page 0x%llx "
-			"refused (idx=%d)\n", v, idx);
+			"refused (idx=%d pi=%d refusal #%d)\n", v, idx,
+			pi, nuntracked_refused);
+		if (idx >= 0) {
+			/* 097 γ': WHICH pages of this block are still
+			 * claimed — a partially-claimed block here is
+			 * the R17 hole's shape (some pages claimed by
+			 * a dead region, their bits never cleared);
+			 * a fully-clear block means the whole block's
+			 * ledger was lost. The vmr dump names the last
+			 * ops. */
+			os_info("os_unmap_memory:   block %d bits "
+				"%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d "
+				"cnt=%d\n", idx, priv_pages[idx][0],
+				priv_pages[idx][1], priv_pages[idx][2],
+				priv_pages[idx][3], priv_pages[idx][4],
+				priv_pages[idx][5], priv_pages[idx][6],
+				priv_pages[idx][7], priv_pages[idx][8],
+				priv_pages[idx][9], priv_pages[idx][10],
+				priv_pages[idx][11], priv_pages[idx][12],
+				priv_pages[idx][13], priv_pages[idx][14],
+				priv_pages[idx][15],
+				priv_block_cnt(idx));
+		}
 		uml_nt_vmr_dump("untracked-page guard refused", 24);
 		return -EINVAL;
 	}

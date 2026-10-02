@@ -1838,7 +1838,7 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 				long long off2 =
 					uml_nt_vma_translate(c->mm, va, 1);
 				long long foff =
-					uml_nt_vma_translate(c->mm, va, 32);
+					uml_nt_vma_translate(c->mm, va, 64);
 
 				os_info("[heapwalk] BAD chunk #%d va=0x%llx "
 					"run_off=0x%llx: %s\n", idx, va,
@@ -1859,9 +1859,75 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 						(const void *)((char *)
 						uml_boot.physmem_base + foff);
 
+					/* 097 α': 64 bytes at the bad
+					 * header — the prev chunk's
+					 * tail data included (a writer
+					 * over the headers leaves its
+					 * payload's SHAPE: the 0x1a/
+					 * 0x8000 pair + text lived
+					 * exactly here in run
+					 * 37031558530). */
 					os_info("[heapwalk]   raw: %016llx "
 						"%016llx %016llx %016llx\n",
 						q[0], q[1], q[2], q[3]);
+					os_info("[heapwalk]   raw2: "
+						"%016llx %016llx %016llx "
+						"%016llx\n", q[4], q[5],
+						q[6], q[7]);
+					{
+						const unsigned char *b;
+						int i, j;
+
+						for (j = 0; j < 8; j++) {
+							b = (const unsigned
+							     char *)&q[j];
+							for (i = 0; i < 8; i++)
+								if (b[i] <
+								    0x20 ||
+								    b[i] >
+								    0x7e)
+									break;
+							if (i == 8)
+								break;
+						}
+						if (j < 8) {
+							os_info("[heapwalk]   fragscan pattern %016llx (\"%.8s\")\n",
+								q[j],
+								(const char *)
+								&q[j]);
+							uml_nt_stub_frag_scan(
+								c, (const
+								unsigned char *)
+								&q[j]);
+						}
+					}
+				}
+				/* 097 α': the next chunk's header as the
+				 * walk saw it — PREV_INUSE=0 there is
+				 * what convicted this chunk, so its
+				 * raw values name the stomp's reach
+				 * (the neighbor's header is the
+				 * writer's other victim). */
+				{
+					long long noff =
+						uml_nt_vma_translate(
+						c->mm, va + (cur_size &
+						~(unsigned long long)0x7),
+						16);
+
+					if (noff >= 0) {
+						const unsigned long long *nq =
+							(const void *)((char *)
+							uml_boot.physmem_base +
+							noff);
+
+						os_info("[heapwalk]   next hdr @0x%llx: "
+							"prev_size=%016llx "
+							"size=0x%llx\n",
+							va + (cur_size &
+							~(unsigned long long)
+							0x7), nq[0], nq[1]);
+					}
 				}
 			} else if (va < c->mm->heap_end) {
 				/* Run 36979286356: the old 4096 cap hit
@@ -2488,8 +2554,10 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		int i;
 
 		os_info("[abrt] raise: nr=%llu a0=0x%llx a1=0x%llx -> %lld "
-			"(task %d)\n", nr, a[0], a[1], (long long)ret,
-			current ? current->pid : 0);
+			"(task %d comm=%.16s)\n", nr, a[0], a[1],
+			(long long)ret,
+			current ? current->pid : 0,
+			current ? current->comm : "(none)");
 		off = uml_nt_vma_translate(c->mm, d->regs.rsp, sizeof(q));
 		if (off >= 0) {
 			memcpy(q, (char *)uml_boot.physmem_base + off,
