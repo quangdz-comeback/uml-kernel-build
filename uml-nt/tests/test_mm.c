@@ -903,6 +903,28 @@ static void test_fault(void)
 	CHECK(UML_NT_FOP_UNMAP == UML_STUB_ACTION_UNMAP);
 	CHECK(UML_NT_FOP_MAP == UML_STUB_ACTION_MAP);
 	CHECK(UML_NT_FOP_PROTECT == UML_STUB_ACTION_PROT);
+
+	/* COW-BREAK AUDIT (M5.6a): the plan above maps shared runs
+	 * READ-ONLY (the effective-prot contract) — the audit stays
+	 * at 0. A WRITABLE view over a SHARED run = the heap-trasher
+	 * class (the write skips the COW fault and eats the sharer's
+	 * heap: cowwatch 37014552047/37017936382 — the fork child's
+	 * own malloc init at nr=56/clone). The audit counts it and
+	 * records the first offender. */
+	CHECK(uml_nt_cowbreak_audit_count == 0);
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	r0 = uml_nt_phys_alloc(&ph);
+	CHECK(r0 >= 0);
+	CHECK(uml_nt_phys_ref(&ph, r0) == 2);   /* shared: two contexts */
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + RUN, r0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_mm_init_plan(&mm, &ph, &plan) == 0);
+	CHECK(uml_nt_cowbreak_audit_count == 1);
+	CHECK(uml_nt_cowbreak_va == RAM &&
+	      uml_nt_cowbreak_run == (unsigned long long)r0 &&
+	      uml_nt_cowbreak_refs == 2);
 }
 
 /* M3.7: first-gap placement (mmap without a hint) + brk bookkeeping

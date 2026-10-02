@@ -20,6 +20,12 @@
  */
 #include <fault.h>
 
+/* COW-BREAK AUDIT globals (fault.h): the init-plan's writable-map-
+ * on-shared-run census — see the audit block in uml_nt_mm_init_plan. */
+int uml_nt_cowbreak_audit_count;
+unsigned long long uml_nt_cowbreak_va, uml_nt_cowbreak_run;
+int uml_nt_cowbreak_refs;
+
 /* The faulting page's run: VMAs are run multiples (vma.h contract),
  * so run index k = (page - start) / RUN and the shared run's section
  * offset is run_off + k * RUN. */
@@ -335,6 +341,38 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			    uml_nt_vma_effective_prot(v, ph),
 			    v->start, v->end - v->start, v->run_off) < 0)
 			return -1;
+	}
+	/* COW-BREAK AUDIT (M5.6a, cowwatch 37014552047/37017936382):
+	 * the writer = a fork child WRITING ITS OWN heap at nr=56
+	 * (clone) through ITS OWN mapping — the run was SHARED
+	 * (refs>=2) and the child's view was mapped WRITABLE: the
+	 * write skipped the COW fault and ate the sharer's heap
+	 * (the deterministic fd=0x1a bk=0x8000 = the same malloc
+	 * arena field at the same heap VA every process gets).
+	 * Audit the emitted MAP ops: writable + shared = the break,
+	 * recorded for the caller's log (pure file: no os_info). */
+	{
+		int ai;
+
+		uml_nt_cowbreak_audit_count = 0;
+		for (ai = 0; ai < plan->n_ops; ai++) {
+			struct uml_nt_fault_op *ao = &plan->ops[ai];
+
+			if (ao->op != UML_NT_FOP_MAP ||
+			    !uml_nt_prot_writable(ao->prot))
+				continue;
+			if (uml_nt_phys_refs(ph,
+				    (long long)ao->off) < 2)
+				continue;
+			if (uml_nt_cowbreak_audit_count == 0) {
+				uml_nt_cowbreak_va = ao->va;
+				uml_nt_cowbreak_run = ao->off;
+				uml_nt_cowbreak_refs =
+					uml_nt_phys_refs(ph,
+					    (long long)ao->off);
+			}
+			uml_nt_cowbreak_audit_count++;
+		}
 	}
 	/* The fork child inherits the parent's guards (vma.h): the
 	 * fresh views come up at the VMA prots — re-apply NOACCESS so

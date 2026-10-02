@@ -39,6 +39,17 @@
 #define UML_NT_FOP_MAP     3u
 #define UML_NT_FOP_UNMAP   4u
 
+/* COW-BREAK AUDIT (M5.6a): uml_nt_mm_init_plan counts the emitted
+ * MAP ops that map a SHARED run (refs >= 2) WRITABLE — a write
+ * through such a view skips the COW fault and eats the sharer's
+ * memory (the heap-trasher class: cowwatch runs 37014552047 +
+ * 37017936382 — the writer = the fork child's own malloc init at
+ * nr=56/clone, rip = the glibc clone wrapper). Pure-file globals:
+ * the caller logs them at the INIT round. */
+extern int uml_nt_cowbreak_audit_count;
+extern unsigned long long uml_nt_cowbreak_va, uml_nt_cowbreak_run;
+extern int uml_nt_cowbreak_refs;
+
 /* UNMAP + up to 3 MAP pieces (COW split), or an INIT plan: one MAP
  * per VMA + guard NOACCESS protects. The plan is kernel-side only
  * (the stub sees ONE op per round-trip), so the cap is memory, not

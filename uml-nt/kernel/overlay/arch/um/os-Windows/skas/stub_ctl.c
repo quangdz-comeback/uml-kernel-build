@@ -899,6 +899,20 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		c->plan_left = c->plan.n_ops;
 		os_info("[stubtest] INIT pid %lu: %d map op(s)\n",
 			(unsigned long)c->pid, c->plan.n_ops);
+		/* COW-BREAK AUDIT (fault.h): a writable view over a
+		 * shared run in the INITIAL plan = the heap-trasher
+		 * class (the child eats the sharer's heap without a
+		 * COW fault). Loud once per INIT; behavior untouched
+		 * (diag) — the fix shape waits for Shelley. */
+		if (uml_nt_cowbreak_audit_count != 0)
+			os_info("[cowbreak-init] pid %lu: %d writable "
+				"map op(s) on shared runs — first "
+				"va=0x%llx run=0x%llx refs=%d\n",
+				(unsigned long)c->pid,
+				uml_nt_cowbreak_audit_count,
+				uml_nt_cowbreak_va,
+				uml_nt_cowbreak_run,
+				uml_nt_cowbreak_refs);
 		if (c->plan_left > 0) {
 			issue_plan_op(c, &c->plan.ops[0]);
 		} else {
