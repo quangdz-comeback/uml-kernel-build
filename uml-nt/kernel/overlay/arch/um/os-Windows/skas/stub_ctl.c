@@ -1591,11 +1591,18 @@ static void release_vma_sweep(const char *kind, long long off, int nruns,
 void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 			   int refs, const void *owner)
 {
-	os_info("[phys] %s off=0x%llx runs=%d refs=%d\n", kind,
-		(unsigned long long)off, nruns, refs);
-	/* park/free/park-spill hand a block back — check nobody's
-	 * live VMA still maps it. unref-refused/alloc-reject name
-	 * table-internal rot; the line above is the evidence. */
+	os_info("[phys] %s off=0x%llx runs=%d refs=%d owner=%s\n", kind,
+		(unsigned long long)off, nruns, refs,
+		owner == (const void *)0 ? "none" : "tagged");
+	/* WRITER-HUNT (M5.6a) run 36984940632: the rot generation
+	 * chain (heap piece <- cowcopy dst <- recycled run) says a
+	 * live conn's drop was PARKED under a FOREIGN tag — the D22
+	 * drop_owner is TABLE-GLOBAL and the table is SHARED between
+	 * forked conns: a dying child's teardown window mis-tags
+	 * every sharer's drop and its settle frees their blocks
+	 * early (free-while-mapped reborn). The tag identity on the
+	 * line = the mis-tag's witness: park owner must be the
+	 * dropping conn's OWN teardown, nobody else's. */
 	if (nruns > 0 && (strcmp(kind, "park") == 0 ||
 			  strcmp(kind, "free") == 0 ||
 			  strcmp(kind, "park-spill") == 0))
