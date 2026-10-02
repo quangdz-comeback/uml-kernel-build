@@ -268,6 +268,20 @@ jobs:
             echo "M5.5b-1 GATE MISS: no LOGIN-OK marker — login did not complete (termios/ioctl ENOSYS hunt likely, read the syscall table)"
             exit 1
           fi
+          # M5.5b close rule (Shelley, after the "green" 36984931372
+          # died post-gate): a milestone-closing run may NOT die after
+          # the marker — the log from the marker on must be clean of
+          # kernel/guest death, or the boot ended only after the fed
+          # shell job completed (the designed park-loud EOF is fine).
+          MK=$(grep -n "^LOGIN-OK" systemd.log | head -1 | cut -d: -f1)
+          if [ -n "$MK" ] && tail -n +"$MK" systemd.log \
+              | grep -qE "Caught <|Freezing|KERNEL NATIVE FAULT"; then
+            echo "M5.5b GATE MISS: post-marker death in the log (the 36984931372 class) — a milestone cannot close on this run"
+            exit 1
+          fi
+          # Close procedure (not automatable here): the M5.5b gates
+          # must pass in TWO CONSECUTIVE runs before the milestone
+          # closes — re-dispatch and confirm, tracked in STATUS.
 
       - name: Upload systemd.log
         if: always()
