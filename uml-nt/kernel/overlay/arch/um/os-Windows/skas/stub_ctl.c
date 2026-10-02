@@ -583,6 +583,13 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
 
+	/* D22 quarantine: this conn's previous round's plan ops have
+	 * applied (a new request only happens after the plan drained),
+	 * so blocks it parked at drop time can return to the backend;
+	 * and this round's drops park under THIS conn's tag. */
+	uml_nt_phys_settle(c->ph, c);
+	uml_nt_phys_set_drop_owner(c->ph, c);
+
 	if (d->cmd == UML_STUB_CMD_PROT_DONE) {
 		/* The stub reports its op result. Failure here means
 		 * the guest would re-fault forever — kill it instead

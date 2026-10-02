@@ -181,8 +181,14 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * M4.2): span_unref per VMA — shared runs survive on the other
 	 * contexts' refs (the table counts contexts, S3), private runs
 	 * return to the buddy backend. Then the table itself: forked
-	 * children SHARE the parent's (ph_shared) — never free that. */
+	 * children SHARE the parent's (ph_shared) — never free that.
+	 * D22: the dying conn tags its drops and settles immediately
+	 * after — its views die with the process (NtTerminateProcess),
+	 * so nothing it parked can alias anyone anymore. */
+	uml_nt_phys_set_drop_owner(c->ph, c);
 	uml_nt_mm_drop(c->mm, c->ph);
+	uml_nt_phys_settle(c->ph, c);
+	uml_nt_phys_set_drop_owner(c->ph, (const void *)0);
 	kfree(c->mm);
 	if (!c->ph_shared)
 		kfree(c->ph);

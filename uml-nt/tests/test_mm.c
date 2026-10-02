@@ -171,6 +171,86 @@ static void test_span(void)
 	CHECK((unsigned long long)uml_nt_phys_alloc(&p) == s);
 }
 
+/* D22 (Shelley phê): owner-view quarantine — a dropped block does not
+ * return to the backend while the dropping conn's pending plan UNMAP
+ * may still have the stub view mapped; a mis-ordered settle (the
+ * OTHER conn's) releases nothing; fork-mid (mm_clone) keeps a shared
+ * run alive on the child's claim. */
+static void test_phys_d22(void)
+{
+	struct uml_nt_phys p;
+	struct uml_nt_mm parent, child;
+	static int connA, connB;
+	unsigned long long r;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&p, 32 * RUN) == 0);
+
+	/* two views of one run: alloc (A's claim) + ref (B's) */
+	r = uml_nt_phys_alloc(&p);
+	CHECK((long long)r >= 0);
+	CHECK(uml_nt_phys_ref(&p, r) == 2);
+
+	/* B drops first: refs 1 — no park, no free */
+	uml_nt_phys_set_drop_owner(&p, &connB);
+	CHECK(uml_nt_phys_unref(&p, r) == 1);
+	CHECK(uml_nt_phys_parked(&p) == 0);
+	CHECK(mock_taken[0]);
+
+	/* A drops last: refs 0 — PARKED, the backend block stays
+	 * claimed and the allocator cannot hand IT out (the mis-
+	 * ordered drop must not free); other blocks are unaffected */
+	uml_nt_phys_set_drop_owner(&p, &connA);
+	CHECK(uml_nt_phys_unref(&p, r) == 0);
+	CHECK(uml_nt_phys_parked(&p) == 1);
+	CHECK(mock_taken[0]);
+	{
+		unsigned long long other =
+			(unsigned long long)uml_nt_phys_alloc(&p);
+
+		CHECK(other != r);
+		uml_nt_phys_set_drop_owner(&p, (const void *)0);
+		CHECK(uml_nt_phys_unref(&p, (long long)other) == 0);
+	}
+
+	/* the WRONG owner's settle releases nothing */
+	uml_nt_phys_settle(&p, &connB);
+	CHECK(uml_nt_phys_parked(&p) == 1);
+	CHECK(mock_taken[0]);
+
+	/* the owner's settle frees; the block is reusable again */
+	uml_nt_phys_settle(&p, &connA);
+	CHECK(uml_nt_phys_parked(&p) == 0);
+	CHECK(!mock_taken[0]);
+	CHECK((unsigned long long)uml_nt_phys_alloc(&p) == r);
+
+	/* fork giữa chừng: the shared run survives both drops on the
+	 * child's own claim; the last drop parks under ITS tag */
+	mock_reset();
+	CHECK(uml_nt_phys_init(&p, 32 * RUN) == 0);
+	uml_nt_mm_init(&parent);
+	r = uml_nt_phys_alloc_span(&p, 2); /* the VMA backs 2 runs */
+	CHECK((long long)r >= 0);
+	CHECK(uml_nt_vma_add(&parent, RAM, RAM + 2 * RUN, r,
+			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
+	CHECK(uml_nt_mm_clone(&child, &parent, &p, 0) == 0);
+	CHECK(uml_nt_phys_refs(&p, r) == 2);
+
+	uml_nt_phys_set_drop_owner(&p, &connA);
+	uml_nt_mm_drop(&parent, &p);
+	CHECK(uml_nt_phys_refs(&p, r) == 1);
+	CHECK(mock_taken[0]);
+
+	uml_nt_phys_set_drop_owner(&p, &connB);
+	uml_nt_mm_drop(&child, &p);
+	CHECK(uml_nt_phys_parked(&p) == 1);
+	CHECK(mock_taken[0]);
+
+	uml_nt_phys_settle(&p, &connB);
+	CHECK(!mock_taken[0]);
+	CHECK(uml_nt_phys_parked(&p) == 0);
+}
+
 /* D11 translate: syscall buffers go through the VMA tree, never the
  * identity (va - ram_base). */
 static void test_translate(void)
@@ -1255,6 +1335,7 @@ int main(void)
 {
 	test_phys();
 	test_span();
+	test_phys_d22();
 	test_vma();
 	test_vma_del_pieces();
 	test_translate();

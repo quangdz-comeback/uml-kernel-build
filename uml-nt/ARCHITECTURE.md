@@ -321,3 +321,36 @@ image) là trọng tài.
 **Non-goal:** không patch binfmt_elf upstream; không vDSO giai đoạn này
 (clock_gettime đã kernel-side — RTT 26µs chấp nhận được cho boot; vDSO
 mở ở M6 nếu cần perf).
+
+## D21 (2026-10-01, Astra one-shot phân tích — Shelley phê)
+ET_EXEC lớn tại low guest VA thật + span backing có giới hạn.
+- Vấn đề: (a) ET_EXEC nhiều PT_LOAD chồng (python3.11: 4 segment merge
+  [0x400000,0xad0000) = 109 runs) → D12 đòi buddy order > MAX_PAGE_ORDER
+  → NOMEM; (b) elf.c:255-265 rebase +0x60000000 KHÔNG relocate absolute
+  pointers — ET_EXEC với absolute refs (python) vẫn invalid dù alloc xong;
+  (c) binfmt.c:373 convert NOMEM(-7) thành ENOEXEC(-8) — che gốc rễ.
+- Quyết: hỗ trợ ET_EXEC tại guest VA thật (0x400000...) — decouple guest
+  address khỏi section offset xuyên suốt loader/VMA/stub trap filter;
+  bound từng span backing liên tục (không đòi order > MAX_PAGE_ORDER —
+  tách span, giữ copy/patch/protect/refcount xuyên span).
+- CẤM: chỉ tăng MAX_PAGE_ORDER (không đủ, nguy hiểm); rebase + hi vọng
+  relocate (sai với arbitrary ET_EXEC).
+- Test-image rule: mask cloud-init units trên bản CI copy (provisioning
+  fluff, không cần cho gate multi-user) — không phải fix kernel, chỉ
+  tránh phụ thuộc python trước khi D21 land. D21 vẫn bắt buộc cho distro
+  software thật (node/qemu/...).
+
+## D22 (2026-10-01 khuya, Shelley phê — từ evidence 069/077/078/081)
+Run lifecycle invariant: owner-view refcount + recycle-zero.
+- Bệnh (bằng chứng hai chiều): free-while-mapped ×14+/boot + double-free
+  0x3990000 + zero-read-back + chuỗi guest (STREAM=7 / a%UTEMD_S$UTEMD_ /
+  EXEC_PID) landed trong malloc meta → run bị phys-free TRONG KHI view/
+  mapping khác còn trỏ → trang tái cấp cho chuỗi/env, heap cũ đọc giá trị mới.
+  Dice: trúng meta PID1 → abort (ĐỎ); chỉ trúng con → XANH (giải thích flake).
+- Quyết: run chỉ phys-free khi (a) mọi view/VMA sở hữu đã unref, (b) mọi
+  pending COW/plan op trên run đã settle. Trang tái cấp từ phys allocator
+  PHẢI zero (recycle-zero) trước khi nhận mapping mới — không tin nội dung cũ.
+- Ảnh hưởng: D12 phys backend ledger + conn view refs + fork handoff
+  (arm/disarm/seed window 01dfd94 đã map) + private-block ledger (f2eb9c7).
+- Trọng tài: unit test multi-owner run (2 view + fork giữa chừng + drop thứ
+  tự sai phải không-free) + M5.5a gate vẫn xanh (dice phải mất).

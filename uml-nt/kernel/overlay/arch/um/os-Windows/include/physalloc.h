@@ -32,6 +32,25 @@
 #define UML_NT_PHYS_RUN_SIZE   (1ull << UML_NT_PHYS_RUN_SHIFT)
 #define UML_NT_PHYS_MAX_RUNS   4096  /* 4096 * 64K = 256 MiB POC ceiling */
 
+/* D22 (Shelley phê 2026-10-01): the recycle quarantine — a dropped
+ * block does NOT return to the backend while the dropping view's
+ * stub may still have it mapped (the plan UNMAP rides the NEXT reply;
+ * between the kernel-side drop and the stub applying it, another
+ * conn's alloc could hand the SAME block out and map it — the
+ * free-while-mapped alias that landed guest env strings
+ * (STREAM=7 / a%UTEMD_S$UTEMD_ / EXEC_PID) inside PID 1's malloc
+ * metadata). Parked blocks release at the owner's NEXT serve round
+ * (uml_nt_phys_settle — a new request proves the previous plan's ops
+ * applied); a conn that dies releases everything it parked at destroy
+ * (its views die with the process). */
+#define UML_NT_PHYS_PARK_MAX  128
+
+struct uml_nt_phys_park {
+	long long off;      /* block owner-run byte offset */
+	int nruns;
+	const void *owner;  /* view tag (conn pointer) at drop time */
+};
+
 /* Guest VA span base (stub_nt.h UML_STUB_RAM_BASE — the unit tests
  * assert the two agree; single physmem-geometry source lives here). */
 #define UML_NT_GUEST_VA_BASE   0x60000000ull
@@ -49,6 +68,14 @@ struct uml_nt_phys {
 	void *pages[UML_NT_PHYS_MAX_RUNS];        /* owner run only */
 	unsigned short span_len[UML_NT_PHYS_MAX_RUNS];  /* 0 = free run */
 	unsigned short span_back[UML_NT_PHYS_MAX_RUNS]; /* dist to owner */
+	/* D22 quarantine (see UML_NT_PHYS_PARK_MAX): blocks dropped to
+	 * 0 while a view owner is tagged wait here instead of going
+	 * straight back to the backend. NULL drop-owner (drops outside
+	 * any conn dispatch — no plan ops can be pending) frees
+	 * immediately, the pre-D22 behavior. */
+	struct uml_nt_phys_park park[UML_NT_PHYS_PARK_MAX];
+	int npark;
+	const void *drop_owner; /* the view performing current drops */
 };
 
 /* Initialize the refcount layer over a section of `size` bytes.
@@ -91,7 +118,14 @@ int uml_nt_phys_refs(struct uml_nt_phys *p, long long off);
  * anon mmap got the TCB's pages). Pure-file neutrality: the pointer
  * stays NULL in unit tests; the kernel pins it at boot (main.c →
  * stub_ctl.c os_info). Fires for:
- *   "free"          — a block returned to the backend (off = base)
+ *   "park"          — a block dropped to 0 under a tagged owner went
+ *                     to the D22 quarantine (off = base; frees at
+ *                     the owner's settle)
+ *   "park-spill"    — the quarantine ring overflowed; the OLDEST
+ *                     parked block released early (bounded memory —
+ *                     a degenerate alias window, loud)
+ *   "free"          — a block returned to the backend (at settle/
+ *                     spill/untagged-drop time; off = base)
  *   "unref-refused" — an unref on a 0-ref run: an unbalanced claim
  *                     drop (THEFT signal — somebody dropped a claim
  *                     they never held; the surviving owner loses the
@@ -101,5 +135,21 @@ int uml_nt_phys_refs(struct uml_nt_phys *p, long long off);
 typedef void (*uml_nt_phys_event_fn)(const char *kind, long long off,
 				     int nruns, int refs);
 extern uml_nt_phys_event_fn uml_nt_phys_event;
+
+/* D22 view-owner tagging: the conn layer sets THIS dispatch's owner
+ * (the conn) at serve entry and at mmctx destroy's mm_drop; drops
+ * made under a tag park their blocks instead of freeing them (see
+ * UML_NT_PHYS_PARK_MAX). NULL (the init/default) restores the
+ * immediate-free behavior — nothing outside a dispatch can have
+ * pending plan ops. */
+void uml_nt_phys_set_drop_owner(struct uml_nt_phys *p, const void *owner);
+
+/* D22 settle: the owner's previous plan ops have applied (a new
+ * request arrived, or the conn died at destroy) — release every
+ * block it parked. */
+void uml_nt_phys_settle(struct uml_nt_phys *p, const void *owner);
+
+/* Quarantine depth (telemetry/tests). */
+int uml_nt_phys_parked(const struct uml_nt_phys *p);
 
 #endif /* __UM_OS_WINDOWS_PHYSALLOC_H */
