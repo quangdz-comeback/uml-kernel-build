@@ -173,6 +173,11 @@ static int __init nt_con_init(void)
 	g_driver->type = TTY_DRIVER_TYPE_CONSOLE;
 	g_driver->subtype = SYSTEM_TYPE_CONSOLE;
 	g_driver->init_termios = tty_std_termios;
+	/* The NT host conhost sends Backspace as BS (0x08), while
+	 * tty_std_termios carries VERASE=0x7f (DEL) — canonical N_TTY
+	 * echoes the unmatched byte raw (^H) and never erases. Match
+	 * what the host actually emits; apps may still stty over it. */
+	g_driver->init_termios.c_cc[VERASE] = 0x08;
 	tty_set_operations(g_driver, &nt_con_ops);
 
 	/* Wire the port into the device slot BEFORE registering: it is
