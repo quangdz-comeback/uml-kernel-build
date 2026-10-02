@@ -110,6 +110,25 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns);
  * through the flat view. -1 on bad offsets. */
 int uml_nt_phys_ref(struct uml_nt_phys *p, long long off);
 int uml_nt_phys_unref(struct uml_nt_phys *p, long long off);
+
+/* WRITER-HUNT (M5.6a, run 36987612985): the per-drop owner. The D22
+ * table-global drop_owner tag LEAKS across a SHARED table (forked
+ * conns share ph): a dying conn's teardown window mis-tags every
+ * sharer's unref-to-0, and its settle frees their blocks while the
+ * live conn's UNMAP ops are still pending — the free-while-mapped
+ * alias reborn through table sharing (the heap-trasher ABRT family:
+ * PID 1's heap run recycled under a foreign tag, another conn's
+ * legit writes land inside PID 1's malloc metadata).
+ *
+ * unref_for names the dropping conn AT THE CALL: conn != NULL → the
+ * dropped block parks under THAT conn (its own serve-round settle
+ * releases it after its plan ops applied); conn == NULL → the drop
+ * is outside any dispatch (no plan ops can be pending) → release
+ * immediately (pre-D22 behavior). The table-global tag dies with
+ * this call: unref() stays as the NULL-owner shorthand and the
+ * drop_owner field/setter become unused legacy. */
+int uml_nt_phys_unref_for(struct uml_nt_phys *p, long long off,
+			  const void *conn);
 int uml_nt_phys_refs(struct uml_nt_phys *p, long long off);
 
 /* Refcount event hook (map 049: the run 0x28b0000 double-claim — a

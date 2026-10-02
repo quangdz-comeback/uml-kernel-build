@@ -324,13 +324,17 @@ static int span_ref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)
 	return 0;
 }
 
-static void span_unref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)
+/* WRITER-HUNT (M5.6a): per-drop owner variant — parks under the
+ * conn named here (physalloc.h unref_for), never under a
+ * table-global tag. */
+static void span_unref_for(struct uml_nt_phys *ph,
+			   const struct uml_nt_vma *v, const void *owner)
 {
 	unsigned long long off;
 
 	for (off = v->run_off; off < v->run_off + (v->end - v->start);
 	     off += UML_NT_PHYS_RUN_SIZE)
-		uml_nt_phys_unref(ph, (long long)off);
+		uml_nt_phys_unref_for(ph, (long long)off, owner);
 }
 
 /* Clone the address-space bookkeeping for a fork child. Returns 0,
@@ -431,14 +435,20 @@ const char *uml_nt_clone_reason(int rc)
 	}
 }
 
-void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
+void uml_nt_mm_drop_for(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			const void *owner)
 {
 	int i;
 
 	for (i = 0; i < mm->nvma; i++)
-		span_unref(ph, &mm->vma[i]);
+		span_unref_for(ph, &mm->vma[i], owner);
 	mm->nvma = 0;
 	mm->nguard = 0;
+}
+
+void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
+{
+	uml_nt_mm_drop_for(mm, ph, (const void *)0);
 }
 
 /* WRITER-HUNT (M5.6a): cross-VMA run alias audit. Two VMAs of the

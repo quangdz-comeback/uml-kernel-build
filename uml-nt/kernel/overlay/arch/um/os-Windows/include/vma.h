@@ -211,6 +211,15 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
  * same run counted once). */
 void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph);
 
+/* WRITER-HUNT (M5.6a): mm_drop with the DROPPING conn named at the
+ * call — every unref parks under THIS conn (its own settle releases
+ * the block after its pending UNMAP ops applied). The teardown must
+ * NOT touch the table-global tag (shared tables: overwriting it
+ * mis-tagged live conns' drops inside the teardown window — the
+ * free-while-mapped alias reborn, run 36987612985). */
+void uml_nt_mm_drop_for(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			const void *owner);
+
 /* WRITER-HUNT (M5.6a): count cross-VMA run aliases (two VMAs of one
  * mm claiming overlapping runs — the double-claim/under-count class).
  * 0 = clean. Pure (unit-testable, no os_info — vma.c stays pure). */

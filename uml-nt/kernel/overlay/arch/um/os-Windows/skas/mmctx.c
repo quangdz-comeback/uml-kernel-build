@@ -185,7 +185,20 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * D22: the dying conn tags its drops and settles immediately
 	 * after — its views die with the process (NtTerminateProcess),
 	 * so nothing it parked can alias anyone anymore. */
-	uml_nt_phys_set_drop_owner(c->ph, c);
+	/* D22/M5.6a repair (runs 36984940632 + 36987612985): the
+	 * teardown names its OWN conn at every drop (mm_drop_for —
+	 * the parks belong to it, its settle releases them) and
+	 * NEVER touches the table-global drop_owner tag: that tag
+	 * belongs to whichever conn is in dispatch (serve_conn sets
+	 * it per round; the table is SHARED between forked conns).
+	 * Overwriting it here mis-tagged live conns' drops inside
+	 * the teardown window and this settle freed their blocks
+	 * while their UNMAP ops were still pending — the
+	 * free-while-mapped alias reborn: PID 1's heap runs handed
+	 * to other conns whose legit writes land inside PID 1's
+	 * malloc metadata (the heap-trasher ABRT family). The dying
+	 * conn's views die with the process (NtTerminateProcess),
+	 * so nothing it parked can alias anyone anymore. */
 	{
 		int na = uml_nt_mm_drop_audit(c->mm);
 
@@ -194,9 +207,8 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 				"run alias(es) — double-claim witness\n",
 				id->pid, na);
 	}
-	uml_nt_mm_drop(c->mm, c->ph);
+	uml_nt_mm_drop_for(c->mm, c->ph, c);
 	uml_nt_phys_settle(c->ph, c);
-	uml_nt_phys_set_drop_owner(c->ph, (const void *)0);
 	kfree(c->mm);
 	if (!c->ph_shared)
 		kfree(c->ph);

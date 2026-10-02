@@ -157,13 +157,18 @@ static void block_park(struct uml_nt_phys *p, int o, const void *owner)
 
 /* Drop one run to 0 and release its block when the LAST run of the
  * block does (D12: pieces of a COW-split span keep the block alive
- * independently of the owner run). D22: under a tagged drop-owner the
- * release PARKS — the dropping conn's pending plan UNMAP applies only
- * with its next reply, and a backend hand-back before that could hand
- * the SAME block to another conn's mapping (the free-while-mapped
- * alias). Untagged drops (outside any dispatch — no plan ops can be
- * pending) release immediately, the pre-D22 behavior. */
-int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
+ * independently of the owner run). D22, REPAIRED per-conn (M5.6a
+ * run 36987612985): a drop inside a dispatch parks under THE
+ * DROPPING CONN (its pending plan UNMAP applies with its next
+ * reply; its own serve-round settle frees the park after that) —
+ * NOT under a table-global tag, which on a SHARED table mis-tagged
+ * every sharer's drop inside a teardown window and let the dying
+ * conn's settle release live conns' blocks early (the
+ * free-while-mapped alias reborn — the heap-trasher ABRT family).
+ * conn == NULL (outside any dispatch — no plan ops can be pending)
+ * releases immediately. */
+int uml_nt_phys_unref_for(struct uml_nt_phys *p, long long off,
+			  const void *conn)
 {
 	int i = run_index(p, off);
 	int o, n, k;
@@ -174,7 +179,7 @@ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
 		 * ITS drop lands. Loud through the hook. */
 		if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
 			uml_nt_phys_event("unref-refused", off, 1, 0,
-					  p->drop_owner);
+					  conn);
 		return -1;
 	}
 	if (--p->refs[i] != 0)
@@ -186,11 +191,16 @@ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
 		if (p->refs[o + k] != 0)
 			return 0; /* block still referenced — keep it */
 	}
-	if (p->drop_owner != (const void *)0)
-		block_park(p, o, p->drop_owner);
+	if (conn != (const void *)0)
+		block_park(p, o, conn);
 	else
 		block_release(p, o, (const void *)0);
 	return 0;
+}
+
+int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
+{
+	return uml_nt_phys_unref_for(p, off, p->drop_owner);
 }
 
 void uml_nt_phys_settle(struct uml_nt_phys *p, const void *owner)

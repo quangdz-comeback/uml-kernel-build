@@ -225,7 +225,9 @@ static void test_phys_d22(void)
 	CHECK((unsigned long long)uml_nt_phys_alloc(&p) == r);
 
 	/* fork giữa chừng: the shared run survives both drops on the
-	 * child's own claim; the last drop parks under ITS tag */
+	 * child's own claim; the last drop parks under ITS OWN conn
+	 * (mm_drop_for names the dropper — M5.6a: the teardown never
+	 * touches the table-global tag) */
 	mock_reset();
 	CHECK(uml_nt_phys_init(&p, 32 * RUN) == 0);
 	uml_nt_mm_init(&parent);
@@ -236,19 +238,48 @@ static void test_phys_d22(void)
 	CHECK(uml_nt_mm_clone(&child, &parent, &p, 0) == 0);
 	CHECK(uml_nt_phys_refs(&p, r) == 2);
 
-	uml_nt_phys_set_drop_owner(&p, &connA);
-	uml_nt_mm_drop(&parent, &p);
+	uml_nt_mm_drop_for(&parent, &p, &connA);
 	CHECK(uml_nt_phys_refs(&p, r) == 1);
 	CHECK(mock_taken[0]);
 
-	uml_nt_phys_set_drop_owner(&p, &connB);
-	uml_nt_mm_drop(&child, &p);
+	uml_nt_mm_drop_for(&child, &p, &connB);
+	CHECK(uml_nt_phys_parked(&p) == 1);
+	CHECK(mock_taken[0]);
+
+	/* the WRONG owner's settle frees nothing of B's park */
+	uml_nt_phys_settle(&p, &connA);
 	CHECK(uml_nt_phys_parked(&p) == 1);
 	CHECK(mock_taken[0]);
 
 	uml_nt_phys_settle(&p, &connB);
 	CHECK(!mock_taken[0]);
 	CHECK(uml_nt_phys_parked(&p) == 0);
+
+	/* M5.6a regression (runs 36984940632 + 36987612985): a live
+	 * conn's drop inside ANOTHER conn's teardown window parks
+	 * under the LIVE conn — the dying conn's settle must not
+	 * free it. unref_for ignores the table-global tag entirely
+	 * (the old bug: the teardown overwrote the shared table's
+	 * tag and its settle freed live conns' blocks with their
+	 * UNMAP ops still pending — the free-while-mapped alias
+	 * reborn). */
+	mock_reset();
+	CHECK(uml_nt_phys_init(&p, 32 * RUN) == 0);
+	r = uml_nt_phys_alloc(&p); /* the LIVE conn's block */
+	CHECK((long long)r >= 0);
+
+	uml_nt_phys_set_drop_owner(&p, &connA); /* stale teardown tag */
+	CHECK(uml_nt_phys_unref_for(&p, (long long)r, &connB) == 0);
+	CHECK(uml_nt_phys_parked(&p) == 1);
+	CHECK(mock_taken[0]);
+
+	uml_nt_phys_settle(&p, &connA);      /* the teardown's settle */
+	CHECK(uml_nt_phys_parked(&p) == 1);  /* B's park SURVIVES it */
+	CHECK(mock_taken[0]);
+
+	uml_nt_phys_settle(&p, &connB);      /* B's own round settle */
+	CHECK(uml_nt_phys_parked(&p) == 0);
+	CHECK(!mock_taken[0]);
 }
 
 /* D11 translate: syscall buffers go through the VMA tree, never the
