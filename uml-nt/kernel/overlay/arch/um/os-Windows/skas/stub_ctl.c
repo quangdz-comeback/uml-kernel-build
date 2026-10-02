@@ -855,6 +855,15 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			 * through d->retval and clobbered it). */
 			d->retval = c->plan_retval;
 			c->plan_has_retval = 0;
+			/* D23 (a) census: the syscall that queued these
+			 * ops — the fork's parent re-protect included —
+			 * now has EVERY op applied before the guest
+			 * resumes. The stub-side verify (stub.c
+			 * verify_prot) proved each apply actually took;
+			 * this line proves the retval waited for it. */
+			os_info("[fork-sync] plan done: %d op(s) applied, "
+				"retval 0x%llx published\n", c->plan.n_ops,
+				(unsigned long long)c->plan_retval);
 		}
 		d->action = UML_STUB_ACTION_NONE;
 		d->err = 0;

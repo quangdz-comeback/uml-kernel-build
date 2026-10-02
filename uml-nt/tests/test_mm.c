@@ -1399,6 +1399,49 @@ static void test_stack_window(void)
 	}
 }
 
+/* Shelley-mandated (answer to 093+094, D23 (a)): the parent writes
+ * its heap IMMEDIATELY after the clone retval — before ANY round.
+ * The clone flagged the parent's view COW (vma.c mm_clone: "upstream
+ * fork marks BOTH pte tables read-only"), so the write must take the
+ * COW path (a private copy + the RO split pieces), NEVER the
+ * private-page restore-W over the shared run (the stomp = the
+ * heap-trasher, cowwatch 37014552047/37017936382/37021184517/
+ * 37025633434). */
+static void test_fork_cow_parent_write(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm parent, child;
+	struct uml_nt_fault_plan plan;
+	long long r0;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&parent);
+	r0 = uml_nt_phys_alloc_span(&ph, 2); /* the heap = 2 runs */
+	CHECK(r0 >= 0);
+	/* the parent's heap: [RAM, RAM+2RUN) W, not COW yet (a fresh
+	 * brk grow) */
+	CHECK(uml_nt_vma_add(&parent, RAM, RAM + 2 * RUN, r0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+
+	CHECK(uml_nt_mm_clone(&child, &parent, &ph, 0) == 0);
+	CHECK(uml_nt_phys_refs(&ph, r0) == 2);
+	CHECK(parent.vma[0].flags & UML_NT_VMA_COW);
+	CHECK(child.vma[0].flags & UML_NT_VMA_COW);
+
+	/* THE PARENT WRITES ITS HEAP IMMEDIATELY (no round in
+	 * between): the fault must COW-copy, never restore-W over
+	 * the shared run. */
+	uml_nt_cowbreak_faults = 0;
+	CHECK(uml_nt_mm_fault(&parent, &ph, RAM + RUN + 0x800,
+			      UML_NT_FAULT_WRITE, &plan) == 0);
+	CHECK(!plan.kill);
+	CHECK(uml_nt_cowbreak_faults == 0);
+	CHECK(plan.copy_src_off == (unsigned long long)r0 + RUN);
+	CHECK(plan.copy_dst_off != 0);
+	CHECK(uml_nt_phys_refs(&ph, r0 + RUN) == 1);
+}
+
 /* WRITER-HUNT (M5.6a): the bulk-fill boundary guard — every run
  * covering [off, off+len) must be live AND owned by the first run's
  * span (a fill spilling into the neighbor block / a dead run is the
@@ -1500,6 +1543,7 @@ int main(void)
 	test_phys();
 	test_span();
 	test_phys_d22();
+	test_fork_cow_parent_write();
 	test_phys_block_check();
 	test_vma();
 	test_vma_del_pieces();

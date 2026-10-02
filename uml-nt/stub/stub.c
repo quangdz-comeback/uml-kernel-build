@@ -212,6 +212,32 @@ static ULONG map_access(unsigned prot)
 	return 0x26u; /* FILE_MAP_EXECUTE | READ | WRITE */
 }
 
+/* D23 (a) verify: the protection the guest will actually fault on
+ * must equal what the kernel asked. A silent mismatch = a writable
+ * view over a COW-shared run (the fork re-protect window) with no
+ * fault to catch the parent's write — the heap-trasher shape. The
+ * region is uniform (one protect per op), so query the first page;
+ * guard/nocache attribute bits do not change the fault verdict. */
+static int verify_prot(void *base, ULONG want)
+{
+	MEMORY_BASIC_INFORMATION mb;
+	ULONG have;
+
+	if (!VirtualQuery(base, &mb, sizeof(mb))) {
+		fprintf(stderr, "stub: verify VirtualQuery(%p) failed "
+			"(%lu)\n", base, GetLastError());
+		return 0;
+	}
+	have = mb.Protect & ~(ULONG)(PAGE_GUARD | PAGE_NOCACHE);
+	if (have != want) {
+		fprintf(stderr, "stub: verify va=%p want=%#lx have=%#lx "
+			"(state %#x) — protect MISMATCH\n", base, want,
+			have, (unsigned)mb.State);
+		return 0;
+	}
+	return 1;
+}
+
 /* Execute one ACTION_* against this stub's views. Returns 1 = ok,
  * 0 = failed (the kernel sees it and kills us loudly — a silent
  * resume would loop the guest fault forever). */
@@ -230,7 +256,7 @@ static int do_action(void)
 				(unsigned)d->prot, GetLastError());
 			return 0;
 		}
-		return 1;
+		return verify_prot(page, d->prot);
 	}
 	case UML_STUB_ACTION_MAP: {
 		void *base = MapViewOfFileEx(phys_sec,
@@ -259,7 +285,7 @@ static int do_action(void)
 				(unsigned)d->map_prot, GetLastError());
 			return 0;
 		}
-		return 1;
+		return verify_prot(base, d->map_prot);
 	}
 	case UML_STUB_ACTION_UNMAP:
 		/* UnmapViewOfFile releases a WHOLE view — the kernel
