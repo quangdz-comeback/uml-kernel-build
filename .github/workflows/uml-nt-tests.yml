@@ -17,6 +17,9 @@ jobs:
           bash uml-nt/tests/test_os_windows_skeleton.sh
           bash uml-nt/tests/test_scan_patch.sh
           bash uml-nt/tests/test_mm.sh
+          # 100-real-alpine: console-status classifier — the stdin
+          # reader must survive the spurious WAIT_1-class wakes
+          bash uml-nt/tests/test_console.sh
           # M3.7 uaccess walker (D15) over the vma tree
           bash uml-nt/tests/test_uaccess.sh
           # M4.1 bench stats — the pure math the freestanding kernel

@@ -38,6 +38,7 @@
 #include <linux/tty_flip.h>
 #include <ntabi.h>
 #include <os.h>
+#include "console_status.h"
 #include "internal.h"
 
 /* ---- tty driver -------------------------------------------------------- */
@@ -99,16 +100,50 @@ static struct console nt_cons = {
 static unsigned long __attribute__((ms_abi)) nt_con_reader(void *arg)
 {
 	static unsigned char buf[512];
+	static unsigned int status_seen[8][2]; /* status, count */
+	static unsigned int nstatus_seen;
 	IO_STATUS_BLOCK iosb;
 	NTSTATUS s;
 
+	(void)arg;
 	for (;;) {
+		int cls, i, found = 0;
+
 		s = nt->NtReadFile(uml_boot.stdio_in, NULL, NULL, NULL,
 				   &iosb, buf, sizeof(buf), NULL, NULL);
-		if (!NT_SUCCESS(s) || iosb.Information == 0) {
+		cls = nt_con_status_class((long long)s);
+		/* (3) log every status once, re-log at x1000. */
+		for (i = 0; i < (int)nstatus_seen; i++)
+			if (status_seen[i][0] == (unsigned int)s) {
+				found = 1;
+				status_seen[i][1]++;
+				if (status_seen[i][1] == 1000)
+					os_info("console: stdin status "
+						"%08x seen x1000\n", s);
+				break;
+			}
+		if (!found && nstatus_seen < 8) {
+			os_info("console: stdin status %08x (class=%s)",
+				s, cls == NT_CON_RETRY ? "retry" :
+				"fatal");
+			status_seen[nstatus_seen][0] = (unsigned int)s;
+			status_seen[nstatus_seen][1] = 1;
+			nstatus_seen++;
+		}
+		if (cls == NT_CON_RETRY) {
+			if (iosb.Information == 0) {
+				/* (1) a spurious wake (WAIT_1 class) —
+				 * re-arm the read; the 100µs yield
+				 * keeps a pathological repeat from
+				 * spinning a core. */
+				nt->NtDelayExecution(0, &(LARGE_INTEGER)
+					{ .QuadPart = -1000 });
+				continue;
+			}
+		} else {
 			/* stdin closed/EOF (CI: no input): park loud. */
-			os_info("console: stdin reader stopped (status %08x)",
-				s);
+			os_info("console: stdin reader stopped (status "
+				"%08x)", s);
 			return 0;
 		}
 		tty_insert_flip_string(&g_port, buf, iosb.Information);

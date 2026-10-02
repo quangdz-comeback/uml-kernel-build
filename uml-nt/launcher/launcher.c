@@ -558,6 +558,19 @@ int main(int argc, char **argv)
 	bi->envp = kenv_p;
 	bi->exec_section = exec_sec;
 	bi->exec_size = exec_size;
+	/* Raw console: drop ENABLE_PROCESSED_INPUT so Ctrl-C is a 0x03
+	 * byte the guest tty turns into SIGINT — the processed mode
+	 * would let Windows swallow the key (and with it any chance
+	 * the guest sees it); Shelley's 100-real-alpine freeze asks
+	 * the interrupt to REACH the guest, not the host. */
+	{
+		HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+		DWORD m;
+
+		if (in != INVALID_HANDLE_VALUE && GetConsoleMode(in, &m))
+			SetConsoleMode(in,
+				       m & ~(DWORD)ENABLE_PROCESSED_INPUT);
+	}
 
 	/* The slot _start reads: [rsp] = boot_info pointer. Keep rsp
 	 * 16-aligned here; _start bumps by 8 to mimic call alignment. */
