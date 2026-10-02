@@ -48,6 +48,18 @@
 #define UML_NT_ELF_SEG     (-6) /* too many regions / bad segment */
 #define UML_NT_ELF_NOMEM   (-7) /* phys backend exhausted */
 #define UML_NT_ELF_MM      (-8) /* VMA table full / collision */
+#define UML_NT_ELF_FILL    (-9) /* WRITER-HUNT (M5.6a): a load fill
+				 * would leave its allocated block —
+				 * direct-write class, refused. The
+				 * region/off/len land in the
+				 * uml_nt_elf_fill_* globals (pure file:
+				 * no os_info here — the caller logs). */
+
+/* WRITER-HUNT (M5.6a): the fill-guard's last failure context — the
+ * loader's callers log these when a load fails with UML_NT_ELF_FILL
+ * (the loader module is pure: no os_info of its own). */
+extern int uml_nt_elf_fill_region;
+extern unsigned long long uml_nt_elf_fill_off, uml_nt_elf_fill_len;
 
 /* One merged, run-aligned load region: [start, end) guest VA backed
  * by the contiguous span at run_off with `prot` (NT PAGE_*). */

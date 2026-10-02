@@ -230,6 +230,22 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 				nruns, mm->brk);
 			return mm->brk;
 		}
+		/* WRITER-HUNT (M5.6a): the re-home is a bulk fill of
+		 * old_len bytes into the fresh span — both ends must
+		 * stay inside their own allocated blocks. On a check
+		 * failure keep the old brk (Linux failure semantics,
+		 * same shape as the exhausted path above) — the log
+		 * names the side that crossed. */
+		if (uml_nt_phys_block_check(c->ph, (long long)new_off,
+					    old_len) < 0 ||
+		    uml_nt_phys_block_check(c->ph, (long long)old_off,
+					    old_len) < 0) {
+			os_info("[fillguard] brk re-home old=0x%llx "
+				"new=0x%llx len=%llu: block check "
+				"failed — kept 0x%llx\n", old_off,
+				new_off, old_len, mm->brk);
+			return mm->brk;
+		}
 		memcpy((char *)uml_boot.physmem_base + new_off,
 		       (char *)uml_boot.physmem_base + old_off, old_len);
 
@@ -582,6 +598,19 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 		}
 		piece = (end < v->end) ? end : v->end;
 		dst = v->run_off + (cur - v->start);
+		/* WRITER-HUNT (M5.6a): a fill piece that would leave
+		 * the VMA's allocated span (cross-block / dead run) is
+		 * the direct-write heap-trasher caught red-handed —
+		 * refuse the write, fail the mapping loud. */
+		if (uml_nt_phys_block_check(c->ph, (long long)dst,
+					    piece - cur) < 0) {
+			os_info("[fillguard] mmap_fill 0x%llx+%llu: dst "
+				"off=0x%llx leaves the block (vma "
+				"[0x%llx,0x%llx) off=0x%llx) — refused\n",
+				cur, piece - cur, dst, v->start, v->end,
+				v->run_off);
+			return -1;
+		}
 		memset((char *)uml_boot.physmem_base + dst, 0,
 		       piece - cur);
 		if (!zero && f != NULL) {

@@ -579,6 +579,89 @@ static void stack_window_reassert(struct uml_nt_stub_conn *c)
 	}
 }
 
+/* WRITER-HUNT (M5.6a): the tcache canary watch — read-only validator
+ * at the poison site, every serve round. glibc 2.36: the
+ * tcache_perthread_struct is the heap's first chunk
+ * [heap_start, +0x290): counts[64] u16 then entries[64] safe-linked
+ * pointers (raw = mangled ^ (slot_va >> 12)). Every entry must
+ * un-mangle to 0 or a 16-aligned pointer this mm translates (own
+ * heap or own mmap arenas — both are VMAs here); every count <= 7
+ * (mp_.tcache_count). The observed poison fails both ("a%UTEMD_
+ * S$UTEMD_" text fragments, misaligned heap-range values). The fire
+ * dump covers the slack on BOTH sides of the struct (the spill
+ * direction) + the round attribution (last_nr/last_ret + trap regs).
+ * Read-only by design: writing canary BYTES around the struct would
+ * corrupt live malloc metadata — the very corruption being hunted.
+ * One-shot per conn, global budget (os_info 256-byte lesson: short
+ * lines, structured rows). */
+#define UML_NT_TCACHE_COUNTS 64
+#define UML_NT_TCACHE_LIMIT  7
+static int tcache_watch_budget = 8;
+static void tcache_watch(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_mm *mm = c->mm;
+	unsigned long long tva, base;
+	unsigned short counts[UML_NT_TCACHE_COUNTS];
+	unsigned long long entries[UML_NT_TCACHE_COUNTS];
+	long long off;
+	int i;
+
+	if (tcache_watch_budget <= 0 || c->tcache_fired ||
+	    !c->task_backed || mm == NULL || mm->heap_start == 0)
+		return;
+	tva = mm->heap_start + 0x10; /* chunk data past the header */
+	/* The glibc shape check first: the heap's first chunk must be
+	 * the tcache itself (chunk size 0x290 | PREV_INUSE = 0x291 in
+	 * the size field at +8). A musl guest shares the same kernel
+	 * heap VMA with a different allocator — no tcache shape,
+	 * nothing to validate, stay silent. */
+	off = uml_nt_vma_translate(mm, mm->heap_start, 16);
+	if (off < 0)
+		return;
+	{
+		unsigned long long hdr = *(const unsigned long long *)
+			(const void *)((char *)uml_boot.physmem_base +
+				       off + 8);
+
+		if (hdr != 0x291)
+			return;
+	}
+	off = uml_nt_vma_translate(mm, tva, 0x290);
+	if (off < 0)
+		return; /* heap VMA not (yet) resident — nothing to watch */
+	base = (unsigned long long)(uintptr_t)
+	       ((char *)uml_boot.physmem_base + off);
+	memcpy(counts, (const void *)(uintptr_t)base, sizeof(counts));
+	memcpy(entries, (const void *)(uintptr_t)base + sizeof(counts),
+	       sizeof(entries));
+	for (i = 0; i < UML_NT_TCACHE_COUNTS; i++) {
+		unsigned long long raw = entries[i];
+		int bad;
+
+		raw ^= ((tva + sizeof(counts) +
+			 (unsigned long long)i * 8) >> 12);
+		bad = (counts[i] > UML_NT_TCACHE_LIMIT) ||
+		      ((raw & 0xf) != 0) ||
+		      (raw != 0 &&
+		       uml_nt_vma_translate(mm, raw, 1) < 0);
+		if (!bad)
+			continue;
+		c->tcache_fired = 1;
+		tcache_watch_budget--;
+		os_info("[tcwatch] pid %lu slot %d COUNT=%u entry=0x%llx "
+			"raw=0x%llx heap [0x%llx,0x%llx)\n",
+			(unsigned long)c->pid, i, counts[i], entries[i],
+			raw, mm->heap_start, mm->heap_end);
+		os_info("[tcwatch]   round nr=%llu ret=%lld rip=0x%llx "
+			"rsp=0x%llx fs=0x%llx\n", c->last_nr, c->last_ret,
+			c->d->regs.rip, c->d->regs.rsp, c->fs_base);
+		dump_guest_bytes(mm, tva - 0x10, 0x10, "tcwatch-before");
+		dump_guest_bytes(mm, tva + 0x290, 0x20, "tcwatch-after");
+		dump_guest_bytes(mm, tva + 0x80, 0x80, "tcwatch-entries");
+		return;
+	}
+}
+
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
@@ -589,6 +672,10 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * and this round's drops park under THIS conn's tag. */
 	uml_nt_phys_settle(c->ph, c);
 	uml_nt_phys_set_drop_owner(c->ph, c);
+	/* WRITER-HUNT (M5.6a): the direct-write canary — validate the
+	 * conn's tcache BEFORE serving this round; poison seen here
+	 * was produced up to the previous round (last_nr names it). */
+	tcache_watch(c);
 
 	if (d->cmd == UML_STUB_CMD_PROT_DONE) {
 		/* The stub reports its op result. Failure here means
@@ -983,9 +1070,27 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			d->fault_type, c->plan.n_ops);
 		/* COW copy directive: the kernel owns the physmem
 		 * content — memcpy the run through its own flat view
-		 * before the stub maps the new one. */
+		 * before the stub maps the new one. WRITER-HUNT
+		 * (M5.6a): a run copy whose either end leaves its
+		 * block is the direct-write class — kill loud instead
+		 * of writing foreign bytes. */
 		if (c->plan.copy_src_off != 0 ||
 		    c->plan.copy_dst_off != 0) {
+			if (uml_nt_phys_block_check(c->ph,
+					c->plan.copy_dst_off,
+					UML_NT_PHYS_RUN_SIZE) < 0 ||
+			    uml_nt_phys_block_check(c->ph,
+					c->plan.copy_src_off,
+					UML_NT_PHYS_RUN_SIZE) < 0) {
+				os_info("[fillguard] COW run copy "
+					"src=0x%llx dst=0x%llx: block "
+					"check failed — killing\n",
+					c->plan.copy_src_off,
+					c->plan.copy_dst_off);
+				d->action = UML_STUB_ACTION_KILL;
+				d->err = 1;
+				return -1;
+			}
 			memcpy(uml_boot.physmem_base +
 				       c->plan.copy_dst_off,
 			       uml_boot.physmem_base +
@@ -1071,6 +1176,24 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 
 		if (cv->run_off == pv->run_off)
 			continue; /* shared run */
+		/* WRITER-HUNT (M5.6a): either end leaving its block is
+		 * the direct-write heap-trasher — fail the fork, no
+		 * write. */
+		if (uml_nt_phys_block_check(c->ph,
+				(long long)cv->run_off,
+				cv->end - cv->start) < 0 ||
+		    uml_nt_phys_block_check(c->ph,
+				(long long)pv->run_off,
+				cv->end - cv->start) < 0) {
+			os_info("[fillguard] fork eager copy vma %d: "
+				"src=0x%llx dst=0x%llx len=%llu leaves "
+				"the block — fork refused\n", vi,
+				pv->run_off, cv->run_off,
+				cv->end - cv->start);
+			d->retval = (unsigned long long)-12LL;
+			d->err = 1;
+			return;
+		}
 		memcpy(uml_boot.physmem_base + cv->run_off,
 		       uml_boot.physmem_base + pv->run_off,
 		       cv->end - cv->start);
@@ -1089,11 +1212,27 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 				unsigned long long zlen =
 					zstart - sv->start;
 
-				memset(uml_boot.physmem_base +
+				/* WRITER-HUNT (M5.6a): hygiene step —
+				 * on a block check failure skip the
+				 * zeroing loud, the fork itself stays
+				 * alive (the copy loop above already
+				 * refused if the table was rotten). */
+				if (uml_nt_phys_block_check(c->ph,
+						(long long)sv->run_off,
+						zlen) < 0)
+					os_info("[fillguard] fork "
+						"residue zero dst=0x%llx "
+						"len=%llu leaves the "
+						"block — skipped\n",
+						sv->run_off, zlen);
+				else {
+					memset(uml_boot.physmem_base +
 					       sv->run_off, 0, zlen);
-				os_info("[stubtest] fork: zeroed child "
-					"stack residue below rsp 0x%llx "
-					"(%llu bytes)\n", g->rsp, zlen);
+					os_info("[stubtest] fork: zeroed "
+						"child stack residue "
+						"below rsp 0x%llx (%llu "
+						"bytes)\n", g->rsp, zlen);
+				}
 			}
 		}
 	}
@@ -1339,11 +1478,77 @@ void uml_nt_fork_arm(struct uml_nt_stub_conn *parent, unsigned long long rsp)
  * "STREAM=7"/wild-pointer SIGSEGVs; the isolated canary never saw
  * it). These lines name the free / the unbalanced drop / the backend
  * double-alloc the moment they happen. */
+/* WRITER-HUNT (M5.6a): the release-under-vma tripwire. Data from the
+ * sampling runs on 6851384 (36969971407 + 36969964516, both red):
+ * the block backing PID 1's LIVE heap (run 0x3960000 — the
+ * tcache_perthread_struct's run) parks at drop and FREES at the
+ * dropping conn's settle while PID 1's heap VMA still maps it — the
+ * next alloc hands that run to another conn whose legit writes then
+ * land INSIDE PID 1's malloc metadata ("a%UTEMD_S$UTEMD_" tcache
+ * fragments). An unref-refused never fires (drops are table-legal):
+ * the claims were under-counted somewhere — this names the moment
+ * (the event), the surviving conn and the VMA that still maps the
+ * released range. Exempts the dropping owner's OWN mm (its views
+ * die with it — the D22 settle contract); any OTHER conn's VMA on a
+ * released range is the smoking gun. Read-only. */
+static int release_guard_budget = 32;
+static void release_vma_sweep(const char *kind, long long off, int nruns,
+			      const void *owner)
+{
+	struct task_struct *p;
+	unsigned long long lo = (unsigned long long)off;
+	unsigned long long hi = lo +
+		(unsigned long long)nruns * UML_NT_PHYS_RUN_SIZE;
+
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		struct uml_nt_mm *mm;
+		int vi;
+
+		if (release_guard_budget <= 0)
+			return; /* loud 32, then silent — the tally
+				 * stays on the [phys] lines */
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			continue;
+		if (owner != NULL && (const void *)pc == owner)
+			continue; /* the dropping view dies with it */
+		mm = pc->mm;
+		for (vi = 0; vi < mm->nvma; vi++) {
+			unsigned long long vlo = mm->vma[vi].run_off;
+			unsigned long long vhi = vlo +
+				(mm->vma[vi].end - mm->vma[vi].start);
+
+			if (vlo < hi && vhi > lo) {
+				release_guard_budget--;
+				os_info("[phys-guard] %s released run "
+					"[0x%llx,0x%llx) still mapped "
+					"by pid %lu vma[%d] [0x%llx,"
+					"0x%llx) off=0x%llx\n",
+					kind, lo, hi,
+					(unsigned long)pc->pid, vi,
+					mm->vma[vi].start,
+					mm->vma[vi].end, vlo);
+			}
+		}
+	}
+}
+
 void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
-			   int refs)
+			   int refs, const void *owner)
 {
 	os_info("[phys] %s off=0x%llx runs=%d refs=%d\n", kind,
 		(unsigned long long)off, nruns, refs);
+	/* park/free/park-spill hand a block back — check nobody's
+	 * live VMA still maps it. unref-refused/alloc-reject name
+	 * table-internal rot; the line above is the evidence. */
+	if (nruns > 0 && (strcmp(kind, "park") == 0 ||
+			  strcmp(kind, "free") == 0 ||
+			  strcmp(kind, "park-spill") == 0))
+		release_vma_sweep(kind, off, nruns, owner);
 }
 
 void uml_nt_fork_disarm(void)
@@ -1443,6 +1648,23 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 
 		if (cv->run_off == pv->run_off)
 			continue;
+		/* WRITER-HUNT (M5.6a): same direct-write tripwire as
+		 * the POC fork hook — either end leaving its block
+		 * fails the seed loud, no write. */
+		if (uml_nt_phys_block_check(child->ph,
+				(long long)cv->run_off,
+				cv->end - cv->start) < 0 ||
+		    uml_nt_phys_block_check(parent->ph,
+				(long long)pv->run_off,
+				cv->end - cv->start) < 0) {
+			os_info("[fillguard] fork seed eager copy vma "
+				"%d: src=0x%llx dst=0x%llx len=%llu "
+				"leaves the block — seed refused\n",
+				vi, pv->run_off, cv->run_off,
+				cv->end - cv->start);
+			uml_nt_fork_disarm();
+			return -ENOMEM;
+		}
 		memcpy(uml_boot.physmem_base + cv->run_off,
 		       uml_boot.physmem_base + pv->run_off,
 		       cv->end - cv->start);
@@ -1471,11 +1693,25 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		if (sv != NULL && zstart > sv->start) {
 			unsigned long long zlen = zstart - sv->start;
 
-			memset(uml_boot.physmem_base + sv->run_off, 0,
-			       zlen);
-			os_info("fork: zeroed child stack residue below "
-				"rsp 0x%llx (%llu bytes)\n",
-				fork_pending_rsp, zlen);
+			/* WRITER-HUNT (M5.6a): hygiene step — skip
+			 * loud on a block check failure (the eager
+			 * copy loop above already failed the seed for
+			 * a rotten table; this guards future edits). */
+			if (uml_nt_phys_block_check(child->ph,
+					(long long)sv->run_off,
+					zlen) < 0)
+				os_info("[fillguard] fork seed residue "
+					"zero dst=0x%llx len=%llu leaves "
+					"the block — skipped\n",
+					sv->run_off, zlen);
+			else {
+				memset(uml_boot.physmem_base +
+				       sv->run_off, 0, zlen);
+				os_info("fork: zeroed child stack "
+					"residue below rsp 0x%llx "
+					"(%llu bytes)\n",
+					fork_pending_rsp, zlen);
+			}
 		}
 no_zero:
 		;

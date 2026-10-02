@@ -48,6 +48,12 @@ _Static_assert(sizeof(elf_phdr) == 56, "ELF64 phdr layout");
 
 #define PT_INTERP 3
 
+/* WRITER-HUNT (M5.6a): the fill-guard's last failure context (pure
+ * file — no os_info here; binfmt.c logs these when a load fails with
+ * UML_NT_ELF_FILL). Zeroed by every load entry. */
+int uml_nt_elf_fill_region;
+unsigned long long uml_nt_elf_fill_off, uml_nt_elf_fill_len;
+
 /*
  * D20 cluster 1: the PT_INTERP path of `image` — a dynamic binary
  * names its interpreter there. Returns 0 = none, 1 = the path copied
@@ -323,8 +329,26 @@ merged:
 		offs[i] = (unsigned long long)off;
 	}
 
-	/* ---- zero every region (bss contract), copy file bytes ---- */
+	/* ---- zero every region (bss contract), copy file bytes ----
+	 * WRITER-HUNT (M5.6a): the loader's bulk fills — the memset
+	 * and every segment memcpy below — must stay inside the
+	 * region's allocated span. A crossing is the direct-write
+	 * heap-trasher caught at the exec/loader phase: refuse (fail
+	 * UML_NT_ELF_FILL), roll the spans back like every failure
+	 * path, and park the context in the globals for the caller's
+	 * log. */
 	for (i = 0; i < nreg; i++) {
+		if (uml_nt_phys_block_check(ph, (long long)offs[i],
+					    regs[i].re - regs[i].rs) < 0) {
+			uml_nt_elf_fill_region = i;
+			uml_nt_elf_fill_off = offs[i];
+			uml_nt_elf_fill_len =
+				regs[i].re - regs[i].rs;
+			for (j = 0; j < nreg; j++)
+				uml_nt_phys_unref(ph,
+					(long long)offs[j]);
+			return UML_NT_ELF_FILL;
+		}
 		__builtin_memset((char *)section + offs[i], 0,
 				 regs[i].re - regs[i].rs);
 	}

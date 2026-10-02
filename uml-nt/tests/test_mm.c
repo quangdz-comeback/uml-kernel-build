@@ -1331,11 +1331,71 @@ static void test_stack_window(void)
 	}
 }
 
+/* WRITER-HUNT (M5.6a): the bulk-fill boundary guard — every run
+ * covering [off, off+len) must be live AND owned by the first run's
+ * span (a fill spilling into the neighbor block / a dead run is the
+ * direct-write heap-trasher class, refused before the write). */
+static void test_phys_block_check(void)
+{
+	struct uml_nt_phys p;
+	unsigned long long s, b;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&p, 32 * RUN) == 0);
+
+	/* 3-run span (mock block = 4 runs: run 3 is padding). */
+	s = uml_nt_phys_alloc_span(&p, 3);
+	CHECK(s == MOCK_BASE);
+
+	/* in-span: whole span, unaligned mid-run window, tail-only */
+	CHECK(uml_nt_phys_block_check(&p, (long long)s, 3 * RUN) == 0);
+	CHECK(uml_nt_phys_block_check(&p, (long long)s + 0x10, RUN) == 0);
+	CHECK(uml_nt_phys_block_check(&p, (long long)s + 2 * RUN - 8,
+				      16) == 0);
+	/* zero length is vacuously fine */
+	CHECK(uml_nt_phys_block_check(&p, (long long)s, 0) == 0);
+
+	/* out of bounds / dead runs */
+	CHECK(uml_nt_phys_block_check(&p, -1, RUN) == -1);
+	CHECK(uml_nt_phys_block_check(&p, 0, RUN) == -1); /* head unalloc */
+	CHECK(uml_nt_phys_block_check(&p, (long long)s + 3 * RUN,
+				      RUN) == -1); /* padding run */
+	CHECK(uml_nt_phys_block_check(&p, (long long)s,
+				      4 * RUN) == -1); /* into padding */
+	CHECK(uml_nt_phys_block_check(&p, (long long)s,
+				      32 * RUN) == -1); /* past table */
+
+	/* adjacent span: a fill crossing the span boundary into the
+	 * neighbor's LIVE run is refused (the spill catch) */
+	b = uml_nt_phys_alloc_span(&p, 1);
+	CHECK(b == s + 4 * RUN); /* mock: block padding run 3 held */
+	CHECK(uml_nt_phys_block_check(&p, (long long)b, RUN) == 0);
+	CHECK(uml_nt_phys_block_check(&p, (long long)s + 2 * RUN,
+				      2 * RUN) == -1);
+	CHECK(uml_nt_phys_block_check(&p, (long long)b - 8,
+				      16) == -1); /* spill from b back */
+
+	/* COW-piece shape: the middle run drops (refs 0), the block
+	 * lives on runs 0/2 — a fill over the dead piece refused, the
+	 * live tail alone still checks */
+	CHECK(uml_nt_phys_unref(&p, (long long)s + RUN) == 0);
+	CHECK(uml_nt_phys_block_check(&p, (long long)s,
+				      2 * RUN) == -1);
+	CHECK(uml_nt_phys_block_check(&p, (long long)s + 2 * RUN,
+				      RUN) == 0);
+
+	/* fully-dropped span is dead everywhere */
+	CHECK(uml_nt_phys_unref(&p, (long long)s) == 0);
+	CHECK(uml_nt_phys_unref(&p, (long long)s + 2 * RUN) == 0);
+	CHECK(uml_nt_phys_block_check(&p, (long long)s, RUN) == -1);
+}
+
 int main(void)
 {
 	test_phys();
 	test_span();
 	test_phys_d22();
+	test_phys_block_check();
 	test_vma();
 	test_vma_del_pieces();
 	test_translate();

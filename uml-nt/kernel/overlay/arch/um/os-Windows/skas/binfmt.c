@@ -372,6 +372,14 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	kvfree(buf);
 	if (rc != UML_NT_ELF_OK) {
 		os_info("binfmt_umlnt: load failed rc=%d\n", rc);
+		/* WRITER-HUNT (M5.6a): the pure loader parks the fill
+		 * guard's context in the globals — print them here. */
+		if (rc == UML_NT_ELF_FILL)
+			os_info("[fillguard] elf load region %d: "
+				"off=0x%llx len=%llu leaves the "
+				"block\n", uml_nt_elf_fill_region,
+				uml_nt_elf_fill_off,
+				uml_nt_elf_fill_len);
 		/* D21: NOMEM is a resource failure, not a format one —
 		 * execve must report -ENOMEM. Converting it to -ENOEXEC
 		 * masks the physalloc root cause AND breaks systemd's
@@ -398,6 +406,15 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		if (rc != UML_NT_ELF_OK) {
 			os_info("binfmt_umlnt: interp load failed rc=%d\n",
 				rc);
+			/* WRITER-HUNT (M5.6a): the fill guard's context
+			 * (pure loader parks it in the globals). */
+			if (rc == UML_NT_ELF_FILL)
+				os_info("[fillguard] elf interp load "
+					"region %d: off=0x%llx "
+					"len=%llu leaves the block\n",
+					uml_nt_elf_fill_region,
+					uml_nt_elf_fill_off,
+					uml_nt_elf_fill_len);
 			if (rc == UML_NT_ELF_NOMEM)
 				return -ENOMEM;
 			return -ENOEXEC;
@@ -463,6 +480,15 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 				c->mm->vma[di].run_off,
 				c->mm->vma[di].prot,
 				c->mm->vma[di].flags);
+		return -ENOMEM;
+	}
+	/* WRITER-HUNT (M5.6a): the stack tables' bulk fill rides this
+	 * run — refuse the exec if its span is rotten (the direct-
+	 * write tripwire; the pure table code has no logger). */
+	if (uml_nt_phys_block_check(c->ph, (long long)stk->run_off,
+				    UML_NT_PHYS_RUN_SIZE) < 0) {
+		os_info("[fillguard] stack run off=0x%llx leaves the "
+			"block — exec refused\n", stk->run_off);
 		return -ENOMEM;
 	}
 	rc = uml_nt_elf_wire_args(bprm, bprm->mm,

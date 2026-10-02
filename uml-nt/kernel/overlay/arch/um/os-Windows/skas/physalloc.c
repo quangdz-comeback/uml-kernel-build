@@ -66,7 +66,8 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns)
 			if (uml_nt_phys_event !=
 			    (uml_nt_phys_event_fn)0)
 				uml_nt_phys_event("alloc-reject", off,
-						  nruns, p->refs[i + k]);
+						  nruns, p->refs[i + k],
+						  (const void *)0);
 			goto reject; /* backend double-allocated: loud */
 		}
 	}
@@ -106,7 +107,7 @@ int uml_nt_phys_ref(struct uml_nt_phys *p, long long off)
 
 /* D22: backend hand-back + table clear, shared by the immediate
  * drop (untagged owner) and the quarantine release (settle/spill). */
-static void block_release(struct uml_nt_phys *p, int o)
+static void block_release(struct uml_nt_phys *p, int o, const void *owner)
 {
 	int n = p->span_len[o];
 	int k;
@@ -115,7 +116,7 @@ static void block_release(struct uml_nt_phys *p, int o)
 	if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
 		uml_nt_phys_event("free",
 				  (long long)o * UML_NT_PHYS_RUN_SIZE,
-				  n, 0);
+				  n, 0, owner);
 	for (k = 0; k < n; k++) {
 		p->pages[o + k] = (void *)0;
 		p->span_len[o + k] = 0;
@@ -135,9 +136,11 @@ static void block_park(struct uml_nt_phys *p, int o, const void *owner)
 		if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
 			uml_nt_phys_event("park-spill",
 					  p->park[0].off,
-					  p->park[0].nruns, 0);
+					  p->park[0].nruns, 0,
+					  p->park[0].owner);
 		block_release(p,
-			      p->park[0].off >> UML_NT_PHYS_RUN_SHIFT);
+			      p->park[0].off >> UML_NT_PHYS_RUN_SHIFT,
+			      p->park[0].owner);
 		for (k = 1; k < p->npark; k++)
 			p->park[k - 1] = p->park[k];
 		p->npark--;
@@ -149,7 +152,7 @@ static void block_park(struct uml_nt_phys *p, int o, const void *owner)
 	if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
 		uml_nt_phys_event("park",
 				  (long long)o * UML_NT_PHYS_RUN_SIZE,
-				  n, 0);
+				  n, 0, owner);
 }
 
 /* Drop one run to 0 and release its block when the LAST run of the
@@ -170,7 +173,8 @@ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
 		 * signal: the LAST legit owner loses the block when
 		 * ITS drop lands. Loud through the hook. */
 		if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
-			uml_nt_phys_event("unref-refused", off, 1, 0);
+			uml_nt_phys_event("unref-refused", off, 1, 0,
+					  p->drop_owner);
 		return -1;
 	}
 	if (--p->refs[i] != 0)
@@ -185,7 +189,7 @@ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
 	if (p->drop_owner != (const void *)0)
 		block_park(p, o, p->drop_owner);
 	else
-		block_release(p, o);
+		block_release(p, o, (const void *)0);
 	return 0;
 }
 
@@ -199,7 +203,8 @@ void uml_nt_phys_settle(struct uml_nt_phys *p, const void *owner)
 	for (i = 0; i < p->npark; i++) {
 		if (p->park[i].owner != owner)
 			continue;
-		block_release(p, p->park[i].off >> UML_NT_PHYS_RUN_SHIFT);
+		block_release(p, p->park[i].off >> UML_NT_PHYS_RUN_SHIFT,
+			      owner);
 		for (k = i + 1; k < p->npark; k++)
 			p->park[k - 1] = p->park[k];
 		p->npark--;
@@ -210,6 +215,38 @@ void uml_nt_phys_settle(struct uml_nt_phys *p, const void *owner)
 int uml_nt_phys_parked(const struct uml_nt_phys *p)
 {
 	return p->npark;
+}
+
+/* WRITER-HUNT (M5.6a): see physalloc.h. The table is the truth —
+ * refs>0 AND span_back continuity AND the span covering the last
+ * touched run (padding runs belong to the backend block, not to the
+ * span: writing them would be benign content-wise but the checker
+ * refuses anyway — a fill that reaches padding is off by definition
+ * and the loud failure points at the call site). */
+int uml_nt_phys_block_check(const struct uml_nt_phys *p, long long off,
+			    unsigned long long len)
+{
+	int first, last, own, k;
+
+	if (len == 0)
+		return 0;
+	if (off < 0 || (unsigned long long)off > p->size ||
+	    len > p->size - (unsigned long long)off)
+		return -1;
+	first = (int)(off >> UML_NT_PHYS_RUN_SHIFT);
+	last = (int)((off + len - 1) >> UML_NT_PHYS_RUN_SHIFT);
+	if (p->refs[first] == 0)
+		return -1;
+	own = first - (int)p->span_back[first];
+	if (own < 0)
+		return -1;
+	for (k = first; k <= last; k++) {
+		if (p->refs[k] == 0 || p->span_back[k] != k - own)
+			return -1;
+	}
+	if (last - own >= (int)p->span_len[own])
+		return -1;
+	return 0;
 }
 
 void uml_nt_phys_set_drop_owner(struct uml_nt_phys *p, const void *owner)

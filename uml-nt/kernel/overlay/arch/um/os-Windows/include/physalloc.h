@@ -131,9 +131,14 @@ int uml_nt_phys_refs(struct uml_nt_phys *p, long long off);
  *                     they never held; the surviving owner loses the
  *                     block on the NEXT drop)
  *   "alloc-reject"  — the backend handed runs this table still counts
- *                     (double-__free_pages signature) */
+ *                     (double-__free_pages signature)
+ * `owner` = the drop/settle tag (the conn view performing the drop),
+ * NULL for untagged drops and for the unit-test/other neutral calls —
+ * the conn layer's release-under-vma tripwire (M5.6a) needs it to
+ * exempt the dropping view's OWN dying mm. */
 typedef void (*uml_nt_phys_event_fn)(const char *kind, long long off,
-				     int nruns, int refs);
+				     int nruns, int refs,
+				     const void *owner);
 extern uml_nt_phys_event_fn uml_nt_phys_event;
 
 /* D22 view-owner tagging: the conn layer sets THIS dispatch's owner
@@ -151,5 +156,18 @@ void uml_nt_phys_settle(struct uml_nt_phys *p, const void *owner);
 
 /* Quarantine depth (telemetry/tests). */
 int uml_nt_phys_parked(const struct uml_nt_phys *p);
+
+/* WRITER-HUNT (M5.6a): bulk-fill boundary guard — the direct-write
+ * tripwire. A kernel-side byte fill (mmap_fill/refill, brk re-home,
+ * fork eager copy, COW run copy, elf loader) must never touch a run
+ * outside the ONE allocated span it targets: a fill that spills past
+ * the span end (or into a dead run) is the heap-trasher class caught
+ * before the write lands. Every run covering [off, off+len) — off is
+ * byte-ranged, fills are not run-aligned — must be live (refs > 0)
+ * and owned by the same span as the first run. Returns 0 = the write
+ * may proceed, -1 = refuse (the caller logs loud and fails the op —
+ * it never writes). Pure: unit-tested against the mock backend. */
+int uml_nt_phys_block_check(const struct uml_nt_phys *p, long long off,
+			    unsigned long long len);
 
 #endif /* __UM_OS_WINDOWS_PHYSALLOC_H */

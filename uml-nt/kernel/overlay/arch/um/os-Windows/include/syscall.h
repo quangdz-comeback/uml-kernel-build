@@ -137,6 +137,10 @@ struct uml_nt_stub_conn {
 	unsigned long long watch_val;
 	unsigned long long watch_rsp;
 	int watch_left;
+	/* M5.6a WRITER-HUNT: the tcache canary watch fired once for
+	 * this conn (per-conn one-shot; the watch re-validates every
+	 * serve round until then). kzalloc init = armed. */
+	int tcache_fired;
 	/* M5.4 c3 (048): destroy stamps DEAD before kfree; consumers
 	 * that reach a conn through a RETAINED pointer (the switch
 	 * hook's re-arm, the co-mapper census, the fork seed) refuse a
