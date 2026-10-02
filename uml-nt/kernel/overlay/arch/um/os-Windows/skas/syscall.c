@@ -2067,9 +2067,30 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 
 	switch (nr) {
 	case 60: /* exit */
-	case 231: /* exit_group — POC: same halt; child teardown is the
-		   * M4 signal/exit work (upstream: zap every task) */
+	case 231: /* exit_group — POC conns: the halt parks the stub
+		   * (no task to reap behind it). Task-backed conns go
+		   * through the REAL exit_group → do_exit: PID 1
+		   * trips the kernel's own "Attempted to kill init!"
+		   * panic (the launcher stops with the M1 panic
+		   * convention, exit 1 — the reader, the timers and
+		   * every conn die with the process; the
+		   * 100-real-alpine zombie had init exiting into a
+		   * halt nobody served), and any other task reaps
+		   * clean through the scheduler — its conn dies with
+		   * its mm at destroy_context, never a panic. */
 		d->retval = a[0];
+		if (c->task_backed) {
+			/* do_exit — for PID 1 the kernel panics (the
+			 * launcher exits with the M1 panic code); for
+			 * any other task the mm is dropped and the
+			 * conn is freed MID-DISPATCH (the execve
+			 * model): nothing of c/d may be touched
+			 * after — same `goto out` the exec path
+			 * uses, whose tail only unwinds the uacc
+			 * globals. */
+			sys_vfs(nr, a);
+			goto out;
+		}
 		d->halt = 1;
 		goto out;
 	case 0: /* read — guest fds (init: 0/1/2 = /dev/console via
