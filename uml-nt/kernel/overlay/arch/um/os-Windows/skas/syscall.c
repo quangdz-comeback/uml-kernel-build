@@ -1702,6 +1702,167 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 				"(nvma %d)\n", c->mm->nvma);
 		}
 	}
+	/* WRITER-HUNT (M5.6a, plan 085): the heap-chain walker. The
+	 * fixed tcache watch stayed silent through run 36975582038 —
+	 * counts <= 7, pair-state clean at abort — glibc's "corrupted
+	 * double-linked list" fires on a BIN chunk elsewhere and 2.36's
+	 * malloc_printerr names no address for this message. Walk the
+	 * main-arena chunk chain from heap_start: geometry (size >=
+	 * MINSIZE, 16-aligned below the flags, next <= heap_end),
+	 * prev_size continuity (only when PREV_INUSE = 0 — otherwise
+	 * prev_size is the previous chunk's data), and free-chunk fd
+	 * (plain VA, NULL, or tcache-safe-linked with THE CHUNK'S OWN
+	 * VA as the key — the walker knows it, so the mangle is
+	 * reversible here; the entries[] slot was not). bk is checked
+	 * soft (a fastbin's stale bk can be untranslatable garbage —
+	 * printed, only geometry + fd convict). First bad link wins:
+	 * VA + run off + raw qwords — the [cowcopy]/[eager]/[wire]/
+	 * [phys] ledger around that run names the writer copy. One
+	 * walk per boot (the first capture is the earliest fatal
+	 * point). */
+	{
+		static int heapwalk_done;
+
+		if (!heapwalk_done && c->mm->heap_start != 0 &&
+		    c->mm->heap_end > c->mm->heap_start) {
+			unsigned long long va, prev_va = 0, prev_cs = 0;
+			unsigned long long g1_va = 0, g1_cs = 0;
+			unsigned long long g2_va = 0, g2_cs = 0;
+			unsigned long long cur_size = 0, cur_ps = 0;
+			const char *why = NULL;
+			int idx;
+
+			heapwalk_done = 1;
+			for (va = c->mm->heap_start, idx = 0;
+			     va < c->mm->heap_end && idx < 4096;
+			     idx++) {
+				long long off =
+					uml_nt_vma_translate(c->mm, va, 16);
+				unsigned long long hdr[2] = { 0, 0 };
+				unsigned long long cs, cs_raw, nxt;
+
+				if (off < 0) {
+					why = "header untranslatable";
+					break;
+				}
+				memcpy(hdr, (char *)uml_boot.physmem_base +
+				       off, 16);
+				cur_ps = hdr[0];
+				cur_size = hdr[1];
+				cs_raw = hdr[1] & ~(unsigned long long)0x7;
+				cs = cs_raw;
+				if (cs < 0x20) {
+					why = "size < MINSIZE";
+					break;
+				}
+				if ((cs & 0xF) != 0) {
+					why = "size not 16-aligned";
+					break;
+				}
+				if (va + cs > c->mm->heap_end) {
+					why = "chunk runs past heap end";
+					break;
+				}
+				if ((hdr[1] & 1) == 0 && prev_va != 0 &&
+				    hdr[0] != prev_cs) {
+					why = "prev_size mismatch";
+					break;
+				}
+				nxt = va + cs;
+				if (nxt < c->mm->heap_end) {
+					long long noff = uml_nt_vma_translate(
+						c->mm, nxt, 16);
+					unsigned long long nh[2];
+
+					if (noff < 0) {
+						why = "next header "
+						      "untranslatable";
+						break;
+					}
+					memcpy(nh, (char *)uml_boot.
+					       physmem_base + noff, 16);
+					if ((nh[1] & 1) == 0) {
+						/* this chunk is FREE:
+						 * validate its links */
+						unsigned long long fd = 0;
+						long long foff =
+							uml_nt_vma_translate(
+							c->mm, va + 0x10, 8);
+						int fd_ok;
+
+						if (foff >= 0)
+							memcpy(&fd, (char *)
+							       uml_boot.
+							       physmem_base +
+							       foff, 8);
+						{
+							unsigned long long
+							un = fd ^ (va >> 12);
+
+							fd_ok =
+								foff < 0 ||
+								fd == 0 ||
+								uml_nt_vma_translate(
+								c->mm, fd, 1)
+								>= 0 ||
+								un == 0 ||
+								uml_nt_vma_translate(
+								c->mm, un, 1) >= 0;
+						}
+						if (!fd_ok) {
+							why = "free-chunk fd "
+							      "untranslatable";
+							break;
+						}
+					}
+				}
+				if (idx > 0) {
+					g2_va = g1_va;
+					g2_cs = g1_cs;
+					g1_va = prev_va;
+					g1_cs = prev_cs;
+				}
+				prev_va = va;
+				prev_cs = cs;
+				va += cs;
+			}
+			if (why != NULL) {
+				long long off2 =
+					uml_nt_vma_translate(c->mm, va, 1);
+				long long foff =
+					uml_nt_vma_translate(c->mm, va, 32);
+
+				os_info("[heapwalk] BAD chunk #%d va=0x%llx "
+					"run_off=0x%llx: %s\n", idx, va,
+					off2 < 0 ? (unsigned long long)-1 :
+					(unsigned long long)off2 &
+					~(UML_NT_PHYS_RUN_SIZE - 1), why);
+				os_info("[heapwalk]   size=0x%llx "
+					"prev_size=0x%llx prev_cs=0x%llx "
+					"heap [0x%llx,0x%llx)\n",
+					cur_size, cur_ps, prev_cs,
+					c->mm->heap_start, c->mm->heap_end);
+				os_info("[heapwalk]   last good: va=0x%llx "
+					"cs=0x%llx, before: va=0x%llx "
+					"cs=0x%llx\n", g1_va, g1_cs, g2_va,
+					g2_cs);
+				if (foff >= 0) {
+					const unsigned long long *q =
+						(const void *)((char *)
+						uml_boot.physmem_base + foff);
+
+					os_info("[heapwalk]   raw: %016llx "
+						"%016llx %016llx %016llx\n",
+						q[0], q[1], q[2], q[3]);
+				}
+			} else {
+				os_info("[heapwalk] chain clean to heap end "
+					"(%d chunks, [0x%llx,0x%llx))\n",
+					idx, c->mm->heap_start,
+					c->mm->heap_end);
+			}
+		}
+	}
 }
 
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
