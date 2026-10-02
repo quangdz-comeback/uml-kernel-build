@@ -10,6 +10,7 @@
  */
 #include <ntabi.h>
 #include <stub-panic.h>
+#include <linux/errno.h>
 
 #include <physalloc.h>
 #include <os.h>
@@ -116,7 +117,43 @@ void os_set_pdeathsig(void)
 	* mem= up to the ceiling */
 #define UML_NT_PRIV_PAGES       16   /* 64K / 4K */
 
-static unsigned char priv_commits[UML_NT_PRIV_BLOCKS];
+/* R17 FIX (proposed — NOT landed; patch awaits Shelley's ruling):
+ * per-page BITS replace the per-block counters. The counter design
+ * undercounted by construction ("a repeated map of an
+ * already-covered page saturates the counter") and its mirror
+ * underflow wrapped 0 -> 255 — run 36997741821's ring caught
+ * MEM_RELEASE firing at ledger-0 while pages d9000/da000/db000 of
+ * block 0x680d0000 were still live (the timer-stack corruption
+ * pair, run 36984931372's fetch fault). Bits are idempotent: a
+ * repeated map SETS the same bit, the block releases only when
+ * ALL its pages are clear — the undercount and the underflow both
+ * vanish by construction. */
+static unsigned char
+priv_pages[UML_NT_PRIV_BLOCKS][UML_NT_PRIV_PAGES];
+
+static int priv_page_idx(unsigned long long v)
+{
+	return (int)((v >> 12) & (UML_NT_PRIV_PAGES - 1));
+}
+
+static int priv_block_live(int bi)
+{
+	int p;
+
+	for (p = 0; p < UML_NT_PRIV_PAGES; p++)
+		if (priv_pages[bi][p])
+			return 1;
+	return 0;
+}
+
+static int priv_block_cnt(int bi)
+{
+	int p, n = 0;
+
+	for (p = 0; p < UML_NT_PRIV_PAGES; p++)
+		n += priv_pages[bi][p] != 0;
+	return n;
+}
 
 static int priv_block_idx(unsigned long long v)
 {
@@ -245,19 +282,19 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 		unsigned long long end = (v + len + 0xFFFull) & ~0xFFFull;
 		unsigned long long b = v & ~(UML_NT_PRIV_BLOCK_SIZE - 1);
 
-		/* One ledger unit PER PAGE covered (the unmap path
-		 * decommits and decrements per page): two maps sharing
-		 * a block keep the release until the last claim dies.
-		 * A repeated map of an already-covered page saturates
-		 * the counter instead of wrapping — the block then
-		 * releases late (address space only), never early. */
+		/* One ledger bit PER PAGE covered (the unmap path
+		 * decommits and clears per page): two maps sharing a
+		 * block keep the release until the last claim dies.
+		 * A repeated map of an already-covered page re-sets
+		 * the same bit — idempotent, no saturation, no
+		 * undercount (the R17 fix; see the bitmap comment). */
 		while (b < end) {
 			unsigned long long b_end =
 				b + UML_NT_PRIV_BLOCK_SIZE;
 			unsigned long long p0 = (v > b) ? v : b;
 			unsigned long long p1 = (end < b_end) ? end : b_end;
-			int n_pages = (int)((p1 - p0 + 0xFFFull) >> 12);
 			int bi = priv_block_idx(b);
+			unsigned int pp;
 			PVOID got;
 
 			if (bi < 0) {
@@ -291,13 +328,10 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 					(unsigned long)q);
 				return -1;
 			}
-			if (priv_commits[bi] + n_pages >
-			    UML_NT_PRIV_PAGES)
-				n_pages = UML_NT_PRIV_PAGES -
-					  priv_commits[bi];
-			if (n_pages > 0)
-				priv_commits[bi] +=
-					(unsigned char)n_pages;
+			for (pp = (unsigned int)((p0 - b) >> 12);
+			     pp < (unsigned int)((p1 - b) >> 12);
+			     pp++)
+				priv_pages[bi][pp] = 1;
 			b = b_end;
 		}
 	}
@@ -305,7 +339,8 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 		int bi0 = priv_block_idx(v);
 
 		vmr_push(v, len, 0,
-			 bi0 >= 0 ? priv_commits[bi0] : 0);
+			 bi0 >= 0 ?
+			 (unsigned char)priv_block_cnt(bi0) : 0);
 	}
 	return 0;
 }
@@ -337,86 +372,55 @@ int os_unmap_memory(void *addr, int len)
 		(unsigned long long)(uintptr_t)uml_boot.physmem_base +
 		uml_boot.physmem_size;
 	int idx = priv_block_idx(v);
-	static int vmr_tripw;
+	int pi = priv_page_idx(v);
 
-	/* R17 DIAG tripwires — BOTH shapes must be impossible (see
-	 * the ring comment above). Log-only: behavior is untouched
-	 * until Shelley rules on the guard. */
+	(void)len; /* per-page decommit; len is a page here */
+
+	/* R17 FIX (proposed — NOT landed; the DIAG tripwires this
+	 * replaces fired log-only until Shelley ruled): the flat
+	 * view is section-backed and PERMANENT (the map path
+	 * short-circuits it). A private-ledger op on it is always a
+	 * kernel bug: a set bit means MEM_DECOMMIT kills a RAM/text
+	 * page of the launcher's own view (the timer fetch-fault
+	 * class, run 36984931372), a clear bit means
+	 * NtUnmapViewOfSection would drop the WHOLE 128M section
+	 * view. Refuse loud instead. */
 	if (v < flat_end && idx >= 0) {
-		if (priv_commits[idx] > 0) {
-			if (vmr_tripw < 2)
-				uml_nt_vmr_dump("TRIPWIRE flat-view "
-						"block with private "
-						"commits — decommit "
-						"would kill launcher "
-						"image/RAM page", 24);
-			vmr_tripw++;
-			os_info("[vmr] TRIPWIRE flat decommit "
-				"@%px commits=%u (fire #%d)\n",
-				addr, priv_commits[idx], vmr_tripw);
-		} else {
-			if (vmr_tripw < 2)
-				uml_nt_vmr_dump("TRIPWIRE flat-view VA "
-						"falls to NtUnmapView"
-						"OfSection — whole 128M "
-						"section view would "
-						"vanish", 24);
-			vmr_tripw++;
-			os_info("[vmr] TRIPWIRE flat whole-view "
-				"unmap @%px (fire #%d)\n",
-				addr, vmr_tripw);
-		}
+		os_info("os_unmap_memory: FLAT-VIEW GUARD: unmap of "
+			"section-backed VA 0x%llx refused "
+			"(page bit=%d)\n", v, priv_pages[idx][pi]);
+		uml_nt_vmr_dump("flat-view guard refused", 24);
+		return -EINVAL;
 	}
 
-	/* Private-backed range (see the ledger comment in os_map_
-	 * memory): decommit the pages — NtUnmapViewOfSection cannot
-	 * undo a VirtualAlloc. The block releases only when its last
-	 * committed page goes (two vmalloc areas may share it). */
-	if (idx >= 0 && priv_commits[idx] > 0) {
-		BOOLEAN ok;
-
-		(void)len; /* per-page decommit; len is a page here */
-		/* R17 DIAG: decommitting a page the ledger never
-		 * counted (saturated map added 0) wraps 0 -> 255 and
-		 * the block never releases; the mirror shape — a
-		 * block whose LAST COUNTED page dies while an
-		 * uncounted one is still live — releases the block
-		 * UNDER a live mapping (run 36994732672: "private
-		 * release failed" @0x680d0000, the timer-stack
-		 * block). Dump the ring at both shapes. */
-		if (priv_commits[idx] == 0)
-			uml_nt_vmr_dump("underflow: decommit of "
-					"uncounted page (0 -> 255 "
-					"wrap ahead)", 24);
-		ok = nt->VirtualFree((PVOID)(uintptr_t)v, 0x1000,
-				     0x00004000UL /* MEM_DECOMMIT */);
-		if (!ok) {
-			os_info("os_unmap_memory: private decommit "
-				"@%px failed\n", addr);
-			uml_nt_vmr_dump("decommit failed", 24);
-			return -1;
-		}
-		if (priv_commits[idx] < 0xff)
-			priv_commits[idx]--;
-		vmr_push(v, 0x1000, 1, priv_commits[idx]);
-		if (priv_commits[idx] == 0 &&
-		    !nt->VirtualFree((PVOID)(uintptr_t)va0, 0,
-				     MEM_RELEASE)) {
-			os_info("os_unmap_memory: private release "
-				"@%px failed (block still holds "
-				"committed pages the ledger lost "
-				"count of)\n", addr);
-			uml_nt_vmr_dump("release failed — ledger "
-					"drift", 24);
-			return -1;
-		}
-		return 0;
+	/* Untracked page: the old path decommitted it anyway and
+	 * wrapped the counter 0 -> 255 (the saturation undercount's
+	 * mirror). With per-page bits, a clear bit means no live
+	 * claim of ours — refusing is the only sound answer. */
+	if (idx < 0 || priv_pages[idx][pi] == 0) {
+		os_info("os_unmap_memory: untracked page 0x%llx "
+			"refused (idx=%d)\n", v, idx);
+		uml_nt_vmr_dump("untracked-page guard refused", 24);
+		return -EINVAL;
 	}
 
-	vmr_push(v, (unsigned long long)(unsigned)len, 1,
-		 idx >= 0 ? priv_commits[idx] : 0);
-	return nt->NtUnmapViewOfSection(UML_NT_CURRENT_PROCESS, addr) < 0 ?
-		-1 : 0;
+	if (!nt->VirtualFree((PVOID)(uintptr_t)v, 0x1000,
+			     0x00004000UL /* MEM_DECOMMIT */)) {
+		os_info("os_unmap_memory: private decommit @%px "
+			"failed\n", addr);
+		uml_nt_vmr_dump("decommit failed", 24);
+		return -1;
+	}
+	priv_pages[idx][pi] = 0;
+	vmr_push(v, 0x1000, 1, (unsigned char)priv_block_cnt(idx));
+	if (!priv_block_live(idx) &&
+	    !nt->VirtualFree((PVOID)(uintptr_t)va0, 0, MEM_RELEASE)) {
+		os_info("os_unmap_memory: private release @%px "
+			"failed\n", addr);
+		uml_nt_vmr_dump("release failed", 24);
+		return -1;
+	}
+	return 0;
 }
 
 int os_drop_memory(void *addr, int length)
