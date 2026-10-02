@@ -853,24 +853,30 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								 d->regs.rsp);
 						valscan_death(c,
 							      d->regs.r13);
-						/* runs 36922613566/
-						 * 36925403121/36932969287:
-						 * the malloc-walk wild is
-						 * BOOT-CONSTANT across
-						 * victims (rdi here) yet
-						 * absent from the
-						 * co-mappers' runs —
-						 * scan for THE VALUE
-						 * itself: every hit = a
-						 * slot the writer (or
-						 * its source struct)
-						 * touches, the
-						 * provenance map. */
-						if (d->regs.rdi >
-						    0x1000)
-							valscan_death(c,
-								d->regs.rdi);
 					}
+					/* runs 36922613566/36925403121/
+					 * 36932969287: the malloc-walk
+					 * wild is BOOT-CONSTANT across
+					 * victims (rdi here) yet absent
+					 * from the co-mappers' runs —
+					 * scan for THE VALUE itself:
+					 * every hit = a slot the writer
+					 * (or its source struct)
+					 * touches, the provenance map.
+					 * Run 36943585894: victim r13 =
+					 * 0x4 (chain length, not a
+					 * cursor) skipped the r13-shaped
+					 * gate and the wild valscan never
+					 * ran — the wild needs its OWN
+					 * gate (sanity on rdi alone),
+					 * independent of the frame
+					 * shape. */
+					if (sigsegv_victims <= 3 &&
+					    d->regs.rdi > 0x1000 &&
+					    d->regs.rdi <
+					    0x800000000000ull)
+						valscan_death(c,
+							      d->regs.rdi);
 					/* v2: run-ownership census at
 					 * the wild pointer. Run
 					 * 36808917963's victims die on
