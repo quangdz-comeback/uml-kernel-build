@@ -122,6 +122,26 @@ jobs:
           done
           echo "--- masked units in /etc/systemd/system ---"
           ls -l /mnt/m55a-rootfs/etc/systemd/system/ | grep -i cloud || true
+          # M5.5b-1 (gate 1/3 of the M5.5b milestone, test-image rule):
+          # the defconfig has NO CONFIG_VT/UNIX98_PTYS — /dev/tty1
+          # cannot exist, so getty@tty1 can only restart-loop. The
+          # console IS a real tty on uml-nt (console.c tty_operations +
+          # the launcher stdin reader thread), so console-getty on
+          # /dev/console is the headless analogue. Enable it, mask the
+          # impossible getty@tty1, and set root/root (shadow-override
+          # in the CI COPY only — the canonical base_image artifact
+          # stays pristine). Deterministic salt so the diff reviews.
+          sudo mkdir -p /mnt/m55a-rootfs/etc/systemd/system/getty.target.wants
+          sudo ln -sf /lib/systemd/system/console-getty.service \
+            /mnt/m55a-rootfs/etc/systemd/system/getty.target.wants/console-getty.service
+          sudo ln -sf /dev/null \
+            "/mnt/m55a-rootfs/etc/systemd/system/getty@tty1.service"
+          HASH=$(openssl passwd -6 -salt umlnt root)
+          sudo sed -i "s|^root:[^:]*:|root:${HASH}:|" \
+            /mnt/m55a-rootfs/etc/shadow
+          echo "--- M5.5b-1 login prep ---"
+          ls -l /mnt/m55a-rootfs/etc/systemd/system/getty.target.wants/ || true
+          grep "^root:" /mnt/m55a-rootfs/etc/shadow | cut -c1-14
           sudo umount /mnt/m55a-rootfs
 
       - name: Upload masked rootfs (CI copy)
@@ -170,21 +190,36 @@ jobs:
         shell: msys2 {0}
         run: ls -lh rootfs-img
 
-      - name: NATIVE systemd boot (M5.5a)
+      - name: NATIVE systemd boot (M5.5a + M5.5b-1 login feed)
         shell: msys2 {0}
         run: |
           cd uml-nt/launcher
           set +e
           # 900s (was 420): mem=120M boots go deeper than the old cap
-          # could film — the evidence (census lines, the failing
-          # put_user) must land before the kill.
+          # could film — the evidence must land before the kill.
           # SYSTEMD_LOG_TARGET=console: init's assert/emergency text
           # defaults to the journald socket — silent when that path
-          # misbehaves, which is exactly the "Caught <ABRT> from our
-          # own process" with NO assertion line before it (run
-          # 36804503133). Console target + code location put the
-          # failing assert on the log we actually read.
-          timeout 900 ./launcher.exe ../../build/vmlinux \
+          # misbehaves ("Caught <ABRT>" with NO assertion line before
+          # it, run 36804503133). Console target puts the failing
+          # assert on the log we actually read.
+          #
+          # M5.5b-1: paced login session fed to the console's stdin
+          # reader (console.c NtReadFile thread). Delay first so the
+          # queue survives getty's initial line discipline setup; the
+          # canonical tty buffer holds the rest until a reader comes.
+          # Pipe close (EOF) after the last line = the designed
+          # "park loud" CI input state — AFTER the marker printed.
+          {
+            sleep 60
+            printf 'root\n'
+            sleep 5
+            printf 'root\n'
+            sleep 5
+            printf 'echo LOGIN-OK\n'
+            sleep 5
+            printf 'uname -a\n'
+            sleep 10
+          } | timeout 900 ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
             "mem=120M" \
@@ -220,6 +255,17 @@ jobs:
             echo "M5.5a GATE OK (fallback): journald Started — multi-user not yet, read the evidence table above"
           else
             echo "M5.5a GATE MISS: neither multi-user.target nor journald Started — boot died before journald"
+            exit 1
+          fi
+          # M5.5b-1 gate (1/3): console-getty login root/root via PAM.
+          # The marker = the fed `echo LOGIN-OK` reaching the console
+          # log — a shell ran it, so getty + PAM auth + a login shell
+          # all worked. Same ANSI lesson: match at line start, the
+          # fed command's echo may colorize nothing (raw bytes in).
+          if grep -q "^LOGIN-OK" systemd.log; then
+            echo "M5.5b-1 GATE OK: root login via console-getty (PAM + shell)"
+          else
+            echo "M5.5b-1 GATE MISS: no LOGIN-OK marker — login did not complete (termios/ioctl ENOSYS hunt likely, read the syscall table)"
             exit 1
           fi
 
