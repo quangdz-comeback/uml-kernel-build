@@ -123,15 +123,17 @@ static unsigned int cowwatch_cursor;
  * scan snapshots proved too late — run 37036034612's two hits sat at
  * the SAME guest VA (0x67d0e910) across two run generations with
  * rips that were parked syscall sites, never the writer. The trap
- * flips the pattern's ONE page NOACCESS on the owner's view (the
- * guard op shape — page-granular PROTECT, no view rebuild); the
- * next access faults back with LIVE regs = the writer named. The
+ * flips the pattern's ONE page READ-ONLY on the owner's view (the
+ * guard op shape — page-granular PROTECT): writes fault back with
+ * LIVE regs = the writer named, reads walk free. Run 37054050100's
+ * NOACCESS build burned its one-shot on a libc READER (0x606668b0,
+ * type=0) 65 lines before the abort — reads must not trip. The
  * fault then repairs through the normal flow (a COW-shared run
  * copies out, a private run just PROTECTs back), so the trap costs
  * one log line and one round-trip, never the guest's life.
- * Discriminator: a trip = a real writer at that rip; silence past
- * the next abort = the pattern was never written (unzeroed recycled
- * backing — the zero-fill hole). */
+ * Also 37054050100: the buddy hands __GFP_ZERO on every backend
+ * alloc, so recycled-run staleness cannot explain the poison — a
+ * real writer exists; READONLY catches it. */
 static struct uml_nt_stub_conn *cowtrap_conn;
 static unsigned long long cowtrap_lo, cowtrap_hi;
 static int cowtrap_pending;
@@ -145,15 +147,15 @@ static void uml_nt_cowtrap_arm(struct uml_nt_stub_conn *c,
 	if (cowtrap_conn != NULL)
 		return; /* one live trap — the log names re-arms */
 	if (uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
-			       UML_NT_PAGE_NOACCESS, tv,
+			       UML_NT_PAGE_READONLY, tv,
 			       UML_NT_FAULT_PAGE_SIZE, 0) < 0)
 		return;
 	cowtrap_conn = c;
 	cowtrap_lo = tv;
 	cowtrap_hi = tv + UML_NT_FAULT_PAGE_SIZE;
 	cowtrap_pending = 1;
-	os_info("[cowtrap] ARMED page 0x%llx pid %lu (run 0x%llx) — "
-		"next access names the writer\n", tv,
+	os_info("[cowtrap] ARMED page 0x%llx pid %lu (run 0x%llx) "
+		"READ-ONLY — the next WRITE names the writer\n", tv,
 		(unsigned long)c->pid, run_off);
 }
 

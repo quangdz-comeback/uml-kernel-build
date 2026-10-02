@@ -2617,6 +2617,17 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		 * [rsp+0x20] = the __abort_msg pointer (both the PID1
 		 * decode and every child dump agree on that slot). */
 		abrt_msg_capture(c, msg_va);
+		/* [cowtrap] follow-up (run 37054050100): the heapwalk
+		 * spanned [0x67c00000,0x67d30000) while every logged
+		 * brk grow stopped at 0x67c50000 — the arena VMA at
+		 * [0x67d00000,...) sat inside the WALK's range. Name
+		 * the bookkeeping at the abort so a walk that reads
+		 * an adjacent arena as heap chunks is visible in the
+		 * same boot. */
+		os_info("[abrt] heap bookkeeping: start=0x%llx "
+			"end=0x%llx brk=0x%llx nvma=%d\n",
+			c->mm->heap_start, c->mm->heap_end,
+			c->mm->brk, c->mm->nvma);
 	} else if (nr == 13 && a[0] == 6 && c->task_backed)
 		os_info("[abrt] sigaction SIGABRT act=0x%llx -> %lld "
 			"(task %d)\n", a[1], (long long)ret,
