@@ -1112,9 +1112,38 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * traffic is small and the fire dumps name their run —
 		 * this line maps a poisoned run back to the copy (and
 		 * its SOURCE run) that produced its generation. */
-		os_info("[cowcopy] pid %lu src=0x%llx dst=0x%llx\n",
-			(unsigned long)c->pid,
-			c->plan.copy_src_off, c->plan.copy_dst_off);
+		/* WRITER-HUNT (M5.6a) provenance ledger, generation
+		 * grade: run 36979286356's tcache content at abort =
+		 * bytes a [cowcopy] generation copied in — run IDs
+		 * alone can't see a wrong-CONTENT source (the fill
+		 * fence checks refs>0 + block bounds, not identity).
+		 * Refs on both ends + the source run's tail-16 fp: the
+		 * abort-time poison sample matches its generating
+		 * copy by fp. */
+		{
+			const unsigned char *fp =
+				(const unsigned char *)
+				((char *)uml_boot.physmem_base +
+				 c->plan.copy_src_off +
+				 UML_NT_PHYS_RUN_SIZE - 16);
+			char hex[49];
+			int hi;
+
+			for (hi = 0; hi < 16; hi++)
+				snprintf(hex + hi * 3,
+					 sizeof(hex) - hi * 3,
+					 "%02x ", fp[hi]);
+			os_info("[cowcopy] pid %lu src=0x%llx (refs=%d) "
+				"dst=0x%llx (refs=%d) fp=%s\n",
+				(unsigned long)c->pid,
+				c->plan.copy_src_off,
+				uml_nt_phys_refs(c->ph,
+					(long long)c->plan.copy_src_off),
+				c->plan.copy_dst_off,
+				uml_nt_phys_refs(c->ph,
+					(long long)c->plan.copy_dst_off),
+				hex);
+		}
 		}
 		stack_window_reassert(c);
 		c->plan_next = 0;
@@ -1690,9 +1719,31 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		memcpy(uml_boot.physmem_base + cv->run_off,
 		       uml_boot.physmem_base + pv->run_off,
 		       cv->end - cv->start);
-		os_info("[eager] fork-seed vma %d src=0x%llx dst=0x%llx "
-			"len=%llu\n", vi, pv->run_off, cv->run_off,
-			cv->end - cv->start);
+		/* WRITER-HUNT (M5.6a): same generation-grade ledger as
+		 * [cowcopy] — refs both ends + source tail-16 fp. */
+		{
+			const unsigned char *fp =
+				(const unsigned char *)
+				((char *)uml_boot.physmem_base +
+				 pv->run_off + UML_NT_PHYS_RUN_SIZE -
+				 16);
+			char hex[49];
+			int hi;
+
+			for (hi = 0; hi < 16; hi++)
+				snprintf(hex + hi * 3,
+					 sizeof(hex) - hi * 3,
+					 "%02x ", fp[hi]);
+			os_info("[eager] fork-seed vma %d src=0x%llx "
+				"(refs=%d) dst=0x%llx (refs=%d) len=%llu "
+				"fp=%s\n", vi, pv->run_off,
+				uml_nt_phys_refs(parent->ph,
+					(long long)pv->run_off),
+				cv->run_off,
+				uml_nt_phys_refs(child->ph,
+					(long long)cv->run_off),
+				cv->end - cv->start, hex);
+		}
 	}
 	/* M5.4 c3 (map 053 item 2b): the eager stack copy hands the
 	 * child the parent's BELOW-RSP residue — sigframes (SIGCHLD

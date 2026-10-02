@@ -186,6 +186,14 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * after — its views die with the process (NtTerminateProcess),
 	 * so nothing it parked can alias anyone anymore. */
 	uml_nt_phys_set_drop_owner(c->ph, c);
+	{
+		int na = uml_nt_mm_drop_audit(c->mm);
+
+		if (na != 0)
+			os_info("[phys-alias] drop pid %d: %d cross-VMA "
+				"run alias(es) — double-claim witness\n",
+				id->pid, na);
+	}
 	uml_nt_mm_drop(c->mm, c->ph);
 	uml_nt_phys_settle(c->ph, c);
 	uml_nt_phys_set_drop_owner(c->ph, (const void *)0);

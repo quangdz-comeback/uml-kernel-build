@@ -1734,7 +1734,7 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 
 			heapwalk_done = 1;
 			for (va = c->mm->heap_start, idx = 0;
-			     va < c->mm->heap_end && idx < 4096;
+			     va < c->mm->heap_end && idx < 32768;
 			     idx++) {
 				long long off =
 					uml_nt_vma_translate(c->mm, va, 16);
@@ -1855,11 +1855,90 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 						"%016llx %016llx %016llx\n",
 						q[0], q[1], q[2], q[3]);
 				}
+			} else if (va < c->mm->heap_end) {
+				/* Run 36979286356: the old 4096 cap hit
+				 * and the "clean" message lied — a
+				 * 1.2 MB heap of 0x20 chunks walks
+				 * ~24k links. Say CAP HIT. */
+				os_info("[heapwalk] CAP HIT va=0x%llx "
+					"after %d chunks — chain untested "
+					"beyond (heap [0x%llx,0x%llx))\n",
+					va, idx, c->mm->heap_start,
+					c->mm->heap_end);
 			} else {
 				os_info("[heapwalk] chain clean to heap end "
 					"(%d chunks, [0x%llx,0x%llx))\n",
 					idx, c->mm->heap_start,
 					c->mm->heap_end);
+			}
+			/* WRITER-HUNT (M5.6a): the tcache poison
+			 * witness. Run 36979286356 died
+			 * "malloc(): unaligned tcache chunk detected" —
+			 * entries[i] (the RAW head pointers, heap_start
+			 * +0x90) held a pointer glibc can't dequeue; the
+			 * mangle-free tcwatch can't see it (counts +
+			 * pair-state only) and the chain walk reads
+			 * headers, not the entries array. Dump every
+			 * entry that is neither NULL nor 16-aligned,
+			 * with its translation: a value that translates
+			 * through THIS mm is an in-heap writer (match
+			 * the run off against the [cowcopy]/[eager]/
+			 * [wire]/[phys] ledger); one that doesn't
+			 * convicts a ghost view / foreign writer. */
+			{
+				long long toff = uml_nt_vma_translate(
+					c->mm, c->mm->heap_start, 16);
+
+				if (toff >= 0) {
+					unsigned long long thdr[2];
+					int tidx;
+
+					memcpy(thdr, (char *)uml_boot.
+					       physmem_base + toff, 16);
+					if ((thdr[1] & ~0x7ull) == 0x290) {
+						for (tidx = 0; tidx < 64;
+						     tidx++) {
+							unsigned long long ev;
+							long long eoff =
+								uml_nt_vma_translate(
+								c->mm,
+								c->mm->heap_start +
+								0x90 +
+								(unsigned long long)
+								tidx * 8, 8);
+
+							if (eoff < 0)
+								break;
+							memcpy(&ev, (char *)
+							       uml_boot.
+							       physmem_base +
+							       eoff, 8);
+							if (ev != 0 &&
+							    (ev & 0xF) != 0) {
+								long long voff =
+									uml_nt_vma_translate(
+									c->mm,
+									ev &
+									~0xFull,
+									1);
+
+								os_info("[heapwalk] "
+									"tcache entries[%d]"
+									"=0x%llx MISALIGNED"
+									" — translate %s"
+									" (off=0x%llx)\n",
+									tidx, ev,
+									voff >= 0 ?
+									"IN-mm" :
+									"FOREIGN",
+									voff < 0 ?
+									(unsigned long long)-1 :
+									(unsigned long long)voff &
+									~(UML_NT_PHYS_RUN_SIZE - 1));
+							}
+						}
+					}
+				}
 			}
 		}
 	}

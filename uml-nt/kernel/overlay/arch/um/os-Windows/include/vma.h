@@ -211,6 +211,11 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
  * same run counted once). */
 void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph);
 
+/* WRITER-HUNT (M5.6a): count cross-VMA run aliases (two VMAs of one
+ * mm claiming overlapping runs — the double-claim/under-count class).
+ * 0 = clean. Pure (unit-testable, no os_info — vma.c stays pure). */
+int uml_nt_mm_drop_audit(const struct uml_nt_mm *mm);
+
 /*
  * COW surgery for one write-fault: split `vma` around the 64K run
  * containing `page`; the intersecting piece is repointed to `new_run`

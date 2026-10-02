@@ -441,6 +441,38 @@ void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
 	mm->nguard = 0;
 }
 
+/* WRITER-HUNT (M5.6a): cross-VMA run alias audit. Two VMAs of the
+ * SAME mm whose run spans overlap = a double claim the refs table
+ * counted once — the mm_drop unref walk frees the run out from under
+ * the survivor VMA and the next alloc hands it to a foreign conn
+ * while this mm still translates into it (the run 0x3900000 shape:
+ * park refs=0 on a live heap). Pure so the unit test owns it; the
+ * conn layer logs the count at teardown. */
+int uml_nt_mm_drop_audit(const struct uml_nt_mm *mm)
+{
+	int i, j, n = 0;
+
+	for (i = 0; i < mm->nvma; i++) {
+		unsigned long long as = mm->vma[i].run_off;
+		unsigned long long ae = as +
+			(mm->vma[i].end - mm->vma[i].start);
+
+		for (j = 0; j < mm->nvma; j++) {
+			unsigned long long bs = mm->vma[j].run_off;
+			unsigned long long be = bs +
+				(mm->vma[j].end - mm->vma[j].start);
+
+			if (i == j)
+				continue;
+			if (as < be && bs < ae) {
+				n++;
+				break;
+			}
+		}
+	}
+	return n;
+}
+
 int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			 struct uml_nt_vma *vma, unsigned long long page,
 			 unsigned long long new_run)

@@ -1390,6 +1390,43 @@ static void test_phys_block_check(void)
 	CHECK(uml_nt_phys_block_check(&p, (long long)s, RUN) == -1);
 }
 
+/* WRITER-HUNT (M5.6a): the drop audit names cross-VMA run aliases —
+ * two VMAs of one mm claiming overlapping runs (the double-claim /
+ * refs under-count class: mm_drop's unref walk would free the run
+ * out from under the survivor VMA). */
+static void test_drop_audit(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	unsigned long long r0, r1;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 64 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	CHECK(uml_nt_mm_drop_audit(&mm) == 0);
+
+	r0 = uml_nt_phys_alloc(&ph);
+	r1 = uml_nt_phys_alloc(&ph);
+	r1 = uml_nt_phys_alloc(&ph); /* 2 runs beyond r0: the mock
+				      * hands adjacent runs, and vma[0]
+				      * below spans [r0, r0+2*RUN) — a
+				      * VMA on r1 would be a REAL alias */
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + 2 * RUN, r0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_mm_drop_audit(&mm) == 0);
+
+	/* disjoint second VMA: clean */
+	CHECK(uml_nt_vma_add(&mm, RAM + 4 * RUN, RAM + 5 * RUN, r1,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_mm_drop_audit(&mm) == 0);
+
+	/* aliased second VMA (stale fork view on the same run block):
+	 * the audit names BOTH members of the alias pair */
+	CHECK(uml_nt_vma_add(&mm, RAM + 6 * RUN, RAM + 7 * RUN, r0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_mm_drop_audit(&mm) == 2);
+}
+
 int main(void)
 {
 	test_phys();
@@ -1408,6 +1445,7 @@ int main(void)
 	test_guard();
 	test_fault_stolen();
 	test_stack_window();
+	test_drop_audit();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);
