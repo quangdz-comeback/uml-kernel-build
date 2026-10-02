@@ -500,6 +500,27 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		os_info("binfmt_umlnt: stack tables failed rc=%d\n", rc);
 		return rc;
 	}
+	/* WRITER-HUNT (M5.6a) provenance ledger: the exec's stack-top
+	 * image (argv/env vectors + strings) is the one structure the
+	 * victim dumps keep matching byte-for-byte (the "US.UTF-8"
+	 * qword sits in a .data run whose peer generation holds a
+	 * relocated pointer). The tail 16 bytes = the execfn's tail —
+	 * a fingerprint that ties a poisoned run back to THE exec
+	 * that wrote it (plus this line's run_off). */
+	{
+		const unsigned char *fp =
+			(const unsigned char *)
+			((char *)uml_boot.physmem_base + stk->run_off +
+			 UML_NT_PHYS_RUN_SIZE - 16);
+		char hex[49];
+		int hi;
+
+		for (hi = 0; hi < 16; hi++)
+			snprintf(hex + hi * 3, sizeof(hex) - hi * 3,
+				 "%02x ", fp[hi]);
+		os_info("[wire] run_off=%#llx used=%llu fp=%s\n",
+			stk->run_off, (unsigned long long)used, hex);
+	}
 
 	/* Central patch contract §5.1: every `syscall` in exec-only
 	 * regions becomes ud2 before any stub view maps the pages —

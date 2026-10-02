@@ -583,11 +583,13 @@ static void stack_window_reassert(struct uml_nt_stub_conn *c)
  * at the poison site, every serve round. glibc 2.36: the
  * tcache_perthread_struct is the heap's first chunk
  * [heap_start, +0x290): counts[64] u16 then entries[64] safe-linked
- * pointers (raw = mangled ^ (slot_va >> 12)). Every entry must
- * un-mangle to 0 or a 16-aligned pointer this mm translates (own
- * heap or own mmap arenas — both are VMAs here); every count <= 7
- * (mp_.tcache_count). The observed poison fails both ("a%UTEMD_
- * S$UTEMD_" text fragments, misaligned heap-range values). The fire
+ * pointers. VALIDATION IS MANGLING-FREE by design (the reveal key
+ * lives in the pushed chunk's own address — un-mangling from the
+ * slot address fired false on every healthy cache in runs
+ * 36972326995/36972320563): every count must be <= 7
+ * (mp_.tcache_count — text poison "a%UTEMD_S$UTEMD_" reads as huge
+ * counts and fires here), and the count/head pair-state must agree
+ * (NULL head <=> zero count; glibc updates them together). The fire
  * dump covers the slack on BOTH sides of the struct (the spill
  * direction) + the round attribution (last_nr/last_ret + trap regs).
  * Read-only by design: writing canary BYTES around the struct would
@@ -635,23 +637,33 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	memcpy(entries, (const void *)(uintptr_t)base + sizeof(counts),
 	       sizeof(entries));
 	for (i = 0; i < UML_NT_TCACHE_COUNTS; i++) {
-		unsigned long long raw = entries[i];
 		int bad;
 
-		raw ^= ((tva + sizeof(counts) +
-			 (unsigned long long)i * 8) >> 12);
+		/* MANGLE-FREE VALIDATION ONLY (runs 36972326995 +
+		 * 36972320563 lesson): safe-linking's reveal key is the
+		 * PUSHED CHUNK's own data address, not the entries[]
+		 * slot address — un-mangling with the slot key flagged
+		 * every healthy cache (an empty slot stores 0, which
+		 * un-mangles to the key itself; a live head un-mangles
+		 * to slot-key-xor garbage) and burned the one-shot
+		 * budget on the first 8 conns before any real poison.
+		 * What convicts WITHOUT the key: count <= 7 always
+		 * (text poison "a%UTEMD_"/"US.UTF-8" reads as huge
+		 * u16 counts and fires here directly), and the
+		 * count/head pair-state glibc maintains atomically per
+		 * put/get — a NULL head with a non-zero count, or a
+		 * non-NULL head with a zero count, is impossible in a
+		 * quiescent cache. */
 		bad = (counts[i] > UML_NT_TCACHE_LIMIT) ||
-		      ((raw & 0xf) != 0) ||
-		      (raw != 0 &&
-		       uml_nt_vma_translate(mm, raw, 1) < 0);
+		      ((entries[i] == 0) != (counts[i] == 0));
 		if (!bad)
 			continue;
 		c->tcache_fired = 1;
 		tcache_watch_budget--;
 		os_info("[tcwatch] pid %lu slot %d COUNT=%u entry=0x%llx "
-			"raw=0x%llx heap [0x%llx,0x%llx)\n",
+			"heap [0x%llx,0x%llx)\n",
 			(unsigned long)c->pid, i, counts[i], entries[i],
-			raw, mm->heap_start, mm->heap_end);
+			mm->heap_start, mm->heap_end);
 		os_info("[tcwatch]   round nr=%llu ret=%lld rip=0x%llx "
 			"rsp=0x%llx fs=0x%llx\n", c->last_nr, c->last_ret,
 			c->d->regs.rip, c->d->regs.rsp, c->fs_base);
@@ -1096,6 +1108,13 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			       uml_boot.physmem_base +
 				       c->plan.copy_src_off,
 			       UML_NT_PHYS_RUN_SIZE);
+		/* WRITER-HUNT (M5.6a) provenance ledger: the run-copy
+		 * traffic is small and the fire dumps name their run —
+		 * this line maps a poisoned run back to the copy (and
+		 * its SOURCE run) that produced its generation. */
+		os_info("[cowcopy] pid %lu src=0x%llx dst=0x%llx\n",
+			(unsigned long)c->pid,
+			c->plan.copy_src_off, c->plan.copy_dst_off);
 		}
 		stack_window_reassert(c);
 		c->plan_next = 0;
@@ -1197,6 +1216,9 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 		memcpy(uml_boot.physmem_base + cv->run_off,
 		       uml_boot.physmem_base + pv->run_off,
 		       cv->end - cv->start);
+		os_info("[eager] poc-fork vma %d src=0x%llx dst=0x%llx "
+			"len=%llu\n", vi, pv->run_off, cv->run_off,
+			cv->end - cv->start);
 	}
 	/* M5.4 c3 (map 053 item 2b): below-rsp residue zeroing — same
 	 * contract as the task-backed seed above (the eager copy hands
@@ -1668,6 +1690,9 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		memcpy(uml_boot.physmem_base + cv->run_off,
 		       uml_boot.physmem_base + pv->run_off,
 		       cv->end - cv->start);
+		os_info("[eager] fork-seed vma %d src=0x%llx dst=0x%llx "
+			"len=%llu\n", vi, pv->run_off, cv->run_off,
+			cv->end - cv->start);
 	}
 	/* M5.4 c3 (map 053 item 2b): the eager stack copy hands the
 	 * child the parent's BELOW-RSP residue — sigframes (SIGCHLD
