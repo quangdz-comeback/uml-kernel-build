@@ -1807,19 +1807,53 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
  * loop serves its own conn; the parent's wait4 blocks in schedule()
  * and the child's do_exit wakes it — upstream parity end to end. */
 
-static struct uml_nt_stub_conn *fork_pending_parent;
+/* The fork handoff is PER-TASK (run 37075722281 decode): a global
+ * fork_pending_parent died the moment two forks overlapped — the
+ * executor's fork (nr=57, conn 2580, armed at line 3611) was still in
+ * copy_process when PID 1's own fork (nr=56, conn 7552) armed at 3629
+ * and CLOBBERED the single global; the loser's child mm then spawned
+ * its conn unseeded (nvma=0, INIT 0 map ops) and the stub jumped into
+ * an unmapped address space (rip=0, 0xC0000005). arm and seed run on
+ * the SAME kernel thread — copy_process is synchronous inside the
+ * fork syscall — so the handoff keys on current->pid and preemption
+ * cannot cross wires. The seed's anti-stale guard re-checks that
+ * current's mm still points at the armed conn (a recycled pid's stale
+ * slot cannot seed a foreign mm). */
+#define UML_NT_FORK_HANDOFF_N 16
+static struct {
+	int pid;
+	struct uml_nt_stub_conn *conn;
+	unsigned long long rsp;
+} fork_handoffs[UML_NT_FORK_HANDOFF_N];
 
-/* [fork-entry] audit (107/108): who owns a fork handoff right now?
+static struct uml_nt_stub_conn *fork_handoff_rsp(unsigned long long *rsp)
+{
+	int i;
+
+	for (i = 0; i < UML_NT_FORK_HANDOFF_N; i++)
+		if (fork_handoffs[i].conn != NULL &&
+		    fork_handoffs[i].pid == current->pid) {
+			*rsp = fork_handoffs[i].rsp;
+			return fork_handoffs[i].conn;
+		}
+	return NULL;
+}
+
+/* [fork-entry] audit (107/108): who owns THIS task's fork handoff?
  * -1 = none. mmctx's spawn print pairs this with the child's mm so
  * an unseeded birth (0 map ops → rip=0, conn 3124's death) names its
- * branch in the same boot. */
+ * branch in the same boot. Per-task: an exec birth during a fork
+ * window reads its OWN (empty) cell instead of another fork's. */
 int uml_nt_fork_pending_pid(void)
 {
-	if (fork_pending_parent == NULL)
+	unsigned long long rsp;
+	struct uml_nt_stub_conn *parent = fork_handoff_rsp(&rsp);
+
+	if (parent == NULL)
 		return -1;
-	return (int)fork_pending_parent->pid;
+	return (int)parent->pid;
 }
-static unsigned long long fork_pending_rsp;
+
 
 /* ---- M5.1c.4: switch-trace ring + the fork_handler birth trace ----
  *
@@ -1981,6 +2015,8 @@ void uml_nt_alias_scan(unsigned long long lo, unsigned long long hi)
 
 void uml_nt_fork_arm(struct uml_nt_stub_conn *parent, unsigned long long rsp)
 {
+	int i, free_i = -1;
+
 	/* fork-handoff trace (poller 070): run 36941397893 died the
 	 * R7 fatal mode — a fork's child conn spawned with an EMPTY mm
 	 * (INIT 0 map ops, stub dead at first access) and NO "child
@@ -1990,8 +2026,46 @@ void uml_nt_fork_arm(struct uml_nt_stub_conn *parent, unsigned long long rsp)
 	 * arm + disarm-pending-set = consumed-by-nobody race). */
 	os_info("fork-handoff: arm parent pid %lu rsp=0x%llx\n",
 		(unsigned long)parent->pid, rsp);
-	fork_pending_parent = parent;
-	fork_pending_rsp = rsp;
+	for (i = 0; i < UML_NT_FORK_HANDOFF_N; i++) {
+		if (fork_handoffs[i].conn != NULL &&
+		    fork_handoffs[i].pid == current->pid) {
+			free_i = i; /* this task re-arming its own fork */
+			break;
+		}
+		if (fork_handoffs[i].conn == NULL && free_i < 0)
+			free_i = i;
+	}
+	if (free_i < 0) {
+		os_info("fork-handoff: table full — fork refused\n");
+		return;
+	}
+	fork_handoffs[free_i].pid = current->pid;
+	fork_handoffs[free_i].conn = parent;
+	fork_handoffs[free_i].rsp = rsp;
+}
+
+void uml_nt_fork_disarm(void)
+{
+	int i;
+
+	/* fork-handoff trace (poller 070): disarm while THIS task's
+	 * handoff is STILL SET = the seed never consumed it — this
+	 * fork's child conn is about to spawn unseeded (the fatal
+	 * mode of run 36941397893). Silent when empty: the seed
+	 * consumed it (the normal path — every seeded fork disarms
+	 * empty). */
+	for (i = 0; i < UML_NT_FORK_HANDOFF_N; i++) {
+		if (fork_handoffs[i].conn == NULL ||
+		    fork_handoffs[i].pid != current->pid)
+			continue;
+		if (fork_handoffs[i].conn != NULL)
+			os_info("fork-handoff: disarm with PENDING STILL "
+				"SET (parent pid %lu) — seed never "
+				"consumed\n", (unsigned long)
+				fork_handoffs[i].conn->pid);
+		fork_handoffs[i].conn = NULL;
+		fork_handoffs[i].rsp = 0;
+	}
 }
 
 /* Map 049: the phys refcount event log (physalloc.h for the fire
@@ -2095,29 +2169,31 @@ void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 		release_vma_sweep(kind, off, nruns, owner);
 }
 
-void uml_nt_fork_disarm(void)
-{
-	/* fork-handoff trace (poller 070): disarm while the pending is
-	 * STILL SET = the seed never consumed the handoff — this fork's
-	 * child conn is about to spawn unseeded (the fatal mode of run
-	 * 36941397893). Silent when NULL: the seed consumed it (the
-	 * normal path — every seeded fork disarms empty). */
-	if (fork_pending_parent != NULL)
-		os_info("fork-handoff: disarm with PENDING STILL SET "
-			"(parent pid %lu) — seed never consumed\n",
-			(unsigned long)fork_pending_parent->pid);
-	fork_pending_parent = NULL;
-	fork_pending_rsp = 0;
-}
-
 int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 {
-	struct uml_nt_stub_conn *parent = fork_pending_parent;
+	unsigned long long seed_rsp;
+	struct uml_nt_stub_conn *parent = fork_handoff_rsp(&seed_rsp);
 	int vi;
 	int rc_clone;
 
 	if (parent == NULL)
-		return 0;
+		return 0; /* exec/bprm birth — nothing to seed */
+	/* Anti-stale guard (per-task handoff): the armed conn must
+	 * still be THIS task's own mm conn. A recycled pid's stale
+	 * slot, or any foreign handoff, must never seed a foreign
+	 * mm — fail the fork loud instead. */
+	if (current->mm == NULL ||
+	    ((struct mm_id *)&current->mm->context.id)->nt_conn != parent) {
+		os_info("fork: handoff stale (armed conn pid %lu, "
+			"current mm conn %s) — seed refused\n",
+			(unsigned long)parent->pid,
+			current->mm != NULL &&
+			((struct mm_id *)&current->mm->context.id)
+			->nt_conn != NULL ?
+			"different" : "none");
+		uml_nt_fork_disarm();
+		return -ENOMEM;
+	}
 	if (parent->dead_magic == UML_NT_CONN_DEAD) {
 		/* 048 audit: the armed parent conn was destroyed
 		 * between the arm and this seed (its exit beat the
@@ -2126,7 +2202,7 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		 * with -ENOMEM, the guest sees fork() fail). */
 		os_info("fork: armed parent conn destroyed (pid %lu) "
 			"— seed refused\n", (unsigned long)parent->pid);
-		fork_pending_parent = NULL;
+		uml_nt_fork_disarm();
 		return -ENOMEM;
 	}
 
@@ -2141,7 +2217,7 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	child->ph_shared = 1;
 
 	rc_clone = uml_nt_mm_clone(child->mm, parent->mm, child->ph,
-			    fork_pending_rsp);
+			    seed_rsp);
 	if (rc_clone != 0) {
 		os_info("fork: mm clone failed (reason %s, child conn "
 			"pid %lu, parent nvma %d, nguard %d)\n",
@@ -2261,10 +2337,10 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		struct uml_nt_vma *sv;
 		unsigned long long zstart;
 
-		if (fork_pending_rsp < 128)
+		if (seed_rsp < 128)
 			goto no_zero;
-		sv = uml_nt_vma_find(child->mm, fork_pending_rsp);
-		zstart = fork_pending_rsp - 128;
+		sv = uml_nt_vma_find(child->mm, seed_rsp);
+		zstart = seed_rsp - 128;
 		if (sv != NULL && zstart > sv->start) {
 			unsigned long long zlen = zstart - sv->start;
 
@@ -2288,7 +2364,7 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 				os_info("fork: zeroed child stack "
 					"residue below rsp 0x%llx "
 					"(%llu bytes)\n",
-					fork_pending_rsp, zlen);
+					seed_rsp, zlen);
 			}
 		}
 no_zero:
@@ -2312,12 +2388,12 @@ no_zero:
 		unsigned long long va, end;
 		int poison = 0;
 
-		lv = uml_nt_vma_find(child->mm, fork_pending_rsp);
+		lv = uml_nt_vma_find(child->mm, seed_rsp);
 		if (lv != NULL) {
-			end = fork_pending_rsp + 0x200;
+			end = seed_rsp + 0x200;
 			if (end > lv->end)
 				end = lv->end;
-			for (va = (fork_pending_rsp + 7) & ~7ull;
+			for (va = (seed_rsp + 7) & ~7ull;
 			     va + 8 <= end; va += 8) {
 				unsigned long long v;
 
@@ -2344,23 +2420,33 @@ no_zero:
 	 * rounds is far past the victims' death depth (INIT + a
 	 * handful of faults + the arena mmap). */
 	child->watch_val = parent->d->regs.rip + 2;
-	child->watch_rsp = fork_pending_rsp;
+	child->watch_rsp = seed_rsp;
 	child->watch_left = 512;
 	{
 		struct uml_nt_vma *wv = uml_nt_vma_find(child->mm,
-							fork_pending_rsp);
+							seed_rsp);
 
 		os_info("fork: residue-watch armed pid %lu val=0x%llx "
 			"rsp=0x%llx vma=[0x%llx,0x%llx) "
 			"run_off=0x%llx\n",
 			(unsigned long)child->pid, child->watch_val,
-			fork_pending_rsp,
+			seed_rsp,
 			wv != NULL ? wv->start : 0,
 			wv != NULL ? wv->end : 0,
 			wv != NULL ? wv->run_off : 0);
 	}
-	fork_pending_parent = NULL;
-	fork_pending_rsp = 0;
+	/* The handoff is consumed: clear THIS task's cell silently —
+	 * the fork round's disarm logs only the not-consumed case. */
+	{
+		int i;
+
+		for (i = 0; i < UML_NT_FORK_HANDOFF_N; i++)
+			if (fork_handoffs[i].conn == parent &&
+			    fork_handoffs[i].pid == current->pid) {
+				fork_handoffs[i].conn = NULL;
+				fork_handoffs[i].rsp = 0;
+			}
+	}
 	/* cowwatch sweep (M5.6a): the clone JUST bumped the refs of
 	 * every COW-shared run — arm each run that is NOW shared
 	 * (refs >= 2): the poison class writes into a shared run
