@@ -1538,6 +1538,100 @@ static void test_drop_audit(void)
 	CHECK(uml_nt_mm_drop_audit(&mm) == 2);
 }
 
+/* D25 (Shelley 2026-10-03, đáp to-shelley 134): the fork-storm —
+ * 1000 re-home/share/drop rounds over 4 conns under the D22 serve
+ * discipline (settle every round). Invariant under test: after EVERY
+ * handout, the fresh span crosses NO live claim (the unit-level form
+ * of the writer-2 pool alias the [alloc-alias] probe named
+ * "kernel-side unseen path"), every drop is balanced (no theft), and
+ * the park ring never spills. */
+#define STORM_CONNS 4
+#define STORM_ROUNDS 1000
+
+static void test_fork_storm(void)
+{
+	struct uml_nt_phys ph;
+	unsigned long long lo[STORM_CONNS], hi[STORM_CONNS];
+	unsigned int seed = 0x3940;
+	int round, i;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 64 * RUN) == 0);
+	for (i = 0; i < STORM_CONNS; i++) {
+		lo[i] = 1; /* hi < lo = no live claim */
+		hi[i] = 0;
+	}
+
+	for (round = 0; round < STORM_ROUNDS; round++) {
+		int c = (int)(seed % STORM_CONNS);
+		int op = (int)((seed >> 8) % 4);
+		const void *tag = (const void *)(long)(c + 1);
+		unsigned long long q, s;
+		int n;
+
+		seed = seed * 1664525u + 1013904223u;
+		if (op == 0) {
+			/* re-home: drop own piece, hand a fresh one */
+			if (hi[c] >= lo[c]) {
+				for (q = lo[c]; q < hi[c]; q += RUN)
+					CHECK(uml_nt_phys_unref_for(
+						&ph, (long long)q,
+						tag) >= 0);
+				hi[c] = 0;
+			}
+			n = 1 + (int)((seed >> 12) % 3);
+			s = uml_nt_phys_alloc_span(&ph, n);
+			if (s < 0) {
+				/* exhausted: legal ENOMEM, force churn
+				 * by dropping every claim */
+				for (i = 0; i < STORM_CONNS; i++) {
+					const void *tg =
+						(const void *)(long)(i + 1);
+
+					for (q = lo[i]; q < hi[i]; q += RUN)
+						CHECK(uml_nt_phys_unref_for(
+							&ph, (long long)q,
+							tg) >= 0);
+					hi[i] = 0;
+				}
+				continue;
+			}
+			/* D25 assert: the handout crosses NO live claim */
+			for (i = 0; i < STORM_CONNS; i++)
+				if (hi[i] >= lo[i])
+					CHECK(s + (long long)n * RUN <=
+						      lo[i] ||
+					      s >= hi[i]);
+			lo[c] = s;
+			hi[c] = s + (unsigned long long)n * RUN;
+		} else if (op == 1 && hi[c] >= lo[c]) {
+			/* fork: the child shares the parent's piece,
+			 * one ref PER RUN of the span */
+			int c2 = (c + 1 + (int)((seed >> 6) %
+						(STORM_CONNS - 1))) %
+				 STORM_CONNS;
+
+			for (q = lo[c]; q < hi[c]; q += RUN)
+				CHECK(uml_nt_phys_ref(&ph,
+						      (long long)q) > 0);
+			lo[c2] = lo[c];
+			hi[c2] = hi[c];
+		} else if (op == 2 && hi[c] >= lo[c]) {
+			/* drop the conn's own claim */
+			for (q = lo[c]; q < hi[c]; q += RUN)
+				CHECK(uml_nt_phys_unref_for(
+					&ph, (long long)q, tag) >= 0);
+			hi[c] = 0;
+		}
+		/* the serve-round discipline: every conn settles each
+		 * round (a new request proves its plan ops applied) */
+		for (i = 0; i < STORM_CONNS; i++)
+			uml_nt_phys_settle(&ph,
+					   (const void *)(long)(i + 1));
+		CHECK(uml_nt_phys_parked(&ph) <= UML_NT_PHYS_PARK_MAX);
+	}
+}
+
 int main(void)
 {
 	test_phys();
@@ -1558,6 +1652,7 @@ int main(void)
 	test_fault_stolen();
 	test_stack_window();
 	test_drop_audit();
+	test_fork_storm();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);

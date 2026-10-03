@@ -1247,6 +1247,28 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 					uml_boot.physmem_base +
 					(unsigned long long)pv->run_off +
 					(pv->end - pv->start);
+				/* D25 census (to-shelley 134): the
+				 * piece's own run MUST be a live
+				 * claim in the refcount table —
+				 * refs<=0 (never handed / stolen) or
+				 * gen==0 (never stamped) = this VMA
+				 * translates into runs the phys
+				 * layer doesn't own it on = the
+				 * alias class, named at arm time. */
+				if (uml_nt_phys_refs(c->ph,
+						     pv->run_off) <= 0 ||
+				    uml_nt_phys_gen(c->ph, pv->run_off)
+					    == 0)
+					os_info("[kheap-arm] piece %d "
+						"off=0x%llx refs=%d "
+						"gen=%llu — UNOWNED "
+						"CLAIM\n", np,
+						pv->run_off,
+						uml_nt_phys_refs(
+							c->ph,
+							pv->run_off),
+						uml_nt_phys_gen(c->ph,
+								pv->run_off));
 				np++;
 			}
 			uml_nt_kheap_sync(pcs, np);
@@ -1914,6 +1936,15 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * so blocks it parked at drop time can return to the backend;
 	 * and this round's drops park under THIS conn's tag. */
 	uml_nt_phys_settle(c->ph, c);
+	/* D25 audit (to-shelley 134): settle TRUSTS the drained
+	 * invariant — ops pending here mean the released block could
+	 * re-hand while THIS conn's stub views are mid-flight (the
+	 * free-while-mapped alias reborn). Log-only until it names
+	 * the window. */
+	if (c->plan_left != 0)
+		os_info("[phys-settle] plan_left=%d pid %lu — settle "
+			"fired with ops pending\n",
+			c->plan_left, (unsigned long)c->pid);
 	uml_nt_phys_set_drop_owner(c->ph, c);
 	/* WRITER-HUNT (M5.6a): the direct-write canary — validate the
 	 * conn's tcache BEFORE serving this round; poison seen here
