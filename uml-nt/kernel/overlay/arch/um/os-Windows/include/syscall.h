@@ -170,6 +170,20 @@ struct uml_nt_stub_conn {
 	unsigned long long tc_chunk_snap[4];
 	unsigned char tc_chunk_armed[4];
 	unsigned char tc_chunk_valid;
+	/* M5.6a POISON SWEEP (referees 37111253316 + 37112746470
+	 * decode): the payload (literal "SYSTEMD_" qword,
+	 * 0x5f444d4554535953 — reveal math exact across every boot)
+	 * keeps landing in freed chunks while EVERY write witness
+	 * stays negative: the writer strikes between rounds and each
+	 * watched page retires at its first legit write. At [tcdelta]
+	 * fire the WHOLE heap VMA is swept for the literal qword; up
+	 * to 4 hit VAs go under per-round byte watch — the next
+	 * content change to a watched chunk prints ITS round
+	 * (nr/ret/rip): the writer's own round, not the surfacing
+	 * pop. kzalloc init = disarmed. */
+	unsigned long long posweep_va[4];
+	unsigned long long posweep_snap[4];
+	unsigned char posweep_armed[4];
 	/* M5.6a TCACHE TRIP: set on the conn at its first fork seed —
 	 * the poison window opens post-fork; the serve hook then arms
 	 * the tcache struct page READ-ONLY (one live trip, re-armed

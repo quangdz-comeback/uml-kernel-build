@@ -1043,6 +1043,14 @@ static int tcache_delta_budget = 16;
 /* The chunk watch budget (see the CHUNK WATCH in tcache_watch) —
  * one line + dump per foreign write into a watched head chunk. */
 static int tcache_chunk_budget = 16;
+/* The poison sweep budgets (see the POISON SWEEP in tcache_watch):
+ * whole-heap scans at [tcdelta] fire + per-round byte watches on the
+ * swept hit chunks. */
+static int posweep_budget = 8;
+static int posweep_va_budget = 16;
+/* The payload literal: "SYSTEMD_" as a little-endian qword — the raw
+ * freed-chunk content the reveal math decodes to on every boot. */
+#define UML_NT_POSWEEP_QWORD 0x5f444d4554535953ull
 
 /* [alias] census (M5.6a, decode 37095399220): every witness on the
  * kernel write paths is now negative — [kcopy] 0, [uawrite] and
@@ -1262,12 +1270,130 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 				(UML_NT_PHYS_RUN_SIZE - 1),
 				UML_NT_PHYS_RUN_SIZE);
 			dump_guest_bytes(mm, tva, 0x40, "tcdelta-struct");
+			/* POISON SWEEP (referees 37111253316 +
+			 * 37112746470): the payload keeps landing in
+			 * freed chunks with EVERY write witness
+			 * negative — the writer strikes between rounds
+			 * and each watched page retires at its first
+			 * legit write. Sweep the WHOLE heap VMA for
+			 * the literal qword NOW (fire-time only, ≤8
+			 * sweeps/boot): the hit VAs = where the poison
+			 * lives, and up to 4 of them go under per-round
+			 * byte watch (the armed check below) — the next
+			 * change to a watched chunk prints its OWN
+			 * round = the writer's round. Direct run_off
+			 * math per VMA piece (no per-qword translate);
+			 * the pieces are the cow_split sub-VMAs. */
+			if (posweep_budget > 0 &&
+			    mm->heap_end > mm->heap_start &&
+			    mm->heap_end - mm->heap_start <= 0x400000) {
+				int vi2, nh = 0, printed = 0;
+				unsigned long long total = 0;
+
+				posweep_budget--;
+				for (vi2 = 0; vi2 < mm->nvma; vi2++) {
+					const struct uml_nt_vma *pv2 =
+						&mm->vma[vi2];
+					unsigned long long va, vend;
+
+					if (pv2->end <= mm->heap_start ||
+					    pv2->start >= mm->heap_end ||
+					    (long long)pv2->run_off < 0)
+						continue;
+					va = (pv2->start > mm->heap_start) ?
+					     pv2->start : mm->heap_start;
+					vend = (pv2->end < mm->heap_end) ?
+					       pv2->end : mm->heap_end;
+					va &= ~7ull;
+					for (; va + 8 <= vend; va += 8) {
+						unsigned long long qv =
+							*(const unsigned
+							  long long *)
+							(const void *)
+							((char *)
+							 uml_boot.physmem_base +
+							 pv2->run_off +
+							 (va - pv2->start));
+
+						if (qv != UML_NT_POSWEEP_QWORD)
+							continue;
+						total++;
+						if (printed < 8) {
+							printed++;
+							os_info("[posweep] "
+								"pid %lu hit "
+								"va=0x%llx "
+								"(sweep round "
+								"nr=%llu "
+								"ret=%lld "
+								"rip=0x%llx)\n",
+								(unsigned
+								 long)
+								c->pid, va,
+								c->last_nr,
+								c->last_ret,
+								c->d->regs.
+								rip);
+						}
+						if (nh < 4) {
+							c->posweep_va[nh] =
+								va;
+							c->posweep_snap[nh] =
+								qv;
+							c->posweep_armed[nh] =
+								1;
+							nh++;
+						}
+					}
+				}
+				for (; nh < 4; nh++)
+					c->posweep_armed[nh] = 0;
+				os_info("[posweep] pid %lu sweep done: "
+					"hits=%llu armed=%d heap="
+					"[0x%llx,0x%llx)\n",
+					(unsigned long)c->pid, total, nh,
+					mm->heap_start, mm->heap_end);
+			}
 		}
 		c->tc_snap_valid = 1;
 		c->tc_snap[0] = entries[0];
 		c->tc_snap[1] = entries[1];
 		c->tc_snap[2] = entries[2];
 		c->tc_snap[3] = entries[3];
+	}
+	/* POISON-SWEEP byte watch: the chunks armed by the last sweep
+	 * on THIS conn report their next content change with the
+	 * round coords (nr/ret/rip) — the writer's own round, not
+	 * just the surfacing pop. One line per watched chunk
+	 * (posweep_va_budget), then the slot disarms. */
+	{
+		int di2;
+
+		for (di2 = 0; di2 < 4; di2++) {
+			unsigned long long nv2;
+			long long coff2;
+
+			if (!c->posweep_armed[di2] ||
+			    posweep_va_budget <= 0)
+				continue;
+			coff2 = uml_nt_vma_translate(mm,
+					c->posweep_va[di2], 8);
+			if (coff2 < 0)
+				continue;
+			nv2 = *(const unsigned long long *)
+				(const void *)((char *)
+				uml_boot.physmem_base + coff2);
+			if (nv2 == c->posweep_snap[di2])
+				continue;
+			posweep_va_budget--;
+			c->posweep_armed[di2] = 0;
+			os_info("[posweep-va] pid %lu va=0x%llx 0x%llx -> "
+				"0x%llx (round nr=%llu ret=%lld rip=0x%llx "
+				"rsp=0x%llx)\n", (unsigned long)c->pid,
+				c->posweep_va[di2], c->posweep_snap[di2],
+				nv2, c->last_nr, c->last_ret,
+				c->d->regs.rip, c->d->regs.rsp);
+		}
 	}
 	/* CHUNK WATCH (referee 37087346082 decode): [tcdelta] named
 	 * the payload — entries[2] 0x67d020d0 -> 0x5f444d4554552451

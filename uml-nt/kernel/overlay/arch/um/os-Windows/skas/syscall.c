@@ -1628,8 +1628,9 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 		return;
 	ncaptured++;
 	os_info("[abrt] libc-message writev(2) -> %lld iovcnt=%llu "
-		"(task %d)\n", (long long)ret, cnt,
-		current ? current->pid : 0);
+		"(task %d conn-pid %lu)\n", (long long)ret, cnt,
+		current ? current->pid : 0,
+		(unsigned long)(c ? c->pid : 0));
 	os_info("[abrt]   message class: %s\n",
 		abrt_text_match(s, n) ? "malloc-family" : "OTHER");
 	/* The writev trap is the EARLIEST fatal point — abort() has
