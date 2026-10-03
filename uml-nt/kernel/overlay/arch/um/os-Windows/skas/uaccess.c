@@ -70,6 +70,31 @@ struct uml_nt_mm *uml_nt_syscall_mm(void)
 /* WRITER-HUNT (M5.6a): budget for the heap-writeback logger in
  * raw_copy_to_user — the rusage-shaped poison source hunt. */
 static unsigned int uacc_heap_writes;
+/* The tcache-page small-write witness (its own, tiny budget). */
+static unsigned int uacc_small_writes;
+
+/* Shared print for both writeback witnesses: task + payload + the
+ * VMA/run coordinates the walker will translate through — a
+ * WRONG-run_off VMA shows up right in the line as run= pointing at
+ * foreign bytes (the cow_split-base sibling class). */
+static void uacc_wlog(const char *tag, unsigned int idx,
+		      unsigned long long va, unsigned long n,
+		      unsigned long long q0, unsigned long long q1)
+{
+	struct uml_nt_vma *v;
+	unsigned long long page, run_start, old_run;
+	int task = current ? current->pid : 0;
+
+	page = va & ~(UACC_TRACE_PAGE - 1);
+	v = uml_nt_vma_find(uacc_mm, page);
+	run_start = page & ~(UML_NT_PHYS_RUN_SIZE - 1);
+	old_run = v ? v->run_off + (run_start - v->start) : 0;
+	os_info("%s #%u task=%d va=0x%llx len=%lu q0=0x%llx q1=0x%llx "
+		"vma=[0x%llx,0x%llx) run_off=0x%llx run=0x%llx\n",
+		tag, idx, task, va, n, q0, q1,
+		v ? v->start : 0, v ? v->end : 0,
+		v ? v->run_off : 0, old_run);
+}
 
 static void uacc_trace_efault(unsigned long long va, unsigned long n)
 {
@@ -217,34 +242,67 @@ unsigned long raw_copy_from_user(void *to, const void __user *from,
 unsigned long raw_copy_to_user(void __user *to, const void *from,
 			       unsigned long n)
 {
-	/* WRITER-HUNT (M5.6a, referee 37080844010): the poison
-	 * {fd=0x1a, bk=0x8000, 0x30, 0x30, 0x7fffffff, 0} sits at the
-	 * SAME heap VA (0x67d0b4c0) across run generations, never
-	 * tripped a cowtrap page (a private run rules out foreign
-	 * views; a stub-view write would fault) and never mismatched
-	 * a copy_verify — the writer class left is the KERNEL-SIDE
-	 * writeback through THIS funnel (rusage/wait4-shaped payload:
-	 * {utime 26s+32768µs, stime 48s+48µs, maxrss INT_MAX}).
-	 * Log every successful bulk writeback into the conn's heap:
-	 * the next poisoned boot names nr-agnostic evidence — va +
-	 * the first payload qwords — directly comparable with the
-	 * cowwatch HIT dump. Budgeted; the range check keeps the hot
-	 * read() path at 3 compares. */
-	if (uacc_mm != NULL && n >= 24 && uacc_heap_writes < 24 &&
-	    uacc_mm->heap_end > uacc_mm->heap_start &&
-	    (unsigned long long)(unsigned long)to >=
-		    uacc_mm->heap_start &&
-	    (unsigned long long)(unsigned long)to + n <=
-		    uacc_mm->heap_end) {
+	/* WRITER-HUNT (M5.6a, referee 37082741453 decode): the first
+	 * logger died of starvation — all 24 slots burned by line
+	 * ~700/23306 on LEGIT bulk reads (config text into low-heap
+	 * buffers), blind long before the poison. The decode also
+	 * moved the crime: the rusage-shaped blob in the top chunk is
+	 * chain-coherent WILDERNESS residue (a freed buffer's bytes —
+	 * benign), while the abort's cause is the 16-byte ASCII blob
+	 * INSIDE the tcache struct (entries[1..2] = near-"SYSTEMD_"
+	 * text; malloc never hands out heap_start+0x98, so no conn
+	 * may target it). v2: (a) bulk budget 24 -> 256 + exact
+	 * quadruple dedup (re-reads die; value-changing writebacks
+	 * survive); (b) NEW small-write witness: put_user-class
+	 * (n < 24) writebacks into the TCACHE PAGE
+	 * [heap_start, +0x1000) — the kernel never legitimately
+	 * writes there, any hit convicts; (c) both lines add task +
+	 * the VMA/run coordinates via uacc_wlog. */
+	if (uacc_mm != NULL && uacc_mm->heap_end > uacc_mm->heap_start) {
+		unsigned long long va =
+			(unsigned long long)(unsigned long)to;
 		const unsigned long long *q =
 			(const unsigned long long *)from;
+		unsigned long long q0, q1;
+		int bulk = n >= 24;
+		int small = !bulk && n >= 4 &&
+			    va >= uacc_mm->heap_start &&
+			    va + n <= uacc_mm->heap_start + 0x1000;
 
-		uacc_heap_writes++;
-		os_info("[uawrite] #%u va=0x%llx len=%lu q0=0x%llx "
-			"q1=0x%llx\n", uacc_heap_writes,
-			(unsigned long long)(unsigned long)to, n,
-			q[0], q[1]);
+		if (!((bulk && va >= uacc_mm->heap_start &&
+		       va + n <= uacc_mm->heap_end) || small))
+			goto walk;
+		if (n >= 8)
+			q0 = q[0];
+		else if (n >= 4)
+			q0 = *(const unsigned int *)from;
+		else
+			q0 = *(const unsigned char *)from;
+		q1 = (n >= 16) ? q[1] : 0;
+		{
+			static unsigned long long d_va, d_len, d_q0, d_q1;
+			static int d_valid;
+
+			if (d_valid && d_va == va && d_len == n &&
+			    d_q0 == q0 && d_q1 == q1)
+				goto walk;
+			d_valid = 1;
+			d_va = va;
+			d_len = n;
+			d_q0 = q0;
+			d_q1 = q1;
+		}
+		if (bulk) {
+			if (++uacc_heap_writes <= 256)
+				uacc_wlog("[uawrite]", uacc_heap_writes,
+					  va, n, q0, q1);
+		} else {
+			if (++uacc_small_writes <= 16)
+				uacc_wlog("[uawrite-s]", uacc_small_writes,
+					  va, n, q0, q1);
+		}
 	}
+walk:
 	if (uml_nt_uacc_walk(uacc_mm, uml_boot.physmem_base,
 			     (unsigned long long)(unsigned long)to, n,
 			     (char *)from, UML_NT_UACC_TO_GUEST) < 0) {
