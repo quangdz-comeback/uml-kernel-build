@@ -74,10 +74,13 @@ int uml_nt_guard_hit(const struct uml_nt_mm *mm, unsigned long long addr)
 	return 0;
 }
 
-/* Insert keeping sort order; overlap rejected (caller's mmap contract). */
-int uml_nt_vma_add(struct uml_nt_mm *mm, unsigned long long start,
-		   unsigned long long end, unsigned long long run_off,
-		   unsigned prot, unsigned flags)
+/* Insert keeping sort order; overlap rejected (caller's mmap
+ * contract). gen = the run-table life recorded with the claim
+ * ([gen] stale-translation guard, vma.h); 0 = unchecked. */
+int uml_nt_vma_add_gen(struct uml_nt_mm *mm, unsigned long long start,
+		       unsigned long long end, unsigned long long run_off,
+		       unsigned prot, unsigned flags,
+		       unsigned long long gen)
 {
 	int i, pos;
 
@@ -103,14 +106,26 @@ int uml_nt_vma_add(struct uml_nt_mm *mm, unsigned long long start,
 	mm->vma[pos].run_off = run_off;
 	mm->vma[pos].prot = prot;
 	mm->vma[pos].flags = flags;
+	mm->vma[pos].gen = gen;
 	mm->nvma++;
 	return 0;
 }
 
-/* Raw insert at a known-sorted position (cow_split bookkeeping). */
+int uml_nt_vma_add(struct uml_nt_mm *mm, unsigned long long start,
+		   unsigned long long end, unsigned long long run_off,
+		   unsigned prot, unsigned flags)
+{
+	return uml_nt_vma_add_gen(mm, start, end, run_off, prot, flags,
+				  0);
+}
+
+/* Raw insert at a known-sorted position (cow_split / del-split
+ * bookkeeping). gen travels with the pieces — both survive on the
+ * SAME block and the claim's life is unchanged. */
 static int vma_insert(struct uml_nt_mm *mm, int pos, unsigned long long start,
 		      unsigned long long end, unsigned long long run_off,
-		      unsigned prot, unsigned flags)
+		      unsigned prot, unsigned flags,
+		      unsigned long long gen)
 {
 	int i;
 
@@ -123,6 +138,7 @@ static int vma_insert(struct uml_nt_mm *mm, int pos, unsigned long long start,
 	mm->vma[pos].run_off = run_off;
 	mm->vma[pos].prot = prot;
 	mm->vma[pos].flags = flags;
+	mm->vma[pos].gen = gen;
 	mm->nvma++;
 	return 0;
 }
@@ -182,10 +198,12 @@ int uml_nt_vma_del(struct uml_nt_mm *mm, unsigned long long start,
 			unsigned long long run = mm->vma[i].run_off;
 			unsigned prot = mm->vma[i].prot;
 			unsigned flags = mm->vma[i].flags;
+			unsigned long long gen = mm->vma[i].gen;
 			int rc;
 
 			rc = vma_insert(mm, i + 1, end, e,
-					run + (end - s), prot, flags);
+					run + (end - s), prot, flags,
+					gen);
 			if (rc < 0)
 				return -1;
 			mm->vma[i].end = start;
@@ -356,6 +374,7 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 		const struct uml_nt_vma *v = &src->vma[i];
 		unsigned flags = v->flags;
 		unsigned long long run_off = v->run_off;
+		unsigned long long gen = v->gen;
 		int rc;
 
 		/* NT constraint (M3.3): the VEH dispatch pushes the
@@ -380,6 +399,10 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 			if (off < 0)
 				return UML_NT_CLONE_SPAN;
 			run_off = (unsigned long long)off;
+			/* [gen] the eager span is a NEW life — the
+			 * child's stack claim records ITS life. */
+			gen = (unsigned long long)uml_nt_phys_gen(ph,
+								  off);
 			flags &= ~UML_NT_VMA_COW;
 		} else if (uml_nt_prot_writable(v->prot)) {
 			flags |= UML_NT_VMA_COW;
@@ -393,8 +416,10 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 			((struct uml_nt_vma *)v)->flags |= UML_NT_VMA_COW;
 		}
 
-		rc = uml_nt_vma_add(dst, v->start, v->end, run_off,
-				    v->prot, flags);
+		/* [gen] shared runs keep the source claim's life; the
+		 * eager stack span recorded its own fresh life above. */
+		rc = uml_nt_vma_add_gen(dst, v->start, v->end, run_off,
+					v->prot, flags, gen);
 		if (rc < 0)
 			return UML_NT_CLONE_TABLE;
 
@@ -489,6 +514,7 @@ int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 {
 	unsigned long long run_start, run_end, mid_s, mid_e;
 	unsigned long long orig_start, orig_end, orig_run, old_run;
+	unsigned long long orig_gen;
 	unsigned prot, flags;
 	int idx, extra, rc;
 
@@ -501,6 +527,7 @@ int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	orig_start = vma->start;
 	orig_end = vma->end;
 	orig_run = vma->run_off;
+	orig_gen = vma->gen;
 	prot = vma->prot;
 	flags = vma->flags;
 
@@ -525,10 +552,16 @@ int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	if (uml_nt_phys_unref(ph, (long long)old_run) < 0)
 		return -1;
 
-	/* Middle piece first (in place): private run, COW cleared. */
+	/* Middle piece first (in place): private run, COW cleared.
+	 * [gen] the claim MOVES to the fresh run — its recorded life
+	 * must move with it (the new run's own life, bumped at its
+	 * handout), or every post-split access would read as a stale
+	 * claim against the new run. */
 	vma->start = mid_s;
 	vma->end = mid_e;
 	vma->run_off = new_run;
+	vma->gen = (unsigned long long)
+		uml_nt_phys_gen(ph, (long long)new_run);
 	vma->flags = flags & ~UML_NT_VMA_COW;
 
 	/* Insertions keep the sort order: post above, pre below. Both
@@ -546,13 +579,13 @@ int uml_nt_vma_cow_split(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	if (orig_end > mid_e) {
 		rc = vma_insert(mm, idx + 1, mid_e, orig_end,
 				orig_run + (mid_e - orig_start), prot,
-				flags);
+				flags, orig_gen);
 		if (rc < 0)
 			return -1;
 	}
 	if (mid_s > orig_start) {
 		rc = vma_insert(mm, idx, orig_start, mid_s, orig_run,
-				prot, flags);
+				prot, flags, orig_gen);
 		if (rc < 0)
 			return -1;
 	}

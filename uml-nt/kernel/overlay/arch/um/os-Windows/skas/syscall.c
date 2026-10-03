@@ -257,12 +257,18 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 		uml_nt_cowwatch_touch(new_off, old_len, "brk-rehome-dst");
 
 		if (uml_nt_vma_del(mm, mm->heap_start, old_end) < 0 ||
-		    uml_nt_vma_add(mm, mm->heap_start, new_end, new_off,
-				   UML_NT_PAGE_READWRITE, 0) < 0) {
+		    uml_nt_vma_add_gen(mm, mm->heap_start, new_end,
+				       new_off, UML_NT_PAGE_READWRITE, 0,
+				       (unsigned long long)uml_nt_phys_gen(
+					       c->ph, new_off)) < 0) {
 			/* Roll the old VMA back (the del succeeded if
 			 * we got here); the fresh span dies young. */
-			uml_nt_vma_add(mm, mm->heap_start, old_end,
-				       old_off, UML_NT_PAGE_READWRITE, 0);
+			uml_nt_vma_add_gen(mm, mm->heap_start, old_end,
+					   old_off, UML_NT_PAGE_READWRITE,
+					   0,
+					   (unsigned long long)
+					   uml_nt_phys_gen(c->ph,
+							   old_off));
 			for (i = 0; i < nruns; i++)
 				uml_nt_phys_unref(c->ph,
 						  (long long)new_off +
@@ -540,8 +546,10 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 			"failed\n", va, len, nruns);
 		return SC_RET(SC_ENOMEM);
 	}
-	if (uml_nt_vma_add(c->mm, va, va + len, (unsigned long long)sp,
-			   prot, 0) < 0) {
+	if (uml_nt_vma_add_gen(c->mm, va, va + len, (unsigned long long)sp,
+			       prot, 0,
+			       (unsigned long long)uml_nt_phys_gen(
+				       c->ph, (long long)sp)) < 0) {
 		for (i = 0; i < nruns; i++)
 			uml_nt_phys_unref(c->ph, sp +
 					  (long long)i *
@@ -901,9 +909,13 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 				fdput(fdesc);
 				return SC_RET(SC_ENOMEM);
 			}
-			if (uml_nt_vma_add(c->mm, cur, cur + clen, sp,
-					   UML_NT_PAGE_EXECUTE_READWRITE,
-					   UML_NT_VMA_FILE) < 0) {
+			if (uml_nt_vma_add_gen(c->mm, cur, cur + clen, sp,
+					       UML_NT_PAGE_EXECUTE_READWRITE,
+					       UML_NT_VMA_FILE,
+					       (unsigned long long)
+					       uml_nt_phys_gen(
+						       c->ph,
+						       (long long)sp)) < 0) {
 				uml_nt_phys_unref(c->ph, (long long)sp);
 				fdput(fdesc);
 				return SC_RET(SC_ENOMEM);

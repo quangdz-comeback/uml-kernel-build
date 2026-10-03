@@ -68,6 +68,14 @@ struct uml_nt_phys {
 	void *pages[UML_NT_PHYS_MAX_RUNS];        /* owner run only */
 	unsigned short span_len[UML_NT_PHYS_MAX_RUNS];  /* 0 = free run */
 	unsigned short span_back[UML_NT_PHYS_MAX_RUNS]; /* dist to owner */
+	/* [gen] (M5.6a map 121, đáp 122): life counter per run — bumped
+	 * at EVERY handout and at EVERY release. A claim (VMA gen)
+	 * recorded at its own handout must still match; a mismatch =
+	 * the run changed lives under the claim (freed + re-handed) =
+	 * a STALE TRANSLATION (the tcache-entries poison writer,
+	 * referee 37105483388: kernel read-fill through a stale
+	 * run_off). */
+	unsigned short gen[UML_NT_PHYS_MAX_RUNS];
 	/* D22 quarantine (see UML_NT_PHYS_PARK_MAX): blocks dropped to
 	 * 0 while a view owner is tagged wait here instead of going
 	 * straight back to the backend. NULL drop-owner (drops outside
@@ -130,6 +138,13 @@ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off);
 int uml_nt_phys_unref_for(struct uml_nt_phys *p, long long off,
 			  const void *conn);
 int uml_nt_phys_refs(struct uml_nt_phys *p, long long off);
+
+/* [gen] (M5.6a map 121, đáp 122): the current life of the run at
+ * off — what a VMA claim recorded at its own handout must still
+ * carry (the stale-translation guard in the uacc walker/funnel).
+ * 0 = free / never handed / bad offset; a live run's life is never
+ * 0 (the first handout bumps 0 -> 1). */
+unsigned short uml_nt_phys_gen(struct uml_nt_phys *p, long long off);
 
 /* Refcount event hook (map 049: the run 0x28b0000 double-claim — a
  * live TLS block whose refs reached 0 through SOME path that unref'd

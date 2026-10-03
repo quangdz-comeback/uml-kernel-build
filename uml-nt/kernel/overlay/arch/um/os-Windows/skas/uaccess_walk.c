@@ -95,6 +95,32 @@ static int uacc_plan_op(struct uml_nt_fault_plan *plan, unsigned op,
 	return 0;
 }
 
+/* Map 121 (đáp 122): the shared generation check for EVERY
+ * translate site (byte walk, str walk, write ptr). refs==1 only
+ * proves SOMEBODY holds the run — a stale VMA whose claim died
+ * (freed + re-handed to the new owner, e.g. the heap/tcache) still
+ * translates and still passes the refs guard; its access then
+ * poisons the new owner's memory (the tcache-entries writer: two
+ * independent rounds, nr=3 ret=0 + nr=318 ret=8, referee
+ * 37105483388). The claim's recorded life must equal the run's
+ * current life; gen==0 = unchecked claim (POC/bench paths keep
+ * the old behavior). Returns 1 = STALE (the caller refuses, EFAULT
+ * class), 0 = ok / unchecked / no table installed. */
+static int uacc_gen_stale(const struct uml_nt_mm *mm,
+			  unsigned long long va, unsigned long long off)
+{
+	struct uml_nt_vma *gv;
+
+	if (uacc_sink.ph == (struct uml_nt_phys *)0)
+		return 0; /* no table installed: unchecked */
+	gv = uml_nt_vma_find((struct uml_nt_mm *)mm, va);
+	if (gv == (struct uml_nt_vma *)0 || gv->gen == 0)
+		return 0;
+	return gv->gen != (unsigned long long)
+	       uml_nt_phys_gen(uacc_sink.ph,
+			       (long long)(off & ~(UACC_RUN - 1)));
+}
+
 /* Flat pointer for the byte at `va` after making a kernel WRITE to
  * its page safe (hazard 3, review M3.8). Mirrors the COW branch of
  * uml_nt_mm_fault (fault.c) except the run copy is INLINE (the
@@ -128,6 +154,13 @@ char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 	run_start = page & ~(UACC_RUN - 1);
 	old_run = vma->run_off + (run_start - vma->start);
 	byte_off = vma->run_off + (va - vma->start);
+
+	/* Map 121: the write funnel's stale-claim guard — the read()
+	 * fill lands HERE for non-COW VMAs (direct flat write): a
+	 * stale heap VMA over a re-handed run writes the NEW owner's
+	 * memory (the tcache-entries writer, referee 37105483388). */
+	if (uacc_gen_stale(mm, va, old_run))
+		return (char *)0;
 
 	if (!(vma->flags & UML_NT_VMA_COW))
 		return base + byte_off; /* never shared: direct */
@@ -246,6 +279,13 @@ int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 		    uml_nt_phys_refs(uacc_sink.ph,
 				     off & ~(UACC_RUN - 1)) == 0)
 			return -1;
+		/* Map 121 (đáp 122): generation check — the claim's
+		 * recorded life must still match the run's current
+		 * life (see uacc_gen_stale; the tcache-entries
+		 * poison-writer class, referee 37105483388). gen==0 =
+		 * unchecked claim (POC/bench paths). */
+		if (uacc_gen_stale(mm, va, (unsigned long long)off))
+			return -1;
 		switch (op) {
 		case UML_NT_UACC_FROM_GUEST:
 			uacc_bcopy(buf, base + off, chunk);
@@ -295,6 +335,11 @@ static long long uacc_str_walk(char *dst, const struct uml_nt_mm *mm,
 		if (uacc_sink.ph != (struct uml_nt_phys *)0 &&
 		    uml_nt_phys_refs(uacc_sink.ph,
 				     off & ~(UACC_RUN - 1)) == 0)
+			return want_nul_incl ? 0 : -1;
+		/* Map 121: same generation guard as the byte walk (the
+		 * str funnel reads through the same claim — see
+		 * uacc_gen_stale). */
+		if (uacc_gen_stale(mm, va, (unsigned long long)off))
 			return want_nul_incl ? 0 : -1;
 		n = (long long)uacc_bstrnlen(base + off, chunk);
 		if (n < (long long)chunk) {

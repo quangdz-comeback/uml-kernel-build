@@ -43,6 +43,7 @@ int uml_nt_phys_init(struct uml_nt_phys *p, unsigned long long size)
 		p->pages[i] = (void *)0;
 		p->span_len[i] = 0;
 		p->span_back[i] = 0;
+		p->gen[i] = 0;
 	}
 	p->npark = 0;
 	p->drop_owner = (const void *)0;
@@ -86,6 +87,14 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns)
 		p->span_len[i + k] = (unsigned short)nruns;
 		p->span_back[i + k] = (unsigned short)k;
 	}
+	/* [gen] EVERY handout bumps the life of every run in the
+	 * span — a claim (VMA gen) recorded against a previous life
+	 * no longer matches the table (the stale-translation guard:
+	 * walker/funnel refuse the access). The bump makes the
+	 * first life 1 — a live run's life is never 0, so gen==0
+	 * stays the "unchecked claim" sentinel. */
+	for (k = 0; k < nruns; k++)
+		p->gen[i + k]++;
 	/* [alloc-alias]: the table claims these runs were FREE — let
 	 * the conn layer name any live VMA that never stopped
 	 * translating into them (log-only; the handout stands). */
@@ -131,6 +140,10 @@ static void block_release(struct uml_nt_phys *p, int o, const void *owner)
 		p->pages[o + k] = (void *)0;
 		p->span_len[o + k] = 0;
 		p->span_back[o + k] = 0;
+		/* [gen] EVERY release bumps the life — a claim that
+		 * outlived its block (a stale VMA) mismatches even
+		 * while the runs sit free in the table. */
+		p->gen[o + k]++;
 	}
 }
 
@@ -281,4 +294,19 @@ int uml_nt_phys_refs(struct uml_nt_phys *p, long long off)
 	if (i < 0)
 		return -1;
 	return p->refs[i];
+}
+
+/* [gen] (M5.6a map 121): the current life of the run at off — the
+ * value a VMA claim recorded at its own handout must still carry.
+ * 0 = free / never handed / bad offset (and the VMA-claim
+ * "unchecked" sentinel — a live run's life is never 0). Wrap at
+ * 65536 lives of ONE run index is a theoretical false-match
+ * window; far beyond any boot's alloc churn. */
+unsigned short uml_nt_phys_gen(struct uml_nt_phys *p, long long off)
+{
+	int i = run_index(p, off);
+
+	if (i < 0)
+		return 0;
+	return p->gen[i];
 }

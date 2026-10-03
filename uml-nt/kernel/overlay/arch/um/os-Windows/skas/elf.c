@@ -387,9 +387,14 @@ merged:
 	out->entry = entry;
 	out->brk = regs[nreg - 1].re + base;
 	for (i = 0; i < nreg; i++) {
-		if (uml_nt_vma_add(mm, out->seg[i].start, out->seg[i].end,
-				   out->seg[i].run_off, out->seg[i].prot,
-				   0) < 0) {
+		if (uml_nt_vma_add_gen(mm, out->seg[i].start,
+				       out->seg[i].end,
+				       out->seg[i].run_off,
+				       out->seg[i].prot, 0,
+				       (unsigned long long)uml_nt_phys_gen(
+					       ph,
+					       (long long)out->seg[i]
+							       .run_off)) < 0) {
 			/* roll back: partial adds out, spans freed */
 			for (j = 0; j < i; j++)
 				uml_nt_vma_del(mm, out->seg[j].start,
@@ -425,8 +430,10 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
 	off = uml_nt_phys_alloc_span(ph, 1);
 	if (off < 0)
 		return UML_NT_ELF_NOMEM;
-	if (uml_nt_vma_add(mm, va, va + RUN, (unsigned long long)off,
-			   0x04u /* READWRITE */, 0) < 0) {
+	if (uml_nt_vma_add_gen(mm, va, va + RUN, (unsigned long long)off,
+			       0x04u /* READWRITE */, 0,
+			       (unsigned long long)uml_nt_phys_gen(ph,
+								   off)) < 0) {
 		uml_nt_phys_unref(ph, off);
 		return UML_NT_ELF_MM;
 	}

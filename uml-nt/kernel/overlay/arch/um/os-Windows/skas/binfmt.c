@@ -567,9 +567,12 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		  UML_NT_HEAP_VA_RESERVE;
 	heap_va &= ~(UML_NT_PHYS_RUN_SIZE - 1);
 	if (heap_va <= UML_NT_GUEST_VA_BASE ||
-	    uml_nt_vma_add(c->mm, heap_va, heap_va + UML_NT_PHYS_RUN_SIZE,
-			   (unsigned long long)heap_off,
-			   UML_NT_PAGE_READWRITE, 0) < 0) {
+	    uml_nt_vma_add_gen(c->mm, heap_va,
+			       heap_va + UML_NT_PHYS_RUN_SIZE,
+			       (unsigned long long)heap_off,
+			       UML_NT_PAGE_READWRITE, 0,
+			       (unsigned long long)uml_nt_phys_gen(
+				       c->ph, heap_off)) < 0) {
 		uml_nt_phys_unref(c->ph, heap_off);
 		os_info("binfmt_umlnt: heap vma failed at 0x%llx\n",
 			heap_va);

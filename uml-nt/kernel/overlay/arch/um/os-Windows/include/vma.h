@@ -61,6 +61,13 @@ struct uml_nt_vma {
 	unsigned prot;    /* NT PAGE_* the guest sees once fixed up */
 	unsigned flags;   /* UML_NT_VMA_* */
 	unsigned long long run_off; /* backing run offset (64K aligned) */
+	/* [gen] (M5.6a map 121): the phys run-table life counter at
+	 * claim time — 0 = unchecked claim (POC/bench paths). The
+	 * uacc walker + funnel refuse (EFAULT class) any access whose
+	 * VMA gen no longer matches the run's current life (freed +
+	 * re-handed under it = stale translation, the tcache poison
+	 * writer class). */
+	unsigned long long gen;
 };
 
 /* Sub-run PROT_NONE region (M4 slice 5): the musl mallocng brk guard
@@ -110,8 +117,19 @@ struct uml_nt_mm {
 
 void uml_nt_mm_init(struct uml_nt_mm *mm);
 
-/* Insert [start, end) backed by run_off with prot/flags. Returns 0,
- * -1 on overlap, table full, or unsorted input. */
+/* Insert [start, end) backed by run_off with prot/flags, recording
+ * the run-table life `gen` with the claim (the [gen] stale-
+ * translation guard: the uacc walker/funnel refuse accesses whose
+ * VMA gen no longer matches the backing run's current life — freed
+ * + re-handed under the claim). Returns 0, -1 on overlap, table
+ * full, or unsorted input. */
+int uml_nt_vma_add_gen(struct uml_nt_mm *mm, unsigned long long start,
+		       unsigned long long end, unsigned long long run_off,
+		       unsigned prot, unsigned flags,
+		       unsigned long long gen);
+
+/* The unchecked-claim shorthand: records gen == 0 — the POC/bench
+ * paths keep the old (unguarded) behavior. */
 int uml_nt_vma_add(struct uml_nt_mm *mm, unsigned long long start,
 		   unsigned long long end, unsigned long long run_off,
 		   unsigned prot, unsigned flags);

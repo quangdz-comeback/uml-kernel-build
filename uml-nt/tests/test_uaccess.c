@@ -88,6 +88,7 @@ static void fill_pattern(unsigned char *b, unsigned long n)
 
 static void test_cow_fixup(void);
 static void test_stolen_run(void);
+static void test_gen_stale(void);
 
 int main(void)
 {
@@ -198,6 +199,10 @@ int main(void)
 
 	/* Map 049 item 2: the stolen-run ownership guard. */
 	test_stolen_run();
+
+	/* Map 121 (đáp 122): the per-run generation (stale claim)
+	 * guard. */
+	test_gen_stale();
 
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
@@ -412,6 +417,95 @@ static void test_stolen_run(void)
 	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 16, NULL,
 			       UML_NT_UACC_ZERO_GUEST) < 0);
 	CHECK(flat[0] == (unsigned char)3); /* pattern byte intact */
+
+	uml_nt_uacc_set_sink(NULL);
+}
+
+/* Map 121 (đáp 122): a VMA claim recorded at its handout must stop
+ * translating when the run is freed + re-handed — the stale-
+ * translation class: the kernel read-fill (read() into a heap
+ * buffer, TO_GUEST -> write_ptr direct) poured bytes into the NEW
+ * owner's tcache entries through the OLD claim (referee
+ * 37105483388). After the re-hand refs==1 (the new owner), so the
+ * refs guard passes and ONLY the generation catches it: refuse
+ * (EFAULT class), nothing lands. A re-added claim at the current
+ * life serves again; gen==0 claims stay unchecked (the POC/bench
+ * contract). */
+static void test_gen_stale(void)
+{
+	struct uml_nt_mm mm;
+	struct uml_nt_phys ph;
+	struct uml_nt_fault_plan plan;
+	struct uml_nt_uacc_sink sink;
+	char buf[32];
+	unsigned long long gen0;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 4 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	CHECK(uml_nt_phys_alloc(&ph) == 0); /* run 0 — first life */
+	gen0 = (unsigned long long)uml_nt_phys_gen(&ph, 0);
+	CHECK(gen0 == 1);
+	CHECK(uml_nt_vma_add_gen(&mm, RAM, RAM + RUN, 0,
+				 UML_NT_PAGE_READWRITE, 0, gen0) == 0);
+	fill_pattern(flat, RUN);
+
+	memset(&plan, 0, sizeof(plan));
+	sink.ph = &ph;
+	sink.plan = &plan;
+	uml_nt_uacc_set_sink(&sink);
+
+	/* healthy at the recorded life: read + write serve */
+	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 16, buf,
+			       UML_NT_UACC_FROM_GUEST) == 0);
+	memset(buf, 0x5a, 8);
+	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 8, buf,
+			       UML_NT_UACC_TO_GUEST) == 0);
+	CHECK(flat[0] == 0x5a);
+
+	/* free + re-hand behind the claim's back: the mock hands the
+	 * SAME run again (first-fit) — refs==1 (the new owner), so
+	 * the refs guard passes; ONLY the generation refuses. */
+	CHECK(uml_nt_phys_unref(&ph, 0) == 0);
+	CHECK(uml_nt_phys_alloc(&ph) == 0);
+	CHECK(uml_nt_phys_refs(&ph, 0) == 1);
+	fill_pattern(flat, RUN); /* the new owner's live content */
+
+	/* read-fill through the stale claim refuses — nothing lands
+	 * in the new owner's memory (the tcache stays clean). */
+	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 16, buf,
+			       UML_NT_UACC_FROM_GUEST) < 0);
+	memset(buf, 0x5a, sizeof(buf));
+	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 8, buf,
+			       UML_NT_UACC_TO_GUEST) < 0);
+	CHECK(flat[0] == (unsigned char)3); /* owner byte intact */
+	CHECK(uml_nt_uacc_strncpy(buf, &mm, (char *)flat, RAM,
+				  32) < 0);
+
+	/* re-claim at the CURRENT life: serves again — the write
+	 * lands at the right destination (the re-handed run). */
+	CHECK(uml_nt_vma_del(&mm, RAM, RAM + RUN) == 0);
+	CHECK(uml_nt_vma_add_gen(&mm, RAM, RAM + RUN, 0,
+				 UML_NT_PAGE_READWRITE, 0,
+				 (unsigned long long)uml_nt_phys_gen(&ph,
+								     0)) == 0);
+	memset(buf, 0x5a, 8);
+	CHECK(uml_nt_uacc_walk(&mm, (char *)flat, RAM, 8, buf,
+			       UML_NT_UACC_TO_GUEST) == 0);
+	CHECK(flat[0] == 0x5a);
+
+	/* gen == 0 claims stay unchecked (the POC/bench contract):
+	 * a live run behind a gen-0 VMA serves as it always did. */
+	{
+		struct uml_nt_mm bench;
+
+		uml_nt_mm_init(&bench);
+		CHECK(uml_nt_vma_add(&bench, RAM, RAM + RUN, 0,
+				     UML_NT_PAGE_READWRITE, 0) == 0);
+		CHECK(uml_nt_uacc_walk(&bench, (char *)flat, RAM, 8,
+				       buf,
+				       UML_NT_UACC_FROM_GUEST) == 0);
+	}
 
 	uml_nt_uacc_set_sink(NULL);
 }
