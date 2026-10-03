@@ -310,6 +310,11 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 		 * first write (report 106). */
 		uml_nt_cowtrap_arm_alloc(c, mm->heap_start, new_end -
 					 mm->heap_start, new_off);
+		/* [cowtrap] grow-side arm: the OLD frontier pages kept
+		 * coverage at the previous grow only — the retire above
+		 * dropped them; re-arm (run 37078256773 decode). */
+		uml_nt_cowtrap_arm_oldtail(c, mm->heap_start, old_end,
+					   new_off);
 		mm->heap_end = new_end;
 	}
 	mm->brk = a[0];

@@ -286,6 +286,15 @@ void uml_nt_cowtrap_arm_alloc(struct uml_nt_stub_conn *c,
 			      unsigned long long len,
 			      unsigned long long run_off);
 
+/* [cowtrap] grow-side arm (run 37078256773): a re-home retires the
+ * old span's slots and re-arms only the new head+tail — the previous
+ * frontier pages drop out of coverage. Call right AFTER the main
+ * arm_alloc on the new span; re-arms [old_end-16p, old_end). */
+void uml_nt_cowtrap_arm_oldtail(struct uml_nt_stub_conn *c,
+				unsigned long long heap_start,
+				unsigned long long old_end,
+				unsigned long long new_off);
+
 /* [cowtrap] trip check at the fault handler: names the first write's
  * rip and retires the slot; the repair stays the normal flow. */
 void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,

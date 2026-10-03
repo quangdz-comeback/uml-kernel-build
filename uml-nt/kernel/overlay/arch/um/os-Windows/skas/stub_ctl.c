@@ -276,6 +276,30 @@ void uml_nt_cowtrap_arm_alloc(struct uml_nt_stub_conn *c,
 		len / UML_NT_PHYS_RUN_SIZE);
 }
 
+/* WRITER-HUNT (M5.6a, run 37078256773): a brk grow retires the old
+ * span's trap slots (the re-home UNMAP+MAPs) and re-arms only the
+ * NEW span's head+tail — the previous frontier pages
+ * [old_end-16p, old_end) fall out of coverage the moment the heap
+ * grows past them. Run 37069739489's poison page (0x67d0e580) was
+ * exactly that: tail-16-armed at its birth grow, written AFTER the
+ * next grow retired it — invisible. Re-arm the old tail on the
+ * fresh span: those are the pages glibc's allocator frontier is
+ * actively filling. */
+void uml_nt_cowtrap_arm_oldtail(struct uml_nt_stub_conn *c,
+				unsigned long long heap_start,
+				unsigned long long old_end,
+				unsigned long long new_off)
+{
+	unsigned long long otv = old_end -
+		(unsigned long long)UML_NT_COWTRAP_TAIL *
+		UML_NT_FAULT_PAGE_SIZE;
+
+	if (otv <= heap_start)
+		return; /* heap smaller than the tail window */
+	uml_nt_cowtrap_arm_alloc(c, otv, old_end - otv,
+				 new_off + (otv - heap_start));
+}
+
 void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,
 			 struct uml_nt_stub_data *d)
 {
@@ -1597,6 +1621,39 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				uml_nt_cowwatch_arm(
 					c->plan.copy_src_off, 0,
 					(unsigned long)c->pid);
+			/* WRITER-HUNT (M5.6a, run 37078256773): the
+			 * DST side goes PRIVATE (refs=1) here with
+			 * writable views and NO watcher — the
+			 * alloc-arm slots on the old span retired
+			 * with the split's UNMAP+MAP, and the
+			 * cowwatch only re-arms at the next fork.
+			 * The poison {fd=0x1a,bk=0x8000} landed in
+			 * exactly that window (dst run 0xee0000,
+			 * private from its cowcopy at line 19941 to
+			 * the next fork's arms at 20754 — ~800 lines
+			 * unwatched) and the first-see then named the
+			 * WRONG round. Arm the dst at birth: the
+			 * flat scan from now on names the round
+			 * truthfully, and every page one-shot-traps
+			 * (a private run repairs by PROTECT, no
+			 * copy) so a stub-view writer dies with
+			 * live rip. The dst maps the SAME VA range
+			 * the faulting write hit — base = its run. */
+			{
+				unsigned long long dvbase =
+					d->fault_addr &
+					~(unsigned long long)
+					(UML_NT_PHYS_RUN_SIZE - 1);
+
+				uml_nt_cowwatch_arm(
+					c->plan.copy_dst_off,
+					dvbase,
+					(unsigned long)c->pid);
+				uml_nt_cowtrap_arm_alloc(c,
+					dvbase,
+					UML_NT_PHYS_RUN_SIZE,
+					c->plan.copy_dst_off);
+			}
 		}
 		}
 		stack_window_reassert(c);
