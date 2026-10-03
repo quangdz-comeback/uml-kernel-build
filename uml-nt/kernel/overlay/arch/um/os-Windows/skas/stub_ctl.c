@@ -1045,18 +1045,18 @@ static int tcache_delta_budget = 16;
 static int tcache_chunk_budget = 16;
 
 /* [alias] census (M5.6a, decode 37095399220): every witness on the
- * kernel write paths is now negative — [kcopy] 0, [uawrite]*/[deadwrite]
- * silent, futex dw silent, [tctrip] trips all legit — while the
- * poison keeps landing on a page that is RO-armed in the victim's
- * OWN stub view. The writer class left standing is a VIEW: another
- * live conn's stub still maps this phys run (a stale view over a
- * recycled run — the D22 free-while-mapped family, INVISIBLE to run
- * refcounts: views are not refs). Walk every live conn's VMA table
- * for VMA run-ranges intersecting [run_off, run_off+len): a FOREIGN
- * mapper = the alias named (its VA + its conn — the writer's
- * process); self-only = the writer is still kernel-side through an
- * unseen path. Log-only; the pump runs on the one vCPU thread, the
- * task list cannot mutate under the walk. */
+ * kernel write paths is now negative — [kcopy] 0, [uawrite] and
+ * [deadwrite] silent, futex dw silent, [tctrip] trips all legit —
+ * while the poison keeps landing on a page that is RO-armed in the
+ * victim's OWN stub view. The writer class left standing is a VIEW:
+ * another live conn's stub still maps this phys run (a stale view
+ * over a recycled run — the D22 free-while-mapped family, INVISIBLE
+ * to run refcounts: views are not refs). Walk every live conn's VMA
+ * table for VMA run-ranges intersecting [run_off, run_off+len): a
+ * FOREIGN mapper = the alias named (its VA + its conn — the
+ * writer's process); self-only = the writer is still kernel-side
+ * through an unseen path. Log-only; the pump runs on the one vCPU
+ * thread, the task list cannot mutate under the walk. */
 void uml_nt_run_alias_census(struct uml_nt_stub_conn *c,
 			     unsigned long long run_off,
 			     unsigned long long len)
