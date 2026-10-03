@@ -141,6 +141,18 @@ struct uml_nt_stub_conn {
 	 * this conn (per-conn one-shot; the watch re-validates every
 	 * serve round until then). kzalloc init = armed. */
 	int tcache_fired;
+	/* M5.6a WRITER-HUNT (referee 37085373580 decode): the tcache
+	 * entries delta-watch. The cowtrap on the tcache page retires
+	 * at the page's FIRST write (glibc's own entry linking), so
+	 * the 16-byte ASCII blob that killed three boots landed after
+	 * the retirement, unwitnessed. This watch snapshots
+	 * entries[0..3] every round; a change to a pointer-ILLEGAL
+	 * value (top 16 bits set — no legit entry has them, safe-
+	 * linked or not — or misaligned) names the round (last_nr)
+	 * and the trap rip. Legit relinking stays silent, so the
+	 * budget survives to the poison. kzalloc init = clean. */
+	unsigned long long tc_snap[4];
+	int tc_snap_valid;
 	/* M5.4 c3 (048): destroy stamps DEAD before kfree; consumers
 	 * that reach a conn through a RETAINED pointer (the switch
 	 * hook's re-arm, the co-mapper census, the fork seed) refuse a

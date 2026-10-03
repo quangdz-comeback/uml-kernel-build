@@ -984,6 +984,9 @@ static void stack_window_reassert(struct uml_nt_stub_conn *c)
 #define UML_NT_TCACHE_COUNTS 64
 #define UML_NT_TCACHE_LIMIT  7
 static int tcache_watch_budget = 8;
+/* The entries delta-watch budget (see the DELTA WATCH in
+ * tcache_watch) — one line per pointer-ILLEGAL entry change. */
+static int tcache_delta_budget = 16;
 static void tcache_watch(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_mm *mm = c->mm;
@@ -993,8 +996,7 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	long long off;
 	int i;
 
-	if (tcache_watch_budget <= 0 || c->tcache_fired ||
-	    !c->task_backed || mm == NULL || mm->heap_start == 0)
+	if (!c->task_backed || mm == NULL || mm->heap_start == 0)
 		return;
 	tva = mm->heap_start + 0x10; /* chunk data past the header */
 	/* The glibc shape check first: the heap's first chunk must be
@@ -1021,6 +1023,48 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	memcpy(counts, (const void *)(uintptr_t)base, sizeof(counts));
 	memcpy(entries, (const void *)(uintptr_t)base + sizeof(counts),
 	       sizeof(entries));
+	/* DELTA WATCH (referee 37085373580 decode): the cowtrap on the
+	 * tcache page retires at the page's FIRST write — glibc's own
+	 * entry linking — so the 16-byte ASCII blob that killed three
+	 * boots (entries[1..2] = "S$UTEMD_"-family text, deterministic)
+	 * landed after the retirement, unwitnessed, NOT via
+	 * raw_copy_to_user ([uawrite-s] clean), and NOT via a tracked
+	 * kernel flat site ([kernel-write] silent). Snapshot
+	 * entries[0..3] per round; a change to a pointer-ILLEGAL value
+	 * names the window: last_nr = the round just served, the trap
+	 * rip = where the guest came back. Pointer-ILLEGAL = top 16
+	 * bits set (no legit entry — 0 or a safe-linked heap pointer —
+	 * has them) or misaligned; legit relinking stays silent so the
+	 * budget survives to the poison. Runs for every task-backed
+	 * conn, including ones whose one-shot bad-scan already fired. */
+	{
+		int di;
+
+		for (di = 0; di < 4; di++) {
+			unsigned long long nv = entries[di];
+			int illegal = ((nv >> 48) != 0) ||
+				      ((nv & 0xF) != 0);
+
+			if (tcache_delta_budget <= 0)
+				break;
+			if (!c->tc_snap_valid || c->tc_snap[di] == nv ||
+			    !illegal)
+				continue;
+			tcache_delta_budget--;
+			os_info("[tcdelta] pid %lu entries[%d] 0x%llx -> "
+				"0x%llx (round nr=%llu ret=%lld rip=0x%llx "
+				"rsp=0x%llx)\n", (unsigned long)c->pid, di,
+				c->tc_snap[di], nv, c->last_nr, c->last_ret,
+				c->d->regs.rip, c->d->regs.rsp);
+		}
+		c->tc_snap_valid = 1;
+		c->tc_snap[0] = entries[0];
+		c->tc_snap[1] = entries[1];
+		c->tc_snap[2] = entries[2];
+		c->tc_snap[3] = entries[3];
+	}
+	if (tcache_watch_budget <= 0 || c->tcache_fired)
+		return;
 	for (i = 0; i < UML_NT_TCACHE_COUNTS; i++) {
 		int bad;
 
