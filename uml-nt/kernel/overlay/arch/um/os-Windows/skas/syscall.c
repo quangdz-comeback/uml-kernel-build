@@ -599,7 +599,10 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 /* File bytes at `off` → [map_start, map_start+len), zeros beyond EOF
  * (everywhere for the anon bss refill). Walks per-VMA pieces — the
  * range may cross VMAs (each segment mapping does); each piece lands
- * at ITS VMA's run offset. */static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
+ * at ITS VMA's run offset. */
+static int kcopy_budget = 24;
+
+static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
 			    unsigned long long map_start,
 			    unsigned long long len, struct file *f,
 			    unsigned long long off,
@@ -619,6 +622,42 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 		}
 		piece = (end < v->end) ? end : v->end;
 		dst = v->run_off + (cur - v->start);
+		/* KCOPY WITNESS (M5.6a, referees 37089977192 +
+		 * 37091284391 decode): the [tctrip] negative witness
+		 * PROVED the poison writer never faults — it writes
+		 * physmem DIRECTLY, bypassing the stub view and every
+		 * funnel. This fill IS such a writer: kernel_read/
+		 * memset pour file bytes (the "SYSTEMD_" text class =
+		 * unit-file/lib bytes) straight into a VMA's run, and
+		 * the comment above already flagged post-fork fills as
+		 * needing COW surgery "later slice". A fill whose
+		 * dest rides an early-heap VA window, or any run still
+		 * COW-shared (refs > 1 — the sibling maps these bytes
+		 * too), = the stomper named. Log-only: one run names
+		 * the site. */
+		if (kcopy_budget > 0 && c->mm != NULL &&
+		    c->mm->heap_start != 0) {
+			unsigned long long drs = dst &
+				~(unsigned long long)
+				(UML_NT_PHYS_RUN_SIZE - 1);
+
+			if ((cur >= c->mm->heap_start - 0x10000 &&
+			     cur < c->mm->heap_start + 0x20000) ||
+			    uml_nt_phys_refs(c->ph, (long long)drs) > 1) {
+				kcopy_budget--;
+				os_info("[kcopy] fill dest va=0x%llx "
+					"len=%llu dst_off=0x%llx run="
+					"0x%llx refs=%d %s vma="
+					"[0x%llx,0x%llx) zero=%d heap="
+					"[0x%llx,0x%llx)\n",
+					cur, piece - cur, dst, drs,
+					uml_nt_phys_refs(c->ph,
+							 (long long)drs),
+					zero ? "anon" : "file", v->start,
+					v->end, zero, c->mm->heap_start,
+					c->mm->heap_end);
+			}
+		}
 		/* WRITER-HUNT (M5.6a): a fill piece that would leave
 		 * the VMA's allocated span (cross-block / dead run) is
 		 * the direct-write heap-trasher caught red-handed —
