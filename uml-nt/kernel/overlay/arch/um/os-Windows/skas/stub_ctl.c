@@ -1417,7 +1417,21 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	{
 		int di;
 
-		for (di = 0; di < 4; di++) {
+		/* DEAD-CODE FIX (referee 37114981981 decode): armed was
+		 * only ever ASSIGNED 0 — the !armed continue below made
+		 * the whole chunk watch unreachable ([tcchunk] = 0
+		 * lines in every referee run; the run-3 dice — bin 0
+		 * head 0x67cd57e0's e->next poisoned, "unaligned tcache
+		 * chunk" — fell exactly in the watched class). Arm now
+		 * SNAPS + SETS armed=1 atomically at (re)arm: the head
+		 * changed identity → read its e->next immediately;
+		 * every later round compares. ALL 64 bins (the poison
+		 * rotated bins 0/1/2 across runs) — 64 translates per
+		 * round is VMA-find work, no copies. A legit push onto
+		 * the head changes entries[i] → re-arm; only a write
+		 * to a STABLE head's next (double-free / the poison
+		 * class) fires. */
+		for (di = 0; di < 64; di++) {
 			unsigned long long ev = entries[di];
 			unsigned long long data;
 			long long coff;
@@ -1427,9 +1441,28 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 			    (ev & 0xF) != 0 || (ev >> 48) != 0 ||
 			    ev < mm->heap_start || ev >= mm->heap_end) {
 				/* (Re)arm: the watched head changed
-				 * identity — new snapshot next round. */
+				 * identity — snapshot its e->next NOW
+				 * and compare from the next round. */
 				c->tc_chunk_va[di] = ev;
 				c->tc_chunk_armed[di] = 0;
+				c->tc_chunk_snap[di] = 0;
+				if (tcache_chunk_budget > 0 &&
+				    (ev & 0xF) == 0 && (ev >> 48) == 0 &&
+				    ev >= mm->heap_start &&
+				    ev < mm->heap_end) {
+					coff = uml_nt_vma_translate(mm, ev,
+								    8);
+					if (coff >= 0) {
+						c->tc_chunk_snap[di] =
+							*(const unsigned
+							  long long *)
+							  (const void *)
+							  ((char *)uml_boot.
+							   physmem_base +
+							   coff);
+						c->tc_chunk_armed[di] = 1;
+					}
+				}
 				continue;
 			}
 			if (tcache_chunk_budget <= 0 ||
@@ -1444,6 +1477,7 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 			if (c->tc_chunk_snap[di] == data)
 				continue;
 			tcache_chunk_budget--;
+			c->tc_chunk_armed[di] = 0;
 			os_info("[tcchunk] pid %lu head[%d] va=0x%llx "
 				"0x%llx -> 0x%llx (round nr=%llu ret=%lld "
 				"rip=0x%llx rsp=0x%llx)\n",

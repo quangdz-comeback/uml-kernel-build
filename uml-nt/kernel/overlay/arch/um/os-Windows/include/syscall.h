@@ -166,9 +166,9 @@ struct uml_nt_stub_conn {
 	 * re-arms on the entry change), so a stable head's e->next is
 	 * stable under legit glibc — only a foreign write (or a
 	 * double-free) moves it. kzalloc init = disarmed. */
-	unsigned long long tc_chunk_va[4];
-	unsigned long long tc_chunk_snap[4];
-	unsigned char tc_chunk_armed[4];
+	unsigned long long tc_chunk_va[64];
+	unsigned long long tc_chunk_snap[64];
+	unsigned char tc_chunk_armed[64];
 	unsigned char tc_chunk_valid;
 	/* M5.6a POISON SWEEP (referees 37111253316 + 37112746470
 	 * decode): the payload (literal "SYSTEMD_" qword,
