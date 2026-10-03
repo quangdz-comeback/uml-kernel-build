@@ -466,7 +466,8 @@ static void test_gen_stale(void)
 
 	/* free + re-hand behind the claim's back: the mock hands the
 	 * SAME run again (first-fit) — refs==1 (the new owner), so
-	 * the refs guard passes; ONLY the generation refuses. */
+	 * the refs guard passes; ONLY the generation refuses. The
+	 * re-hand stamps a NEW epoch (2) on the run. */
 	CHECK(uml_nt_phys_unref(&ph, 0) == 0);
 	CHECK(uml_nt_phys_alloc(&ph) == 0);
 	CHECK(uml_nt_phys_refs(&ph, 0) == 1);
@@ -485,12 +486,12 @@ static void test_gen_stale(void)
 
 	/* the refusals named themselves (map 121 telemetry): 3 gen
 	 * refusals — byte-read walk + write walk + str walk — at
-	 * va=RAM, claim life 1 vs the run's current life 3. */
+	 * va=RAM, claim epoch 1 vs the run's current epoch 2. */
 	CHECK(uml_nt_uacc_refuses - r0 == 3);
 	CHECK(uml_nt_uacc_refuse_kind == 1);
 	CHECK(uml_nt_uacc_refuse_va == RAM);
 	CHECK(uml_nt_uacc_refuse_claim_gen == 1);
-	CHECK(uml_nt_uacc_refuse_run_gen == 3);
+	CHECK(uml_nt_uacc_refuse_run_gen == 2);
 
 	/* re-claim at the CURRENT life: serves again — the write
 	 * lands at the right destination (the re-handed run). */

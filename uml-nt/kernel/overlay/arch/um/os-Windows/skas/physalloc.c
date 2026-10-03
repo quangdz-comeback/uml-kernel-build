@@ -47,6 +47,7 @@ int uml_nt_phys_init(struct uml_nt_phys *p, unsigned long long size)
 	}
 	p->npark = 0;
 	p->drop_owner = (const void *)0;
+	p->epoch = 0;
 	return 0;
 }
 
@@ -87,14 +88,19 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns)
 		p->span_len[i + k] = (unsigned short)nruns;
 		p->span_back[i + k] = (unsigned short)k;
 	}
-	/* [gen] EVERY handout bumps the life of every run in the
-	 * span — a claim (VMA gen) recorded against a previous life
-	 * no longer matches the table (the stale-translation guard:
-	 * walker/funnel refuse the access). The bump makes the
-	 * first life 1 — a live run's life is never 0, so gen==0
-	 * stays the "unchecked claim" sentinel. */
+	/* [gen] EVERY handout stamps the span's runs with ONE new
+	 * epoch (table-global counter, assigned — not bumped — so a
+	 * span whose runs carry DIFFERENT recycle histories still
+	 * ends up uniform; the per-run bump false-positived on the
+	 * span's own tail runs — referee 37109883909: task 1's heap
+	 * VMA [0x67c00000,0x67c50000)@0x7200000 vs a tail run whose
+	 * first life was younger). A claim recorded against an
+	 * earlier epoch = stale translation (walker/funnel refuse);
+	 * the first stamp makes every live run's epoch >= 1, so
+	 * gen==0 stays the "unchecked claim" sentinel. */
+	p->epoch++;
 	for (k = 0; k < nruns; k++)
-		p->gen[i + k]++;
+		p->gen[i + k] = p->epoch;
 	/* [alloc-alias]: the table claims these runs were FREE — let
 	 * the conn layer name any live VMA that never stopped
 	 * translating into them (log-only; the handout stands). */
@@ -140,10 +146,13 @@ static void block_release(struct uml_nt_phys *p, int o, const void *owner)
 		p->pages[o + k] = (void *)0;
 		p->span_len[o + k] = 0;
 		p->span_back[o + k] = 0;
-		/* [gen] EVERY release bumps the life — a claim that
-		 * outlived its block (a stale VMA) mismatches even
-		 * while the runs sit free in the table. */
-		p->gen[o + k]++;
+		/* [gen] the released run KEEPS its epoch: while it
+		 * sits free the refs==0 guard refuses access; the
+		 * epoch moves only at the NEXT handout (the re-hand
+		 * = the stale-claim signal). A release bump here
+		 * would diverge a span's runs (partial releases of
+		 * D12 pieces) — the false-positive class referee
+		 * 37109883909 caught. */
 	}
 }
 
@@ -296,13 +305,13 @@ int uml_nt_phys_refs(struct uml_nt_phys *p, long long off)
 	return p->refs[i];
 }
 
-/* [gen] (M5.6a map 121): the current life of the run at off — the
- * value a VMA claim recorded at its own handout must still carry.
- * 0 = free / never handed / bad offset (and the VMA-claim
- * "unchecked" sentinel — a live run's life is never 0). Wrap at
- * 65536 lives of ONE run index is a theoretical false-match
- * window; far beyond any boot's alloc churn. */
-unsigned short uml_nt_phys_gen(struct uml_nt_phys *p, long long off)
+/* [gen] (M5.6a map 121): the epoch of the run at off's LAST handout
+ * — the value a VMA claim recorded at its own handout must still
+ * carry. 0 = never handed / bad offset (and the VMA-claim
+ * "unchecked" sentinel — a live run's epoch is never 0); a
+ * released-but-not-re-handed run KEEPS its epoch (the refs==0
+ * guard owns the free state, the epoch owns the re-hand). */
+unsigned long long uml_nt_phys_gen(struct uml_nt_phys *p, long long off)
 {
 	int i = run_index(p, off);
 

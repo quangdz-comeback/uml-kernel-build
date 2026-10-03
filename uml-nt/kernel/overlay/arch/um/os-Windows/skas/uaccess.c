@@ -161,8 +161,34 @@ static void dw_check(unsigned long long va, unsigned long n,
 static void uacc_trace_efault(unsigned long long va, unsigned long n)
 {
 	static int traced;
+	static unsigned long long seen_refuses;
 	struct uml_nt_mm *mm = uacc_mm;
 	int task = current ? current->pid : 0;
+
+	/* [gen] telemetry first: when the WALKER refused (refs guard
+	 * or the [gen] generation guard — its refusal counter moved),
+	 * the replicated census below knows neither guard and
+	 * mislabels the failure ("direct-write" while the walk
+	 * refused — referee 37109883909's to_user EFAULT flood on
+	 * task 1's heap VMA). Name OUR refusal from the walker's
+	 * pure telemetry instead. An errno-print with the counter
+	 * NOT moved = the failure happened elsewhere (fs layer). */
+	if (uml_nt_uacc_refuses != seen_refuses) {
+		seen_refuses = uml_nt_uacc_refuses;
+		if (traced < UACC_TRACE_MAX) {
+			traced++;
+			os_info("[uacc] walker refuse #%d: task=%d "
+				"va=0x%llx len=%lu kind=%lu "
+				"claim_gen=0x%llx run_gen=0x%llx "
+				"refuses=%llu\n",
+				traced, task, va, n,
+				uml_nt_uacc_refuse_kind,
+				uml_nt_uacc_refuse_claim_gen,
+				uml_nt_uacc_refuse_run_gen,
+				uml_nt_uacc_refuses);
+		}
+		return;
+	}
 
 	while (n) {
 		unsigned long long chunk = UACC_TRACE_PAGE -
