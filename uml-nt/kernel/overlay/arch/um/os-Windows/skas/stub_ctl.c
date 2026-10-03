@@ -1639,6 +1639,79 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 					((nxt & 0xF) != 0 ||
 					 nxt < mm->heap_start ||
 					 nxt >= mm->heap_end);
+				/* GHOST CHECK (referee 37121882179
+				 * decode): the 16 POISON fires were
+				 * A-B-A ghosts — the head returned to
+				 * its snapshot VA within the pass
+				 * window (push+pop cycle), the depth
+				 * slots went stale, and the "poison
+				 * text" was a REALLOCATED chunk's
+				 * read-buffer data ([uawrite] #12's
+				 * os-release PRETTY_NAME matched fire
+				 * #1's payload byte-for-byte). A REAL
+				 * corrupting write hits a chunk that
+				 * is STILL a live member of the
+				 * CURRENT chain — re-walk from this
+				 * pass's head and require membership
+				 * before spending the POISON budget.
+				 * A stale slot downgrades to churn
+				 * (re-snapshot, no fire, no arm).
+				 * A rotten chain below the head
+				 * (garbage next within the walk)
+				 * fails loud as POISON — fail-closed
+				 * for the real writer. */
+				if (poison) {
+					unsigned long long cur_chunk =
+						ev;
+					int d2, live = 0;
+
+					for (d2 = 0; d2 < 6; d2++) {
+						unsigned long long
+						cdata, cnxt;
+						long long ccoff =
+						uml_nt_vma_translate(
+							mm, cur_chunk,
+							8);
+
+						if (ccoff < 0)
+							break;
+						cdata = *(const unsigned
+							  long long *)
+							(const void *)
+							((char *)uml_boot
+							 .physmem_base +
+							 ccoff);
+						if (cur_chunk == chunk) {
+							live = 1;
+							break;
+						}
+						cnxt = cdata ^
+							(cur_chunk >> 12);
+						if (cnxt == 0 ||
+						    (cnxt & 0xF) != 0 ||
+						    cnxt <
+						    mm->heap_start ||
+						    cnxt >=
+						    mm->heap_end)
+							break;
+						cur_chunk = cnxt;
+					}
+					if (!live) {
+						poison = 0;
+						os_info("[tcchunk-stale] "
+							"pid %lu list[%d] "
+							"d%d va=0x%llx "
+							"0x%llx -> 0x%llx "
+							"(A-B-A ghost — "
+							"chunk left the "
+							"chain; churn)\n",
+							(unsigned long)
+							c->pid, di, depth,
+							chunk, c->
+							tc_chunk_snap[di]
+							[depth], data);
+					}
+				}
 				if (poison) {
 					if (tcache_poison_budget <= 0) {
 						c->tc_chunk_snap[di][depth] =

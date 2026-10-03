@@ -679,6 +679,14 @@ static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
 				v->run_off);
 			return -1;
 		}
+		/* 098 δ ledger for the fill itself (referee 37121882179
+		 * decode): every bulk kernel-direct writer must appear
+		 * in the [cowwatch] kernel-write census — the fill was
+		 * the last one missing. A fill touching a cowwatch-armed
+		 * run (arm-on-fire heap runs included) now names itself;
+		 * census silence on a poisoned armed run then EXCLUDES
+		 * the fill class too. Log-only. */
+		uml_nt_cowwatch_touch(dst, piece - cur, "mmap-fill");
 		memset((char *)uml_boot.physmem_base + dst, 0,
 		       piece - cur);
 		if (!zero && f != NULL) {
