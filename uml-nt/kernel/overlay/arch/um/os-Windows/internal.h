@@ -121,6 +121,15 @@ void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
  * alloc failure (the stale-PTE WARN precedent, run 36984931372). */
 void uml_nt_vmr_dump(const char *why, unsigned int n);
 
+/* start_up.c (M5.6a [ktrip], map 117): arm the KERNEL-flat witness —
+ * PAGE_READONLY on [lo,hi) inside THIS process's physmem view, the
+ * one mapping no witness has ever protected. The crash reporter's
+ * VEH repairs (back to RW) + replays on the first write, logging rip
+ * + stack: a legit funnel writeback costs one line, an unknown rip
+ * is the flat-write stomper. One window at a time; re-arms unprotect
+ * the old page. */
+void uml_nt_ktrip_arm(unsigned long long lo, unsigned long long hi);
+
 /* skas/uaccess.c (M5.6a [deadwrite], lead 115): arm the destroy-path
  * writeback witness. While armed, EVERY translate-then-write (raw_
  * copy_to_user / clear_user / futex atomics) landing in the dying

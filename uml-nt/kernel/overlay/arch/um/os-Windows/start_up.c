@@ -170,6 +170,54 @@ static void uml_nt_crash_scan_stack(unsigned long long rsp)
 
 static volatile int in_crash_report;
 
+/* [ktrip] (M5.6a, map 117): the DECISIVE writer witness. Every RO
+ * arm so far lived in a STUB's views; the poison still lands on an
+ * RO-armed page with no foreign mapper ([alias] census) and no
+ * kernel funnel hit — the one writer class left standing is a flat
+ * write through THIS process's own physmem view ([0x60000000,
+ * +section) — never protected). Arm PAGE_READONLY on the witness
+ * page inside that view: the FIRST kernel-side write trips HERE,
+ * with rip + stack — the writer named in its own process. Repair =
+ * the page returns to RW and the store replays on resume, so a
+ * legit funnel writeback (read() into a heap buffer — they DO land
+ * on the tcache page) costs one line and lives on; an UNKNOWN rip =
+ * the stomper (zero-fill, ubd direct read, patcher, stale kernel
+ * object). One window at a time; every re-arm unprotects the old
+ * page first — a stale RO page would trip the VEH on future legit
+ * writes far from the hunt. */
+static volatile unsigned long long ktrip_lo, ktrip_hi;
+static int ktrip_budget = 8;
+
+void uml_nt_ktrip_arm(unsigned long long lo, unsigned long long hi)
+{
+	ULONG old;
+	PVOID base;
+	SIZE_T size;
+
+	if (ktrip_budget <= 0 || hi <= lo || nt == NULL)
+		return;
+	if (ktrip_hi != 0) {
+		base = (PVOID)(uintptr_t)ktrip_lo;
+		size = (SIZE_T)(ktrip_hi - ktrip_lo);
+		(void)nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
+						 &base, &size, 0x04,
+						 &old);
+		ktrip_lo = 0;
+		ktrip_hi = 0;
+	}
+	base = (PVOID)(uintptr_t)lo;
+	size = (SIZE_T)(hi - lo);
+	if (nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS, &base,
+				       &size, 0x02, &old) < 0)
+		return;
+	ktrip_budget--;
+	ktrip_lo = lo;
+	ktrip_hi = hi;
+	os_info("[ktrip] armed kernel-flat [0x%llx,0x%llx) READ-ONLY — "
+		"the first kernel write here names the writer\n", lo,
+		hi);
+}
+
 /* Which kernel thread is running — set at each aux thread's entry,
  * read by the crash reporter (rsp alone can't name the thread). */
 const char *uml_nt_thread_role = "boot/vcpu";
@@ -213,6 +261,46 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 	 * it could no longer see what it was built for. Every write
 	 * fault now takes the fatal report below, which prints the
 	 * same forensic data without unprotecting anything. */
+
+	/* [ktrip]: the armed kernel-flat window caught a WRITE. Name
+	 * the writer (rip + regs + stack) and repair-and-replay: the
+	 * page returns to RW, the store executes on resume. Raw
+	 * console only (uml_nt_crash_write) — a VEH may not take
+	 * locks. The rip IS the verdict: a funnel/known site = legit
+	 * writeback (one line, lives on); anything else = the
+	 * flat-write stomper the whole hunt is after. */
+	if (nt != NULL && ktrip_hi != 0 && r != NULL &&
+	    r->code == 0xC0000005ull && r->nparams > 1 &&
+	    r->info[0] == 1 &&
+	    (unsigned long long)(uintptr_t)r->address >= ktrip_lo &&
+	    (unsigned long long)(uintptr_t)r->address < ktrip_hi) {
+		PVOID base = (PVOID)(uintptr_t)ktrip_lo;
+		SIZE_T size = (SIZE_T)(ktrip_hi - ktrip_lo);
+		ULONG old;
+
+		n = snprintf(buf, sizeof(buf),
+			     "[ktrip] KERNEL FLAT WRITE caught: rip=%llx "
+			     "addr=%llx rax=%llx rdi=%llx rsi=%llx "
+			     "rbp=%llx\n",
+			     rip,
+			     (unsigned long long)(uintptr_t)r->address,
+			     UML_NT_X64_CTX_RAX(e->context),
+			     UML_NT_X64_CTX_RDI(e->context),
+			     UML_NT_X64_CTX_RSI(e->context),
+			     UML_NT_X64_CTX_RBP(e->context));
+		if (n > 0)
+			uml_nt_crash_write(buf, (unsigned int)n);
+		if (e != NULL && e->context != NULL)
+			uml_nt_crash_scan_stack(
+				UML_NT_X64_CTX_RSP(e->context));
+		(void)nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
+						 &base, &size, 0x04,
+						 &old);
+		ktrip_lo = 0;
+		ktrip_hi = 0;
+		/* EXCEPTION_CONTINUE_EXECUTION: replay the store. */
+		return -1L;
+	}
 
 	in_crash_report = 1;
 

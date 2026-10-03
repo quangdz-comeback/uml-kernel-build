@@ -1133,6 +1133,31 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	off = uml_nt_vma_translate(mm, tva, 0x290);
 	if (off < 0)
 		return; /* heap VMA not (yet) resident — nothing to watch */
+	/* [ktrip] (map 117): arm the tcache struct's 4K page in the
+	 * KERNEL's own flat view — the last writer class standing
+	 * (every stub-view, funnel, futex, destroy and foreign-mapper
+	 * witness is negative). Re-arm only when the run moves; the
+	 * re-arm unprotects the old page (stale RO = stray VEH trips
+	 * on future legit writes). */
+	{
+		static unsigned long long ktrip_armed_page;
+
+		{
+			unsigned long long page =
+				((unsigned long long)off) &
+				~0xfffull;
+
+			if (page != ktrip_armed_page) {
+				uml_nt_ktrip_arm(
+					(unsigned long long)(uintptr_t)
+					uml_boot.physmem_base + page,
+					(unsigned long long)(uintptr_t)
+					uml_boot.physmem_base + page +
+					0x1000);
+				ktrip_armed_page = page;
+			}
+		}
+	}
 	base = (unsigned long long)(uintptr_t)
 	       ((char *)uml_boot.physmem_base + off);
 	memcpy(counts, (const void *)(uintptr_t)base, sizeof(counts));
