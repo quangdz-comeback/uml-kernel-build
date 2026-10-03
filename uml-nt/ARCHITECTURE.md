@@ -354,3 +354,10 @@ Run lifecycle invariant: owner-view refcount + recycle-zero.
   (arm/disarm/seed window 01dfd94 đã map) + private-block ledger (f2eb9c7).
 - Trọng tài: unit test multi-owner run (2 view + fork giữa chừng + drop thứ
   tự sai phải không-free) + M5.5a gate vẫn xanh (dice phải mất).
+
+## D24 (draft — hàng đợi sau D23, user nhắc từ patches/uml-memdrop-on-free.patch)
+Memdrop analog: run phys unref-to-0 + settle → MEM_DECOMMIT trong flat view
+(trả RAM host; re-commit = trang zero tươi → D22 recycle-zero miễn phí).
+Điều kiện: chỉ run refs==0 đã settle. Mục tiêu: guest lớn/LXC không giữ
+high-water mark. Kế thừa: patches/uml-memdrop-on-free.patch (PAGE_REPORTING
++ MADV_REMOVE, thời Termux).
