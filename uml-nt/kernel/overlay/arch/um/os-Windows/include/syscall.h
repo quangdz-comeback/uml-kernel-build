@@ -150,8 +150,19 @@ struct uml_nt_stub_conn {
 	 * value (top 16 bits set — no legit entry has them, safe-
 	 * linked or not — or misaligned) names the round (last_nr)
 	 * and the trap rip. Legit relinking stays silent, so the
-	 * budget survives to the poison. kzalloc init = clean. */
-	unsigned long long tc_snap[4];
+	 * budget survives to the poison. kzalloc init = clean.
+	 *
+	 * WHOLE-STRUCT (K3 starhost, referee 37133302551 decode): the
+	 * tcache watches went fully silent (POISON=0, tcdelta=0) while
+	 * the boot still died "corrupted double-linked list" — the
+	 * delta watch covered only entries[0..3] and the abort dump
+	 * proved the visible entries raw-legal. Snapshot ALL 64
+	 * entries + all 64 counts per round: a transition INTO an
+	 * illegal state (pointer-illegal entry, count > 7) now names
+	 * its round from ANY bin. The per-round read already copies
+	 * the whole struct — the extension is compare-only. */
+	unsigned long long tc_snap[64];
+	unsigned short tc_counts_snap[64];
 	int tc_snap_valid;
 	/* M5.6a CHUNK WATCH (referee 37087346082 decode): [tcdelta]
 	 * proved the entries[] text = glibc's own tcache_get revealing

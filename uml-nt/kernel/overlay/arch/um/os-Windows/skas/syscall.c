@@ -1599,6 +1599,245 @@ static void abrt_msg_capture(struct uml_nt_stub_conn *c,
 	}
 }
 
+/* K3 starhost (referee 37133302551 decode): the ARENA/BIN audit at
+ * the abort. "corrupted double-linked list" = unlink_chunk's
+ * fd->bk != p || bk->fd != p (image libc 2.36, BuildID 93ac61ec…:
+ * unlink_chunk at file 0x95060, the plain string at rodata
+ * 0x19805d, printerr call site 0x9510f — detector ret 0x95114).
+ * The tcache struct dump is blind to this family (bins live
+ * outside it; the heapwalk checks chain geometry, never bin
+ * back-pointers). iov[0] points AT the message string in libc
+ * rodata (glibc's __libc_message iovecs reference the printerr
+ * string in place): an EXACT (len+bytes) match against the
+ * printerr table yields the string's rodata offset → libc_base →
+ * main_arena (+0x1d3c60 — verified: iov0 0x6076805d + 0x3bc03 =
+ * 0x607a3c60 = [rbp+0] in run 37133302551). Self-checks gate
+ * every walk (av->top in heap, unsorted head shape) — a wrong
+ * derivation skips loudly, never walks garbage. The audit checks
+ * every bin head's fd->bk/bk->fd pairing (the unlink predicate at
+ * the boundary), always walks the unsorted member chain (≤16), and
+ * walks any failed bin's chain — the first desync = the poisoned
+ * chunk, printed with run_off + raw qwords + neighbor headers.
+ * Plus a stack scan above rbp for libc-text qwords: offline, the
+ * first hit past the unlink frame names unlink_chunk's CALLER
+ * (_int_malloc / _int_free / malloc_consolidate). */
+static const struct {
+	unsigned int off;
+	const char *msg;
+} abrt_strtab[] = {
+	{ 0x198040, "corrupted size vs. prev_size" },
+	{ 0x19805d, "corrupted double-linked list" },
+	{ 0x1980b1, "free(): invalid pointer" },
+	{ 0x1980c9, "free(): invalid size" },
+	{ 0x1980de, "invalid fastbin entry (free)" },
+	{ 0x198159, "malloc(): corrupted top size" },
+	{ 0x19cf30, "corrupted double-linked list (not small)" },
+	{ 0x19cfc8, "corrupted size vs. prev_size in fastbins" },
+	{ 0x19d038, "free(): too many chunks detected in tcache" },
+	{ 0x19d068, "free(): unaligned chunk detected in tcache 2" },
+	{ 0x19d098, "free(): double free detected in tcache 2" },
+	{ 0x19d0c8, "free(): invalid next size (fast)" },
+	{ 0x19d0f0, "double free or corruption (fasttop)" },
+	{ 0x19d118, "double free or corruption (top)" },
+	{ 0x19d138, "double free or corruption (out)" },
+	{ 0x19d158, "double free or corruption (!prev)" },
+	{ 0x19d180, "free(): invalid next size (normal)" },
+	{ 0x19d1a8, "corrupted size vs. prev_size while consolidating" },
+	{ 0x19d1e0, "free(): corrupted unsorted chunks" },
+	{ 0x19d480, "malloc(): unaligned fastbin chunk detected 2" },
+	{ 0x19d4b0, "malloc(): unaligned fastbin chunk detected" },
+	{ 0x19d4e0, "malloc(): memory corruption (fast)" },
+	{ 0x19d508, "malloc(): unaligned fastbin chunk detected 3" },
+	{ 0x19d538, "malloc(): smallbin double linked list corrupted" },
+	{ 0x19d568, "malloc(): invalid size (unsorted)" },
+	{ 0x19d590, "malloc(): invalid next size (unsorted)" },
+	{ 0x19d5b8, "malloc(): mismatching next->prev_size (unsorted)" },
+	{ 0x19d5f0, "malloc(): unsorted double linked list corrupted" },
+	{ 0x19d620, "malloc(): invalid next->prev_inuse (unsorted)" },
+	{ 0x19d650, "malloc(): largebin double linked list corrupted (nextsize)" },
+	{ 0x19d690, "malloc(): largebin double linked list corrupted (bk)" },
+	{ 0x19d6c8, "malloc(): unaligned tcache chunk detected" },
+	{ 0x19d6f8, "malloc(): corrupted unsorted chunks" },
+	{ 0x19d750, "malloc(): corrupted unsorted chunks 2" },
+};
+
+/* main_arena file offset in the pinned image libc (BuildID
+ * 93ac61ec5a8eb1396f9fbd350e3169a558528a40) — from __libc_malloc's
+ * arena_get path (lea 0x1d3c60 at file 0x98cd8). */
+#define UML_NT_MAIN_ARENA_OFF 0x1d3c60ull
+
+static int abrt_qword(struct uml_nt_stub_conn *c,
+		      unsigned long long va, unsigned long long *out)
+{
+	long long off = uml_nt_vma_translate(c->mm, va, 8);
+
+	if (off < 0)
+		return -1;
+	*out = *(const unsigned long long *)
+		(const void *)((char *)uml_boot.physmem_base + off);
+	return 0;
+}
+
+/* syscall.c-local twin of stub_ctl.c's dump_guest_bytes (static
+ * there) — 64-byte hex rows via os_info, read-only translate. */
+static void abrt_dump_bytes(struct uml_nt_mm *mm, unsigned long long va,
+			    int n, const char *tag)
+{
+	unsigned char buf[128];
+	char line[3 * 64 + 1];
+	long long off;
+	int i;
+
+	if (n > (int)sizeof(buf))
+		n = (int)sizeof(buf);
+	off = uml_nt_vma_translate(mm, va, n);
+	if (off < 0) {
+		os_info("[abrt]   %s 0x%llx: untranslatable (%lld)\n",
+			tag, va, off);
+		return;
+	}
+	memcpy(buf, (char *)uml_boot.physmem_base + off, n);
+	for (i = 0; i < n; i += 64) {
+		int chunk = (n - i < 64) ? n - i : 64;
+		int j;
+
+		for (j = 0; j < chunk; j++)
+			snprintf(line + 3 * j, 4, "%02x ", buf[i + j]);
+		os_info("[abrt]   %s 0x%llx: %s\n", tag, va + i, line);
+	}
+}
+
+static void abrt_bin_walk(struct uml_nt_stub_conn *c,
+			  unsigned long long head, int idx, int maxwalk)
+{
+	unsigned long long cur;
+	int k;
+
+	if (abrt_qword(c, head + 0x10, &cur) < 0)
+		return;
+	for (k = 0; k < maxwalk && cur != head; k++) {
+		unsigned long long size, fd, bk, fdbk, bkfd;
+		long long coff;
+		int bad;
+
+		if (abrt_qword(c, cur + 0x8, &size) < 0 ||
+		    abrt_qword(c, cur + 0x10, &fd) < 0 ||
+		    abrt_qword(c, cur + 0x18, &bk) < 0) {
+			os_info("[abrt]   bin[%d] member 0x%llx: "
+				"untranslatable\n", idx, cur);
+			break;
+		}
+		bad = abrt_qword(c, fd + 0x18, &fdbk) < 0 ||
+		      fdbk != cur ||
+		      abrt_qword(c, bk + 0x10, &bkfd) < 0 ||
+		      bkfd != cur;
+		coff = uml_nt_vma_translate(c->mm, cur, 8);
+		os_info("[abrt]   bin[%d] member 0x%llx size=0x%llx "
+			"fd=0x%llx bk=0x%llx fd->bk=%s bk->fd=%s "
+			"run=0x%llx%s\n", idx, cur, size & ~7ull, fd, bk,
+			fdbk == cur ? "ok" : "BAD", bkfd == cur ? "ok" : "BAD",
+			coff >= 0 ? (unsigned long long)coff &
+				    ~(UML_NT_PHYS_RUN_SIZE - 1) : 0,
+			bad ? "  <== DESYNC" : "");
+		if (bad) {
+			abrt_dump_bytes(c->mm, cur, 0x40, "desync-chunk");
+			abrt_dump_bytes(c->mm, fd, 0x20, "desync-fd");
+			abrt_dump_bytes(c->mm, bk, 0x20, "desync-bk");
+			break;
+		}
+		cur = fd;
+	}
+}
+
+static void abrt_arena_audit(struct uml_nt_stub_conn *c,
+			     const struct uml_nt_stub_data *d,
+			     unsigned long long iov0_base,
+			     unsigned long long iov0_len,
+			     const char *s)
+{
+	unsigned long long libc_base = 0, av, top, ufd, ubk, sp, q;
+	int i, badbins = 0, hits = 0;
+
+	for (i = 0; i < (int)ARRAY_SIZE(abrt_strtab); i++) {
+		if (strlen(abrt_strtab[i].msg) == iov0_len &&
+		    !memcmp(s, abrt_strtab[i].msg, iov0_len)) {
+			libc_base = iov0_base - abrt_strtab[i].off;
+			break;
+		}
+	}
+	if (libc_base == 0) {
+		os_info("[abrt] arena: no strtab match (iov0 len=%llu) — "
+			"bin audit skipped\n", iov0_len);
+		return;
+	}
+	av = libc_base + UML_NT_MAIN_ARENA_OFF;
+	os_info("[abrt] arena: libc_base=0x%llx main_arena=0x%llx "
+		"(msg off=0x%x)\n", libc_base, av, abrt_strtab[i].off);
+	/* Self-checks: av->top (+0x60) is a heap chunk; the unsorted
+	 * head (chunk at av+0x60, fd/bk at +0x70/+0x78) is empty
+	 * (self-linked) or in-heap. */
+	if (abrt_qword(c, av + 0x60, &top) < 0 ||
+	    top < c->mm->heap_start || top >= c->mm->heap_end ||
+	    abrt_qword(c, av + 0x70, &ufd) < 0 ||
+	    abrt_qword(c, av + 0x78, &ubk) < 0 ||
+	    !((ufd == av + 0x60 && ubk == av + 0x60) ||
+	      (ufd >= c->mm->heap_start && ufd < c->mm->heap_end &&
+	       ubk >= c->mm->heap_start && ubk < c->mm->heap_end))) {
+		os_info("[abrt] arena: self-check FAILED top=0x%llx "
+			"ufd=0x%llx ubk=0x%llx heap [0x%llx,0x%llx) — "
+			"derivation wrong, audit skipped\n", top, ufd, ubk,
+			c->mm->heap_start, c->mm->heap_end);
+		return;
+	}
+	os_info("[abrt] arena: top=0x%llx unsorted head fd=0x%llx "
+		"bk=0x%llx\n", top, ufd, ubk);
+	/* Every bin head: fd->bk == head && bk->fd == head (the unlink
+	 * predicate at the boundary). bins[i] pair for bin i (1..126)
+	 * lives at av+0x70+(i-1)*16; the head CHUNK is 0x10 below. */
+	for (i = 1; i <= 126 && badbins < 3; i++) {
+		unsigned long long head = av + 0x60 +
+					  (unsigned long long)(i - 1) * 16;
+		unsigned long long fd, bk, fdbk, bkfd;
+
+		if (abrt_qword(c, head + 0x10, &fd) < 0 ||
+		    abrt_qword(c, head + 0x18, &bk) < 0)
+			continue;
+		if (fd == head && bk == head)
+			continue;
+		if (abrt_qword(c, fd + 0x18, &fdbk) < 0)
+			fdbk = 0;
+		if (abrt_qword(c, bk + 0x10, &bkfd) < 0)
+			bkfd = 0;
+		if (fdbk == head && bkfd == head) {
+			if (i == 1)
+				abrt_bin_walk(c, head, i, 16);
+			continue;
+		}
+		badbins++;
+		os_info("[abrt]   bin[%d] head 0x%llx fd=0x%llx "
+			"bk=0x%llx fd->bk=0x%llx bk->fd=0x%llx — HEAD "
+			"DESYNC\n", i, head, fd, bk, fdbk, bkfd);
+		abrt_bin_walk(c, head, i, 16);
+	}
+	if (badbins == 0)
+		os_info("[abrt] arena: all bin head pairings clean "
+			"(unsorted member walk above)\n");
+	/* The caller hint: libc-text qwords above __libc_message's
+	 * frame — the first hit past the unlink frame (libc+0x95114)
+	 * is unlink_chunk's caller. */
+	for (sp = d->regs.rbp + 0x20; sp < d->regs.rbp + 0x120 &&
+	     hits < 8; sp += 8) {
+		if (abrt_qword(c, sp, &q) < 0)
+			continue;
+		if (q >= libc_base + 0x26000 && q < libc_base + 0x1b0000) {
+			hits++;
+			os_info("[abrt]   stacktext [rbp+0x%02llx]: "
+				"libc+0x%llx\n", sp - d->regs.rbp,
+				q - libc_base);
+		}
+	}
+}
+
 /* The writev-half capture: glibc __libc_message() writev()s the fatal
  * text to fd 2 BEFORE the __abort_msg mmap — this yields the same
  * {function, predicate} pair a round earlier, plus the writev retval
@@ -1696,6 +1935,12 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 				q[2], q[3]);
 		}
 	}
+	/* K3 starhost: the arena/bin audit — the iov context anchors
+	 * libc (iov[0] = the printerr string in rodata), the audit
+	 * names the desynced bin chunk the tcache dump cannot see.
+	 * s still holds iov[0]'s bytes here (the per-iov dump below
+	 * reuses the buffer). */
+	abrt_arena_audit(c, d, iov[0].base, iov[0].len, s);
 	for (i = 0; i < (int)cnt; i++) {
 		n = abrt_read_str(c, iov[i].base, s, sizeof(s));
 		if (n < 0)
@@ -1711,32 +1956,37 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 	 * chain named the DETECTOR: [rbp+0x18] = 0x98c2c = ret into
 	 * __libc_malloc's fastpath tcache_get, i.e. the tcache HEAD
 	 * entry (mangled, safe-linked) for some index was unaligned.
-	 * The struct is the first chunk of the task's main arena: its
-	 * heap VMA is deterministic ([0x67c00000,..) every conn —
-	 * fixed-position layout), data at start+0x10: counts[64] then
-	 * entries[64]. Dump 0x280 bytes; offline decode: raw =
-	 * mangled ^ (slot_va >> 12), compared against the SEGV-family
-	 * wilds (0x7c9f8f0b93be870a / 0xf5aaec5571e07789). */
+	 * The struct is the first chunk of the task's main arena, data
+	 * at heap_start+0x10: counts[64] then entries[64]. K3 starhost
+	 * (referee 37133302551 decode): dump the FULL 0x290 struct
+	 * (header row + all counts + all entries) at mm->heap_start —
+	 * the fixed 0x67c00010 only ever covered task 1's layout; a
+	 * child abort (task 49 class) found no VMA there and lost the
+	 * struct. Offline decode: raw = mangled ^ (slot_va >> 12),
+	 * compared against the SEGV-family wilds
+	 * (0x7c9f8f0b93be870a / 0xf5aaec5571e07789). */
 	{
-		struct uml_nt_vma *hv = uml_nt_vma_find(c->mm,
-							0x67c00010);
+		unsigned long long tcbase = c->mm->heap_start + 0x10;
+		struct uml_nt_vma *hv = c->mm->heap_start != 0 ?
+					uml_nt_vma_find(c->mm, tcbase) : NULL;
 
 		if (hv != NULL) {
 			int row;
 
-			os_info("[abrt] tcache @0x67c00010 (vma "
+			os_info("[abrt] tcache @0x%llx (vma "
 				"[0x%llx,0x%llx) off=0x%llx):\n",
-				hv->start, hv->end, hv->run_off);
+				tcbase, hv->start, hv->end, hv->run_off);
 			/* [alias] census (decode 37095399220): same
 			 * question as the tcdelta site, asked at the
 			 * abort — who ELSE maps this run right now. */
 			uml_nt_run_alias_census(c, hv->run_off,
 						hv->end - hv->start);
-			for (row = 0; row < 10; row++) {
+			abrt_dump_bytes(c->mm, c->mm->heap_start, 0x10,
+					"tcache-hdr");			for (row = 0; row < 10; row++) {
 				long long foff =
 					uml_nt_vma_translate(c->mm,
-						0x67c00010 + row * 64,
-						64);
+					tcbase + row * 64,
+					64);
 
 				if (foff < 0) {
 					os_info("[abrt]   row %d: "
@@ -1778,7 +2028,7 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 				unsigned long long frag = 0;
 				long long foff =
 					uml_nt_vma_translate(c->mm,
-						0x67c00010 + 0x88, 8);
+						tcbase + 0x88, 8);
 
 				if (foff >= 0) {
 					const unsigned char *b;
@@ -1802,8 +2052,8 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 				}
 			}
 		} else {
-			os_info("[abrt] tcache: no VMA at 0x67c00010 "
-				"(nvma %d)\n", c->mm->nvma);
+			os_info("[abrt] tcache: no VMA at heap_start+0x10 "
+				"(0x%llx, nvma %d)\n", tcbase, c->mm->nvma);
 		}
 	}
 	/* WRITER-HUNT (M5.6a, plan 085): the heap-chain walker. The

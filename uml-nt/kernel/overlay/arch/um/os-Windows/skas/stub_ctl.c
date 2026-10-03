@@ -1292,26 +1292,50 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	 * bits set (no legit entry — 0 or a safe-linked heap pointer —
 	 * has them) or misaligned; legit relinking stays silent so the
 	 * budget survives to the poison. Runs for every task-backed
-	 * conn, including ones whose one-shot bad-scan already fired. */
+	 * conn, including ones whose one-shot bad-scan already fired.
+	 *
+	 * WHOLE-STRUCT (K3 starhost, referee 37133302551 decode): all
+	 * 64 entries + all 64 counts (the read above already copies
+	 * the full struct — compare-only extension). A transition
+	 * INTO an illegal state from ANY bin names its round; the
+	 * count watch catches the text-poison class that reads as a
+	 * huge u16 even when the paired entry stays legal-shaped. */
 	{
 		int di;
 
-		for (di = 0; di < 4; di++) {
+		for (di = 0; di < 64; di++) {
 			unsigned long long nv = entries[di];
+			unsigned int ncnt = counts[di];
 			int illegal = ((nv >> 48) != 0) ||
 				      ((nv & 0xF) != 0);
+			int cnt_bad = ncnt > UML_NT_TCACHE_LIMIT;
 
 			if (tcache_delta_budget <= 0)
 				break;
-			if (!c->tc_snap_valid || c->tc_snap[di] == nv ||
-			    !illegal)
+			if (!c->tc_snap_valid)
 				continue;
-			tcache_delta_budget--;
-			os_info("[tcdelta] pid %lu entries[%d] 0x%llx -> "
-				"0x%llx (round nr=%llu ret=%lld rip=0x%llx "
-				"rsp=0x%llx)\n", (unsigned long)c->pid, di,
-				c->tc_snap[di], nv, c->last_nr, c->last_ret,
-				c->d->regs.rip, c->d->regs.rsp);
+			if (c->tc_snap[di] != nv && illegal) {
+				tcache_delta_budget--;
+				os_info("[tcdelta] pid %lu entries[%d] 0x%llx -> "
+					"0x%llx (round nr=%llu ret=%lld rip=0x%llx "
+					"rsp=0x%llx)\n", (unsigned long)c->pid, di,
+					c->tc_snap[di], nv, c->last_nr, c->last_ret,
+					c->d->regs.rip, c->d->regs.rsp);
+				goto tcdelta_fire;
+			}
+			if (c->tc_counts_snap[di] != ncnt && cnt_bad) {
+				tcache_delta_budget--;
+				os_info("[tcdelta] pid %lu counts[%d] %u -> %u "
+					"(entry=0x%llx round nr=%llu ret=%lld "
+					"rip=0x%llx rsp=0x%llx)\n",
+					(unsigned long)c->pid, di,
+					c->tc_counts_snap[di], ncnt, nv,
+					c->last_nr, c->last_ret,
+					c->d->regs.rip, c->d->regs.rsp);
+				goto tcdelta_fire;
+			}
+			continue;
+		tcdelta_fire:
 			/* [alias] census at the poison detection (decode
 			 * 37095399220): the kernel write paths are all
 			 * negative now — name any FOREIGN conn still
@@ -1409,12 +1433,12 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 					(unsigned long)c->pid, total, nh,
 					mm->heap_start, mm->heap_end);
 			}
+			continue;
 		}
 		c->tc_snap_valid = 1;
-		c->tc_snap[0] = entries[0];
-		c->tc_snap[1] = entries[1];
-		c->tc_snap[2] = entries[2];
-		c->tc_snap[3] = entries[3];
+		memcpy(c->tc_snap, entries, sizeof(c->tc_snap));
+		memcpy(c->tc_counts_snap, counts,
+		       sizeof(c->tc_counts_snap));
 	}
 	/* POISON-SWEEP byte watch: the chunks armed by the last sweep
 	 * on THIS conn report their next content change with the
