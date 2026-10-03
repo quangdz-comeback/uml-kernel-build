@@ -64,10 +64,18 @@ void um_early_printk(const char *s, unsigned int n)
 
 void os_info(const char *fmt, ...)
 {
+	/* M5.6b: host env UML_NT_QUIET=any-value silences the diag firehose
+	 * (real-machine UX; CI never sets it). os_warn/os_err stay loud. */
+	static int quiet = -1;
 	char buf[256];
 	va_list args;
 	int n;
 
+	if (quiet < 0)
+		quiet = nt && nt->GetEnvironmentVariableA &&
+			nt->GetEnvironmentVariableA("UML_NT_QUIET", buf, 1);
+	if (quiet)
+		return;
 	va_start(args, fmt);
 	n = vscnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);

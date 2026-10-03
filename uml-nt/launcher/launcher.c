@@ -152,6 +152,7 @@ static void resolve_api_table(void)
 	RESOLVE(NtProtectVirtualMemory, ntdll, "NtProtectVirtualMemory");
 	RESOLVE(RtlGetLastWin32Error, ntdll, "RtlGetLastWin32Error");
 	RESOLVE(CloseHandle, k32, "CloseHandle");
+        RESOLVE(GetEnvironmentVariableA, k32, "GetEnvironmentVariableA");
 	RESOLVE(CreateFileMappingW, k32, "CreateFileMappingW");
 	RESOLVE(CreateEventW, k32, "CreateEventW");
 	RESOLVE(MapViewOfFileEx, k32, "MapViewOfFileEx");

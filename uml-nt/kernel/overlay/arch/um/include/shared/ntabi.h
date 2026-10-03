@@ -63,6 +63,8 @@ typedef unsigned long long SIZE_T;
 typedef unsigned long long ULONG_PTR;
 typedef long long LONG64;
 typedef int BOOL; /* win32 BOOL (4 bytes) — NOT the 1-byte BOOLEAN */
+typedef const char *LPCSTR; /* M5.6b quiet: GetEnvironmentVariableA */
+typedef char *LPSTR;
 
 /* CreateProcessW / CreateFileMappingW / CreateEventW plumbing. */
 typedef struct {
@@ -393,7 +395,7 @@ static inline int uml_nt_inet_pton4(const char *s, unsigned int *out)
  * kernel accepts version == UML_NT_API_VERSION exactly (it fails loudly
  * otherwise — silent ABI drift is the failure mode we refuse).
  */
-#define UML_NT_API_VERSION 3u
+#define UML_NT_API_VERSION 4u
 
 /* ---- function prototypes (ms_abi) — the launcher resolves these ------
  * Kernel-ELF consumers need them declared here (nothing else will).
@@ -491,6 +493,9 @@ NTSTATUS UML_NTABI_CC NtProtectVirtualMemory(HANDLE process, PVOID *base,
 					     ULONG *old_protect);
 ULONG UML_NTABI_CC RtlGetLastWin32Error(void);
 BOOLEAN UML_NTABI_CC CloseHandle(HANDLE handle);
+/* M5.6b quiet: kernel-side reads UML_NT_QUIET host env via this. */
+DWORD UML_NTABI_CC GetEnvironmentVariableA(LPCSTR name, LPSTR buf,
+		DWORD size);
 
 /* M2 additions (appended; table members above stay frozen). Kernel is
  * the parent of every stub process: it creates the stub_data section
@@ -737,6 +742,14 @@ struct uml_nt_api_table {
 	 * travels in boot-info v4 (job_object). */
 	BOOLEAN (UML_NTABI_CC *AssignProcessToJobObject)(HANDLE job,
 			HANDLE process);
+
+	/* ---- appended for M5.6b quiet (osinfo-quiet patch, Shelley) ------
+	 * Kernel-side os_info reads UML_NT_QUIET through this (cached
+	 * flag; os_warn/os_err stay loud). APPENDED at the struct end —
+	 * the append-only ABI contract (mid-table inserts would shift
+	 * every later member's offset). */
+	DWORD (UML_NTABI_CC *GetEnvironmentVariableA)(LPCSTR name,
+			LPSTR buf, DWORD size);
 };
 
 #endif /* __UML_NTABI_H */
