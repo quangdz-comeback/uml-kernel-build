@@ -265,6 +265,207 @@ void uml_nt_ktrip_w_arm(unsigned long long lo, unsigned long long hi)
 		hi);
 }
 
+/* [kheap] (referees 37124011556 + 37126690946 decode): the
+ * PRE-EMPTIVE kernel-flat witness. Both post-hoc arms missed the
+ * writer: [ktrip] (struct page) and [ktrip-w] (fired chunk page)
+ * arm only AFTER a fire, and the poison's first write to a chunk
+ * never came back — the writer strikes once per chunk. The census
+ * side is now fully negative too: [uawrite] budget 4096 stayed
+ * live through the fire window with ZERO env-text payloads and
+ * zero writes to the poisoned VAs (the fill does NOT go through
+ * the copy_to_user funnel), cowtrap catches are all legit malloc,
+ * and the fire round signature is byte-identical across runs
+ * (nr=1 ret=3 rip=0x606cce65 rsp=0x6006efe8 — one deterministic
+ * point in the boot). So: protect EVERY page of the INIT heap
+ * PAGE_READONLY in the kernel's physmem view BEFORE the corruption
+ * lands — every kernel-flat write to a heap page trips the VEH
+ * with its rip; a funnel/known site costs one line and lives on,
+ * an unknown rip is the writer.
+ * The heap is PIECEWISE (one VMA piece per re-homed run, run_off
+ * arbitrary — 0x3940000/0x3b40000/0x52a0000/0x6bc0000 across one
+ * boot), so the witness is a SET of flat ranges, one per piece,
+ * synced by uml_nt_kheap_sync each round: a piece whose flat range
+ * moved (re-home) = era change → the old range drops back to RW
+ * wholesale (recycled pages must never trip outside the window —
+ * a window-miss write fault takes the FATAL report), the new range
+ * arms page-by-page (so a catch can unprotect exactly one page).
+ * The VEH catch marks the faulting page dirty; the next sync
+ * re-arms dirty pages that still belong to a live range. */
+#define UML_NT_KHEAP_RANGES 12
+#define UML_NT_KHEAP_DIRTY_MAX 256
+
+static struct uml_nt_kheap_range {
+	unsigned long long lo; /* flat, page-aligned */
+	unsigned long long hi; /* flat, exclusive */
+	int live;	       /* slot in use */
+} kheap_r[UML_NT_KHEAP_RANGES];
+static int kheap_log_budget = 4096;
+/* Pages a catch left RW for its replay (a burst writer can dirty
+ * several before the next sync) — re-armed by the next sync, only
+ * while their range stays live. */
+static volatile unsigned long long kheap_dirty[UML_NT_KHEAP_DIRTY_MAX];
+static volatile int kheap_dirty_n;
+
+static void uml_nt_kheap_protect(unsigned long long lo,
+				 unsigned long long hi, ULONG prot)
+{
+	ULONG old;
+	PVOID base;
+	SIZE_T size;
+	unsigned long long page;
+
+	for (page = lo & ~0xfffull; page < hi; page += 0x1000) {
+		base = (PVOID)(uintptr_t)page;
+		size = 0x1000;
+		(void)nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
+						 &base, &size, prot,
+						 &old);
+	}
+}
+
+void uml_nt_kheap_sync(const struct uml_nt_kheap_piece *pcs, int np)
+{
+	ULONG old;
+	PVOID base;
+	SIZE_T size;
+	int i, j, i2;
+
+	if (nt == NULL || pcs == NULL || np < 0)
+		return;
+	/* Drop ranges whose piece is gone (re-home): back to RW
+	 * wholesale. */
+	for (i = 0; i < UML_NT_KHEAP_RANGES; i++) {
+		if (!kheap_r[i].live)
+			continue;
+		for (j = 0; j < np; j++)
+			if (pcs[j].lo == kheap_r[i].lo)
+				break;
+		if (j < np)
+			continue;
+		base = (PVOID)(uintptr_t)kheap_r[i].lo;
+		size = (SIZE_T)(kheap_r[i].hi - kheap_r[i].lo);
+		(void)nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
+						 &base, &size, 0x04,
+						 &old);
+		kheap_r[i].live = 0;
+	}
+	/* Arm/extend the current pieces. */
+	for (j = 0; j < np; j++) {
+		for (i = 0; i < UML_NT_KHEAP_RANGES; i++)
+			if (kheap_r[i].live &&
+			    kheap_r[i].lo == pcs[j].lo)
+				break;
+		if (i < UML_NT_KHEAP_RANGES) {
+			if (pcs[j].hi > kheap_r[i].hi) {
+				uml_nt_kheap_protect(kheap_r[i].hi,
+						     pcs[j].hi, 0x02);
+				kheap_r[i].hi = pcs[j].hi;
+			}
+			continue;
+		}
+		for (i = 0; i < UML_NT_KHEAP_RANGES; i++)
+			if (!kheap_r[i].live)
+				break;
+		if (i == UML_NT_KHEAP_RANGES)
+			return; /* piece table full — partial cover */
+		uml_nt_kheap_protect(pcs[j].lo, pcs[j].hi, 0x02);
+		kheap_r[i].lo = pcs[j].lo;
+		kheap_r[i].hi = pcs[j].hi;
+		kheap_r[i].live = 1;
+		os_info("[kheap] armed kernel-flat piece [0x%llx,0x%llx) "
+			"READ-ONLY — every kernel write to the heap "
+			"names its rip\n", pcs[j].lo, pcs[j].hi);
+	}
+	/* Pages the VEH left RW for replays — back to RO, but only
+	 * while their range is still live (a dropped era's pages
+	 * belong to the pool now). */
+	if (kheap_dirty_n > 0) {
+		for (i2 = 0; i2 < kheap_dirty_n; i2++) {
+			unsigned long long page = kheap_dirty[i2];
+
+			if (page == 0)
+				continue;
+			for (i = 0; i < UML_NT_KHEAP_RANGES; i++)
+				if (kheap_r[i].live &&
+				    page >= kheap_r[i].lo &&
+				    page < kheap_r[i].hi)
+					break;
+			if (i == UML_NT_KHEAP_RANGES)
+				continue;
+			base = (PVOID)(uintptr_t)page;
+			size = 0x1000;
+			(void)nt->NtProtectVirtualMemory(
+				UML_NT_CURRENT_PROCESS, &base, &size,
+				0x02, &old);
+		}
+		kheap_dirty_n = 0;
+	}
+}
+
+/* [kheap] VEH tail: a kernel-flat write inside an armed heap
+ * piece. Log rip + regs + stack (budget-capped), unprotect ONLY
+ * the faulting page (the rest of the heap stays armed), mark it
+ * dirty for the next sync's re-arm, and replay the store. */
+static int uml_nt_kheap_catch(
+	const struct uml_nt_exception_pointers *e,
+	const struct uml_nt_exception_record *r,
+	unsigned long long rip)
+{
+	unsigned long long addr, page;
+	char wbuf[224];
+	int wn, i;
+	ULONG old;
+	PVOID base;
+	SIZE_T size;
+
+	if (nt == NULL || r == NULL || r->code != 0xC0000005ull ||
+	    r->nparams <= 1 || r->info[0] != 1)
+		return 0;
+	addr = (unsigned long long)(uintptr_t)r->info[1];
+	if (addr == 0)
+		return 0;
+	for (i = 0; i < UML_NT_KHEAP_RANGES; i++)
+		if (kheap_r[i].live && addr >= kheap_r[i].lo &&
+		    addr < kheap_r[i].hi)
+			break;
+	if (i == UML_NT_KHEAP_RANGES)
+		return 0;
+	if (kheap_log_budget > 0) {
+		kheap_log_budget--;
+		wn = snprintf(wbuf, sizeof(wbuf),
+			      "[kheap] KERNEL FLAT WRITE caught: rip=%llx "
+			      "addr=%llx rax=%llx rdi=%llx rsi=%llx "
+			      "rbp=%llx\n",
+			      rip, addr,
+			      UML_NT_X64_CTX_RAX(e->context),
+			      UML_NT_X64_CTX_RDI(e->context),
+			      UML_NT_X64_CTX_RSI(e->context),
+			      UML_NT_X64_CTX_RBP(e->context));
+		if (wn > 0)
+			uml_nt_crash_write(wbuf, (unsigned int)wn);
+		if (e != NULL && e->context != NULL)
+			uml_nt_crash_scan_stack(
+				UML_NT_X64_CTX_RSP(e->context));
+	}
+	page = addr & ~0xfffull;
+	base = (PVOID)(uintptr_t)page;
+	size = 0x1000;
+	(void)nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS, &base,
+					 &size, 0x04, &old);
+	if (kheap_dirty_n < UML_NT_KHEAP_DIRTY_MAX) {
+		int i2;
+
+		for (i2 = 0; i2 < kheap_dirty_n; i2++)
+			if (kheap_dirty[i2] == page)
+				break;
+		if (i2 == kheap_dirty_n) {
+			kheap_dirty[kheap_dirty_n] = page;
+			kheap_dirty_n++;
+		}
+	}
+	return 1;
+}
+
 /* Shared tail of both kernel-flat witness windows ([ktrip] +
  * [ktrip-w]): a WRITE fault (info[0] == 1) whose DATA address
  * (info[1] — NOT r->address = the ExceptionAddress = rip, referee
@@ -379,6 +580,11 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 	 * Verdict per map 117: rip=uml_nt_uacc_walk byte-copy, caller
 	 * ksys_read = legit writeback — exactly the "one line, boot
 	 * lives on" case. */
+	/* [kheap] FIRST: the pre-emptive whole-heap witness owns every
+	 * heap page (the [ktrip]/[ktrip-w] sub-windows below would
+	 * otherwise unprotect single pages out from under it). */
+	if (uml_nt_kheap_catch(e, r, rip))
+		return -1L;
 	if (uml_nt_ktrip_window_catch(e, r, rip, &ktrip_lo, &ktrip_hi,
 				      "ktrip"))
 		return -1L;

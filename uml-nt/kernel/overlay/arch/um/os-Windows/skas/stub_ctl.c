@@ -1203,23 +1203,53 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	 * witness is negative). Re-arm only when the run moves; the
 	 * re-arm unprotects the old page (stale RO = stray VEH trips
 	 * on future legit writes). */
+	/* [kheap] (referees 37124011556 + 37126690946 decode): the
+	 * PRE-EMPTIVE whole-heap witness replaces the struct-page
+	 * [ktrip] arm — the post-hoc arms missed the writer because
+	 * the poison's first write to a chunk predates every fire
+	 * (the writer strikes once per chunk; the census side is
+	 * fully negative: [uawrite] live through the fire window with
+	 * zero env-text payloads, cowtrap all-legit). Protect EVERY
+	 * heap VMA piece kernel-flat READ-ONLY (the heap is piecewise
+	 * — re-homed runs at arbitrary run_off, so a single endpoint
+	 * range would cover 50MB of other tasks' memory): every
+	 * kernel write to a heap page trips the VEH with its rip.
+	 * Only the INIT conn owns the arm (every decoded fire lived
+	 * in the first task-backed conn's heap); the shape check
+	 * above gates to glibc heaps already. Direct run_off math per
+	 * piece (no per-page translate — same pattern as the poison
+	 * sweep). */
 	{
-		static unsigned long long ktrip_armed_page;
+		static void *kheap_owner;
+		struct uml_nt_kheap_piece pcs[UML_NT_KHEAP_RANGES];
+		int np = 0, vi2;
 
-		{
-			unsigned long long page =
-				((unsigned long long)off) &
-				~0xfffull;
+		if (kheap_owner == NULL)
+			kheap_owner = c;
+		if (kheap_owner == c) {
+			for (vi2 = 0; vi2 < mm->nvma; vi2++) {
+				const struct uml_nt_vma *pv =
+					&mm->vma[vi2];
 
-			if (page != ktrip_armed_page) {
-				uml_nt_ktrip_arm(
+				if (np == UML_NT_KHEAP_RANGES)
+					break;
+				if (pv->end <= mm->heap_start ||
+				    pv->start >= mm->heap_end ||
+				    (long long)pv->run_off < 0)
+					continue;
+				pcs[np].lo =
 					(unsigned long long)(uintptr_t)
-					uml_boot.physmem_base + page,
+					uml_boot.physmem_base +
+					((unsigned long long)pv->run_off &
+					 ~0xfffull);
+				pcs[np].hi =
 					(unsigned long long)(uintptr_t)
-					uml_boot.physmem_base + page +
-					0x1000);
-				ktrip_armed_page = page;
+					uml_boot.physmem_base +
+					(unsigned long long)pv->run_off +
+					(pv->end - pv->start);
+				np++;
 			}
+			uml_nt_kheap_sync(pcs, np);
 		}
 	}
 	base = (unsigned long long)(uintptr_t)

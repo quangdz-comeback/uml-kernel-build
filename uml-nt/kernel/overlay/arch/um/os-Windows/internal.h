@@ -143,6 +143,23 @@ void uml_nt_ktrip_arm(unsigned long long lo, unsigned long long hi);
  * rip. Stub-side writes stay covered by the run-level cowtrap. */
 void uml_nt_ktrip_w_arm(unsigned long long lo, unsigned long long hi);
 
+/* start_up.c (M5.6a [kheap], referees 37124011556 + 37126690946): the
+ * PRE-EMPTIVE whole-heap kernel-flat witness — [heap_start, heap_end)
+ * PAGE_READONLY page-by-page in THIS process's physmem view, armed
+ * BEFORE the corruption lands. Every kernel-flat write to a heap page
+ * trips the VEH with its rip (funnel writeback = legit, one line;
+ * unknown rip = the flat-write stomper). The catch unprotects only the
+ * faulting page (replay) and the next uml_nt_kheap_sync call re-arms
+ * dirty pages + drops/extends ranges whose piece re-homed (era
+ * change). The heap is PIECEWISE (one VMA piece per re-homed run) so
+ * the witness is a SET of flat ranges, one per piece. */
+#define UML_NT_KHEAP_RANGES 12
+struct uml_nt_kheap_piece {
+	unsigned long long lo; /* flat, page-aligned */
+	unsigned long long hi; /* flat, exclusive */
+};
+void uml_nt_kheap_sync(const struct uml_nt_kheap_piece *pcs, int n);
+
 /* stub_ctl.c (M5.6a [alloc-alias], map 121): the physalloc handout
  * probe — scan every live conn's VMAs into the freshly claimed
  * [off, off+nruns*RUN) range; a hit names the stale translation
