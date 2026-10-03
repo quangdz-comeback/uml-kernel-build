@@ -170,6 +170,13 @@ struct uml_nt_stub_conn {
 	unsigned long long tc_chunk_snap[4];
 	unsigned char tc_chunk_armed[4];
 	unsigned char tc_chunk_valid;
+	/* M5.6a TCACHE TRIP: set on the conn at its first fork seed —
+	 * the poison window opens post-fork; the serve hook then arms
+	 * the tcache struct page READ-ONLY (one live trip, re-armed
+	 * per round within budget) so every write to the entries[]
+	 * page faults and names its rip. The poison write = a direct
+	 * store (bypasses every funnel); its rip = the hunt's end. */
+	int tctrip_want;
 	/* M5.4 c3 (048): destroy stamps DEAD before kfree; consumers
 	 * that reach a conn through a RETAINED pointer (the switch
 	 * hook's re-arm, the co-mapper census, the fork seed) refuse a

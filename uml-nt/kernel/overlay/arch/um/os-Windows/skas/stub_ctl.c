@@ -321,6 +321,59 @@ void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,
 	}
 }
 
+/* M5.6a TCACHE TRIP (referee 37089977192 decode): the poison write
+ * hits the tcache struct page DIRECTLY (the entries[] slots
+ * themselves — the chunk watch stayed silent this boot), a
+ * repeated deterministic stale value (0x67d6ecae, misaligned past
+ * the heap end; the "SYSTEMD_" text of the earlier referees = the
+ * same class, different scratch contents). Bypasses every funnel:
+ * raw_copy_to_user, the four tracked flat copiers, the guards —
+ * the pages are writable so nothing faults. Arm the struct page
+ * READ-ONLY from this conn's first fork seed on (the poison window
+ * opens post-fork); every write faults and names its rip. Legit
+ * glibc entries churn = the noise the budget pays (its rips are
+ * known: malloc+0x16a/0x172); the writer's rip = anything else.
+ * Private-run repair = a plain PROTECT back (the cowtrap lesson:
+ * one log line, one round-trip, never the guest's life). */
+static struct uml_nt_stub_conn *tctrip_conn;
+static unsigned long long tctrip_page;
+static int tctrip_pending;
+static int tctrip_budget = 12;
+
+static void uml_nt_tctrip_arm(struct uml_nt_stub_conn *c)
+{
+	if (tctrip_budget <= 0 || tctrip_conn != NULL)
+		return; /* one live trip — the log names re-arms */
+	if (c->mm == NULL || c->mm->heap_start == 0)
+		return;
+	if (uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
+			       UML_NT_PAGE_READONLY, c->mm->heap_start,
+			       UML_NT_FAULT_PAGE_SIZE, 0) < 0)
+		return;
+	tctrip_conn = c;
+	tctrip_page = c->mm->heap_start;
+	tctrip_pending = 1;
+	os_info("[tctrip] armed tcache page 0x%llx pid %lu "
+		"READ-ONLY — every write to the struct page names "
+		"its rip\n", tctrip_page, (unsigned long)c->pid);
+}
+
+static void uml_nt_tctrip_trip(struct uml_nt_stub_conn *c,
+			       struct uml_nt_stub_data *d)
+{
+	if (tctrip_conn != c || d->fault_addr < tctrip_page ||
+	    d->fault_addr >= tctrip_page + UML_NT_FAULT_PAGE_SIZE)
+		return;
+	os_info("[tctrip] WRITE pid %lu rip=0x%llx rsp=0x%llx "
+		"rcx=0x%llx addr=0x%llx type=%u nr=%llu ret=%lld\n",
+		(unsigned long)c->pid, d->regs.rip, d->regs.rsp,
+		d->regs.rcx, d->fault_addr, d->fault_type,
+		c->last_nr, c->last_ret);
+	tctrip_conn = NULL;
+	tctrip_pending = 0;
+	tctrip_budget--; /* re-armed at the next serve round */
+}
+
 /* [copyver] (see syscall.h): memcpy + read-back verify for the
  * kernel-side bulk copies into guest memory. The trap census only
  * sees stub-view writes — a bad kernel copy is invisible to it, and
@@ -1001,6 +1054,11 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 
 	if (!c->task_backed || mm == NULL || mm->heap_start == 0)
 		return;
+	/* TCACHE TRIP arm/re-arm: after this conn's first fork seed
+	 * the poison window is open — keep the struct page tripped
+	 * (one live trap; the writer's rip = the hunt's end). */
+	if (c->tctrip_want && tctrip_conn == NULL && tctrip_budget > 0)
+		uml_nt_tctrip_arm(c);
 	tva = mm->heap_start + 0x10; /* chunk data past the header */
 	/* The glibc shape check first: the heap's first chunk must be
 	 * the tcache itself (chunk size 0x290 | PREV_INUSE = 0x291 in
@@ -1303,6 +1361,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * the normal mm_fault flow — the log line is the
 		 * whole cost. */
 		uml_nt_cowtrap_trip(c, d);
+		uml_nt_tctrip_trip(c, d);
 		if (cowtrap_conn == c &&
 		    d->fault_addr >= cowtrap_lo &&
 		    d->fault_addr < cowtrap_hi) {
@@ -2427,6 +2486,12 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	/* Contents of the eager (private) spans: everything whose
 	 * run_off moved (the stack VMA — the COW-shared runs are the
 	 * same bytes by construction). */
+	/* TCACHE TRIP: the poison window opens post-fork — the
+	 * parent's own heap churn carries it (the writer writes
+	 * THROUGH the parent's view; every referee so far caught
+	 * only the parent's legit writes next to it). Arm on the
+	 * parent from its first fork on. */
+	parent->tctrip_want = 1;
 	for (vi = 0; vi < child->mm->nvma; vi++) {
 		const struct uml_nt_vma *cv = &child->mm->vma[vi];
 		const struct uml_nt_vma *pv = &parent->mm->vma[vi];
