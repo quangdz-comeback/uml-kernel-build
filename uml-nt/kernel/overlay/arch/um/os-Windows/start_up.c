@@ -269,11 +269,20 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 	 * locks. The rip IS the verdict: a funnel/known site = legit
 	 * writeback (one line, lives on); anything else = the
 	 * flat-write stomper the whole hunt is after. */
+	/* Window test MUST use the write's DATA address (info[1]) —
+	 * r->address is the ExceptionAddress (= rip). Referee
+	 * 37099170639: the first funnel writeback (ksys_read filling
+	 * the heap page) faulted INSIDE the armed window but the
+	 * branch compared rip (0x60040190) against [ktrip_lo,ktrip_hi)
+	 * and skipped the catch, so the boot took the fatal report.
+	 * Verdict per map 117: rip=uml_nt_uacc_walk byte-copy, caller
+	 * ksys_read = legit writeback — exactly the "one line, boot
+	 * lives on" case. */
 	if (nt != NULL && ktrip_hi != 0 && r != NULL &&
 	    r->code == 0xC0000005ull && r->nparams > 1 &&
 	    r->info[0] == 1 &&
-	    (unsigned long long)(uintptr_t)r->address >= ktrip_lo &&
-	    (unsigned long long)(uintptr_t)r->address < ktrip_hi) {
+	    (unsigned long long)(uintptr_t)r->info[1] >= ktrip_lo &&
+	    (unsigned long long)(uintptr_t)r->info[1] < ktrip_hi) {
 		PVOID base = (PVOID)(uintptr_t)ktrip_lo;
 		SIZE_T size = (SIZE_T)(ktrip_hi - ktrip_lo);
 		ULONG old;
