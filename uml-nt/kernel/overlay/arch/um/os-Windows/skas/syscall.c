@@ -1707,14 +1707,16 @@ static void abrt_dump_bytes(struct uml_nt_mm *mm, unsigned long long va,
 	}
 }
 
-static void abrt_bin_walk(struct uml_nt_stub_conn *c,
-			  unsigned long long head, int idx, int maxwalk)
+/* Return the desynced chunk's VA (0 = chain clean to the cap). */
+static unsigned long long abrt_bin_walk(struct uml_nt_stub_conn *c,
+					unsigned long long head, int idx,
+					int maxwalk)
 {
 	unsigned long long cur;
 	int k;
 
 	if (abrt_qword(c, head + 0x10, &cur) < 0)
-		return;
+		return 0;
 	for (k = 0; k < maxwalk && cur != head; k++) {
 		unsigned long long size, fd, bk, fdbk, bkfd;
 		long long coff;
@@ -1743,10 +1745,102 @@ static void abrt_bin_walk(struct uml_nt_stub_conn *c,
 			abrt_dump_bytes(c->mm, cur, 0x40, "desync-chunk");
 			abrt_dump_bytes(c->mm, fd, 0x20, "desync-fd");
 			abrt_dump_bytes(c->mm, bk, 0x20, "desync-bk");
-			break;
+			return cur;
 		}
 		cur = fd;
 	}
+	return 0;
+}
+
+/* TWIN SCAN (K3 starhost, referee 37137513174 decode): the desync
+ * state = HALF of one glibc operation's stores landed (the chunk's
+ * fd/bk keep stale bin links while the head's pairing points at it,
+ * or vice versa). The missing stores could not have faulted (every
+ * fault prints; none did for those qwords) — so they executed
+ * against a STALE VIEW of the page: a COW twin run the conn's stub
+ * kept mapping after the table moved (the view-desync class — the
+ * uacc fixup no-rollback hole / a wrong-offset re-MAP). The stores
+ * LANDED on the twin; the twin's lineage in the [cowcopy]/[phys]
+ * ledger then names the mechanism. Sweep ALL of physmem for the
+ * page holding the expected-if-landed values, twice:
+ *   A (arena twin): qwords at the unsorted head fd/bk + the
+ *     desynced bin head fd's page offsets = {uhead, uhead, victim}
+ *     (the removal+insert stores as they SHOULD look);
+ *   B (chunk twin): the chunk's fd/bk = {uhead, uhead} (the
+ *     unsorted-insert stores as they should look).
+ * The believed pages never self-match (they hold the stale values
+ * by construction). Pure flat-view qword reads — 3 per run, cheap
+ * at abort time; hits print refs (a FREE run hit = an old twin
+ * whose lineage the ledger still names). */
+static void abrt_twin_scan(struct uml_nt_stub_conn *c,
+			   unsigned long long av,
+			   unsigned long long victim)
+{
+	const unsigned long long uhead = av + 0x60;
+	const unsigned long long a_fd = (av + 0x70) & (UML_NT_PHYS_RUN_SIZE - 1);
+	const unsigned long long a_bk = (av + 0x78) & (UML_NT_PHYS_RUN_SIZE - 1);
+	const unsigned long long v_fd = (victim + 0x10) & (UML_NT_PHYS_RUN_SIZE - 1);
+	const unsigned long long v_bk = (victim + 0x18) & (UML_NT_PHYS_RUN_SIZE - 1);
+	const char *base = (const char *)uml_boot.physmem_base;
+	unsigned long long run, size = uml_boot.physmem_size;
+	unsigned long long hits_a = 0, hits_b = 0;
+	unsigned long long vbk, bfd_off = 0;
+	int have_bfd = 0;
+
+	if (victim == 0 || size == 0)
+		return;
+	/* The third A-qword: the bin the victim's stale bk points into
+	 * (the earlier pass's insert target) — its head fd should have
+	 * become `victim`. Only when bk lands exactly on a bin head. */
+	if (abrt_qword(c, victim + 0x18, &vbk) == 0 &&
+	    vbk >= uhead && vbk < uhead + 126 * 16 &&
+	    ((vbk - uhead) & 0xf) == 0) {
+		bfd_off = (vbk + 0x10) & (UML_NT_PHYS_RUN_SIZE - 1);
+		have_bfd = 1;
+	}
+	for (run = 0; run + UML_NT_PHYS_RUN_SIZE <= size;
+		     run += UML_NT_PHYS_RUN_SIZE) {
+		unsigned long long q0, q1;
+
+		q0 = *(const unsigned long long *)(const void *)(base +
+							 run + a_fd);
+		if (q0 == uhead) {
+			q1 = *(const unsigned long long *)(const void *)(base +
+								 run + a_bk);
+			if (q1 == uhead && (!have_bfd ||
+			    *(const unsigned long long *)(const void *)(base +
+						  run + bfd_off) == victim)) {
+				hits_a++;
+				if (hits_a <= 4)
+					os_info("[abrt] TWIN-A run=0x%llx "
+						"refs=%d: [fd]=uhead "
+						"[bk]=uhead [binfd]=victim "
+						"(the missing removal+insert "
+						"stores landed HERE)\n", run,
+						uml_nt_phys_refs(c->ph,
+								 (long long)run));
+			}
+		}
+		q0 = *(const unsigned long long *)(const void *)(base +
+							 run + v_fd);
+		if (q0 == uhead) {
+			q1 = *(const unsigned long long *)(const void *)(base +
+								 run + v_bk);
+			if (q1 == uhead) {
+				hits_b++;
+				if (hits_b <= 4)
+					os_info("[abrt] TWIN-B run=0x%llx "
+						"refs=%d: chunk fd/bk = "
+						"uhead/uhead (the missing "
+						"insert stores landed "
+						"HERE)\n", run,
+						uml_nt_phys_refs(c->ph,
+								 (long long)run));
+			}
+		}
+	}
+	os_info("[abrt] twin scan: %llu A-hit(s), %llu B-hit(s) over "
+		"0x%llx bytes\n", hits_a, hits_b, size);
 }
 
 static void abrt_arena_audit(struct uml_nt_stub_conn *c,
@@ -1756,6 +1850,7 @@ static void abrt_arena_audit(struct uml_nt_stub_conn *c,
 			     const char *s)
 {
 	unsigned long long libc_base = 0, av, top, ufd, ubk, sp, q;
+	unsigned long long desync = 0;
 	int i, badbins = 0, hits = 0;
 
 	for (i = 0; i < (int)ARRAY_SIZE(abrt_strtab); i++) {
@@ -1797,7 +1892,7 @@ static void abrt_arena_audit(struct uml_nt_stub_conn *c,
 	for (i = 1; i <= 126 && badbins < 3; i++) {
 		unsigned long long head = av + 0x60 +
 					  (unsigned long long)(i - 1) * 16;
-		unsigned long long fd, bk, fdbk, bkfd;
+		unsigned long long fd, bk, fdbk, bkfd, d2;
 
 		if (abrt_qword(c, head + 0x10, &fd) < 0 ||
 		    abrt_qword(c, head + 0x18, &bk) < 0)
@@ -1809,19 +1904,29 @@ static void abrt_arena_audit(struct uml_nt_stub_conn *c,
 		if (abrt_qword(c, bk + 0x10, &bkfd) < 0)
 			bkfd = 0;
 		if (fdbk == head && bkfd == head) {
-			if (i == 1)
-				abrt_bin_walk(c, head, i, 16);
+			if (i == 1) {
+				d2 = abrt_bin_walk(c, head, i, 16);
+				if (d2 != 0 && desync == 0)
+					desync = d2;
+			}
 			continue;
 		}
 		badbins++;
 		os_info("[abrt]   bin[%d] head 0x%llx fd=0x%llx "
 			"bk=0x%llx fd->bk=0x%llx bk->fd=0x%llx — HEAD "
 			"DESYNC\n", i, head, fd, bk, fdbk, bkfd);
-		abrt_bin_walk(c, head, i, 16);
+		d2 = abrt_bin_walk(c, head, i, 16);
+		if (d2 != 0 && desync == 0)
+			desync = d2;
 	}
 	if (badbins == 0)
 		os_info("[abrt] arena: all bin head pairings clean "
 			"(unsorted member walk above)\n");
+	/* The desync = a half-landed glibc store set — find the twin
+	 * run the missing stores actually landed on (the view-desync
+	 * class; see abrt_twin_scan). */
+	if (desync != 0)
+		abrt_twin_scan(c, av, desync);
 	/* The caller hint: libc-text qwords above __libc_message's
 	 * frame — the first hit past the unlink frame (libc+0x95114)
 	 * is unlink_chunk's caller. */

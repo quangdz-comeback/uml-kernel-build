@@ -241,6 +241,28 @@ char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 	span_base = vma->run_off;
 	prot = vma->prot;
 
+	/* K3 starhost (oracle, referee 37137513174 decode): the ops
+	 * below are the VIEW half of the tree move — queueing them is
+	 * not optional. A plan overflow AFTER the copy+split left the
+	 * stub's view stranded on the OLD run (a byte-identical COW
+	 * twin): the guest's later writes landed on the twin while the
+	 * table + the flat view said the new run — the half-landed
+	 * store set behind the bin-desync aborts ("corrupted
+	 * double-linked list" family). All-or-nothing: reserve the
+	 * capacity FIRST — a full plan fails the write BEFORE anything
+	 * moves (EFAULT at the caller: loud, retriable, never a
+	 * stranded view). Op count mirrors the queue below. */
+	{
+		int need = 2; /* UNMAP + mid MAP */
+
+		if (run_start > s)
+			need++;
+		if (run_start + UACC_RUN < e)
+			need++;
+		if (uacc_sink.plan->n_ops + need > UML_NT_FAULT_MAX_OPS)
+			return (char *)0;
+	}
+
 	new_run = (unsigned long long)uml_nt_phys_alloc(uacc_sink.ph);
 	if (new_run == (unsigned long long)-1)
 		return (char *)0;
