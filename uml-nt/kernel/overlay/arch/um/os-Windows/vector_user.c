@@ -163,6 +163,14 @@ netstack_spawn_thread(void *arg)
 	 * diagnostic only. */
 	req->pid = pi.dwProcessId;
 	req->rc = 0;
+	/* M5.6b: the helper joins the launcher's kill-on-close job
+	 * (boot-info v4) — same contract as the stub spawn: a
+	 * launcher/kernel death takes every helper down. */
+	if (uml_boot.job_object != NULL &&
+	    !nt->AssignProcessToJobObject(uml_boot.job_object,
+					  pi.hProcess))
+		os_info("[net] job assign failed win32=%lu\n",
+			nt->RtlGetLastWin32Error());
 	return 0;
 }
 

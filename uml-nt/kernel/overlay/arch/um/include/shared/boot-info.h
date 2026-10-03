@@ -15,7 +15,7 @@
 
 /* "UMLB" little-endian. */
 #define UML_BOOT_MAGIC   0x424C4D55u
-#define UML_BOOT_VERSION 3u /* v3: stdin for the console TTY (M3.6) */
+#define UML_BOOT_VERSION 4u /* v4: kill-on-close job object (M5.6b) */
 
 struct uml_boot_info {
 	unsigned int magic;
@@ -60,6 +60,16 @@ struct uml_boot_info {
 	 * or file handle — raw console input handles are M4). NULL =
 	 * no input source; the console then runs write-only. */
 	HANDLE stdio_in;
+
+	/* ---- v4 (M5.6b): kill-on-close job object ----------------
+	 * The launcher's own job (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+	 * the launcher assigned itself at startup): the kernel
+	 * assigns EVERY spawned child (stub.exe, netstack/vector
+	 * helper) so a launcher/kernel death takes the whole process
+	 * tree down — stub.exe park_forever must not outlive a dead
+	 * kernel (the zombie-stub report). NULL = none (legacy
+	 * launcher). Append-only: fields above stay frozen. */
+	HANDLE job_object;
 };
 
 #endif /* __UML_BOOT_INFO_H */

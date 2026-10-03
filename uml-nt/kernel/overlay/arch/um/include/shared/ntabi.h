@@ -393,7 +393,7 @@ static inline int uml_nt_inet_pton4(const char *s, unsigned int *out)
  * kernel accepts version == UML_NT_API_VERSION exactly (it fails loudly
  * otherwise — silent ABI drift is the failure mode we refuse).
  */
-#define UML_NT_API_VERSION 2u
+#define UML_NT_API_VERSION 3u
 
 /* ---- function prototypes (ms_abi) — the launcher resolves these ------
  * Kernel-ELF consumers need them declared here (nothing else will).
@@ -511,6 +511,15 @@ BOOL UML_NTABI_CC CreateProcessA(char *app_name, char *cmd_line,
 				 PROCESS_INFORMATION *pi);
 ULONG UML_NTABI_CC ResumeThread(HANDLE thread);
 BOOL UML_NTABI_CC GetExitCodeProcess(HANDLE process, ULONG *exit_code);
+
+/* M5.6b additions (appended; table members above stay frozen). Job
+ * membership for spawned children: the launcher owns a kill-on-close
+ * job (boot-info v4 carries the handle) — every stub/helper joins it
+ * so a launcher/kernel death takes the whole tree down (the
+ * zombie-stub report: park_forever outlived a dead kernel on the
+ * real machine). Nested jobs = Win8+; the CI runner's parent job
+ * combs fine. */
+BOOLEAN UML_NTABI_CC AssignProcessToJobObject(HANDLE job, HANDLE process);
 
 /* M3.3 additions (appended; table members above stay frozen). The
  * kernel serves several stub processes: one wait on all their evt_in
@@ -721,6 +730,13 @@ struct uml_nt_api_table {
 	int (UML_NTABI_CC *WSAEventSelect)(unsigned long long s,
 			void *event, long net_events);
 	int (UML_NTABI_CC *WSAGetLastError)(void);
+
+	/* ---- appended for M5.6b (job object — the zombie-stub fix) -------
+	 * The launcher dies for ANY reason (panic/crash/taskkill/exit)
+	 * → Windows kills every stub+helper in the job. The handle
+	 * travels in boot-info v4 (job_object). */
+	BOOLEAN (UML_NTABI_CC *AssignProcessToJobObject)(HANDLE job,
+			HANDLE process);
 };
 
 #endif /* __UML_NTABI_H */

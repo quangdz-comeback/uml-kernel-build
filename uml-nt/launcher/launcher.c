@@ -63,6 +63,39 @@ static void die(const char *what, unsigned long gle)
 /* ---- D9: resolve the whole table, fail loudly on any miss ------------- */
 static struct uml_nt_api_table g_api;
 
+/* M5.6b: the launcher's own kill-on-close job. The kernel runs IN
+ * this process and hands the handle to every spawn (stub.exe,
+ * netstack) — the launcher dying for ANY reason (panic, crash,
+ * taskkill, normal exit) makes Windows take the whole tree down.
+ * Before this, a dead kernel left stub.exe park_forever-ing on the
+ * real machine (nobody left to terminate it). */
+static HANDLE g_job;
+
+static void create_boot_job(void)
+{
+	JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
+
+	g_job = CreateJobObjectW(NULL, NULL);
+	if (g_job == NULL)
+		die("CreateJobObjectW", GetLastError());
+	memset(&li, 0, sizeof(li));
+	li.BasicLimitInformation.LimitFlags =
+		JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+	if (!SetInformationJobObject(g_job,
+				     JobObjectExtendedLimitInformation,
+				     &li, sizeof(li)))
+		die("SetInformationJobObject", GetLastError());
+	/* Nested jobs (Win8+): a runner-owned parent job combs fine —
+	 * this process ends up in both, our kill-on-close still fires
+	 * on OUR handle's closure. Warn-and-continue (not die): the
+	 * property is a real-machine guarantee; wine's job support is
+	 * best-effort and the wine boot gate must stay green. */
+	if (!AssignProcessToJobObject(g_job, GetCurrentProcess()))
+		fprintf(stderr, "[launcher] job self-assign failed "
+			"(gle=%lu) — zombie children possible on this "
+			"host\n", GetLastError());
+}
+
 #define RESOLVE(field, mod, name)                                          \
 	do {                                                               \
 		g_api.field = (typeof(g_api.field))GetProcAddress(mod, name); \
@@ -123,6 +156,10 @@ static void resolve_api_table(void)
 	RESOLVE(CreateEventW, k32, "CreateEventW");
 	RESOLVE(MapViewOfFileEx, k32, "MapViewOfFileEx");
 	RESOLVE(UnmapViewOfFile, k32, "UnmapViewOfFile");
+
+	/* M5.6b: the kernel assigns spawned children to the launcher's
+	 * kill-on-close job (boot-info v4) — see create_boot_job(). */
+	RESOLVE(AssignProcessToJobObject, k32, "AssignProcessToJobObject");
 	RESOLVE(CreateProcessA, k32, "CreateProcessA");
 	RESOLVE(ResumeThread, k32, "ResumeThread");
 	RESOLVE(GetExitCodeProcess, k32, "GetExitCodeProcess");
@@ -420,6 +457,7 @@ int main(int argc, char **argv)
 	 * guest-RAM window (load_exec_section's fopen below allocates;
 	 * see the function comment). */
 	resolve_api_table();
+	create_boot_job();
 	reserve_vmalloc_band();
 
 	/* M3.4: uml_nt_exec=<file> names the guest ELF the kernel-side
@@ -558,6 +596,7 @@ int main(int argc, char **argv)
 	bi->envp = kenv_p;
 	bi->exec_section = exec_sec;
 	bi->exec_size = exec_size;
+	bi->job_object = g_job; /* v4: the kernel joins its spawns */
 	/* Raw console: drop ENABLE_PROCESSED_INPUT so Ctrl-C is a 0x03
 	 * byte the guest tty turns into SIGINT — the processed mode
 	 * would let Windows swallow the key (and with it any chance

@@ -3224,6 +3224,17 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	c->exit_code = 0;
 	c->plan_next = 0;
 	c->plan_left = 0;
+	/* M5.6b: join the launcher's kill-on-close job (boot-info v4)
+	 * — the launcher/kernel dying for ANY reason takes every stub
+	 * down (the zombie-stub report: park_forever outlived a dead
+	 * kernel on the real machine). CreateProcess children inherit
+	 * the job by default; the explicit assign beats hoping (and
+	 * is the nested-job-safe no-op when already a member). */
+	if (uml_boot.job_object != NULL &&
+	    !nt->AssignProcessToJobObject(uml_boot.job_object,
+					  pi.hProcess))
+		os_info("[stub] job assign failed win32=%lu\n",
+			nt->RtlGetLastWin32Error());
 	return 0;
 
 fail:
