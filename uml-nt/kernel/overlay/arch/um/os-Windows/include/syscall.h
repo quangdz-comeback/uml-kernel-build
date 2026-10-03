@@ -159,16 +159,26 @@ struct uml_nt_stub_conn {
 	 * "SYSTEMD_" (env-text class; the per-boot variant byte =
 	 * the (chunk_addr>>12) reveal XOR). The store into the chunk
 	 * itself is one event EARLIER than the get that reveals it —
-	 * per watched head chunk (entries[0..3] holding a legal
+	 * per watched bin (all 64 entries[] slots holding a legal
 	 * in-heap pointer), snapshot the chunk's first 8 bytes
 	 * (e->next) per serve round; a change names the write's round
 	 * and trap rip. A popped chunk stops being the head (its slot
 	 * re-arms on the entry change), so a stable head's e->next is
 	 * stable under legit glibc — only a foreign write (or a
-	 * double-free) moves it. kzalloc init = disarmed. */
-	unsigned long long tc_chunk_va[64];
-	unsigned long long tc_chunk_snap[64];
-	unsigned char tc_chunk_armed[64];
+	 * double-free) moves it.
+	 *
+	 * DEPTH-4 (referee 37117711740 decode): the poison also lands
+	 * in list members BELOW the stable head (37116465517:
+	 * mid-list) — and the tcache list is LIFO, so a member's
+	 * e->next is as stable as the head's while it sits in the
+	 * list; push/pop only touch the head slot and any head change
+	 * re-walks the bin. So each bin watches the first 4 members:
+	 * slot [d] = the list member d steps from the head, snapshotted
+	 * at (re)arm via the safe-linked decode (key = the member's
+	 * own address). kzalloc init = disarmed. */
+	unsigned long long tc_chunk_va[64][4];
+	unsigned long long tc_chunk_snap[64][4];
+	unsigned char tc_chunk_armed[64][4];
 	unsigned char tc_chunk_valid;
 	/* M5.6a POISON SWEEP (referees 37111253316 + 37112746470
 	 * decode): the payload (literal "SYSTEMD_" qword,

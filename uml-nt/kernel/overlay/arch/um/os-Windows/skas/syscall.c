@@ -1825,12 +1825,33 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 			unsigned long long g1_va = 0, g1_cs = 0;
 			unsigned long long g2_va = 0, g2_cs = 0;
 			unsigned long long cur_size = 0, cur_ps = 0;
+			unsigned long long heap_brk;
 			const char *why = NULL;
 			int idx;
 
 			heapwalk_done = 1;
+			/* Referee 37117711740 decode: the walk convicted
+			 * chunk #4578 (va=0x67d0e680, size 0x18981 ending
+			 * EXACTLY at brk=0x67d27000 — the abort dump
+			 * prints "brk=0x67d27000") as "free-chunk fd
+			 * untranslatable". That is the TOP CHUNK: the
+			 * walker crossed glibc's brk, read the never-
+			 * written zero pages past it as a zero "next
+			 * header", took PREV_INUSE=0 as "this chunk is
+			 * free", and link-validated fd/bk that glibc
+			 * NEVER maintains for the top chunk (they hold
+			 * leftover body data — the recurring
+			 * {fd=0x1a,bk=0x8000} shape). The real smallbin
+			 * victim was never reached. Bound the walk by
+			 * brk (binfmt + brk-syscall bookkeeping, fork
+			 * preserves it) and skip link validation for the
+			 * last chunk before brk — the top chunk by
+			 * construction. */
+			heap_brk = (c->mm->brk > c->mm->heap_start &&
+				    c->mm->brk <= c->mm->heap_end) ?
+				   c->mm->brk : c->mm->heap_end;
 			for (va = c->mm->heap_start, idx = 0;
-			     va < c->mm->heap_end && idx < 32768;
+			     va < heap_brk && idx < 32768;
 			     idx++) {
 				long long off =
 					uml_nt_vma_translate(c->mm, va, 16);
@@ -1855,8 +1876,8 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 					why = "size not 16-aligned";
 					break;
 				}
-				if (va + cs > c->mm->heap_end) {
-					why = "chunk runs past heap end";
+				if (va + cs > heap_brk) {
+					why = "chunk runs past heap brk";
 					break;
 				}
 				if ((hdr[1] & 1) == 0 && prev_va != 0 &&
@@ -1865,7 +1886,11 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 					break;
 				}
 				nxt = va + cs;
-				if (nxt < c->mm->heap_end) {
+				/* nxt == heap_brk → this chunk is the
+				 * top chunk: skip the free-link check —
+				 * its fd/bk are leftovers, not bin
+				 * links (the FP class of 37117711740). */
+				if (nxt < heap_brk) {
 					long long noff = uml_nt_vma_translate(
 						c->mm, nxt, 16);
 					unsigned long long nh[2];
@@ -2017,7 +2042,7 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 							0x7), nq[0], nq[1]);
 					}
 				}
-			} else if (va < c->mm->heap_end) {
+			} else if (va < heap_brk) {
 				/* Run 36979286356: the old 4096 cap hit
 				 * and the "clean" message lied — a
 				 * 1.2 MB heap of 0x20 chunks walks
@@ -2028,10 +2053,11 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 					va, idx, c->mm->heap_start,
 					c->mm->heap_end);
 			} else {
-				os_info("[heapwalk] chain clean to heap end "
-					"(%d chunks, [0x%llx,0x%llx))\n",
+				os_info("[heapwalk] chain clean to brk "
+					"(%d chunks, heap [0x%llx,0x%llx) "
+					"brk 0x%llx)\n",
 					idx, c->mm->heap_start,
-					c->mm->heap_end);
+					c->mm->heap_end, heap_brk);
 			}
 			/* WRITER-HUNT (M5.6a): the tcache poison
 			 * witness. Run 36979286356 died

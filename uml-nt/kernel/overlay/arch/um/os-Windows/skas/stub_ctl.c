@@ -1433,102 +1433,180 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 		 * round is VMA-find work, no copies. A legit push onto
 		 * the head changes entries[i] → re-arm; only a write
 		 * to a STABLE head's next (double-free / the poison
-		 * class) fires. */
+		 * class) fires.
+		 *
+		 * DEPTH-4 (referee 37117711740 decode): the split
+		 * stayed at 0 POISON — 16 churn fires ate their budget
+		 * and the smallbin ABRT still killed the boot with the
+		 * tcache entries CLEAN at abort: the poison rounds
+		 * hit list members BELOW the stable head (37116465517
+		 * mid-list) and non-tcache free chunks. The tcache
+		 * list is LIFO, so a member's e->next is as stable as
+		 * the head's while it sits in the list — push/pop
+		 * touch the head slot only, and any head change
+		 * re-walks the bin. So each bin now watches the first
+		 * 4 members: walk entries[di] via the safe-linked
+		 * decode (key = the member's OWN address, map-053),
+		 * snapshot each member's e->next, compare per round.
+		 * A change on a stable member (any depth) classifies
+		 * exactly like the head did: POISON = the decoded next
+		 * is misaligned/out-of-heap (no legit free() writes
+		 * that), CHURN = everything else; both re-arm so the
+		 * watch survives its own fires. The walk also decodes
+		 * AT (re)arm: a garbage member next decoded right
+		 * there fires immediately — the write landed since the
+		 * last walk, first sight = this round. The walk is
+		 * gated on (churn || poison budget) so exhausted
+		 * budgets stop the VMA-find work; a fresh head still
+		 * arms while the POISON budget lives (the head-write
+		 * rounds keep their witness after churn dies). */
 		for (di = 0; di < 64; di++) {
 			unsigned long long ev = entries[di];
-			unsigned long long data;
-			long long coff;
+			int depth;
 
 			if (!c->tc_chunk_valid ||
-			    c->tc_chunk_va[di] != ev ||
+			    c->tc_chunk_va[di][0] != ev ||
+			    !c->tc_chunk_armed[di][0] ||
 			    (ev & 0xF) != 0 || (ev >> 48) != 0 ||
 			    ev < mm->heap_start || ev >= mm->heap_end) {
 				/* (Re)arm: the watched head changed
-				 * identity — snapshot its e->next NOW
-				 * and compare from the next round. */
-				c->tc_chunk_va[di] = ev;
-				c->tc_chunk_armed[di] = 0;
-				c->tc_chunk_snap[di] = 0;
-				if (tcache_chunk_budget > 0 &&
+				 * identity — walk the list and snapshot
+				 * its members NOW; compare from the
+				 * next round. */
+				c->tc_chunk_va[di][0] = ev;
+				c->tc_chunk_snap[di][0] = 0;
+				for (depth = 0; depth < 4; depth++)
+					c->tc_chunk_armed[di][depth] = 0;
+				if ((tcache_chunk_budget > 0 ||
+				     tcache_poison_budget > 0) &&
 				    (ev & 0xF) == 0 && (ev >> 48) == 0 &&
 				    ev >= mm->heap_start &&
 				    ev < mm->heap_end) {
-					coff = uml_nt_vma_translate(mm, ev,
-								    8);
-					if (coff >= 0) {
-						c->tc_chunk_snap[di] =
-							*(const unsigned
+					unsigned long long chunk = ev;
+
+					for (depth = 0; depth < 4;
+					     depth++) {
+						unsigned long long data,
+							nxt;
+						long long coff =
+							uml_nt_vma_translate(
+							mm, chunk, 8);
+
+						if (coff < 0)
+							break;
+						data = *(const unsigned
 							  long long *)
-							  (const void *)
-							  ((char *)uml_boot.
-							   physmem_base +
-							   coff);
-						c->tc_chunk_armed[di] = 1;
+							(const void *)
+							((char *)uml_boot.
+							 physmem_base +
+							 coff);
+						nxt = data ^ (chunk >> 12);
+						c->tc_chunk_va[di][depth] =
+							chunk;
+						c->tc_chunk_snap[di][depth] =
+							data;
+						c->tc_chunk_armed[di][depth] =
+							1;
+						if (nxt == 0)
+							break;
+						if ((nxt & 0xF) != 0 ||
+						    nxt < mm->heap_start ||
+						    nxt >= mm->heap_end) {
+							/* POISON decoded at
+							 * walk time — the
+							 * list member's next
+							 * is garbage right
+							 * now. */
+							if (tcache_poison_budget >
+							    0) {
+								tcache_poison_budget--;
+								os_info("[tcchunk-POISON] pid %lu list[%d] d%d va=0x%llx next=0x%llx (rearm-decode round nr=%llu ret=%lld rip=0x%llx rsp=0x%llx)\n",
+									(unsigned
+									long)
+									c->pid,
+									di, depth,
+									chunk,
+									nxt,
+									c->last_nr,
+									c->last_ret,
+									c->d->regs.
+									rip,
+									c->d->regs.
+									rsp);
+								dump_guest_bytes(
+									mm, chunk,
+									0x20,
+									"tcchunk-head");
+							}
+							break;
+						}
+						chunk = nxt;
 					}
 				}
 				continue;
 			}
-			if (tcache_chunk_budget <= 0 ||
-			    !c->tc_chunk_armed[di])
-				continue;
-			coff = uml_nt_vma_translate(mm, ev, 8);
-			if (coff < 0)
-				continue;
-			data = *(const unsigned long long *)
-				(const void *)((char *)uml_boot.physmem_base +
-					       coff);
-			if (c->tc_chunk_snap[di] == data)
-				continue;
-			/* Referee 37116465517 (86c74f5): the watch LIVES
-			 * but churn eats the budget — an A-B-A push pair
-			 * inside one round restores the head VA while
-			 * its next moved (0x67c0f = PROTECT_PTR(pos,0)
-			 * of an empty bin — LEGIT), the stale snap
-			 * fires, and the 16-line budget was gone before
-			 * the poison round (head[1] 0x67c3f590 — the
-			 * EXACT slot of 37105483388 — unwitnessed
-			 * again). Split the fires: POISON = the decoded
-			 * next (safe-linking reveal with the PUSHED
-			 * chunk's own address — the map-053 lesson) is
-			 * misaligned or outside the heap = no legit
-			 * free() writes that; CHURN = everything else,
-			 * re-arms silently. Both re-arm so the watch
-			 * survives its own fires. */
-			{
-				unsigned long long nxt = data ^
-					(ev >> 12);
-				int poison = nxt != 0 &&
+			/* Stable bin: compare every armed member. */
+			for (depth = 0; depth < 4; depth++) {
+				unsigned long long chunk =
+					c->tc_chunk_va[di][depth];
+				unsigned long long data, nxt;
+				long long coff;
+				int poison;
+
+				if (!c->tc_chunk_armed[di][depth])
+					continue;
+				coff = uml_nt_vma_translate(mm, chunk, 8);
+				if (coff < 0)
+					continue;
+				data = *(const unsigned long long *)
+					(const void *)((char *)
+					uml_boot.physmem_base + coff);
+				if (c->tc_chunk_snap[di][depth] == data)
+					continue;
+				/* The POISON/churn split (37116465517):
+				 * an A-B-A push pair inside one round
+				 * restores the head VA while its next
+				 * moved (0x67c0f = PROTECT_PTR(pos,0)
+				 * of an empty bin — LEGIT), the stale
+				 * snap fires. Decode the next with the
+				 * PUSHED chunk's own address: POISON =
+				 * misaligned/out-of-heap, CHURN = the
+				 * rest. Each class draws its own
+				 * budget; both re-arm. */
+				nxt = data ^ (chunk >> 12);
+				poison = nxt != 0 &&
 					((nxt & 0xF) != 0 ||
 					 nxt < mm->heap_start ||
 					 nxt >= mm->heap_end);
-
 				if (poison) {
 					if (tcache_poison_budget <= 0) {
-						c->tc_chunk_snap[di] = data;
+						c->tc_chunk_snap[di][depth] =
+							data;
 						continue;
 					}
 					tcache_poison_budget--;
 				} else {
 					if (tcache_chunk_budget <= 0) {
-						c->tc_chunk_snap[di] = data;
+						c->tc_chunk_snap[di][depth] =
+							data;
 						continue;
 					}
 					tcache_chunk_budget--;
 				}
-				os_info("[tcchunk-%s] pid %lu head[%d] "
+				os_info("[tcchunk-%s] pid %lu list[%d] d%d "
 					"va=0x%llx 0x%llx -> 0x%llx "
 					"(next=0x%llx round nr=%llu "
 					"ret=%lld rip=0x%llx rsp=0x%llx)"
 					"\n", poison ? "POISON" : "churn",
-					(unsigned long)c->pid, di, ev,
-					c->tc_chunk_snap[di], data, nxt,
-					c->last_nr, c->last_ret,
+					(unsigned long)c->pid, di, depth,
+					chunk, c->tc_chunk_snap[di][depth],
+					data, nxt, c->last_nr, c->last_ret,
 					c->d->regs.rip, c->d->regs.rsp);
 				if (poison)
-					dump_guest_bytes(mm, ev, 0x20,
+					dump_guest_bytes(mm, chunk, 0x20,
 							 "tcchunk-head");
-				c->tc_chunk_snap[di] = data;
-				c->tc_chunk_armed[di] = 1;
+				c->tc_chunk_snap[di][depth] = data;
+				c->tc_chunk_armed[di][depth] = 1;
 			}
 		}
 		c->tc_chunk_valid = 1;
