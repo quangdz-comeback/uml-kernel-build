@@ -161,6 +161,15 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 		return;
 	c = id->nt_conn;
 
+	/* [deadwrite] arm (lead 115): the mmctx-destroy adjacency
+	 * precedes every poison detection in both decoded boots.
+	 * Teardown here does not walk guest mem through the funnel,
+	 * but the witness also covers any straggler writeback issued
+	 * while this destroy runs nested inside an exit (tag
+	 * "exit" would already be armed — this names the narrower
+	 * site when the destroy is the caller). */
+	uml_nt_deadwrite_arm(id->pid, "destroy");
+
 	/* Kernel owns the kill (M2.2 parity): the stub may still be
 	 * suspended (never got guest code — the normal S1/S2 fate for
 	 * an mm whose exec failed) or parked after a halt. */
@@ -230,4 +239,10 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	kfree(c);
 	id->nt_conn = NULL;
 	id->pid = -1;
+	/* [deadwrite]: the teardown wrote nothing through the funnel
+	 * — retire the armed context so a pump-side destroy cannot
+	 * mis-tag the next conn's legit writebacks (the dispatch
+	 * entry is the other disarm, for the exit route that never
+	 * returns here). */
+	uml_nt_deadwrite_disarm();
 }

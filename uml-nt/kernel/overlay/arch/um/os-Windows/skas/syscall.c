@@ -2102,6 +2102,12 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	struct uml_nt_mm *uacc_prev_mm;
 	struct uml_nt_uacc_sink uacc_prev_sink;
 
+	/* [deadwrite] leak guard (lead 115): the exit route arms the
+	 * destroy-path witness and do_exit never returns, so a fresh
+	 * round on ANY conn (this thread serves them all) is the one
+	 * point that reliably retires the armed context. */
+	uml_nt_deadwrite_disarm();
+
 	uacc_prev_mm = uml_nt_uacc_set_mm(c->mm);
 	/* The write-fixup channel (hazard 3): the handler's to_user/
 	 * clear_user/futex writes force COW-shared runs private and
@@ -2147,6 +2153,14 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			 * after — same `goto out` the exec path
 			 * uses, whose tail only unwinds the uacc
 			 * globals. */
+			/* [deadwrite] arm (lead 115): from here to conn
+			 * death the DYING task's exit path owns this
+			 * thread — the robust-list exit-fixup class
+			 * writes through the walker/futex primitives
+			 * right here. Every translate-then-write into
+			 * the heap window logs with tag=exit. */
+			uml_nt_deadwrite_arm(current ? current->pid : 0,
+					     "exit");
 			sys_vfs(nr, a);
 			goto out;
 		}

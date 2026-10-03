@@ -121,4 +121,17 @@ void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
  * alloc failure (the stale-PTE WARN precedent, run 36984931372). */
 void uml_nt_vmr_dump(const char *why, unsigned int n);
 
+/* skas/uaccess.c (M5.6a [deadwrite], lead 115): arm the destroy-path
+ * writeback witness. While armed, EVERY translate-then-write (raw_
+ * copy_to_user / clear_user / futex atomics) landing in the dying
+ * mm's heap window [heap_start, +0x20000) logs "[deadwrite] tag=...
+ * dying=..." with the call-site tag. Arm sites: the dispatch's
+ * task-backed exit_group route (tag "exit") and uml_nt_mmctx_destroy
+ * (tag "destroy") — the robust-list exit-fixup suspect set. The
+ * dispatch entry disarms: a fresh syscall round on any conn is a
+ * live context, and do_exit never returns, so the exit arm would
+ * otherwise leak into every later round on this thread. */
+void uml_nt_deadwrite_arm(int pid, const char *tag);
+void uml_nt_deadwrite_disarm(void);
+
 #endif

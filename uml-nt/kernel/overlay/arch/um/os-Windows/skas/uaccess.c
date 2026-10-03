@@ -73,6 +73,38 @@ static unsigned int uacc_heap_writes;
 /* The tcache-page small-write witness (its own, tiny budget). */
 static unsigned int uacc_small_writes;
 
+/* [deadwrite] witness (M5.6a, lead 115): armed ONLY while a dying
+ * task's exit/destroy path runs on this thread. The decode of both
+ * referee boots puts "mmctx: destroy pid X" immediately before every
+ * poison detection, and the [tctrip] negative witness proved the
+ * writer is kernel-side direct phys — so the suspect set is the
+ * translate-then-write primitives that run AT DESTROY: the futex
+ * robust-list exit-fixup class (exit_robust_list walks a possibly
+ * stale user list and cmpxchg-writes the OWNER_DIED word at chain
+ * VAs — put_user-class, but riding uml_nt_uacc_write_ptr, invisible
+ * to the [uawrite] funnel loggers), plus any copy_to_user/clear_user
+ * the exit path issues. While armed, EVERY translate-then-write into
+ * [heap_start, +0x20000) of the dying mm's heap logs with the dying
+ * pid + call-site tag — one referee names the site. */
+static int dw_armed;
+static int dw_pid;
+static const char *dw_tag;
+static unsigned int dw_writes;
+
+void uml_nt_deadwrite_arm(int pid, const char *tag)
+{
+	dw_armed = 1;
+	dw_pid = pid;
+	dw_tag = tag;
+}
+
+void uml_nt_deadwrite_disarm(void)
+{
+	dw_armed = 0;
+	dw_pid = -1;
+	dw_tag = NULL;
+}
+
 /* Shared print for both writeback witnesses: task + payload + the
  * VMA/run coordinates the walker will translate through — a
  * WRONG-run_off VMA shows up right in the line as run= pointing at
@@ -92,6 +124,36 @@ static void uacc_wlog(const char *tag, unsigned int idx,
 	os_info("%s #%u task=%d va=0x%llx len=%lu q0=0x%llx q1=0x%llx "
 		"vma=[0x%llx,0x%llx) run_off=0x%llx run=0x%llx\n",
 		tag, idx, task, va, n, q0, q1,
+		v ? v->start : 0, v ? v->end : 0,
+		v ? v->run_off : 0, old_run);
+}
+
+/* [deadwrite]: the armed-window check + print. Same VMA/run coords
+ * as uacc_wlog — a stale/foreign translate shows up right in the
+ * line as run= pointing at foreign bytes. */
+static void dw_check(unsigned long long va, unsigned long n,
+		     unsigned long long q0, unsigned long long q1)
+{
+	struct uml_nt_vma *v;
+	unsigned long long page, run_start, old_run;
+
+	if (!dw_armed || dw_writes >= 16)
+		return;
+	if (uacc_mm == NULL || uacc_mm->heap_end <= uacc_mm->heap_start)
+		return;
+	if (va < uacc_mm->heap_start ||
+	    va + n > uacc_mm->heap_start + 0x20000)
+		return;
+	dw_writes++;
+	page = va & ~(UACC_TRACE_PAGE - 1);
+	v = uml_nt_vma_find(uacc_mm, page);
+	run_start = page & ~(UML_NT_PHYS_RUN_SIZE - 1);
+	old_run = v ? v->run_off + (run_start - v->start) : 0;
+	os_info("[deadwrite] tag=%s dying=%d task=%d va=0x%llx len=%lu "
+		"q0=0x%llx q1=0x%llx vma=[0x%llx,0x%llx) run_off=0x%llx "
+		"run=0x%llx\n",
+		dw_tag ? dw_tag : "?", dw_pid,
+		current ? current->pid : 0, va, n, q0, q1,
 		v ? v->start : 0, v ? v->end : 0,
 		v ? v->run_off : 0, old_run);
 }
@@ -242,6 +304,27 @@ unsigned long raw_copy_from_user(void *to, const void __user *from,
 unsigned long raw_copy_to_user(void __user *to, const void *from,
 			       unsigned long n)
 {
+	/* [deadwrite]: armed = a destroy/exit path owns this thread —
+	 * any writeback into the victim heap window names its site
+	 * (the robust-list exit-fixup hypothesis, lead 115). Runs
+	 * before the ordinary witnesses so a dying task's writeback
+	 * can never be eaten by their budgets/dedup. */
+	if (dw_armed) {
+		unsigned long long va =
+			(unsigned long long)(unsigned long)to;
+		unsigned long long q0 = 0, q1 = 0;
+
+		if (n >= 8)
+			q0 = *(const unsigned long long *)from;
+		else if (n >= 4)
+			q0 = *(const unsigned int *)from;
+		else if (n >= 1)
+			q0 = *(const unsigned char *)from;
+		if (n >= 16)
+			q1 = ((const unsigned long long *)from)[1];
+		dw_check(va, n, q0, q1);
+	}
+
 	/* WRITER-HUNT (M5.6a, referee 37082741453 decode): the first
 	 * logger died of starvation — all 24 slots burned by line
 	 * ~700/23306 on LEGIT bulk reads (config text into low-heap
@@ -332,6 +415,10 @@ long strnlen_user(const char __user *str, long len)
 
 unsigned long __clear_user(void __user *mem, unsigned long len)
 {
+	/* [deadwrite]: the zero path is a writer too — the exit path
+	 * may memclear user buffers while armed. */
+	if (dw_armed)
+		dw_check((unsigned long long)(unsigned long)mem, len, 0, 0);
 	if (uml_nt_uacc_walk(uacc_mm, uml_boot.physmem_base,
 			     (unsigned long long)(unsigned long)mem, len,
 			     NULL, UML_NT_UACC_ZERO_GUEST) < 0)
@@ -375,6 +462,11 @@ int arch_futex_atomic_op_inuser(int op, u32 oparg, int *oval,
 	default:
 		return -ENOSYS;
 	}
+	/* [deadwrite]: the futex atomics are the ONE translate-then-
+	 * write family that bypasses raw_copy_to_user (write_ptr
+	 * direct) — the robust-list exit-fixup writes live exactly
+	 * here, so the armed witness must see them. */
+	dw_check((unsigned long long)(unsigned long)uaddr, 4, *p, oldval);
 	*oval = oldval;
 	return 0;
 }
@@ -392,6 +484,12 @@ int futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
 		return -EFAULT;
 	p = (volatile u32 *)w;
 	v = __sync_val_compare_and_swap(p, oldval, newval);
+	/* [deadwrite]: log only a COMMITTED exchange (v == oldval) —
+	 * a lost race wrote nothing. handle_futex_death's OWNER_DIED
+	 * cmpxchg rides this path at destroy. */
+	if (v == oldval)
+		dw_check((unsigned long long)(unsigned long)uaddr, 4,
+			 newval, oldval);
 	*uval = v;
 	return 0;
 }
