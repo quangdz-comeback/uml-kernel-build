@@ -130,6 +130,12 @@ void uml_nt_vmr_dump(const char *why, unsigned int n);
  * the old page. */
 void uml_nt_ktrip_arm(unsigned long long lo, unsigned long long hi);
 
+/* stub_ctl.c (M5.6a [alloc-alias], map 121): the physalloc handout
+ * probe — scan every live conn's VMAs into the freshly claimed
+ * [off, off+nruns*RUN) range; a hit names the stale translation
+ * ("alloc over a live run", the heap-trasher family). Log-only. */
+void uml_nt_alloc_alias_scan(long long off, int nruns);
+
 /* skas/uaccess.c (M5.6a [deadwrite], lead 115): arm the destroy-path
  * writeback witness. While armed, EVERY translate-then-write (raw_
  * copy_to_user / clear_user / futex atomics) landing in the dying

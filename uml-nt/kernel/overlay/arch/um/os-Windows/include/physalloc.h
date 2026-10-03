@@ -160,6 +160,17 @@ typedef void (*uml_nt_phys_event_fn)(const char *kind, long long off,
 				     const void *owner);
 extern uml_nt_phys_event_fn uml_nt_phys_event;
 
+/* [alloc-alias] (M5.6a map 121, to-shelley 119): fired on EVERY
+ * successful uml_nt_phys_alloc_span handout — the refs table just
+ * claimed [off, off+nruns) as free. The conn layer answers with the
+ * live-VMA scan: a mm still translating into the fresh range = a
+ * stale translation pointing at re-allocated phys (the "alloc over
+ * a live run" writer, R25 decode of 37003166709). Pure layer knows
+ * nothing about conns: NULL in the Linux unit-test build, pinned by
+ * main.c. */
+typedef void (*uml_nt_alloc_alias_fn)(long long off, int nruns);
+extern uml_nt_alloc_alias_fn uml_nt_alloc_alias_probe;
+
 /* D22 view-owner tagging: the conn layer sets THIS dispatch's owner
  * (the conn) at serve entry and at mmctx destroy's mm_drop; drops
  * made under a tag park their blocks instead of freeing them (see

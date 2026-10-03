@@ -68,6 +68,11 @@ void nt_main(struct uml_boot_info *bi)
 	 * 0x28b0000 double-claim class names its thief this way. */
 	uml_nt_phys_event = uml_nt_phys_event_log;
 
+	/* Map 121: every fresh handout crosses the live-VMA scan — a
+	 * stale translation into the new range names the
+	 * alloc-over-live-run writer (heap-trasher family). */
+	uml_nt_alloc_alias_probe = uml_nt_alloc_alias_scan;
+
 	linux_main(uml_boot.argc, uml_boot.argv, uml_boot.envp);
 
 	/* linux_main runs start_uml() → start_kernel() → (M1) panic

@@ -1097,6 +1097,59 @@ void uml_nt_run_alias_census(struct uml_nt_stub_conn *c,
 		"path)\n", conns, run_off, len);
 }
 
+/* [alloc-alias] (M5.6a, map 121 + to-shelley 119): the allocator's
+ * refs table says the handout was FREE — the last word belongs to
+ * the LIVE VMAs: any mm still translating into the fresh range
+ * names the stale-translation writer class ("cấp phát đè run sống",
+ * R25 decode of 37003166709: the heap chunk re-homes onto a run a
+ * live VMA never stopped pointing at). Fired from the ONE choke
+ * point every cowcopy/span/heap alloc crosses; the walk mirrors the
+ * co-mapper census (single vCPU pump — the task list cannot mutate
+ * under it). Log-only: a hit is EVIDENCE, the handout stands — the
+ * ownership check at fault time stays the law. Budget-capped: a
+ * degenerate rot that maps everything would flood the console
+ * otherwise. */
+void uml_nt_alloc_alias_scan(long long off, int nruns)
+{
+	static int alias_budget = 16;
+	struct task_struct *p;
+	unsigned long long lo, hi;
+
+	lo = (unsigned long long)off;
+	hi = lo + (unsigned long long)nruns * UML_NT_PHYS_RUN_SIZE;
+
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		struct uml_nt_vma *pv;
+		int vi;
+
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			continue;
+		for (vi = 0; vi < pc->mm->nvma; vi++) {
+			unsigned long long vlen;
+
+			pv = &pc->mm->vma[vi];
+			if (pv->end <= pv->start)
+				continue;
+			vlen = pv->end - pv->start;
+			if (pv->run_off + vlen <= lo || pv->run_off >= hi)
+				continue;
+			if (alias_budget > 0) {
+				alias_budget--;
+				os_info("[alloc-alias] off=0x%llx+%d "
+					"held by pid %d vma [0x%llx,0x%llx) "
+					"run_off=0x%llx\n",
+					off, nruns, p->pid, pv->start,
+					pv->end, pv->run_off);
+			}
+		}
+	}
+}
+
 static void tcache_watch(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_mm *mm = c->mm;

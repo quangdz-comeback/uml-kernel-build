@@ -12,6 +12,11 @@
 /* Event hook (physalloc.h) — NULL in unit tests, pinned by main.c. */
 uml_nt_phys_event_fn uml_nt_phys_event = (uml_nt_phys_event_fn)0;
 
+/* [alloc-alias] probe (physalloc.h) — NULL in unit tests, pinned by
+ * main.c. */
+uml_nt_alloc_alias_fn uml_nt_alloc_alias_probe =
+	(uml_nt_alloc_alias_fn)0;
+
 static int run_index(struct uml_nt_phys *p, long long off)
 {
 	long long i;
@@ -81,6 +86,11 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns)
 		p->span_len[i + k] = (unsigned short)nruns;
 		p->span_back[i + k] = (unsigned short)k;
 	}
+	/* [alloc-alias]: the table claims these runs were FREE — let
+	 * the conn layer name any live VMA that never stopped
+	 * translating into them (log-only; the handout stands). */
+	if (uml_nt_alloc_alias_probe != (uml_nt_alloc_alias_fn)0)
+		uml_nt_alloc_alias_probe(off, nruns);
 	return off;
 
 reject:
