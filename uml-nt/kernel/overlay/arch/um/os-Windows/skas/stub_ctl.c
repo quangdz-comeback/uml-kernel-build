@@ -1048,6 +1048,9 @@ static int tcache_chunk_budget = 16;
  * swept hit chunks. */
 static int posweep_budget = 8;
 static int posweep_va_budget = 16;
+/* The tcchunk split budgets: POISON-class fires (decoded next
+ * misaligned/out-of-heap) vs churn re-arms — see the watch body. */
+static int tcache_poison_budget = 16;
 /* The payload literal: "SYSTEMD_" as a little-endian qword — the raw
  * freed-chunk content the reveal math decodes to on every boot. */
 #define UML_NT_POSWEEP_QWORD 0x5f444d4554535953ull
@@ -1476,17 +1479,57 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 					       coff);
 			if (c->tc_chunk_snap[di] == data)
 				continue;
-			tcache_chunk_budget--;
-			c->tc_chunk_armed[di] = 0;
-			os_info("[tcchunk] pid %lu head[%d] va=0x%llx "
-				"0x%llx -> 0x%llx (round nr=%llu ret=%lld "
-				"rip=0x%llx rsp=0x%llx)\n",
-				(unsigned long)c->pid, di, ev,
-				c->tc_chunk_snap[di], data, c->last_nr,
-				c->last_ret, c->d->regs.rip,
-				c->d->regs.rsp);
-			dump_guest_bytes(mm, ev, 0x20, "tcchunk-head");
-			c->tc_chunk_snap[di] = data;
+			/* Referee 37116465517 (86c74f5): the watch LIVES
+			 * but churn eats the budget — an A-B-A push pair
+			 * inside one round restores the head VA while
+			 * its next moved (0x67c0f = PROTECT_PTR(pos,0)
+			 * of an empty bin — LEGIT), the stale snap
+			 * fires, and the 16-line budget was gone before
+			 * the poison round (head[1] 0x67c3f590 — the
+			 * EXACT slot of 37105483388 — unwitnessed
+			 * again). Split the fires: POISON = the decoded
+			 * next (safe-linking reveal with the PUSHED
+			 * chunk's own address — the map-053 lesson) is
+			 * misaligned or outside the heap = no legit
+			 * free() writes that; CHURN = everything else,
+			 * re-arms silently. Both re-arm so the watch
+			 * survives its own fires. */
+			{
+				unsigned long long nxt = data ^
+					(ev >> 12);
+				int poison = nxt != 0 &&
+					((nxt & 0xF) != 0 ||
+					 nxt < mm->heap_start ||
+					 nxt >= mm->heap_end);
+
+				if (poison) {
+					if (tcache_poison_budget <= 0) {
+						c->tc_chunk_snap[di] = data;
+						continue;
+					}
+					tcache_poison_budget--;
+				} else {
+					if (tcache_chunk_budget <= 0) {
+						c->tc_chunk_snap[di] = data;
+						continue;
+					}
+					tcache_chunk_budget--;
+				}
+				os_info("[tcchunk-%s] pid %lu head[%d] "
+					"va=0x%llx 0x%llx -> 0x%llx "
+					"(next=0x%llx round nr=%llu "
+					"ret=%lld rip=0x%llx rsp=0x%llx)"
+					"\n", poison ? "POISON" : "churn",
+					(unsigned long)c->pid, di, ev,
+					c->tc_chunk_snap[di], data, nxt,
+					c->last_nr, c->last_ret,
+					c->d->regs.rip, c->d->regs.rsp);
+				if (poison)
+					dump_guest_bytes(mm, ev, 0x20,
+							 "tcchunk-head");
+				c->tc_chunk_snap[di] = data;
+				c->tc_chunk_armed[di] = 1;
+			}
 		}
 		c->tc_chunk_valid = 1;
 	}
