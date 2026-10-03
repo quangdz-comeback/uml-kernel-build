@@ -1,0 +1,70 @@
+diff --git a/uml-nt/kernel/overlay/arch/um/include/shared/boot-info.h b/uml-nt/kernel/overlay/arch/um/include/shared/boot-info.h
+index 8544f43..4ae06b3 100644
+--- a/uml-nt/kernel/overlay/arch/um/include/shared/boot-info.h
++++ b/uml-nt/kernel/overlay/arch/um/include/shared/boot-info.h
+@@ -15,7 +15,7 @@
+ 
+ /* "UMLB" little-endian. */
+ #define UML_BOOT_MAGIC   0x424C4D55u
+-#define UML_BOOT_VERSION 3u /* v3: stdin for the console TTY (M3.6) */
++#define UML_BOOT_VERSION 4u /* v4: host quiet flag for os_info */
+ 
+ struct uml_boot_info {
+ 	unsigned int magic;
+@@ -60,6 +60,14 @@ struct uml_boot_info {
+ 	 * or file handle — raw console input handles are M4). NULL =
+ 	 * no input source; the console then runs write-only. */
+ 	HANDLE stdio_in;
++
++	/* ---- v4: host quiet flag --------------------------------
++	 * The launcher reads UML_NT_QUIET from ITS environment (the
++	 * CRT getenv — the kernel is freestanding, no env access) and
++	 * passes it here; os_info drops its output when set (os_err
++	 * and the panic path stay loud). CI never sets it — logs are
++	 * byte-identical. */
++	unsigned int quiet;
+ };
+ 
+ #endif /* __UML_BOOT_INFO_H */
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/util.c b/uml-nt/kernel/overlay/arch/um/os-Windows/util.c
+index 8c35705..241bd5a 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/util.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/util.c
+@@ -64,10 +64,23 @@ void um_early_printk(const char *s, unsigned int n)
+ 
+ void os_info(const char *fmt, ...)
+ {
++	static int quiet = -1; /* -1 = unread (v4 boot flag) */
+ 	char buf[256];
+ 	va_list args;
+ 	int n;
+ 
++	if (quiet < 0) {
++		/* Shelley's 100-real-alpine request: the diag forest
++		 * drowns a quiet home boot. The host passes
++		 * UML_NT_QUIET through the v4 boot-info (the kernel
++		 * cannot read env — freestanding). CI never sets it:
++		 * logs byte-identical. os_err stays loud. */
++		quiet = (uml_boot.magic == UML_BOOT_MAGIC &&
++			 uml_boot.version >= 4) ?
++			(int)uml_boot.quiet : 0;
++	}
++	if (quiet)
++		return;
+ 	va_start(args, fmt);
+ 	n = vscnprintf(buf, sizeof(buf), fmt, args);
+ 	va_end(args);
+diff --git a/uml-nt/launcher/launcher.c b/uml-nt/launcher/launcher.c
+index 42a388c..15d6675 100644
+--- a/uml-nt/launcher/launcher.c
++++ b/uml-nt/launcher/launcher.c
+@@ -558,6 +558,9 @@ int main(int argc, char **argv)
+ 	bi->envp = kenv_p;
+ 	bi->exec_section = exec_sec;
+ 	bi->exec_size = exec_size;
++	/* v4: UML_NT_QUIET (host env, CRT-side read) — the kernel's
++	 * os_info drops its output when set; os_err stays loud. */
++	bi->quiet = getenv("UML_NT_QUIET") != NULL;
+ 
+ 	/* The slot _start reads: [rsp] = boot_info pointer. Keep rsp
+ 	 * 16-aligned here; _start bumps by 8 to mimic call alignment. */

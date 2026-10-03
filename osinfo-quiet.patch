@@ -1,0 +1,52 @@
+--- a/uml-nt/kernel/overlay/arch/um/include/shared/ntabi.h	2026-10-03 10:57:26.634619164 +0000
++++ b/uml-nt/kernel/overlay/arch/um/include/shared/ntabi.h.quiet	2026-10-03 11:01:59.985620053 +0000
+@@ -491,6 +491,9 @@
+ 					     ULONG *old_protect);
+ ULONG UML_NTABI_CC RtlGetLastWin32Error(void);
+ BOOLEAN UML_NTABI_CC CloseHandle(HANDLE handle);
++/* M5.6b quiet: kernel-side reads UML_NT_QUIET host env via this. */
++DWORD UML_NTABI_CC GetEnvironmentVariableA(LPCSTR name, LPSTR buf,
++		DWORD size);
+ 
+ /* M2 additions (appended; table members above stay frozen). Kernel is
+  * the parent of every stub process: it creates the stub_data section
+@@ -675,6 +678,8 @@
+ 			ULONG *old_protect);
+ 	ULONG (UML_NTABI_CC *RtlGetLastWin32Error)(void);
+ 	BOOLEAN (UML_NTABI_CC *CloseHandle)(HANDLE handle);
++	DWORD (UML_NTABI_CC *GetEnvironmentVariableA)(LPCSTR name,
++			LPSTR buf, DWORD size);
+ 
+ 	/* ---- appended for M2 -------------------------------------------- */
+ 	HANDLE (UML_NTABI_CC *CreateFileMappingW)(HANDLE file,
+--- a/uml-nt/launcher/launcher.c	2026-10-03 10:58:19.003626614 +0000
++++ b/uml-nt/launcher/launcher.c.quiet	2026-10-03 11:01:59.985620053 +0000
+@@ -152,6 +152,7 @@
+ 	RESOLVE(NtProtectVirtualMemory, ntdll, "NtProtectVirtualMemory");
+ 	RESOLVE(RtlGetLastWin32Error, ntdll, "RtlGetLastWin32Error");
+ 	RESOLVE(CloseHandle, k32, "CloseHandle");
++        RESOLVE(GetEnvironmentVariableA, k32, "GetEnvironmentVariableA");
+ 	RESOLVE(CreateFileMappingW, k32, "CreateFileMappingW");
+ 	RESOLVE(CreateEventW, k32, "CreateEventW");
+ 	RESOLVE(MapViewOfFileEx, k32, "MapViewOfFileEx");
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/util.c	2026-10-02 18:11:32.526650779 +0000
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/util.c.quiet	2026-10-03 11:01:59.985620053 +0000
+@@ -64,10 +64,18 @@
+ 
+ void os_info(const char *fmt, ...)
+ {
++	/* M5.6b: host env UML_NT_QUIET=any-value silences the diag firehose
++	 * (real-machine UX; CI never sets it). os_warn/os_err stay loud. */
++	static int quiet = -1;
+ 	char buf[256];
+ 	va_list args;
+ 	int n;
+ 
++	if (quiet < 0)
++		quiet = nt && nt->GetEnvironmentVariableA &&
++			nt->GetEnvironmentVariableA("UML_NT_QUIET", buf, 1);
++	if (quiet)
++		return;
+ 	va_start(args, fmt);
+ 	n = vscnprintf(buf, sizeof(buf), fmt, args);
+ 	va_end(args);

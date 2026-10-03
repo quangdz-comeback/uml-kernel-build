@@ -1,0 +1,25 @@
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c
+index 47db1f9..9306b41 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c
+@@ -152,6 +152,20 @@ static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
+ {
+ 	unsigned int i;
+ 
++	/* D24 (a) PROPOSAL — patch-ready, NOT landed: the 64-slot
++	 * full-run scan runs every serve round; run 37039450821
++	 * timed out mid-boot under the tax (~524k qword loads per
++	 * round). Scan one round in 16: the pattern lives in RAM
++	 * until cleared, so the first-see attribution only widens
++	 * from "this round" to "one of the last 16" — enough for a
++	 * witness, a sixteenth of the cost. */
++	{
++		static unsigned int cowwatch_phase;
++
++		cowwatch_phase = (cowwatch_phase + 1) & 0xF;
++		if (cowwatch_phase != 0)
++			return;
++	}
+ 	for (i = 0; i < UML_NT_COWWATCH_N; i++) {
+ 		struct uml_nt_cowwatch *w = &cowwatchs[i];
+ 		unsigned long long off, base;

@@ -1,0 +1,25 @@
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c
+index 47db1f9..c3f5bb7 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c
+@@ -877,6 +877,20 @@ static int serve_conn(struct uml_nt_stub_conn *c)
+ 		}
+ 		if (c->plan_left > 1) {
+ 			c->plan_left--;
++			if (c->plan_has_retval)
++				/* 102 (b)-wedge trace: a syscall-carried
++				 * plan streams op-by-op — the last
++				 * printed op + a missing "plan done"
++				 * names exactly where a fork-sync
++				 * round wedged (candidate (b) of the
++				 * 100 runtime freeze). Budget: only
++				 * syscall-carried plans (the fork's
++				 * re-protect), not fault fixups. */
++				os_info("[fork-sync] op %d/%d issued "
++					"(pid %lu)\n",
++					c->plan.n_ops - c->plan_left,
++					c->plan.n_ops,
++					(unsigned long)c->pid);
+ 			issue_plan_op(c, &c->plan.ops[c->plan_next]);
+ 			return 0;
+ 		}

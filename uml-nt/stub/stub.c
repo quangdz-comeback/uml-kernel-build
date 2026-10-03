@@ -285,6 +285,15 @@ static int do_action(void)
 				(unsigned)d->map_prot, GetLastError());
 			return 0;
 		}
+		/* mapcanary (stub_nt.h v7): read the view's tail-8
+		 * THROUGH the fresh mapping so the kernel can prove the
+		 * view is backed by the VMA table's run (a stale-off
+		 * MAP passes verify_prot and serves the wrong run —
+		 * the lost-metadata-store shape). The kernel planted
+		 * the nonce flat-side; a mismatch here names the op. */
+		if (d->mapcanary != 0 && d->map_len >= 16)
+			d->mapcanary_got = *(volatile unsigned long long *)
+				((char *)base + d->map_len - 8);
 		return verify_prot(base, d->map_prot);
 	}
 	case UML_STUB_ACTION_UNMAP:

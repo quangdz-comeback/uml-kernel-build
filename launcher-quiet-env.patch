@@ -1,0 +1,85 @@
+--- a/uml-nt/launcher/launcher.c	2026-10-01 00:20:12.471789404 +0000
++++ b/uml-nt/launcher/launcher.c
+@@ -475,34 +475,56 @@
+ 	 * UML args; env is a minimal PATH (get_top_address scans env
+ 	 * strings upstream). */
+ 	{
++		/* UML_NT_NO_EARLYPRINTK=1 (host env): drop the earlyprintk
++		 * arg so a quiet home boot shows only the console driver
++		 * output (pair with kernel loglevel=0 + 2>nul). CI never
++		 * sets it — the default argv is byte-identical. */
++		int no_early = getenv("UML_NT_NO_EARLYPRINTK") != NULL;
+ 		int n = nargs > 60 ? 60 : nargs;
+ 		size_t need = strlen("vmlinux") + 1 +
+-			      strlen("earlyprintk") + 1 +
++			      (no_early ? 0 : strlen("earlyprintk") + 1) +
+ 			      strlen(UML_NT_LPJ) + 1 +
+ 			      strlen("PATH=C:\\Windows\\System32") + 1;
+ 		char *strs2;
++		char *w;
+ 
+ 		kargv[0] = "vmlinux";
+-		kargv[1] = "earlyprintk";
+-		kargv[2] = UML_NT_LPJ;
+-		for (i = 0; i < (size_t)n; i++)
+-			kargv[3 + i] = argv[2 + i];
+-		kargv[3 + n] = NULL;
++		kargv[1] = no_early ? UML_NT_LPJ : "earlyprintk";
++		kargv[2] = no_early ? NULL : UML_NT_LPJ;
++		if (no_early) {
++			for (i = 0; i < (size_t)n; i++)
++				kargv[2 + i] = argv[2 + i];
++			kargv[2 + n] = NULL;
++		} else {
++			for (i = 0; i < (size_t)n; i++)
++				kargv[3 + i] = argv[2 + i];
++			kargv[3 + n] = NULL;
++		}
+ 		kenv[0] = "PATH=C:\\Windows\\System32";
+ 		kenv[1] = NULL;
+ 
+ 		strs2 = (char *)PUSH_BYTES(need);
+-		strcpy(strs2, kargv[0]);
+-		strcpy(strs2 + strlen(kargv[0]) + 1, kargv[1]);
+-		strcpy(strs2 + strlen(kargv[0]) + 1 + strlen(kargv[1]) + 1,
+-		       kargv[2]);
+-		strcpy(strs2 + strlen(kargv[0]) + 1 + strlen(kargv[1]) + 1 +
+-		       strlen(kargv[2]) + 1, kenv[0]);
+-		kargv[0] = strs2;
+-		kargv[1] = strs2 + strlen(strs2) + 1;
+-		kargv[2] = kargv[1] + strlen(kargv[1]) + 1;
+-		kenv[0] = kargv[2] + strlen(kargv[2]) + 1;
+-		nargs = n + 2; /* earlyprintk + lpj join the count */
++		w = strs2;
++		/* pack argv strings up to (and including) the first NULL,
++		 * then the one env string — pointers rewritten below */
++		{
++			char *cur2 = w;
++			int ai;
++			for (ai = 0; kargv[ai]; ai++) {
++				size_t l = strlen(kargv[ai]) + 1;
++				memcpy(cur2, kargv[ai], l);
++				cur2 += l;
++			}
++			memcpy(cur2, kenv[0], strlen(kenv[0]) + 1);
++		}
++		kargv[0] = w = strs2;
++		for (i = 1; kargv[i]; i++) {
++			w += strlen(w) + 1;
++			kargv[i] = w;
++		}
++		w += strlen(w) + 1;
++		kenv[0] = w;
++		nargs = n + 1 + (no_early ? 0 : 1); /* lpj (+earlyprintk) */
+ 	}
+ 
+ 	kargv_p = (char **)PUSH_PTR(63 + 1);
+@@ -522,7 +544,7 @@
+ 	bi->stdio_out = std_out;
+ 	bi->stdio_err = std_err;
+ 	bi->stdio_in = GetStdHandle(STD_INPUT_HANDLE);
+-	bi->argc = nargs + 1; /* argv[0] + args (earlyprintk included) */
++	bi->argc = nargs + 1; /* argv[0] + args (earlyprintk unless env-off) */
+ 	bi->argv = kargv_p;
+ 	bi->envp = kenv_p;
+ 	bi->exec_section = exec_sec;

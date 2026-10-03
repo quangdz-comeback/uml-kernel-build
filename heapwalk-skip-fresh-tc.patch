@@ -1,0 +1,35 @@
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/syscall.c b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/syscall.c
+index a3eb31c..c41cb84 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/syscall.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/syscall.c
+@@ -1855,6 +1855,22 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
+ 				long long foff =
+ 					uml_nt_vma_translate(c->mm, va, 64);
+ 
++				/* 100-real-alpine false positive: a FRESH
++				 * process's heap (sh forked, no malloc
++				 * yet) holds a zeroed
++				 * tcache_perthread_struct — chunk #0
++				 * with (prev_size=0, size=0) trips
++				 * "size < MINSIZE" and the walker
++				 * convicts healthy memory. Report the
++				 * freshness, not rot; the tcache dump
++				 * below still runs. */
++				if (idx == 0 && cur_size == 0 &&
++				    cur_ps == 0) {
++					os_info("[heapwalk] heap fresh: "
++						"chunk #0 = zeroed tcache "
++						"— walk skipped (not "
++						"rot)\n");
++				} else {
+ 				os_info("[heapwalk] BAD chunk #%d va=0x%llx "
+ 					"run_off=0x%llx: %s\n", idx, va,
+ 					off2 < 0 ? (unsigned long long)-1 :
+@@ -1944,6 +1960,7 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
+ 							0x7), nq[0], nq[1]);
+ 					}
+ 				}
++				} /* 098-fresh: end of the BAD-prints else */
+ 			} else if (va < c->mm->heap_end) {
+ 				/* Run 36979286356: the old 4096 cap hit
+ 				 * and the "clean" message lied — a

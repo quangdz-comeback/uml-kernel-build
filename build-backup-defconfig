@@ -1,0 +1,32 @@
+CONFIG_NO_HZ=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_LOG_BUF_SHIFT=14
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+CONFIG_OS_WINDOWS=y
+# binfmt_umlnt (D17) replaces the ELF loader: the pte-backed
+# binfmt_elf path has no stub backing (guest VA = per-VMA views).
+# CONFIG_BINFMT_ELF is not set
+# CONFIG_MCONSOLE is not set
+CONFIG_MAGIC_SYSRQ=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_BLK_DEV_UBD=y
+CONFIG_EXT4_FS=y
+CONFIG_EARLY_PRINTK=y
+# M5: netstack channel (D8) — vector driver + guest IP stack
+# (udhcpc needs AF_PACKET, ping needs INET/ICMP)
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_PACKET=y
+CONFIG_UML_NET=y
+CONFIG_UML_NET_VECTOR=y
+
+# M5.4 c3 (systemd boot-failure-driven, run 36770043168): the API
+# filesystem cluster — tmpfs mounts with mode= (systemd /run /dev/shm),
+# the cgroup2 hierarchy, sysfs via mount(2), AF_UNIX for journald's
+# /dev/log + /run sockets (guest-internal AF_UNIX is guest-kernel
+# territory — D8 governs only the kernel↔helper channel).
+CONFIG_TMPFS=y
+CONFIG_CGROUPS=y
+CONFIG_SYSFS_SYSCALL=y
+CONFIG_UNIX=y

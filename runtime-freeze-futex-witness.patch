@@ -1,0 +1,37 @@
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/syscall.c b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/syscall.c
+index 347273f..feea372 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/syscall.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/syscall.c
+@@ -2203,7 +2203,31 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
+ 	case 99: /* sysinfo */
+ 	case 98: /* getrusage */
+ 	case 202: /* futex — guest pthreads (the walker serves the
+-		   * guest pointers; hazard-3 fixups apply) */
++		   * guest pointers; hazard-3 fixups apply). NO threads
++		   * yet (M5): the answer is ENOSYS — but musl's
++		   * mallocng lock SPINS on futex-ENOSYS when contended
++		   * (Shelley's 100-runtime-freeze candidate (a): every
++		   * new process stuck at its first malloc). Count and
++		   * name the wedge once — the count itself is the
++		   * discriminating evidence vs candidate (b) (a
++		   * fork-sync plan stuck = NO futex rounds at all). */
++		{
++			static unsigned int futex_enosys_count;
++
++			futex_enosys_count++;
++			if (futex_enosys_count == 32 ||
++			    futex_enosys_count == 512)
++				os_info("[malloc-wedge] futex ENOSYS "
++					"x%u (task %d comm=%.16s) — "
++					"musl mallocng lock spinning? "
++					"residual-corruption class\n",
++					futex_enosys_count,
++					current ? current->pid : 0,
++					current ? current->comm :
++					"(none)");
++		}
++		ret = SC_RET(SC_ENOSYS);
++		break;
+ 	case 230: /* clock_nanosleep — unit timeout arithmetic */
+ 	case 291: /* epoll_create1 — the systemd event loop */
+ 	case 233: /* epoll_ctl */

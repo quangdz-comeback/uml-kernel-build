@@ -54,6 +54,12 @@ struct uml_nt_stub_conn {
 	 * re-publishes it into d->retval before the final NONE. */
 	int plan_has_retval;
 	unsigned long long plan_retval;
+	/* mapcanary (M5.6a): single-outstanding-op save slot for the
+	 * writable-MAP view-backing check — see stub_nt.h v7. mc_active
+	 * marks the op at plan_next-1 as canaried; PROTDONE verifies
+	 * mapcanary_got and flat-restores the saved qword. */
+	unsigned long long mc_want, mc_off, mc_orig;
+	int mc_active;
 	/* process identity for the syscall surface: ppid = the stub
 	 * pid that forked us (0 for the root conn). */
 	unsigned long long ppid;

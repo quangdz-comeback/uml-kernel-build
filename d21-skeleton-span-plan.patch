@@ -1,0 +1,105 @@
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/include/elf.h b/uml-nt/kernel/overlay/arch/um/os-Windows/include/elf.h
+index ca51b5c..309cf73 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/include/elf.h
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/include/elf.h
+@@ -61,6 +61,21 @@
+ extern int uml_nt_elf_fill_region;
+ extern unsigned long long uml_nt_elf_fill_off, uml_nt_elf_fill_len;
+ 
++/* D21 SKELETON (proposed — NOT landed): max runs ONE backing span
++ * may have. The D12 backend builds a contiguous buddy block of
++ * order RUN_ORDER(4) + ceil(log2(nruns)); kernel MAX_PAGE_ORDER=10
++ * caps the order, i.e. 64 runs (1 MiB) per span. python3.11's four
++ * overlapping PT_LOADs merge to 109 runs = order 11 = the
++ * deterministic UML_NT_ELF_NOMEM (Astra's audit, run 36878030578).
++ * The loader will allocate PER-CHUNK spans instead of one; this is
++ * the reviewable, unit-tested chunking math. */
++#define UML_NT_ELF_SPAN_MAX_RUNS 64
++
++/* Fill out[] with the per-chunk run counts for a contiguous region
++ * of `nruns` runs (greedy full chunks). Returns the chunk count, or
++ * -1 on bad input / max_out too small. Pure function. */
++int uml_nt_elf_span_plan(long long nruns, int *out, int max_out);
++
+ /* One merged, run-aligned load region: [start, end) guest VA backed
+  * by the contiguous span at run_off with `prot` (NT PAGE_*). */
+ struct uml_nt_elf_seg {
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/elf.c b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/elf.c
+index c8fb348..270e822 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/elf.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/elf.c
+@@ -139,6 +139,29 @@ struct reg {
+ 	unsigned flags;
+ };
+ 
++/* D21 SKELETON (proposed — NOT landed): the chunking math for
++ * per-chunk span allocation (see UML_NT_ELF_SPAN_MAX_RUNS in
++ * elf.h). Pure function — unit-tested in test_elf.c. The loader's
++ * alloc loop will consume this per merged region: one contiguous
++ * buddy block per chunk instead of one order-11 monster. */
++int uml_nt_elf_span_plan(long long nruns, int *out, int max_out)
++{
++	int n = 0;
++
++	if (nruns <= 0 || max_out <= 0 || out == (int *)0)
++		return -1;
++	while (nruns > 0) {
++		long long c = (nruns > UML_NT_ELF_SPAN_MAX_RUNS) ?
++			      UML_NT_ELF_SPAN_MAX_RUNS : nruns;
++
++		if (n == max_out)
++			return -1;
++		out[n++] = (int)c;
++		nruns -= c;
++	}
++	return n;
++}
++
+ /* First-fit run-aligned [cur, cur+size) free of every VMA, scanning
+  * up from the guest VA base (D11: nothing is assumed about where
+  * earlier allocations landed — we ASK the mm). */
+diff --git a/uml-nt/tests/test_elf.c b/uml-nt/tests/test_elf.c
+index 8f03811..443ef4d 100644
+--- a/uml-nt/tests/test_elf.c
++++ b/uml-nt/tests/test_elf.c
+@@ -882,6 +882,32 @@ static void test_real_guest(const char *path)
+ 	       out.nseg, out.entry, patched);
+ }
+ 
++/* D21 SKELETON: the per-chunk span plan — greedy 64-run chunks, the
++ * math the loader's alloc loop will consume (python3.11's 109-run
++ * merged region = the order-11 NOMEM it must dissolve). */
++static void test_span_plan(void)
++{
++	int out[8];
++
++	/* 109 runs (python3.11 merged): [64, 45]. */
++	CHECK(uml_nt_elf_span_plan(109, out, 8) == 2);
++	CHECK(out[0] == 64);
++	CHECK(out[1] == 45);
++
++	/* Exact multiples and single chunks. */
++	CHECK(uml_nt_elf_span_plan(64, out, 8) == 1 && out[0] == 64);
++	CHECK(uml_nt_elf_span_plan(1, out, 8) == 1 && out[0] == 1);
++	CHECK(uml_nt_elf_span_plan(128, out, 8) == 2);
++
++	/* Max-out too small: -1, no overwrite. */
++	CHECK(uml_nt_elf_span_plan(129, out, 2) == -1);
++
++	/* Bad inputs. */
++	CHECK(uml_nt_elf_span_plan(0, out, 8) == -1);
++	CHECK(uml_nt_elf_span_plan(-4, out, 8) == -1);
++	CHECK(uml_nt_elf_span_plan(16, NULL, 8) == -1);
++}
++
+ int main(int argc, char **argv)
+ {
+ 	test_exec_basic();
+@@ -894,6 +920,7 @@ int main(int argc, char **argv)
+ 	test_stack_tables();
+ 	test_interp_path();
+ 	test_split_args();
++	test_span_plan();
+ 	if (argc > 1)
+ 		test_real_guest(argv[1]);
+ 	if (argc > 2)

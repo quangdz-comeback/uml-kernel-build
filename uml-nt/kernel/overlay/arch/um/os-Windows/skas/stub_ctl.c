@@ -577,6 +577,7 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 {
 	struct uml_nt_stub_data *d = c->d;
 
+	d->mapcanary = 0;
 	switch (op->op) {
 	case UML_NT_FOP_PROTECT:
 		d->action = UML_STUB_ACTION_PROT;
@@ -590,6 +591,47 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 		d->map_va = op->va;
 		d->map_len = op->len;
 		d->map_off = op->off;
+		/* mapcanary (stub_nt.h v7): prove the fresh view's
+		 * BACKING, not only its protection. Plant a nonce
+		 * flat-side at the VMA TABLE's run for the view's
+		 * tail-8; the stub reads the tail through the fresh
+		 * view; PROTDONE compares and restores. Only writable
+		 * MAPs with a private table run (refs==1): no shared
+		 * run is ever clobbered (the RO/shared maps skip —
+		 * the cowbreak audits own that class), and the parked
+		 * guest never sees the transient plant. */
+		if ((op->prot == UML_NT_PAGE_READWRITE ||
+		     op->prot == UML_NT_PAGE_WRITECOPY ||
+		     op->prot == UML_NT_PAGE_EXECUTE_READWRITE) &&
+		    op->len >= 16 && c->mm != NULL) {
+			long long tbl = uml_nt_vma_translate(
+				c->mm, op->va + op->len - 8, 8);
+			unsigned long long plant =
+				(tbl >= 0) ? (unsigned long long)tbl
+					   : op->off + op->len - 8;
+
+			if (tbl >= 0 &&
+			    (unsigned long long)tbl != op->off + op->len - 8)
+				os_info("[mapcanary] ISSUE-MISMATCH pid %lu "
+					"va=0x%llx len=0x%llx op_off=0x%llx "
+					"tbl_off=0x%llx — the plan op carries a "
+					"run the VMA table does not own\n",
+					(unsigned long)c->pid, op->va, op->len,
+					op->off, (unsigned long long)tbl);
+			if (uml_nt_phys_refs(c->ph, (long long)plant) == 1) {
+				unsigned long long *qp =
+					(unsigned long long *)
+					((char *)uml_boot.physmem_base + plant);
+
+				c->mc_off = plant;
+				c->mc_orig = *qp;
+				c->mc_want = 0x4d43414e41525900ull /* "MCANARY" */
+					     ^ op->va ^ (op->off << 1);
+				*qp = c->mc_want;
+				c->mc_active = 1;
+				d->mapcanary = c->mc_want;
+			}
+		}
 		break;
 	default: /* UML_NT_FOP_UNMAP */
 		d->action = UML_STUB_ACTION_UNMAP;
@@ -1996,6 +2038,27 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			d->action = UML_STUB_ACTION_KILL;
 			d->err = 1;
 			return -1;
+		}
+		/* mapcanary verdict for the just-applied op: the stub
+		 * read the view's tail-8 — if it does not match the
+		 * nonce planted at the VMA table's run, the fresh view
+		 * is NOT backed by the run the table owns (a stale-off
+		 * MAP that verify_prot proved green). Loud, not fatal:
+		 * the hunt wants the pattern, the boot dies on its own
+		 * if the divergence is real. */
+		if (c->mc_active) {
+			c->mc_active = 0;
+			if (d->mapcanary_got != c->mc_want)
+				os_info("[mapcanary] MISMATCH pid %lu "
+					"va=0x%llx off=0x%llx(tbl) want=0x%llx "
+					"got=0x%llx — the stub's view is not "
+					"backed by the VMA table's run\n",
+					(unsigned long)c->pid, d->map_va,
+					c->mc_off, c->mc_want,
+					d->mapcanary_got);
+			*(unsigned long long *)
+				((char *)uml_boot.physmem_base + c->mc_off) =
+				c->mc_orig;
 		}
 		if (c->plan_left > 1) {
 			c->plan_left--;

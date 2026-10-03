@@ -1,0 +1,20 @@
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/process.c b/uml-nt/kernel/overlay/arch/um/os-Windows/process.c
+index 6cc7762..7e13175 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/process.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/process.c
+@@ -438,7 +438,14 @@ int os_unmap_memory(void *addr, int len)
+ 				priv_block_cnt(idx));
+ 		}
+ 		uml_nt_vmr_dump("untracked-page guard refused", 24);
+-		return -EINVAL;
++		/* D24 (b) PROPOSAL — patch-ready, NOT landed: the page
++		 * was never claimed by this kernel, so unmapping it is
++		 * a faithful no-op (upstream vfree of an unclaimed
++		 * range), not an error. The -EINVAL made the caller's
++		 * error path the loudest late-boot event (run
++		 * 37039450821: the refusal + the dump = the last work
++		 * before the timeout). Log-only from here. */
++		return 0;
+ 	}
+ 
+ 	if (!nt->VirtualFree((PVOID)(uintptr_t)v, 0x1000,

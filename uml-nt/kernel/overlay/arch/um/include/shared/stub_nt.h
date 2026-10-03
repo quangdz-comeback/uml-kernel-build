@@ -197,6 +197,22 @@ struct uml_nt_stub_data {
 	u32_nt _pad_xs;
 	unsigned char xstate[UML_STUB_XS_SIZE]
 		__attribute__((aligned(16)));
+
+	/* -- v7: MAP backing canary (M5.6a, referee 37140517824) ------- */
+	/* verify_prot proves a fresh view's PROTECTION, never its
+	 * BACKING: a MAP carrying a stale run offset verifies green and
+	 * the guest then reads/writes the wrong run — the lost-tcache-
+	 * store shape (a tcache_put's e->next store vanished from every
+	 * run in physmem). For a writable MAP the kernel now plants a
+	 * nonce flat-side at the VMA TABLE's run for the view's tail-8
+	 * and ships it here; the stub reads the tail-8 through the fresh
+	 * view into mapcanary_got; the kernel compares at PROTDONE and
+	 * restores the original qword. Mismatch = the view is not backed
+	 * by the run the VMA table owns — the divergence named at the
+	 * op that created it. 0 = no canary this op (RO maps, short
+	 * maps, shared-run targets: no shared run is ever clobbered). */
+	unsigned long long mapcanary;
+	unsigned long long mapcanary_got;
 };
 
 #endif /* __UML_STUB_NT_H */

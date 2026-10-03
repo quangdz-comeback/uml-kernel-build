@@ -1,0 +1,264 @@
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/include/physalloc.h b/uml-nt/kernel/overlay/arch/um/os-Windows/include/physalloc.h
+index 28f2ee2..9b56720 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/include/physalloc.h
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/include/physalloc.h
+@@ -110,6 +110,25 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns);
+  * through the flat view. -1 on bad offsets. */
+ int uml_nt_phys_ref(struct uml_nt_phys *p, long long off);
+ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off);
++
++/* WRITER-HUNT (M5.6a, run 36987612985): the per-drop owner. The D22
++ * table-global drop_owner tag LEAKS across a SHARED table (forked
++ * conns share ph): a dying conn's teardown window mis-tags every
++ * sharer's unref-to-0, and its settle frees their blocks while the
++ * live conn's UNMAP ops are still pending — the free-while-mapped
++ * alias reborn through table sharing (the heap-trasher ABRT family:
++ * PID 1's heap run recycled under a foreign tag, another conn's
++ * legit writes land inside PID 1's malloc metadata).
++ *
++ * unref_for names the dropping conn AT THE CALL: conn != NULL → the
++ * dropped block parks under THAT conn (its own serve-round settle
++ * releases it after its plan ops applied); conn == NULL → the drop
++ * is outside any dispatch (no plan ops can be pending) → release
++ * immediately (pre-D22 behavior). The table-global tag dies with
++ * this call: unref() stays as the NULL-owner shorthand and the
++ * drop_owner field/setter become unused legacy. */
++int uml_nt_phys_unref_for(struct uml_nt_phys *p, long long off,
++			  const void *conn);
+ int uml_nt_phys_refs(struct uml_nt_phys *p, long long off);
+ 
+ /* Refcount event hook (map 049: the run 0x28b0000 double-claim — a
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/include/vma.h b/uml-nt/kernel/overlay/arch/um/os-Windows/include/vma.h
+index 1ae16ff..1b09f25 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/include/vma.h
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/include/vma.h
+@@ -211,6 +211,15 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
+  * same run counted once). */
+ void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph);
+ 
++/* WRITER-HUNT (M5.6a): mm_drop with the DROPPING conn named at the
++ * call — every unref parks under THIS conn (its own settle releases
++ * the block after its pending UNMAP ops applied). The teardown must
++ * NOT touch the table-global tag (shared tables: overwriting it
++ * mis-tagged live conns' drops inside the teardown window — the
++ * free-while-mapped alias reborn, run 36987612985). */
++void uml_nt_mm_drop_for(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
++			const void *owner);
++
+ /* WRITER-HUNT (M5.6a): count cross-VMA run aliases (two VMAs of one
+  * mm claiming overlapping runs — the double-claim/under-count class).
+  * 0 = clean. Pure (unit-testable, no os_info — vma.c stays pure). */
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/mmctx.c b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/mmctx.c
+index fed53dc..7eb5539 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/mmctx.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/mmctx.c
+@@ -185,7 +185,20 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
+ 	 * D22: the dying conn tags its drops and settles immediately
+ 	 * after — its views die with the process (NtTerminateProcess),
+ 	 * so nothing it parked can alias anyone anymore. */
+-	uml_nt_phys_set_drop_owner(c->ph, c);
++	/* D22/M5.6a repair (runs 36984940632 + 36987612985): the
++	 * teardown names its OWN conn at every drop (mm_drop_for —
++	 * the parks belong to it, its settle releases them) and
++	 * NEVER touches the table-global drop_owner tag: that tag
++	 * belongs to whichever conn is in dispatch (serve_conn sets
++	 * it per round; the table is SHARED between forked conns).
++	 * Overwriting it here mis-tagged live conns' drops inside
++	 * the teardown window and this settle freed their blocks
++	 * while their UNMAP ops were still pending — the
++	 * free-while-mapped alias reborn: PID 1's heap runs handed
++	 * to other conns whose legit writes land inside PID 1's
++	 * malloc metadata (the heap-trasher ABRT family). The dying
++	 * conn's views die with the process (NtTerminateProcess),
++	 * so nothing it parked can alias anyone anymore. */
+ 	{
+ 		int na = uml_nt_mm_drop_audit(c->mm);
+ 
+@@ -194,9 +207,8 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
+ 				"run alias(es) — double-claim witness\n",
+ 				id->pid, na);
+ 	}
+-	uml_nt_mm_drop(c->mm, c->ph);
++	uml_nt_mm_drop_for(c->mm, c->ph, c);
+ 	uml_nt_phys_settle(c->ph, c);
+-	uml_nt_phys_set_drop_owner(c->ph, (const void *)0);
+ 	kfree(c->mm);
+ 	if (!c->ph_shared)
+ 		kfree(c->ph);
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/physalloc.c b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/physalloc.c
+index 8b7b457..771dd7d 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/physalloc.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/physalloc.c
+@@ -157,13 +157,18 @@ static void block_park(struct uml_nt_phys *p, int o, const void *owner)
+ 
+ /* Drop one run to 0 and release its block when the LAST run of the
+  * block does (D12: pieces of a COW-split span keep the block alive
+- * independently of the owner run). D22: under a tagged drop-owner the
+- * release PARKS — the dropping conn's pending plan UNMAP applies only
+- * with its next reply, and a backend hand-back before that could hand
+- * the SAME block to another conn's mapping (the free-while-mapped
+- * alias). Untagged drops (outside any dispatch — no plan ops can be
+- * pending) release immediately, the pre-D22 behavior. */
+-int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
++ * independently of the owner run). D22, REPAIRED per-conn (M5.6a
++ * run 36987612985): a drop inside a dispatch parks under THE
++ * DROPPING CONN (its pending plan UNMAP applies with its next
++ * reply; its own serve-round settle frees the park after that) —
++ * NOT under a table-global tag, which on a SHARED table mis-tagged
++ * every sharer's drop inside a teardown window and let the dying
++ * conn's settle release live conns' blocks early (the
++ * free-while-mapped alias reborn — the heap-trasher ABRT family).
++ * conn == NULL (outside any dispatch — no plan ops can be pending)
++ * releases immediately. */
++int uml_nt_phys_unref_for(struct uml_nt_phys *p, long long off,
++			  const void *conn)
+ {
+ 	int i = run_index(p, off);
+ 	int o, n, k;
+@@ -174,7 +179,7 @@ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
+ 		 * ITS drop lands. Loud through the hook. */
+ 		if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
+ 			uml_nt_phys_event("unref-refused", off, 1, 0,
+-					  p->drop_owner);
++					  conn);
+ 		return -1;
+ 	}
+ 	if (--p->refs[i] != 0)
+@@ -186,13 +191,18 @@ int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
+ 		if (p->refs[o + k] != 0)
+ 			return 0; /* block still referenced — keep it */
+ 	}
+-	if (p->drop_owner != (const void *)0)
+-		block_park(p, o, p->drop_owner);
++	if (conn != (const void *)0)
++		block_park(p, o, conn);
+ 	else
+ 		block_release(p, o, (const void *)0);
+ 	return 0;
+ }
+ 
++int uml_nt_phys_unref(struct uml_nt_phys *p, long long off)
++{
++	return uml_nt_phys_unref_for(p, off, p->drop_owner);
++}
++
+ void uml_nt_phys_settle(struct uml_nt_phys *p, const void *owner)
+ {
+ 	int i, k;
+diff --git a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/vma.c b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/vma.c
+index 13646b8..8bff85b 100644
+--- a/uml-nt/kernel/overlay/arch/um/os-Windows/skas/vma.c
++++ b/uml-nt/kernel/overlay/arch/um/os-Windows/skas/vma.c
+@@ -324,13 +324,17 @@ static int span_ref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)
+ 	return 0;
+ }
+ 
+-static void span_unref(struct uml_nt_phys *ph, const struct uml_nt_vma *v)
++/* WRITER-HUNT (M5.6a): per-drop owner variant — parks under the
++ * conn named here (physalloc.h unref_for), never under a
++ * table-global tag. */
++static void span_unref_for(struct uml_nt_phys *ph,
++			   const struct uml_nt_vma *v, const void *owner)
+ {
+ 	unsigned long long off;
+ 
+ 	for (off = v->run_off; off < v->run_off + (v->end - v->start);
+ 	     off += UML_NT_PHYS_RUN_SIZE)
+-		uml_nt_phys_unref(ph, (long long)off);
++		uml_nt_phys_unref_for(ph, (long long)off, owner);
+ }
+ 
+ /* Clone the address-space bookkeeping for a fork child. Returns 0,
+@@ -431,16 +435,22 @@ const char *uml_nt_clone_reason(int rc)
+ 	}
+ }
+ 
+-void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
++void uml_nt_mm_drop_for(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
++			const void *owner)
+ {
+ 	int i;
+ 
+ 	for (i = 0; i < mm->nvma; i++)
+-		span_unref(ph, &mm->vma[i]);
++		span_unref_for(ph, &mm->vma[i], owner);
+ 	mm->nvma = 0;
+ 	mm->nguard = 0;
+ }
+ 
++void uml_nt_mm_drop(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
++{
++	uml_nt_mm_drop_for(mm, ph, (const void *)0);
++}
++
+ /* WRITER-HUNT (M5.6a): cross-VMA run alias audit. Two VMAs of the
+  * SAME mm whose run spans overlap = a double claim the refs table
+  * counted once — the mm_drop unref walk frees the run out from under
+diff --git a/uml-nt/tests/test_mm.c b/uml-nt/tests/test_mm.c
+index 0e86d31..6e5549e 100644
+--- a/uml-nt/tests/test_mm.c
++++ b/uml-nt/tests/test_mm.c
+@@ -225,7 +225,9 @@ static void test_phys_d22(void)
+ 	CHECK((unsigned long long)uml_nt_phys_alloc(&p) == r);
+ 
+ 	/* fork giữa chừng: the shared run survives both drops on the
+-	 * child's own claim; the last drop parks under ITS tag */
++	 * child's own claim; the last drop parks under ITS OWN conn
++	 * (mm_drop_for names the dropper — M5.6a: the teardown never
++	 * touches the table-global tag) */
+ 	mock_reset();
+ 	CHECK(uml_nt_phys_init(&p, 32 * RUN) == 0);
+ 	uml_nt_mm_init(&parent);
+@@ -236,19 +238,48 @@ static void test_phys_d22(void)
+ 	CHECK(uml_nt_mm_clone(&child, &parent, &p, 0) == 0);
+ 	CHECK(uml_nt_phys_refs(&p, r) == 2);
+ 
+-	uml_nt_phys_set_drop_owner(&p, &connA);
+-	uml_nt_mm_drop(&parent, &p);
++	uml_nt_mm_drop_for(&parent, &p, &connA);
+ 	CHECK(uml_nt_phys_refs(&p, r) == 1);
+ 	CHECK(mock_taken[0]);
+ 
+-	uml_nt_phys_set_drop_owner(&p, &connB);
+-	uml_nt_mm_drop(&child, &p);
++	uml_nt_mm_drop_for(&child, &p, &connB);
++	CHECK(uml_nt_phys_parked(&p) == 1);
++	CHECK(mock_taken[0]);
++
++	/* the WRONG owner's settle frees nothing of B's park */
++	uml_nt_phys_settle(&p, &connA);
+ 	CHECK(uml_nt_phys_parked(&p) == 1);
+ 	CHECK(mock_taken[0]);
+ 
+ 	uml_nt_phys_settle(&p, &connB);
+ 	CHECK(!mock_taken[0]);
+ 	CHECK(uml_nt_phys_parked(&p) == 0);
++
++	/* M5.6a regression (runs 36984940632 + 36987612985): a live
++	 * conn's drop inside ANOTHER conn's teardown window parks
++	 * under the LIVE conn — the dying conn's settle must not
++	 * free it. unref_for ignores the table-global tag entirely
++	 * (the old bug: the teardown overwrote the shared table's
++	 * tag and its settle freed live conns' blocks with their
++	 * UNMAP ops still pending — the free-while-mapped alias
++	 * reborn). */
++	mock_reset();
++	CHECK(uml_nt_phys_init(&p, 32 * RUN) == 0);
++	r = uml_nt_phys_alloc(&p); /* the LIVE conn's block */
++	CHECK((long long)r >= 0);
++
++	uml_nt_phys_set_drop_owner(&p, &connA); /* stale teardown tag */
++	CHECK(uml_nt_phys_unref_for(&p, (long long)r, &connB) == 0);
++	CHECK(uml_nt_phys_parked(&p) == 1);
++	CHECK(mock_taken[0]);
++
++	uml_nt_phys_settle(&p, &connA);      /* the teardown's settle */
++	CHECK(uml_nt_phys_parked(&p) == 1);  /* B's park SURVIVES it */
++	CHECK(mock_taken[0]);
++
++	uml_nt_phys_settle(&p, &connB);      /* B's own round settle */
++	CHECK(uml_nt_phys_parked(&p) == 0);
++	CHECK(!mock_taken[0]);
+ }
+ 
+ /* D11 translate: syscall buffers go through the VMA tree, never the
