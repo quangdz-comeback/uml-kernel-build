@@ -1538,6 +1538,67 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 									0x20,
 									"tcchunk-head");
 							}
+							/* ARM-ON-FIRE
+							 * (referee
+							 * 37120127074
+							 * decode): the
+							 * poison repeats
+							 * — 16 POISON
+							 * fires in one
+							 * boot, same
+							 * class. The fired
+							 * chunk's RUN goes
+							 * under the
+							 * direct-write
+							 * tripwires NOW:
+							 * the next write
+							 * to the page
+							 * names the writer
+							 * (a stub-side rip
+							 * through the
+							 * cowtrap fault; a
+							 * kernel-side flat
+							 * write through
+							 * the cowwatch
+							 * round-compare
+							 * "kernel-write"
+							 * report). Both
+							 * layers already
+							 * existed — this
+							 * reuses them at
+							 * the fire point
+							 * (no new
+							 * layer). */
+							{
+								unsigned long
+								long frun =
+									(unsigned
+									long long)
+									coff &
+									~(unsigned
+									long long)
+									(UML_NT_PHYS_RUN_SIZE -
+									 1);
+								unsigned long
+								long fbase =
+									chunk &
+									~(unsigned
+									long long)
+									(UML_NT_PHYS_RUN_SIZE -
+									 1);
+
+								uml_nt_cowwatch_arm(
+									frun,
+									fbase,
+									(unsigned
+									long)
+									c->pid);
+								uml_nt_cowtrap_arm_alloc(
+									c,
+									fbase,
+									UML_NT_PHYS_RUN_SIZE,
+									frun);
+							}
 							break;
 						}
 						chunk = nxt;
@@ -1602,9 +1663,38 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 					chunk, c->tc_chunk_snap[di][depth],
 					data, nxt, c->last_nr, c->last_ret,
 					c->d->regs.rip, c->d->regs.rsp);
-				if (poison)
+				if (poison) {
+					unsigned long long frun =
+						(unsigned long long)coff &
+						~(unsigned long long)
+						(UML_NT_PHYS_RUN_SIZE - 1);
+					unsigned long long fbase =
+						chunk &
+						~(unsigned long long)
+						(UML_NT_PHYS_RUN_SIZE - 1);
+
 					dump_guest_bytes(mm, chunk, 0x20,
 							 "tcchunk-head");
+					/* ARM-ON-FIRE (referee 37120127074
+					 * decode): the poison repeats —
+					 * 16 POISON fires, one boot, same
+					 * class. The fired chunk's RUN
+					 * goes under the direct-write
+					 * tripwires NOW: the next write
+					 * to the page names the writer
+					 * (stub-side = the cowtrap fault
+					 * rip; kernel-side = the
+					 * cowwatch round-compare
+					 * "kernel-write" report). No new
+					 * layer — the fire point reuses
+					 * both. */
+					uml_nt_cowwatch_arm(frun, fbase,
+							    (unsigned long)
+							    c->pid);
+					uml_nt_cowtrap_arm_alloc(c, fbase,
+								 UML_NT_PHYS_RUN_SIZE,
+								 frun);
+				}
 				c->tc_chunk_snap[di][depth] = data;
 				c->tc_chunk_armed[di][depth] = 1;
 			}
