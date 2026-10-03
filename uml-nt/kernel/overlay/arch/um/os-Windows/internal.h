@@ -130,6 +130,19 @@ void uml_nt_vmr_dump(const char *why, unsigned int n);
  * the old page. */
 void uml_nt_ktrip_arm(unsigned long long lo, unsigned long long hi);
 
+/* start_up.c (M5.6a [ktrip-w], referee 37124011556 decode): SECOND
+ * kernel-flat witness window, independent of the struct-page arm —
+ * the struct page re-arms EVERY round (its static page tracker
+ * unprotects whatever single window ktrip holds), so a fire-armed
+ * chunk page would be displaced after one round. The
+ * [tcchunk-POISON] fire path arms the fired chunk's own 4K page
+ * here: the corruption lives at chunk+0/+8 (env text over
+ * e->next+e->key — the clobbered key also blinds glibc's tcache
+ * double-free check, leaving the chunk linked in tcache AND
+ * unsorted), and the next kernel-flat write to that page names its
+ * rip. Stub-side writes stay covered by the run-level cowtrap. */
+void uml_nt_ktrip_w_arm(unsigned long long lo, unsigned long long hi);
+
 /* stub_ctl.c (M5.6a [alloc-alias], map 121): the physalloc handout
  * probe — scan every live conn's VMAs into the freshly claimed
  * [off, off+nruns*RUN) range; a hit names the stale translation

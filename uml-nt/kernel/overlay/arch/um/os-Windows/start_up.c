@@ -218,6 +218,104 @@ void uml_nt_ktrip_arm(unsigned long long lo, unsigned long long hi)
 		hi);
 }
 
+/* [ktrip-w] (referee 37124011556 decode): SECOND kernel-flat witness
+ * window, independent of the struct-page arm above — that one
+ * re-arms EVERY round (ktrip holds a single window, so a chunk page
+ * armed at a [tcchunk-POISON] fire would be displaced by the next
+ * struct re-arm). The fire path arms the fired chunk's own 4K page
+ * here: the corruption lives at chunk+0/+8 (env text over
+ * e->next+e->key — the clobbered key also blinds glibc's tcache
+ * double-free check, leaving the chunk linked in tcache AND
+ * unsorted — "corrupted double-linked list" is that desync
+ * surfacing), and the next kernel-flat write to that page names its
+ * rip. Same repair-and-replay contract: a legit funnel writeback
+ * into a re-alloc'd chunk costs one line and lives on. */
+static volatile unsigned long long ktrip_w_lo, ktrip_w_hi;
+static int ktrip_w_budget = 8;
+
+void uml_nt_ktrip_w_arm(unsigned long long lo, unsigned long long hi)
+{
+	ULONG old;
+	PVOID base;
+	SIZE_T size;
+
+	if (ktrip_w_budget <= 0 || hi <= lo || nt == NULL)
+		return;
+	if (lo == ktrip_w_lo && hi == ktrip_w_hi)
+		return; /* same page still armed — keep the budget */
+	if (ktrip_w_hi != 0) {
+		base = (PVOID)(uintptr_t)ktrip_w_lo;
+		size = (SIZE_T)(ktrip_w_hi - ktrip_w_lo);
+		(void)nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
+						 &base, &size, 0x04,
+						 &old);
+		ktrip_w_lo = 0;
+		ktrip_w_hi = 0;
+	}
+	base = (PVOID)(uintptr_t)lo;
+	size = (SIZE_T)(hi - lo);
+	if (nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS, &base,
+				       &size, 0x02, &old) < 0)
+		return;
+	ktrip_w_budget--;
+	ktrip_w_lo = lo;
+	ktrip_w_hi = hi;
+	os_info("[ktrip-w] armed kernel-flat [0x%llx,0x%llx) READ-ONLY — "
+		"the first kernel write here names the writer\n", lo,
+		hi);
+}
+
+/* Shared tail of both kernel-flat witness windows ([ktrip] +
+ * [ktrip-w]): a WRITE fault (info[0] == 1) whose DATA address
+ * (info[1] — NOT r->address = the ExceptionAddress = rip, referee
+ * 37099170639) falls inside the window prints the writer (rip + regs
+ * + stack), unprotects the page and replays the store
+ * (EXCEPTION_CONTINUE_EXECUTION). Returns 1 when this fault belonged
+ * to the window. Raw console only — a VEH may not take locks. */
+static int uml_nt_ktrip_window_catch(
+	const struct uml_nt_exception_pointers *e,
+	const struct uml_nt_exception_record *r,
+	unsigned long long rip,
+	volatile unsigned long long *wlo,
+	volatile unsigned long long *whi,
+	const char *tag)
+{
+	unsigned long long lo, hi, addr;
+	char wbuf[224];
+	int wn;
+	ULONG old;
+	PVOID base;
+	SIZE_T size;
+
+	if (nt == NULL || r == NULL || r->code != 0xC0000005ull ||
+	    r->nparams <= 1 || r->info[0] != 1)
+		return 0;
+	lo = *wlo;
+	hi = *whi;
+	addr = (unsigned long long)(uintptr_t)r->info[1];
+	if (lo == 0 || addr < lo || addr >= hi)
+		return 0;
+	wn = snprintf(wbuf, sizeof(wbuf),
+		      "[%s] KERNEL FLAT WRITE caught: rip=%llx addr=%llx "
+		      "rax=%llx rdi=%llx rsi=%llx rbp=%llx\n",
+		      tag, rip, addr,
+		      UML_NT_X64_CTX_RAX(e->context),
+		      UML_NT_X64_CTX_RDI(e->context),
+		      UML_NT_X64_CTX_RSI(e->context),
+		      UML_NT_X64_CTX_RBP(e->context));
+	if (wn > 0)
+		uml_nt_crash_write(wbuf, (unsigned int)wn);
+	if (e != NULL && e->context != NULL)
+		uml_nt_crash_scan_stack(UML_NT_X64_CTX_RSP(e->context));
+	base = (PVOID)(uintptr_t)lo;
+	size = (SIZE_T)(hi - lo);
+	(void)nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS, &base,
+					 &size, 0x04, &old);
+	*wlo = 0;
+	*whi = 0;
+	return 1;
+}
+
 /* Which kernel thread is running — set at each aux thread's entry,
  * read by the crash reporter (rsp alone can't name the thread). */
 const char *uml_nt_thread_role = "boot/vcpu";
@@ -262,13 +360,16 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 	 * fault now takes the fatal report below, which prints the
 	 * same forensic data without unprotecting anything. */
 
-	/* [ktrip]: the armed kernel-flat window caught a WRITE. Name
-	 * the writer (rip + regs + stack) and repair-and-replay: the
-	 * page returns to RW, the store executes on resume. Raw
-	 * console only (uml_nt_crash_write) — a VEH may not take
-	 * locks. The rip IS the verdict: a funnel/known site = legit
-	 * writeback (one line, lives on); anything else = the
-	 * flat-write stomper the whole hunt is after. */
+	/* [ktrip]/[ktrip-w]: an armed kernel-flat window caught a
+	 * WRITE. Name the writer (rip + regs + stack) and repair-and-
+	 * replay: the page returns to RW, the store executes on
+	 * resume. Raw console only (uml_nt_crash_write) — a VEH may
+	 * not take locks. The rip IS the verdict: a funnel/known site
+	 * = legit writeback (one line, lives on); anything else = the
+	 * flat-write stomper the whole hunt is after. Two independent
+	 * windows: the tcache-struct page ([ktrip], re-armed per
+	 * round) and the [tcchunk-POISON] fire's chunk page ([ktrip-w],
+	 * referee 37124011556). */
 	/* Window test MUST use the write's DATA address (info[1]) —
 	 * r->address is the ExceptionAddress (= rip). Referee
 	 * 37099170639: the first funnel writeback (ksys_read filling
@@ -278,38 +379,12 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 	 * Verdict per map 117: rip=uml_nt_uacc_walk byte-copy, caller
 	 * ksys_read = legit writeback — exactly the "one line, boot
 	 * lives on" case. */
-	if (nt != NULL && ktrip_hi != 0 && r != NULL &&
-	    r->code == 0xC0000005ull && r->nparams > 1 &&
-	    r->info[0] == 1 &&
-	    (unsigned long long)(uintptr_t)r->info[1] >= ktrip_lo &&
-	    (unsigned long long)(uintptr_t)r->info[1] < ktrip_hi) {
-		PVOID base = (PVOID)(uintptr_t)ktrip_lo;
-		SIZE_T size = (SIZE_T)(ktrip_hi - ktrip_lo);
-		ULONG old;
-
-		n = snprintf(buf, sizeof(buf),
-			     "[ktrip] KERNEL FLAT WRITE caught: rip=%llx "
-			     "addr=%llx rax=%llx rdi=%llx rsi=%llx "
-			     "rbp=%llx\n",
-			     rip,
-			     (unsigned long long)(uintptr_t)r->address,
-			     UML_NT_X64_CTX_RAX(e->context),
-			     UML_NT_X64_CTX_RDI(e->context),
-			     UML_NT_X64_CTX_RSI(e->context),
-			     UML_NT_X64_CTX_RBP(e->context));
-		if (n > 0)
-			uml_nt_crash_write(buf, (unsigned int)n);
-		if (e != NULL && e->context != NULL)
-			uml_nt_crash_scan_stack(
-				UML_NT_X64_CTX_RSP(e->context));
-		(void)nt->NtProtectVirtualMemory(UML_NT_CURRENT_PROCESS,
-						 &base, &size, 0x04,
-						 &old);
-		ktrip_lo = 0;
-		ktrip_hi = 0;
-		/* EXCEPTION_CONTINUE_EXECUTION: replay the store. */
+	if (uml_nt_ktrip_window_catch(e, r, rip, &ktrip_lo, &ktrip_hi,
+				      "ktrip"))
 		return -1L;
-	}
+	if (uml_nt_ktrip_window_catch(e, r, rip, &ktrip_w_lo, &ktrip_w_hi,
+				      "ktrip-w"))
+		return -1L;
 
 	in_crash_report = 1;
 

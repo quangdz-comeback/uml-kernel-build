@@ -1598,6 +1598,35 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 									fbase,
 									UML_NT_PHYS_RUN_SIZE,
 									frun);
+								/* KTRIP-W
+								 * (referee
+								 * 37124011556
+								 * decode):
+								 * walk-time
+								 * fire =
+								 * FRESHEST
+								 * victim (the
+								 * write
+								 * landed
+								 * since the
+								 * last
+								 * walk) — arm
+								 * the
+								 * chunk's
+								 * 4K page
+								 * kernel-flat
+								 * too (see
+								 * the
+								 * compare-time
+								 * fire
+								 * site). */
+								uml_nt_ktrip_w_arm(
+		(unsigned long long)(uintptr_t)uml_boot.physmem_base +
+			((unsigned long long)coff &
+			 ~(unsigned long long)0xfffull),
+		(unsigned long long)(uintptr_t)uml_boot.physmem_base +
+			(((unsigned long long)coff &
+			  ~(unsigned long long)0xfffull) + 0x1000));
 							}
 							break;
 						}
@@ -1767,6 +1796,31 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 					uml_nt_cowtrap_arm_alloc(c, fbase,
 								 UML_NT_PHYS_RUN_SIZE,
 								 frun);
+					/* KTRIP-W (referee 37124011556
+					 * decode): the fired chunk's own
+					 * 4K page goes READ-ONLY in the
+					 * KERNEL's flat view — the
+					 * witness the fire window was
+					 * missing. cowtrap covers
+					 * stub-side writes (every catch
+					 * so far = legit malloc), the
+					 * cowwatch HIT is a run-level
+					 * round-compare; a kernel-direct
+					 * flat write to THIS page now
+					 * trips with its rip. Referee
+					 * 37121882179's A-B-A decode
+					 * also showed the struct-page
+					 * [ktrip] arm cannot hold this
+					 * window (it re-arms every
+					 * round) — ktrip-w is
+					 * independent. */
+					uml_nt_ktrip_w_arm(
+		(unsigned long long)(uintptr_t)uml_boot.physmem_base +
+			((unsigned long long)coff &
+			 ~(unsigned long long)0xfffull),
+		(unsigned long long)(uintptr_t)uml_boot.physmem_base +
+			(((unsigned long long)coff &
+			  ~(unsigned long long)0xfffull) + 0x1000));
 				}
 				c->tc_chunk_snap[di][depth] = data;
 				c->tc_chunk_armed[di][depth] = 1;

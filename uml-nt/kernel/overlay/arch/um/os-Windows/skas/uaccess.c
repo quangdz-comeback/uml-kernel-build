@@ -401,8 +401,14 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 			d_q0 = q0;
 			d_q1 = q1;
 		}
+		/* v3 (referee 37124011556): bulk budget 256 -> 4096.
+		 * The census went blind EXACTLY at the fire window —
+		 * [uawrite] saturated at #256 around line 20k of a
+		 * 24k-line boot while the [tcchunk-POISON] fires sat
+		 * at line ~23k, so "no [uawrite] at the poisoned VAs"
+		 * was unprovable. 4096 lines ~ fits the whole boot. */
 		if (bulk) {
-			if (++uacc_heap_writes <= 256)
+			if (++uacc_heap_writes <= 4096)
 				uacc_wlog("[uawrite]", uacc_heap_writes,
 					  va, n, q0, q1);
 		} else {
