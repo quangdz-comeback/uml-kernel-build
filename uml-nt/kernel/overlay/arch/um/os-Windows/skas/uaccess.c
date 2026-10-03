@@ -67,6 +67,10 @@ struct uml_nt_mm *uml_nt_syscall_mm(void)
 #define UACC_TRACE_PAGE_OFF(v) ((v) & (UACC_TRACE_PAGE - 1))
 #define UACC_TRACE_MAX         16
 
+/* WRITER-HUNT (M5.6a): budget for the heap-writeback logger in
+ * raw_copy_to_user — the rusage-shaped poison source hunt. */
+static unsigned int uacc_heap_writes;
+
 static void uacc_trace_efault(unsigned long long va, unsigned long n)
 {
 	static int traced;
@@ -213,6 +217,34 @@ unsigned long raw_copy_from_user(void *to, const void __user *from,
 unsigned long raw_copy_to_user(void __user *to, const void *from,
 			       unsigned long n)
 {
+	/* WRITER-HUNT (M5.6a, referee 37080844010): the poison
+	 * {fd=0x1a, bk=0x8000, 0x30, 0x30, 0x7fffffff, 0} sits at the
+	 * SAME heap VA (0x67d0b4c0) across run generations, never
+	 * tripped a cowtrap page (a private run rules out foreign
+	 * views; a stub-view write would fault) and never mismatched
+	 * a copy_verify — the writer class left is the KERNEL-SIDE
+	 * writeback through THIS funnel (rusage/wait4-shaped payload:
+	 * {utime 26s+32768µs, stime 48s+48µs, maxrss INT_MAX}).
+	 * Log every successful bulk writeback into the conn's heap:
+	 * the next poisoned boot names nr-agnostic evidence — va +
+	 * the first payload qwords — directly comparable with the
+	 * cowwatch HIT dump. Budgeted; the range check keeps the hot
+	 * read() path at 3 compares. */
+	if (uacc_mm != NULL && n >= 24 && uacc_heap_writes < 24 &&
+	    uacc_mm->heap_end > uacc_mm->heap_start &&
+	    (unsigned long long)(unsigned long)to >=
+		    uacc_mm->heap_start &&
+	    (unsigned long long)(unsigned long)to + n <=
+		    uacc_mm->heap_end) {
+		const unsigned long long *q =
+			(const unsigned long long *)from;
+
+		uacc_heap_writes++;
+		os_info("[uawrite] #%u va=0x%llx len=%lu q0=0x%llx "
+			"q1=0x%llx\n", uacc_heap_writes,
+			(unsigned long long)(unsigned long)to, n,
+			q[0], q[1]);
+	}
 	if (uml_nt_uacc_walk(uacc_mm, uml_boot.physmem_base,
 			     (unsigned long long)(unsigned long)to, n,
 			     (char *)from, UML_NT_UACC_TO_GUEST) < 0) {
