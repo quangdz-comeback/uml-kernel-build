@@ -987,6 +987,9 @@ static int tcache_watch_budget = 8;
 /* The entries delta-watch budget (see the DELTA WATCH in
  * tcache_watch) — one line per pointer-ILLEGAL entry change. */
 static int tcache_delta_budget = 16;
+/* The chunk watch budget (see the CHUNK WATCH in tcache_watch) —
+ * one line + dump per foreign write into a watched head chunk. */
+static int tcache_chunk_budget = 16;
 static void tcache_watch(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_mm *mm = c->mm;
@@ -1062,6 +1065,67 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 		c->tc_snap[1] = entries[1];
 		c->tc_snap[2] = entries[2];
 		c->tc_snap[3] = entries[3];
+	}
+	/* CHUNK WATCH (referee 37087346082 decode): [tcdelta] named
+	 * the payload — entries[2] 0x67d020d0 -> 0x5f444d4554552451
+	 * at the round right after nr=228, trap rip = malloc+0x172
+	 * (tcache_get's e->key=NULL). The reveal math is exact across
+	 * every boot: 0x5f444d4554552451 ^ (0x67d020d0>>12) =
+	 * "SYSTEMD_" — the freed chunk ITSELF held the literal env
+	 * text ("SYSTEMD_LOG_TARGET=console"-class, cmdline env), and
+	 * each boot's variant byte (S/Q/W) = (chunk_addr>>12) byte
+	 * k. So the writer = an 8-byte guest-side store into the
+	 * freed chunk (UAF shape) one event BEFORE the get that
+	 * reveals it, and the store raises no fault (the pages are
+	 * writable) — every kernel funnel stays silent. Watch the
+	 * chunks: for each of entries[0..3] holding a legal in-heap
+	 * pointer, snapshot the chunk's first 8 bytes (e->next) per
+	 * round; a change names the write's window (last_nr/ret +
+	 * trap rip/rsp) and dumps the chunk. A popped chunk stops
+	 * being the head — its slot re-arms on the entry change — so
+	 * a stable head's e->next does not move under legit glibc;
+	 * only a foreign write (or a double-free) trips. */
+	{
+		int di;
+
+		for (di = 0; di < 4; di++) {
+			unsigned long long ev = entries[di];
+			unsigned long long data;
+			long long coff;
+
+			if (!c->tc_chunk_valid ||
+			    c->tc_chunk_va[di] != ev ||
+			    (ev & 0xF) != 0 || (ev >> 48) != 0 ||
+			    ev < mm->heap_start || ev >= mm->heap_end) {
+				/* (Re)arm: the watched head changed
+				 * identity — new snapshot next round. */
+				c->tc_chunk_va[di] = ev;
+				c->tc_chunk_armed[di] = 0;
+				continue;
+			}
+			if (tcache_chunk_budget <= 0 ||
+			    !c->tc_chunk_armed[di])
+				continue;
+			coff = uml_nt_vma_translate(mm, ev, 8);
+			if (coff < 0)
+				continue;
+			data = *(const unsigned long long *)
+				(const void *)((char *)uml_boot.physmem_base +
+					       coff);
+			if (c->tc_chunk_snap[di] == data)
+				continue;
+			tcache_chunk_budget--;
+			os_info("[tcchunk] pid %lu head[%d] va=0x%llx "
+				"0x%llx -> 0x%llx (round nr=%llu ret=%lld "
+				"rip=0x%llx rsp=0x%llx)\n",
+				(unsigned long)c->pid, di, ev,
+				c->tc_chunk_snap[di], data, c->last_nr,
+				c->last_ret, c->d->regs.rip,
+				c->d->regs.rsp);
+			dump_guest_bytes(mm, ev, 0x20, "tcchunk-head");
+			c->tc_chunk_snap[di] = data;
+		}
+		c->tc_chunk_valid = 1;
 	}
 	if (tcache_watch_budget <= 0 || c->tcache_fired)
 		return;

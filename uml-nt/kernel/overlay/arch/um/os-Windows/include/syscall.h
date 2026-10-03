@@ -153,6 +153,23 @@ struct uml_nt_stub_conn {
 	 * budget survives to the poison. kzalloc init = clean. */
 	unsigned long long tc_snap[4];
 	int tc_snap_valid;
+	/* M5.6a CHUNK WATCH (referee 37087346082 decode): [tcdelta]
+	 * proved the entries[] text = glibc's own tcache_get revealing
+	 * a freed chunk whose first 8 bytes held the literal ASCII
+	 * "SYSTEMD_" (env-text class; the per-boot variant byte =
+	 * the (chunk_addr>>12) reveal XOR). The store into the chunk
+	 * itself is one event EARLIER than the get that reveals it —
+	 * per watched head chunk (entries[0..3] holding a legal
+	 * in-heap pointer), snapshot the chunk's first 8 bytes
+	 * (e->next) per serve round; a change names the write's round
+	 * and trap rip. A popped chunk stops being the head (its slot
+	 * re-arms on the entry change), so a stable head's e->next is
+	 * stable under legit glibc — only a foreign write (or a
+	 * double-free) moves it. kzalloc init = disarmed. */
+	unsigned long long tc_chunk_va[4];
+	unsigned long long tc_chunk_snap[4];
+	unsigned char tc_chunk_armed[4];
+	unsigned char tc_chunk_valid;
 	/* M5.4 c3 (048): destroy stamps DEAD before kfree; consumers
 	 * that reach a conn through a RETAINED pointer (the switch
 	 * hook's re-arm, the co-mapper census, the fork seed) refuse a
