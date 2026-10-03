@@ -1935,16 +1935,26 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * applied (a new request only happens after the plan drained),
 	 * so blocks it parked at drop time can return to the backend;
 	 * and this round's drops park under THIS conn's tag. */
-	uml_nt_phys_settle(c->ph, c);
-	/* D25 audit (to-shelley 134): settle TRUSTS the drained
-	 * invariant — ops pending here mean the released block could
-	 * re-hand while THIS conn's stub views are mid-flight (the
-	 * free-while-mapped alias reborn). Log-only until it names
-	 * the window. */
-	if (c->plan_left != 0)
-		os_info("[phys-settle] plan_left=%d pid %lu — settle "
-			"fired with ops pending\n",
-			c->plan_left, (unsigned long)c->pid);
+	/* D25 FIX (referee 37131511929: 7589 [phys-settle] hits): the
+	 * drained invariant DOES break — the fork re-protect stream
+	 * keeps plan_left > 0 across rounds by design, and settle
+	 * released parked blocks while THIS conn's UNMAP/MAP ops were
+	 * still in flight; the backend re-handed the block and a new
+	 * view mapped it before the stale op applied = the
+	 * free-while-mapped alias (task 1's malloc metadata eating
+	 * dead conns' env strings). Settle ONLY on a drained plan:
+	 * parks ride until the round that actually drains (a stuck
+	 * conn's parks end at destroy's settle — mmctx). */
+	if (c->plan_left == 0)
+		uml_nt_phys_settle(c->ph, c);
+	else {
+		static int settle_audit;
+
+		if (settle_audit++ < 64)
+			os_info("[phys-settle] deferred plan_left=%d "
+				"pid %lu\n", c->plan_left,
+				(unsigned long)c->pid);
+	}
 	uml_nt_phys_set_drop_owner(c->ph, c);
 	/* WRITER-HUNT (M5.6a): the direct-write canary — validate the
 	 * conn's tcache BEFORE serving this round; poison seen here
