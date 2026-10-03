@@ -102,6 +102,21 @@ extern unsigned long long uml_nt_uacc_fixup_vma_end;
 extern unsigned long long uml_nt_uacc_fixup_old_run;
 extern unsigned long long uml_nt_uacc_fixup_new_run;
 
+/* Refusal telemetry (map 121 follow-up): every walker refusal
+ * (stolen-run refs guard OR [gen] generation mismatch) records its
+ * coordinates here — the boot-wide count + the LAST refusal's va /
+ * claim-gen / run-gen / kind (0 = refs, 1 = gen). Pure data: the
+ * kernel side (uaccess.c) turns it into the log line; the conn
+ * layer can delta the counter per serve round. A refusal that
+ * produces a guest-visible errno with NO counter delta = the errno
+ * came from somewhere else (fs layer) — the discriminator the
+ * EPERM-wall decode needs. */
+extern unsigned long long uml_nt_uacc_refuses;
+extern unsigned long long uml_nt_uacc_refuse_va;
+extern unsigned long long uml_nt_uacc_refuse_claim_gen;
+extern unsigned long long uml_nt_uacc_refuse_run_gen;
+extern unsigned long uml_nt_uacc_refuse_kind;
+
 char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 			    unsigned long long va);
 

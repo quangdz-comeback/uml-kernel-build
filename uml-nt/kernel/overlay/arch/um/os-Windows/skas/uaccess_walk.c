@@ -65,6 +65,20 @@ const struct uml_nt_fault_plan *uml_nt_uacc_sink_plan(void)
 	return uacc_sink.plan;
 }
 
+/* Refusal telemetry (map 121 follow-up, run 37108542522): the
+ * walker refuses SILENTLY (this file is log-free — 8350576), but
+ * its refusals surface at the caller as errno, and the errno path
+ * was indistinguishable from an fs-side EPERM. Pure globals: the
+ * LAST refusal's coordinates + the boot-wide count; the kernel
+ * side (uaccess.c, has os_info) logs the line and the conn layer
+ * can delta the counter per serve round. */
+unsigned long long uml_nt_uacc_refuses;
+unsigned long long uml_nt_uacc_refuse_va;
+unsigned long long uml_nt_uacc_refuse_claim_gen;
+unsigned long long uml_nt_uacc_refuse_run_gen;
+unsigned long uml_nt_uacc_refuse_kind; /* 0 = stolen-run refs,
+					* 1 = generation mismatch */
+
 struct uml_nt_uacc_sink uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s)
 {
 	struct uml_nt_uacc_sink prev = uacc_sink;
@@ -116,9 +130,37 @@ static int uacc_gen_stale(const struct uml_nt_mm *mm,
 	gv = uml_nt_vma_find((struct uml_nt_mm *)mm, va);
 	if (gv == (struct uml_nt_vma *)0 || gv->gen == 0)
 		return 0;
-	return gv->gen != (unsigned long long)
-	       uml_nt_phys_gen(uacc_sink.ph,
-			       (long long)(off & ~(UACC_RUN - 1)));
+	if (gv->gen == (unsigned long long)
+	    uml_nt_phys_gen(uacc_sink.ph,
+			    (long long)(off & ~(UACC_RUN - 1))))
+		return 0;
+	uml_nt_uacc_refuses++;
+	uml_nt_uacc_refuse_kind = 1;
+	uml_nt_uacc_refuse_va = va;
+	uml_nt_uacc_refuse_claim_gen = gv->gen;
+	uml_nt_uacc_refuse_run_gen = (unsigned long long)
+		uml_nt_phys_gen(uacc_sink.ph,
+				(long long)(off & ~(UACC_RUN - 1)));
+	return 1;
+}
+
+/* The stolen-run guard (map 049 item 2) with the same telemetry —
+ * shared by the byte walk and the str walk. Returns 1 = refuse. */
+static int uacc_refs_refuse(unsigned long long va,
+			    unsigned long long off)
+{
+	if (uacc_sink.ph == (struct uml_nt_phys *)0 ||
+	    uml_nt_phys_refs(uacc_sink.ph,
+			     (long long)(off & ~(UACC_RUN - 1))) != 0)
+		return 0;
+	uml_nt_uacc_refuses++;
+	uml_nt_uacc_refuse_kind = 0;
+	uml_nt_uacc_refuse_va = va;
+	uml_nt_uacc_refuse_claim_gen = 0;
+	uml_nt_uacc_refuse_run_gen = (unsigned long long)
+		uml_nt_phys_gen(uacc_sink.ph,
+				(long long)(off & ~(UACC_RUN - 1)));
+	return 1;
 }
 
 /* Flat pointer for the byte at `va` after making a kernel WRITE to
@@ -275,9 +317,7 @@ int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 		 * bytes; refuse (-EFAULT class). The sink's ph is the
 		 * dispatching conn's own table; NULL outside a
 		 * handler keeps the fail-safe default. */
-		if (uacc_sink.ph != (struct uml_nt_phys *)0 &&
-		    uml_nt_phys_refs(uacc_sink.ph,
-				     off & ~(UACC_RUN - 1)) == 0)
+		if (uacc_refs_refuse(va, (unsigned long long)off))
 			return -1;
 		/* Map 121 (đáp 122): generation check — the claim's
 		 * recorded life must still match the run's current
@@ -332,9 +372,7 @@ static long long uacc_str_walk(char *dst, const struct uml_nt_mm *mm,
 			return want_nul_incl ? 0 : -1;
 		/* Stolen run (map 049 item 2): same ownership guard as
 		 * the byte walk — refuse the read. */
-		if (uacc_sink.ph != (struct uml_nt_phys *)0 &&
-		    uml_nt_phys_refs(uacc_sink.ph,
-				     off & ~(UACC_RUN - 1)) == 0)
+		if (uacc_refs_refuse(va, (unsigned long long)off))
 			return want_nul_incl ? 0 : -1;
 		/* Map 121: same generation guard as the byte walk (the
 		 * str funnel reads through the same claim — see

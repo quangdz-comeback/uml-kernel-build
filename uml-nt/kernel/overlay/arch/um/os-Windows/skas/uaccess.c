@@ -397,11 +397,41 @@ walk:
 
 long strncpy_from_user(char *dst, const char __user *src, long count)
 {
+	long long n;
+
 	if (count <= 0)
 		return -EFAULT;
-	return uml_nt_uacc_strncpy(dst, uacc_mm, uml_boot.physmem_base,
-				   (unsigned long long)(unsigned long)src,
-				   (unsigned long long)count);
+	n = uml_nt_uacc_strncpy(dst, uacc_mm, uml_boot.physmem_base,
+				(unsigned long long)(unsigned long)src,
+				(unsigned long long)count);
+	if (n < 0) {
+		/* Upstream strncpy_from_user never returns -1: the
+		 * only failure is -EFAULT. The raw walker -1 leaked
+		 * into getname() → openat returned -EPERM (the
+		 * unit-file wall, referee 37108542522: EVERY unit
+		 * open "Operation not permitted" → crash-isolate
+		 * fails → freeze). Report EFAULT per contract and
+		 * NAME the refusal — the walker's pure telemetry
+		 * tells a gen/refs refusal (ours) from a refuse with
+		 * no counter delta (fs-side — different hunt). */
+		static int traced;
+
+		if (traced < 16) {
+			os_info("[uacc] strncpy refuse: task=%d "
+				"va=0x%llx count=%ld kind=%lu "
+				"claim_gen=0x%llx run_gen=0x%llx "
+				"refuses=%llu\n",
+				current ? current->pid : 0,
+				(unsigned long long)(unsigned long)src,
+				count, uml_nt_uacc_refuse_kind,
+				uml_nt_uacc_refuse_claim_gen,
+				uml_nt_uacc_refuse_run_gen,
+				uml_nt_uacc_refuses);
+			traced++;
+		}
+		return -EFAULT;
+	}
+	return n;
 }
 
 long strnlen_user(const char __user *str, long len)

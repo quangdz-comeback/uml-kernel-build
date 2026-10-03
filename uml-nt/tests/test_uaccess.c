@@ -439,6 +439,7 @@ static void test_gen_stale(void)
 	struct uml_nt_uacc_sink sink;
 	char buf[32];
 	unsigned long long gen0;
+	unsigned long long r0 = uml_nt_uacc_refuses;
 
 	mock_reset();
 	CHECK(uml_nt_phys_init(&ph, 4 * RUN) == 0);
@@ -481,6 +482,15 @@ static void test_gen_stale(void)
 	CHECK(flat[0] == (unsigned char)3); /* owner byte intact */
 	CHECK(uml_nt_uacc_strncpy(buf, &mm, (char *)flat, RAM,
 				  32) < 0);
+
+	/* the refusals named themselves (map 121 telemetry): 3 gen
+	 * refusals — byte-read walk + write walk + str walk — at
+	 * va=RAM, claim life 1 vs the run's current life 3. */
+	CHECK(uml_nt_uacc_refuses - r0 == 3);
+	CHECK(uml_nt_uacc_refuse_kind == 1);
+	CHECK(uml_nt_uacc_refuse_va == RAM);
+	CHECK(uml_nt_uacc_refuse_claim_gen == 1);
+	CHECK(uml_nt_uacc_refuse_run_gen == 3);
 
 	/* re-claim at the CURRENT life: serves again — the write
 	 * lands at the right destination (the re-handed run). */
