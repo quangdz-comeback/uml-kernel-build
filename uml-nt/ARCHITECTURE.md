@@ -361,3 +361,16 @@ Memdrop analog: run phys unref-to-0 + settle → MEM_DECOMMIT trong flat view
 Điều kiện: chỉ run refs==0 đã settle. Mục tiêu: guest lớn/LXC không giữ
 high-water mark. Kế thừa: patches/uml-memdrop-on-free.patch (PAGE_REPORTING
 + MADV_REMOVE, thời Termux).
+
+## D25 (2026-10-03, Shelley — từ witness 452/452 copy_process+0x883)
+Invariant không gian flat: POOL OBJECT KERNEL và POOL RUN GUEST PHẢI
+DISJOINT tuyệt đối. Bệnh: kmalloc-class của kernel (list_head +0x478,
+cấp trong copy_process) được đặt ở flat VA trùng heap piece của guest
+(run 0x3940000, alias cả sau re-home) → mỗi fork đè tcache PID1 =
+writer-2. FIX (hướng duy nhất được phép): tách hẳn — kernel object
+pool cấp từ region riêng của flat space (hoặc section riêng), guest
+run allocator KHÔNG BAO GIỜ cấp vùng đó; thêm assert địa chỉ khi
+handout run guest (VA phải nằm ngoài kernel-pool region) + unit test
+fork-storm: 1000 fork liên tiếp, 0 lần object kernel đè run guest.
+FORBIDDEN: vá lún từng site copy_process (bệnh nằm ở pool, không
+phải ở fork).
