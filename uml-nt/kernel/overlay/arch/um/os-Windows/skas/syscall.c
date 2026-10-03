@@ -1706,6 +1706,11 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 			os_info("[abrt] tcache @0x67c00010 (vma "
 				"[0x%llx,0x%llx) off=0x%llx):\n",
 				hv->start, hv->end, hv->run_off);
+			/* [alias] census (decode 37095399220): same
+			 * question as the tcdelta site, asked at the
+			 * abort — who ELSE maps this run right now. */
+			uml_nt_run_alias_census(c, hv->run_off,
+						hv->end - hv->start);
 			for (row = 0; row < 10; row++) {
 				long long foff =
 					uml_nt_vma_translate(c->mm,

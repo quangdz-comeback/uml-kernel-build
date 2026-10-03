@@ -1043,6 +1043,60 @@ static int tcache_delta_budget = 16;
 /* The chunk watch budget (see the CHUNK WATCH in tcache_watch) —
  * one line + dump per foreign write into a watched head chunk. */
 static int tcache_chunk_budget = 16;
+
+/* [alias] census (M5.6a, decode 37095399220): every witness on the
+ * kernel write paths is now negative — [kcopy] 0, [uawrite]*/[deadwrite]
+ * silent, futex dw silent, [tctrip] trips all legit — while the
+ * poison keeps landing on a page that is RO-armed in the victim's
+ * OWN stub view. The writer class left standing is a VIEW: another
+ * live conn's stub still maps this phys run (a stale view over a
+ * recycled run — the D22 free-while-mapped family, INVISIBLE to run
+ * refcounts: views are not refs). Walk every live conn's VMA table
+ * for VMA run-ranges intersecting [run_off, run_off+len): a FOREIGN
+ * mapper = the alias named (its VA + its conn — the writer's
+ * process); self-only = the writer is still kernel-side through an
+ * unseen path. Log-only; the pump runs on the one vCPU thread, the
+ * task list cannot mutate under the walk. */
+void uml_nt_run_alias_census(struct uml_nt_stub_conn *c,
+			     unsigned long long run_off,
+			     unsigned long long len)
+{
+	struct task_struct *p;
+	int conns = 0;
+
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		struct uml_nt_vma *pv;
+		int vi;
+
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			continue;
+		conns++;
+		if (pc == c)
+			continue; /* the detector's own mapping is legit */
+		for (vi = 0; vi < pc->mm->nvma; vi++) {
+			unsigned long long lo, hi;
+
+			pv = &pc->mm->vma[vi];
+			lo = pv->run_off;
+			hi = lo + (pv->end - pv->start);
+			if (lo < run_off + len && run_off < hi)
+				os_info("[alias] foreign mapper pid %d: "
+					"vma [0x%llx,0x%llx) run_off=0x%llx "
+					"intersects run 0x%llx+0x%llx\n",
+					p->pid, pv->start, pv->end,
+					pv->run_off, run_off, len);
+		}
+	}
+	os_info("[alias] census: %d live conns, foreign mappers of run "
+		"0x%llx+0x%llx listed above (none = kernel-side unseen "
+		"path)\n", conns, run_off, len);
+}
+
 static void tcache_watch(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_mm *mm = c->mm;
@@ -1117,6 +1171,19 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 				"rsp=0x%llx)\n", (unsigned long)c->pid, di,
 				c->tc_snap[di], nv, c->last_nr, c->last_ret,
 				c->d->regs.rip, c->d->regs.rsp);
+			/* [alias] census at the poison detection (decode
+			 * 37095399220): the kernel write paths are all
+			 * negative now — name any FOREIGN conn still
+			 * mapping the run behind this tcache struct
+			 * (the stale-view writer class), plus the
+			 * struct bytes AT hit time (the abort dump is
+			 * too late — state evolves). */
+			uml_nt_run_alias_census(c,
+				(unsigned long long)off &
+				~(unsigned long long)
+				(UML_NT_PHYS_RUN_SIZE - 1),
+				UML_NT_PHYS_RUN_SIZE);
+			dump_guest_bytes(mm, tva, 0x40, "tcdelta-struct");
 		}
 		c->tc_snap_valid = 1;
 		c->tc_snap[0] = entries[0];

@@ -266,6 +266,16 @@ void uml_nt_fork_disarm(void);
  * (the mm — and with it the fork — aborts). */
 int uml_nt_fork_seed(struct uml_nt_stub_conn *child);
 
+/* [alias] census (M5.6a, decode 37095399220): walk every live conn's
+ * VMA table for VMA run-ranges intersecting [run_off, run_off+len)
+ * and log each FOREIGN mapper — a stale view over a recycled run is
+ * the one writer class every kernel-side witness is blind to (views
+ * are not refs). Callers: the [tcdelta] poison detection and the
+ * [abrt] tcache dump. Log-only. */
+void uml_nt_run_alias_census(struct uml_nt_stub_conn *c,
+			     unsigned long long run_off,
+			     unsigned long long len);
+
 /* Queue the fork answer's re-protect ops on the PARENT (upstream fork
  * marks both pte tables RO): unmap + remap read-only every COW-flagged
  * writable VMA — the parent's next write faults into the COW machinery
