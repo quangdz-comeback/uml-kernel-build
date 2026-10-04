@@ -71,6 +71,15 @@ struct uml_nt_stub_conn {
 		fdbk,bkfd} */
 	int bw_nslot[5];
 	int bw_snap_valid;
+	/* [replay-check] (M5.6a, referee 37179076089): a write fault's
+	 * repair replays the faulting store on the fixed view — nothing
+	 * today PROVES the replay landed. Arm at the fault (qword store
+	 * decodable: 48/49/4c/4d 89 + 48/49 c7 forms), verify at the
+	 * same conn's next syscall park: the qword still holding the
+	 * BEFORE value one full round later = the swallowed replay —
+	 * the lost-store class named at the store itself. */
+	unsigned long long rp_va, rp_want, rp_before, rp_rip;
+	int rp_active;
 	/* process identity for the syscall surface: ppid = the stub
 	 * pid that forked us (0 for the root conn). */
 	unsigned long long ppid;

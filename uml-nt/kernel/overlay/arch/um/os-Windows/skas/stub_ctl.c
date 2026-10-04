@@ -2535,6 +2535,11 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		}
 		rc = uml_nt_mm_fault(c->mm, c->ph, d->fault_addr,
 				     d->fault_type, &c->plan);
+		/* [replay-check] arm AFTER the repair decision: only a
+		 * plan the guest will resume into (no kill) replays
+		 * the store. */
+		if (rc == 0 && !c->plan.kill)
+			replay_check_arm(c);
 		/* [cowtrap] carrier (the fault path): mm_fault reset
 		 * the plan above — re-queue the armed page's op so a
 		 * fault-storm boot cannot starve the trap forever
