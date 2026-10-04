@@ -3358,8 +3358,8 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					"rip=0x%llx why=%c fs=0x%llx "
 					"rsp=0x%llx "
 					"insn=%02x%02x%02x%02x%02x%02x%02x%02x "
-					"rax=0x%llx rdi=0x%llx rsi=0x%llx "
-					"rdx=0x%llx\n",
+					"rax=0x%llx rcx=0x%llx rdi=0x%llx "
+					"rsi=0x%llx rdx=0x%llx\n",
 					sigsegv_victims,
 					(unsigned long)c->pid, d->fault_addr,
 					d->fault_type, d->regs.rip,
@@ -3368,8 +3368,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					d->fs_base, d->regs.rsp,
 					ib[0], ib[1], ib[2], ib[3],
 					ib[4], ib[5], ib[6], ib[7],
-					d->regs.rax, d->regs.rdi,
-					d->regs.rsi, d->regs.rdx);
+					d->regs.rax, d->regs.rcx,
+					d->regs.rdi, d->regs.rsi,
+					d->regs.rdx);
 				os_info("[stubtest]   callee: "
 					"rbx=0x%llx rbp=0x%llx r12=0x%llx "
 					"r13=0x%llx r14=0x%llx r15=0x%llx "
@@ -3384,6 +3385,56 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 						       0xffffffff),
 					(unsigned int)(d->regs.rax >> 32),
 					c->d->init_regs.rip);
+				/* M5.6a unlink autopsy: the dlZ shape
+				 * is the glibc-2.36 unlink check
+				 * (cmp %rcx,0x10(%rdx)) faulting on a
+				 * bin-listed chunk whose bk holds env
+				 * text ("STREAM=7"). rcx=P (the chunk)
+				 * was never printed; walk the unsorted
+				 * bin and flag members whose fd/bk is
+				 * neither heap nor arena — the torn
+				 * member names itself and the text's
+				 * full value names its source. */
+				if (c->bw_arena != 0) {
+					unsigned long long head =
+						c->bw_arena + 0x70;
+					unsigned long long m;
+					int steps;
+
+					m = *(unsigned long long *)
+						(uml_boot.physmem_base +
+						 uml_nt_vma_translate(c->mm,
+							head, 8) == -1ll ? 0 :
+						 uml_nt_vma_translate(c->mm,
+							head, 8));
+					for (steps = 0; steps < 8 &&
+					     m != c->bw_arena + 0x70 &&
+					     m != 0; steps++) {
+						long long mt =
+							uml_nt_vma_translate(
+								c->mm, m,
+								0x20);
+						unsigned long long fd, bk;
+
+						if (mt < 0)
+							break;
+						fd = *(unsigned long long *)
+							(uml_boot.physmem_base
+							 + mt + 0x10);
+						bk = *(unsigned long long *)
+							(uml_boot.physmem_base
+							 + mt + 0x18);
+						os_info("[stubtest]   "
+							"unsorted[%d] m="
+							"0x%llx fd=0x%llx "
+							"bk=0x%llx%s\n",
+							steps, m, fd, bk,
+							((bk >> 44) != 0x6 &&
+							 bk != 0) ?
+							"  <-- TORN" : "");
+						m = fd;
+					}
+				}
 				/* M5.4 c3: the wild-pointer autopsy —
 				 * run 36806296858's victims all die at
 				 * ONE libc rip copying 8 bytes from a
