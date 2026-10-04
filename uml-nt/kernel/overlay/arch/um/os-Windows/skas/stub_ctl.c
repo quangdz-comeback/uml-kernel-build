@@ -1630,8 +1630,19 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	c->rp_active = 1;
 	/* viewprobe: the stub snapshots the fault VA through its own
 	 * view once the repair's PROTECT applies (read at the
-	 * PROTDONE below) — the wrong-backed view shows itself. */
-	d->viewprobe_addr = d->fault_addr;
+	 * PROTDONE below) — the wrong-backed view shows itself. ONLY
+	 * arm it when the repair actually starts with a PROT covering
+	 * the fault VA: the stub consumes the field in the PROT branch
+	 * alone, and a leaked address rides into a LATER unrelated
+	 * PROT whose page may be NOACCESS — the read then dies as an
+	 * unowned exception inside the stub (referee 37205147552). */
+	if (c->plan.n_ops > 0 &&
+	    c->plan.ops[0].op == UML_NT_FOP_PROTECT &&
+	    d->fault_addr >= c->plan.ops[0].va &&
+	    d->fault_addr < c->plan.ops[0].va + c->plan.ops[0].len)
+		d->viewprobe_addr = d->fault_addr;
+	else
+		d->viewprobe_addr = 0;
 	/* single-step (v10): after the repair the stub resumes with
 	 * TF; the post-store #DB re-arms the page NOACCESS so the
 	 * NEXT writer (the replay proves itself first) is caught by

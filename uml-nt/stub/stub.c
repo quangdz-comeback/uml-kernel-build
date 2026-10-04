@@ -282,10 +282,13 @@ static int do_action(void)
 		 * table's run. A divergence here is the wrong-backed
 		 * view itself. */
 		if (d->viewprobe_addr != 0) {
-			if (d->prot != 0 /* not NOACCESS */)
+			if (d->prot != 0 /* not NOACCESS */) {
+				guest_read_site = 1;
 				d->viewprobe_got =
 					*(volatile unsigned long long *)
 					(uintptr_t)d->viewprobe_addr;
+				guest_read_site = 0;
+			}
 			d->viewprobe_addr = 0;
 		}
 		return verify_prot(page, d->prot);
@@ -408,12 +411,17 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 		     slot, above, mbi.BaseAddress, mbi.AllocationBase,
 		     (unsigned long long)mbi.RegionSize,
 		     (unsigned long)mbi.Protect, (unsigned long)mbi.Type);
+	n = snprintf(line + (n > 0 ? n : 0),
+		     sizeof(line) - (n > 0 ? n : 0),
+		     " guest_read_site=%ld", (long)guest_read_site);
 	if (n > 0)
 		WriteFile(GetStdHandle(STD_ERROR_HANDLE), line,
 			  (DWORD)(n < (int)sizeof(line) ? n :
 				  (int)sizeof(line) - 1),
 			  &wrote, NULL);
 }
+
+static volatile LONG guest_read_site; /* 1=viewprobe 2=ss-got */
 
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
@@ -460,8 +468,10 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			 * run. The kernel compares against the VMA
 			 * table's run: a match-less pair is the
 			 * wrong-backed twin at the qword. */
+			guest_read_site = 2;
 			d->ss_got = *(volatile unsigned long long *)
 				(uintptr_t)d->ss_va;
+			guest_read_site = 0;
 			c->EFlags &= ~(DWORD)0x100;
 			VirtualProtect(pg, (SIZE_T)0x1000, PAGE_NOACCESS,
 				       &old_prot);
