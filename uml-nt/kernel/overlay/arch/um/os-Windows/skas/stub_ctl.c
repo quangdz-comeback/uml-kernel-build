@@ -1667,6 +1667,12 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 			(unsigned long)c->pid, c->rp_va, c->rp_rip,
 			c->rp_want, now, c->last_nr, c->last_ret,
 			c->d->regs.rip);
+		os_info("[replay-lost]   resume_rip=0x%llx (fault rip "
+			"0x%llx) — %s\n",
+			c->d->resume_rip, c->rp_rip,
+			c->d->resume_rip == c->rp_rip ?
+			"RESUMED AT THE STORE — yet it never ran?!" :
+			"RESUME WENT ELSEWHERE — the skip path");
 		dump_guest_bytes(c->mm, c->rp_va & ~0xfffull, 0x40,
 				 "replay-page");
 		/* WHERE did the store land? Sweep ALL of physmem for

@@ -445,6 +445,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			fs_tramp_base = d->fs_base;
 			fs_save_r11 = c->R11;
 			fs_tramp_target = c->Rip;
+			d->resume_rip = c->Rip;
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
@@ -521,6 +522,8 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			fs_tramp_target = d->regs.rip;
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
 		}
+		d->resume_rip = fs_tramp_target ? fs_tramp_target
+			: (unsigned long long)c->Rip;
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
@@ -544,6 +547,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		} else {
 			c->Rip = (DWORD64)target;
 		}
+		d->resume_rip = target;
 	} else {
 		/* D18: the fault-repair resume re-executes the faulting
 		 * instruction with every register live — and the
@@ -562,6 +566,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			fs_tramp_target = d->regs.rip;
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
 		}
+		d->resume_rip = d->regs.rip;
 	}
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);

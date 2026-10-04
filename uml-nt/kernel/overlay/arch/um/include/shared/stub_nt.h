@@ -213,6 +213,15 @@ struct uml_nt_stub_data {
 	 * maps, shared-run targets: no shared run is ever clobbered). */
 	unsigned long long mapcanary;
 	unsigned long long mapcanary_got;
+
+	/* -- v8: the resume witness (M5.6a, referee 37184498411) --- */
+	/* The stub records the FINAL guest resume target at every
+	 * answer return (the trampoline target when wrapped). The
+	 * kernel's [replay-lost] fire prints it against the faulting
+	 * rip: equal = the store should have re-executed; anything
+	 * else names the exact skip path (signal handler entry,
+	 * rip+2, ...). */
+	unsigned long long resume_rip;
 };
 
 #endif /* __UML_STUB_NT_H */
