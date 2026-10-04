@@ -1593,18 +1593,36 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 
 		want = rf[src];
 	} else if (insn[i] == (unsigned char)0xc7 &&
-		   i + 6 < 8 && ((insn[i + 1] >> 3) & 7) == 0 &&
+		   ((insn[i + 1] >> 3) & 7) == 0 &&
 		   (insn[i + 1] & 0xc0) != 0xc0) {
-		int imm = (int)((unsigned int)insn[i + 2] |
-			((unsigned int)insn[i + 3] << 8) |
-			((unsigned int)insn[i + 4] << 16) |
-			((unsigned int)insn[i + 5] << 24));
+		/* imm32 sits AFTER the ModRM displacement: mod=00 at
+		 * i+2, mod=01 (disp8) at i+3 (the first version read
+		 * the disp8 as the imm — e->key=NULL decoded as 8,
+		 * 37180771956). mod=10 (disp32) at i+6 — needs 8-byte
+		 * window, allow via the i+6 bound. */
+		int imm;
+		int m = (insn[i + 1] >> 6) & 3;
+		int io = i + 2 + (m == 1 ? 1 : m == 2 ? 4 : 0);
 
+		if (io + 4 > 8)
+			return;
+		imm = (int)((unsigned int)insn[io] |
+			((unsigned int)insn[io + 1] << 8) |
+			((unsigned int)insn[io + 2] << 16) |
+			((unsigned int)insn[io + 3] << 24));
 		want = (unsigned long long)(long long)imm;
 	} else
 		return;
 	if (bw_qword(mm, d->fault_addr, &before) < 0)
 		return;
+	{
+		long long roff = uml_nt_vma_translate(
+			mm, d->fault_addr, 8);
+
+		c->rp_armrun = roff < 0 ? 0 :
+			(unsigned long long)roff &
+			~(unsigned long long)(UML_NT_PHYS_RUN_SIZE - 1);
+	}
 	c->rp_va = d->fault_addr;
 	c->rp_want = want;
 	c->rp_before = before;
@@ -1615,16 +1633,28 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 /* [replay-check] verdict at the next syscall park. */
 static void replay_check_verify(struct uml_nt_stub_conn *c)
 {
-	static int rp_budget = 8;
-	unsigned long long now;
+	static int rp_budget = 16;
+	unsigned long long now, vrun = 0;
+	long long voff;
 
 	if (!c->rp_active)
 		return;
 	c->rp_active = 0;
 	if (rp_budget <= 0)
 		return;
-	if (bw_qword(c->mm, c->rp_va, &now) < 0)
+	voff = uml_nt_vma_translate(c->mm, c->rp_va, 8);
+	if (voff < 0)
 		return;
+	vrun = (unsigned long long)voff &
+		~(unsigned long long)(UML_NT_PHYS_RUN_SIZE - 1);
+	now = *(const unsigned long long *)(const void *)
+		((char *)uml_boot.physmem_base + voff);
+	if (vrun != c->rp_armrun)
+		os_info("[replay-lost] pid %lu va=0x%llx piece RE-HOMED "
+			"arm-run=0x%llx verify-run=0x%llx — the store's "
+			"landing (if any) rode the copy\n",
+			(unsigned long)c->pid, c->rp_va,
+			c->rp_armrun, vrun);
 	if (now == c->rp_before && now != c->rp_want) {
 		unsigned long long run, sz = uml_boot.physmem_size;
 		const char *b = (const char *)uml_boot.physmem_base;
@@ -1645,30 +1675,48 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 		 * names the stale op); zero hits = the store never
 		 * re-executed at all (the resume skipped it — the
 		 * signal-path shape). */
-		for (run = 0;
-		     run + 8 <= sz && nhits < 8;
-		     run += UML_NT_PHYS_RUN_SIZE) {
-			unsigned long long o;
+		{
+			/* A wrong-backed view maps run R at the piece's
+			 * base VA — the lost store sits at R + the va's
+			 * offset within its piece. Scan exactly that
+			 * offset on EVERY run: one qword per run,
+			 * unambiguous (37182772578's 4 whole-run hits
+			 * were legit pointer copies at other offsets).
+			 * want==0 (NULL stores — e->key=NULL) can't be
+			 * scanned: the world is full of zeros; report
+			 * skip. */
+			unsigned long long inoff = c->rp_va &
+				(UML_NT_PHYS_RUN_SIZE - 1);
 
-			for (o = 0;
-			     o + 8 <= UML_NT_PHYS_RUN_SIZE;
-			     o += 8)
-				if (*(const unsigned long long *)
-					(const void *)(b + run + o) ==
-				    c->rp_want) {
-					os_info("[replay-lost]   want-qword "
-						"FOUND at phys 0x%llx "
-						"(va's table run holds "
-						"the old value)\n",
-						run + o);
-					nhits++;
-					break;
-				}
+			if (c->rp_want == 0) {
+				os_info("[replay-lost]   want==0 (a NULL "
+					"metadata store) — twin scan "
+					"skipped\n");
+			} else {
+				for (run = 0;
+				     run + 8 <= sz && nhits < 8;
+				     run += UML_NT_PHYS_RUN_SIZE)
+					if (*(const unsigned long long *)
+						(const void *)
+						(b + run + inoff) ==
+					    c->rp_want) {
+						os_info("[replay-lost]   "
+							"twin? want at phys "
+							"0x%llx (in-run off "
+							"0x%llx, table run "
+							"0x%llx)\n",
+							run + inoff, inoff,
+							vrun);
+						nhits++;
+					}
+				if (nhits == 0)
+					os_info("[replay-lost]   want "
+						"ABSENT at in-run offset "
+						"0x%llx on every run — "
+						"the store never "
+						"re-executed\n", inoff);
+			}
 		}
-		if (nhits == 0)
-			os_info("[replay-lost]   want-qword ABSENT "
-				"from all physmem — the store never "
-				"re-executed\n");
 	}
 }
 

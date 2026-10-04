@@ -78,7 +78,8 @@ struct uml_nt_stub_conn {
 	 * same conn's next syscall park: the qword still holding the
 	 * BEFORE value one full round later = the swallowed replay —
 	 * the lost-store class named at the store itself. */
-	unsigned long long rp_va, rp_want, rp_before, rp_rip;
+	unsigned long long rp_va, rp_want, rp_before, rp_rip,
+		rp_armrun;
 	int rp_active;
 	/* process identity for the syscall surface: ppid = the stub
 	 * pid that forked us (0 for the root conn). */
