@@ -1267,6 +1267,7 @@ static unsigned long long bw_find_arena(struct uml_nt_stub_conn *c)
 	for (n = 0; n < 8192 && cur + 0x20 <= mm->heap_end; n++) {
 		unsigned long long sz, fd;
 		long long off = uml_nt_vma_translate(mm, cur + 8, 8);
+		int cand = 0;
 
 		if (off < 0)
 			return 0;
@@ -1291,6 +1292,13 @@ static unsigned long long bw_find_arena(struct uml_nt_stub_conn *c)
 				if (bw_arena_shape(c, av))
 					return av;
 			}
+			/* bound: in-use chunks hold arbitrary user
+			 * data at +0x10 (libc function pointers pass
+			 * the out-of-heap translate filter); the shape
+			 * check rejects each, but the 126-deep probe
+			 * per false candidate must not dominate. */
+			if (++cand > 64)
+				return 0;
 		}
 		cur += sz;
 	}
@@ -1300,7 +1308,7 @@ static unsigned long long bw_find_arena(struct uml_nt_stub_conn *c)
 static void binwatch(struct uml_nt_stub_conn *c,
 		     const unsigned long long *entries)
 {
-	static int bw_budget = 48, bw_discover = 64;
+	static int bw_budget = 48;
 	struct uml_nt_mm *mm = c->mm;
 	unsigned long long av;
 	int bi;
@@ -1313,7 +1321,14 @@ static void binwatch(struct uml_nt_stub_conn *c,
 	if (c->d->cmd != UML_STUB_CMD_SYSCALL)
 		return;
 	if (c->bw_arena == 0) {
-		if (bw_discover-- <= 0)
+		static unsigned int bw_tick;
+
+		/* Retry every 64th syscall round: early boot has
+	 * no bin-linked chunks yet (everything tcache), so a
+	 * one-shot try budget burned out before the first
+	 * unsorted free (referee 37175427829: zero discovery
+	 * lines, 64 tries gone in the first 64 rounds). */
+		if ((++bw_tick & 63u) != 0)
 			return;
 		c->bw_arena = bw_find_arena(c);
 		if (c->bw_arena == 0)
