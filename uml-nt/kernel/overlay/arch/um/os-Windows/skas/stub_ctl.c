@@ -1230,12 +1230,17 @@ static int bw_qword(struct uml_nt_mm *mm, unsigned long long va,
 /* glibc 2.36 malloc_state, pinned by the abort audit's field math:
  * bin_at(1) (unsorted sentinel) = av+0x60, its fd/bk live at
  * av+0x70/av+0x78 (bins[0]/bins[1]); the top pointer qword sits
- * at av+0x60. Shape: top in-heap, unsorted fd/bk self-or-in-heap. */
+ * at av+0x60. v3 shape (37177116246: pid 500 latched a FALSE
+ * arena at av+0x520 — libc .data holds many heap-shaped qwords):
+ * top in-heap, unsorted fd/bk self-or-in-heap, AND a mini-walk of
+ * the unsorted fd chain that terminates at the head within 8
+ * members, each in-heap with a sane size. */
 static int bw_arena_shape(struct uml_nt_stub_conn *c,
 			  unsigned long long av)
 {
 	struct uml_nt_mm *mm = c->mm;
-	unsigned long long top, fd, bk;
+	unsigned long long top, fd, bk, cur;
+	int k;
 
 	if (av == 0 || (av & 0xf))
 		return 0;
@@ -1251,7 +1256,21 @@ static int bw_arena_shape(struct uml_nt_stub_conn *c,
 	if (bk != av + 0x60 && (bk < mm->heap_start ||
 				bk >= mm->heap_end))
 		return 0;
-	return 1;
+	cur = fd;
+	for (k = 0; k < 8 && cur != av + 0x60; k++) {
+		unsigned long long sz, nfd;
+
+		if (cur < mm->heap_start || cur >= mm->heap_end ||
+		    (cur & 0xf))
+			return 0;
+		if (bw_qword(mm, cur + 0x8, &sz) < 0 ||
+		    bw_qword(mm, cur + 0x10, &nfd) < 0)
+			return 0;
+		if ((sz & ~7ull) < 0x20)
+			return 0;
+		cur = nfd;
+	}
+	return cur == av + 0x60;
 }
 
 /* Discover main_arena once per conn: walk the heap's chunk chain;
@@ -1308,7 +1327,9 @@ static unsigned long long bw_find_arena(struct uml_nt_stub_conn *c)
 static void binwatch(struct uml_nt_stub_conn *c,
 		     const unsigned long long *entries)
 {
-	static int bw_budget = 48;
+	static int bw_budget = 64;
+	static unsigned long long bw_seen[16];
+	static int bw_nseen;
 	struct uml_nt_mm *mm = c->mm;
 	unsigned long long av;
 	int bi;
@@ -1324,10 +1345,10 @@ static void binwatch(struct uml_nt_stub_conn *c,
 		static unsigned int bw_tick;
 
 		/* Retry every 64th syscall round: early boot has
-	 * no bin-linked chunks yet (everything tcache), so a
-	 * one-shot try budget burned out before the first
-	 * unsorted free (referee 37175427829: zero discovery
-	 * lines, 64 tries gone in the first 64 rounds). */
+		 * no bin-linked chunks yet (everything tcache), so a
+		 * one-shot try budget burned out before the first
+		 * unsorted free (referee 37175427829: zero discovery
+		 * lines, 64 tries gone in the first 64 rounds). */
 		if ((++bw_tick & 63u) != 0)
 			return;
 		c->bw_arena = bw_find_arena(c);
@@ -1341,91 +1362,155 @@ static void binwatch(struct uml_nt_stub_conn *c,
 	for (bi = 1; bi <= 5 && bw_budget > 0; bi++) {
 		unsigned long long head = av + 0x50 + 16ull * bi;
 		unsigned long long cur;
-		int k, maxw = (bi == 1) ? 16 : 4;
+		int k, maxw = (bi == 1) ? 8 : 4, slot = 0;
 
 		if (bw_qword(mm, head + 0x10, &cur) < 0)
 			return; /* arena page not resident */
 		for (k = 0; k < maxw && cur != head; k++) {
-			unsigned long long sz, fd, bk, fdbk, bkfd,
-				badp = 0;
-			int di, dbl = -1;
+			unsigned long long rec[5];
+			int di, dbl = -1, f, seen2 = 0;
+			unsigned long long dedup;
 
-			if (bw_qword(mm, cur + 0x8, &sz) < 0 ||
-			    bw_qword(mm, cur + 0x10, &fd) < 0 ||
-			    bw_qword(mm, cur + 0x18, &bk) < 0) {
-				bw_budget--;
-				os_info("[binwatch] GARBAGE bin %d member "
-					"0x%llx untranslatable "
-					"(nr=%llu ret=%lld rip=0x%llx)\n",
-					bi, cur, c->last_nr,
-					c->last_ret,
-					c->d->regs.rip);
-				dump_guest_bytes(mm, head, 0x20,
-					 "binwatch-head");
-				break;
-			}
-			sz &= ~7ull;
-			if ((fd >> 48) != 0)
-				badp = fd;
-			else if ((bk >> 48) != 0)
-				badp = bk;
-			else if (fd != head && (fd < mm->heap_start ||
-						fd >= mm->heap_end))
-				badp = fd;
-			else if (bk != head && (bk < mm->heap_start ||
-						bk >= mm->heap_end))
-				badp = bk;
-			if (badp) {
-				bw_budget--;
-				os_info("[binwatch] GARBAGE bin %d member "
-					"0x%llx size=0x%llx fd=0x%llx "
-					"bk=0x%llx (nr=%llu ret=%lld "
-					"rip=0x%llx)\n", bi, cur, sz,
-					fd, bk, c->last_nr, c->last_ret,
-					c->d->regs.rip);
-				dump_guest_bytes(mm, cur, 0x40,
-					 "binwatch-chunk");
-				break;
-			}
-			if (bw_qword(mm, fd + 0x18, &fdbk) < 0 ||
-			    fdbk != cur ||
-			    bw_qword(mm, bk + 0x10, &bkfd) < 0 ||
-			    bkfd != cur) {
-				bw_budget--;
-				os_info("[binwatch] DESYNC bin %d member "
-					"0x%llx size=0x%llx fd=0x%llx "
-					"bk=0x%llx fd->bk=0x%llx "
-					"bk->fd=0x%llx (nr=%llu "
-					"ret=%lld rip=0x%llx)\n", bi,
-					cur, sz, fd, bk, fdbk, bkfd,
-					c->last_nr, c->last_ret,
-					c->d->regs.rip);
-				dump_guest_bytes(mm, cur, 0x40,
-					 "binwatch-chunk");
-				break;
-			}
-			for (di = 0; di < 64; di++)
-				if (entries[di] != 0 &&
-				    (entries[di] == cur + 0x10 ||
-				     entries[di] == cur)) {
-					dbl = di;
-					break;
+			if (bw_qword(mm, cur + 0x8, &rec[0]) < 0 ||
+			    bw_qword(mm, cur + 0x10, &rec[1]) < 0 ||
+			    bw_qword(mm, cur + 0x18, &rec[2]) < 0 ||
+			    bw_qword(mm, rec[1] + 0x18, &rec[3]) < 0 ||
+			    bw_qword(mm, rec[2] + 0x10, &rec[4]) < 0) {
+				/* Untranslatable member or neighbor.
+				 * Only when the member VA itself is
+				 * outside the heap (a heap VA failing
+				 * translate = a mid-rehome piece —
+				 * retry later, not evidence). */
+				if (cur < mm->heap_start ||
+				    cur >= mm->heap_end) {
+					bw_budget--;
+					os_info("[binwatch] pid %lu "
+						"GARBAGE bin %d member "
+						"0x%llx untranslatable "
+						"(nr=%llu ret=%lld "
+						"rip=0x%llx)\n",
+						(unsigned long)c->pid,
+						bi, cur, c->last_nr,
+						c->last_ret,
+						c->d->regs.rip);
+					dump_guest_bytes(mm, head, 0x20,
+							 "binwatch-head");
 				}
-			if (dbl >= 0) {
-				bw_budget--;
-				os_info("[binwatch] DOUBLE-LISTED bin %d "
-					"member 0x%llx also tcache[%d] "
-					"(nr=%llu ret=%lld rip=0x%llx)\n",
-					bi, cur, dbl, c->last_nr,
-					c->last_ret,
-					c->d->regs.rip);
-				dump_guest_bytes(mm, cur, 0x40,
-					 "binwatch-chunk");
 				break;
 			}
-			cur = fd;
+			/* v3 FIELD DIFF (37177116246: the fires only
+			 * showed the after-state): the transition of
+			 * fd/bk/fd->bk/bk->fd INTO an illegal value
+			 * names the exact qword, its old content, and
+			 * the round — the foreign write itself.
+			 * Illegal: non-canonical, or not the bin head
+			 * and outside the heap span (0 stays legal —
+			 * transient churn). */
+			for (f = 1; f <= 4; f++) {
+				unsigned long long v = rec[f];
+				unsigned long long pv;
+				int ill, ill_prev;
+				int have = c->bw_snap_valid &&
+					slot < c->bw_nslot[bi - 1] &&
+					c->bw_snap[bi - 1][slot][0] ==
+						cur;
+
+				pv = have ?
+					c->bw_snap[bi - 1][slot][f] : v;
+				ill = ((v >> 48) != 0 || v == 0) ? 0 :
+					(v != head &&
+					 (v < mm->heap_start ||
+					  v >= mm->heap_end));
+				ill = ill || (v >> 48) != 0;
+				ill_prev = ((pv >> 48) != 0 || pv == 0) ?
+					0 : (pv != head &&
+					     (pv < mm->heap_start ||
+					      pv >= mm->heap_end));
+				ill_prev = ill_prev ||
+					(pv >> 48) != 0;
+				if (ill && !ill_prev && have) {
+					bw_budget--;
+					os_info("[binwatch] pid %lu FIELD "
+						"bin %d member 0x%llx "
+						"[%s] 0x%llx -> 0x%llx "
+						"(nr=%llu ret=%lld "
+						"rip=0x%llx)\n",
+						(unsigned long)c->pid,
+						bi, cur,
+						f == 1 ? "fd" :
+						f == 2 ? "bk" :
+						f == 3 ? "fd->bk" :
+							 "bk->fd",
+						pv, v, c->last_nr,
+						c->last_ret,
+						c->d->regs.rip);
+					dump_guest_bytes(mm, cur, 0x40,
+							 "binwatch-chunk");
+				}
+			}
+			/* record for the next round's diff */
+			if (slot < 8) {
+				for (f = 0; f < 5; f++)
+					c->bw_snap[bi - 1][slot][f] =
+						rec[f];
+				slot++;
+			}
+			/* dedup persistent-state fires so the budget
+			 * survives to NEW events (37177116246 burned
+			 * 48 fires on one member). */
+			dedup = ((unsigned long long)bi << 48) ^ cur;
+			for (di = 0; di < bw_nseen; di++)
+				if (bw_seen[di] == dedup)
+					seen2 = 1;
+			if (!seen2) {
+				if (rec[3] != cur || rec[4] != cur) {
+					if (bw_nseen < 16)
+						bw_seen[bw_nseen++] = dedup;
+					bw_budget--;
+					os_info("[binwatch] pid %lu DESYNC "
+						"bin %d member 0x%llx "
+						"size=0x%llx fd=0x%llx "
+						"bk=0x%llx fd->bk=0x%llx "
+						"bk->fd=0x%llx (nr=%llu "
+						"ret=%lld rip=0x%llx)\n",
+						(unsigned long)c->pid,
+						bi, cur, rec[0] & ~7ull,
+						rec[1], rec[2], rec[3],
+						rec[4], c->last_nr,
+						c->last_ret,
+						c->d->regs.rip);
+					dump_guest_bytes(mm, cur, 0x40,
+							 "binwatch-chunk");
+				}
+				for (di = 0; di < 64; di++)
+					if (entries[di] != 0 &&
+					    (entries[di] == cur + 0x10 ||
+					     entries[di] == cur)) {
+						dbl = di;
+						break;
+					}
+				if (dbl >= 0) {
+					if (bw_nseen < 16)
+						bw_seen[bw_nseen++] = dedup;
+					bw_budget--;
+					os_info("[binwatch] pid %lu "
+						"DOUBLE-LISTED bin %d "
+						"member 0x%llx also "
+						"tcache[%d] (nr=%llu "
+						"ret=%lld rip=0x%llx)\n",
+						(unsigned long)c->pid,
+						bi, cur, dbl,
+						c->last_nr, c->last_ret,
+						c->d->regs.rip);
+					dump_guest_bytes(mm, cur, 0x40,
+							 "binwatch-chunk");
+				}
+			}
+			cur = rec[1];
 		}
+		c->bw_nslot[bi - 1] = slot;
 	}
+	c->bw_snap_valid = 1;
 }
 
 /* [mmdup]: two pieces of the SAME mm claiming overlapping run

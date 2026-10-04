@@ -63,8 +63,14 @@ struct uml_nt_stub_conn {
 	/* binwatch (M5.6a, referee 37144114627): cached main_arena VA
 	 * discovered once by heap scan (0 = not yet); the per-round
 	 * arena-bin walk validates the glibc double-link invariant and
-	 * tcache overlap. */
+	 * tcache overlap. v3 (37177116246): per-bin member/link field
+	 * snapshots — a transition into an ILLEGAL value names the
+	 * exact qword + round (the foreign write itself). */
 	unsigned long long bw_arena;
+	unsigned long long bw_snap[5][8][5]; /* bin,slot,{va,fd,bk,
+		fdbk,bkfd} */
+	int bw_nslot[5];
+	int bw_snap_valid;
 	/* process identity for the syscall surface: ppid = the stub
 	 * pid that forked us (0 for the root conn). */
 	unsigned long long ppid;
