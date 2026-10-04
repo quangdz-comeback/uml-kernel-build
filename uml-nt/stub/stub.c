@@ -61,6 +61,7 @@
 static struct uml_nt_stub_data *d;
 static HANDLE evt_in, evt_out; /* stub->kernel, kernel->stub */
 static HANDLE phys_sec; /* physmem section (per-VMA views, do_action) */
+static volatile unsigned char *flat_view; /* RO whole-section view */
 
 static void die(const char *what, DWORD err)
 {
@@ -477,6 +478,8 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			guest_read_site = 2;
 			d->ss_got = *(volatile unsigned long long *)
 				(uintptr_t)d->ss_va;
+			d->ss_flat = *(volatile unsigned long long *)
+				(flat_view + d->ss_flatoff);
 			guest_read_site = 0;
 			memset(&mbi, 0, sizeof(mbi));
 			if (VirtualQuery((void *)(uintptr_t)d->ss_va,
@@ -781,6 +784,31 @@ int main(int argc, char **argv)
 	phys_sec = (HANDLE)(uintptr_t)phys_h;
 	evt_in = (HANDLE)(uintptr_t)in_h;
 	evt_out = (HANDLE)(uintptr_t)out_h;
+
+	/* The stub's OWN flat view of the physmem section (READ-ONLY,
+	 * unplaced VA — outside the guest span): the post-store #DB
+	 * readback compares the guest view's qword against the flat
+	 * view's at the table's run AT THE SAME INSTANT — the
+	 * canary-at-birth + no-re-map + still-diverged triangle
+	 * (referee 37216364213) breaks only if the covering view is
+	 * NOT the physmem section at all, and this is the direct
+	 * read. */
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+
+		flat_view = MapViewOfFile(phys_sec, FILE_MAP_READ,
+					  0, 0, 0);
+		if (flat_view == NULL)
+			die("MapViewOfFile(flat RO)", GetLastError());
+		/* The guest span must never collide with it. */
+		if (VirtualQuery(flat_view, &mbi, sizeof(mbi)) ==
+		    sizeof(mbi) &&
+		    (uintptr_t)mbi.BaseAddress < 0x68000000u &&
+		    (uintptr_t)mbi.BaseAddress + mbi.RegionSize >
+		     0x60000000u)
+			die("flat view inside the guest span",
+			    ERROR_INVALID_ADDRESS);
+	}
 
 	/* stub_data at the FIXED va (below the guest span) — the NT
 	 * allocator never places anything inside the guest range after

@@ -269,6 +269,12 @@ struct uml_nt_stub_data {
 	 * MEM_PRIVATE allocation squatting on the guest VA). */
 	unsigned long long ss_vtype;
 	unsigned long long ss_vrsize;
+	/* The kernel plants ss_flatoff = the fault VA's byte offset in
+	 * the physmem section per the VMA table; the stub's #DB reads
+	 * flat_view[ss_flatoff] into ss_flat. view vs flat at the same
+	 * instant: divergent = the covering view is not the section. */
+	unsigned long long ss_flatoff;
+	unsigned long long ss_flat;
 };
 
 #endif /* __UML_STUB_NT_H */

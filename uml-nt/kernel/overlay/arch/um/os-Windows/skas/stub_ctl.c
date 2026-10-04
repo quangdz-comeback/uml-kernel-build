@@ -1670,6 +1670,13 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	d->ss_page = d->fault_addr & ~0xfffull;
 	d->ss_va = d->fault_addr;
 	d->ss_got = ~0ull;
+	d->ss_flat = ~0ull;
+	/* The flat offset of the fault VA per the TABLE — the #DB
+	 * reads it through the stub's RO flat view: view vs flat at
+	 * one instant. The arm run is piece-aligned (run-multiple
+	 * VMAs), so the byte offset is arm-run + the in-run bits. */
+	d->ss_flatoff = c->rp_armrun +
+		(d->fault_addr & (UML_NT_PHYS_RUN_SIZE - 1));
 }
 
 /* [replay-check] verdict at the next syscall park. */
@@ -1715,6 +1722,15 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 			c->d->resume_rip == c->rp_rip ?
 			"RESUMED AT THE STORE — yet it never ran?!" :
 			"RESUME WENT ELSEWHERE — the skip path");
+		if (c->d->ss_flat != ~0ull)
+			os_info("[replay-lost]   ss: flat=0x%llx vs "
+				"view=0x%llx at the #DB instant — %s\n",
+				c->d->ss_flat, c->d->ss_got,
+				c->d->ss_flat == c->d->ss_got ?
+				"AGREE (the view IS the section; the "
+				"loss is later)" :
+				"DIVERGED — THE COVERING VIEW IS NOT "
+				"THE PHYSMEM SECTION");
 		if (c->d->ss_got == ~0ull)
 			os_info("[replay-lost]   ss: the #DB NEVER "
 				"FIRED — the store never ran despite "
