@@ -275,6 +275,15 @@ struct uml_nt_stub_data {
 	 * instant: divergent = the covering view is not the section. */
 	unsigned long long ss_flatoff;
 	unsigned long long ss_flat;
+	/* The same-conn stale-view census (M5.6a, oracle k3 pass 2):
+	 * at the post-store #DB the stub VirtualQuery-walks the whole
+	 * guest span and dumps every MEM_MAPPED region here; the
+	 * kernel's fire checks each against the conn's VMA table — a
+	 * region no VMA admits is a stale view (a dropped UNMAP in the
+	 * cross-round plan stream), the last channel every per-view
+	 * witness is blind to. */
+	unsigned int ss_ndump;
+	unsigned long long ss_dump[48][3]; /* base, len, prot|type */
 };
 
 #endif /* __UML_STUB_NT_H */

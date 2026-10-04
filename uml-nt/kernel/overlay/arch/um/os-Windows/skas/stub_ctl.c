@@ -1880,6 +1880,42 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 				}
 			}
 		}
+		{
+			/* The same-conn stale-view census: every dumped
+			 * region the VMA table cannot account for is a
+			 * view the kernel never (or no longer) asked
+			 * for — the dropped-UNMAP class. */
+			unsigned int k;
+
+			for (k = 0; k < c->d->ss_ndump && k < 48; k++) {
+				unsigned long long b =
+					c->d->ss_dump[k][0];
+				unsigned long long l =
+					c->d->ss_dump[k][1];
+				unsigned long long pt =
+					c->d->ss_dump[k][2];
+				unsigned long long va;
+				int admitted = 1;
+
+				for (va = b; va < b + l;
+				     va += UML_NT_PHYS_RUN_SIZE)
+					if (uml_nt_vma_find(c->mm, va) ==
+					    NULL) {
+						admitted = 0;
+						break;
+					}
+				if (!admitted)
+					os_info("[replay-lost]   "
+						"UNADMITTED VIEW "
+						"[0x%llx,+0x%llx) "
+						"prot=0x%llx "
+						"type=0x%llx — the "
+						"table dropped it, "
+						"the view lived on\n",
+						b, l, pt & 0xffffffffull,
+						pt >> 32);
+			}
+		}
 		dump_guest_bytes(c->mm, c->rp_va & ~0xfffull, 0x40,
 				 "replay-page");
 		/* WHERE did the store land? Sweep ALL of physmem for

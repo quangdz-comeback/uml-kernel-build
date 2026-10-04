@@ -481,6 +481,42 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			d->ss_flat = *(volatile unsigned long long *)
 				(flat_view + d->ss_flatoff);
 			guest_read_site = 0;
+			{
+				/* Dump every MEM_MAPPED region in the
+				 * guest span — the kernel diffs this
+				 * against the VMA table. */
+				uintptr_t va = (uintptr_t)d->ram_base;
+				uintptr_t end = va + d->ram_size;
+				unsigned int n = 0;
+
+				while (va < end && n < 48) {
+					MEMORY_BASIC_INFORMATION m2;
+
+					if (VirtualQuery((void *)va, &m2,
+							 sizeof(m2)) !=
+					    sizeof(m2))
+						break;
+					if (m2.State == MEM_MAPPED ||
+					    m2.State == MEM_PRIVATE) {
+						d->ss_dump[n][0] =
+							(unsigned long long)
+							(uintptr_t)
+							m2.BaseAddress;
+						d->ss_dump[n][1] =
+							(unsigned long long)
+							m2.RegionSize;
+						d->ss_dump[n][2] =
+							(unsigned long long)
+							m2.Protect |
+							((unsigned long long)
+							 m2.Type << 32);
+						n++;
+					}
+					va = (uintptr_t)m2.BaseAddress +
+						m2.RegionSize;
+				}
+				d->ss_ndump = n;
+			}
 			memset(&mbi, 0, sizeof(mbi));
 			if (VirtualQuery((void *)(uintptr_t)d->ss_va,
 					 &mbi, sizeof(mbi)) == sizeof(mbi)) {
