@@ -528,6 +528,14 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			}
 			c->EFlags &= ~(DWORD)0x100;
 			d->ss_page = 0;
+			if (d->fs_base != 0 && have_fsgsbase) {
+				fs_save_r11 = c->R11;
+				fs_tramp_base = d->fs_base;
+				fs_tramp_target =
+					(unsigned long long)c->Rip;
+				c->Rip = (DWORD64)(uintptr_t)
+					&fs_trampoline_fault;
+			}
 		}
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
@@ -586,7 +594,6 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			fs_tramp_base = d->fs_base;
 			fs_save_r11 = c->R11;
 			fs_tramp_target = c->Rip;
-			d->resume_rip = c->Rip;
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
