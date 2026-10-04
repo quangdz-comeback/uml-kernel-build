@@ -222,6 +222,18 @@ struct uml_nt_stub_data {
 	 * else names the exact skip path (signal handler entry,
 	 * rip+2, ...). */
 	unsigned long long resume_rip;
+
+	/* -- v9: the view readback (M5.6a, referee 37197703025) ------- */
+	/* The twin scan stayed ambiguous across same-VA-space fork
+	 * children (an inherited tcache copy at the same in-run offset
+	 * is indistinguishable from a stale view's landing). Settle it
+	 * directly: the kernel sets viewprobe_addr to the fault VA when
+	 * arming replay-check; the stub, after a PROTECT op applies,
+	 * reads the qword THROUGH ITS OWN VIEW into viewprobe_got. The
+	 * kernel compares with the VMA-table-side value: a mismatch is
+	 * the wrong-backed view itself, no scanning. */
+	unsigned long long viewprobe_addr;
+	unsigned long long viewprobe_got;
 };
 
 #endif /* __UML_STUB_NT_H */

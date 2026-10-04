@@ -1628,6 +1628,10 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	c->rp_before = before;
 	c->rp_rip = d->regs.rip;
 	c->rp_active = 1;
+	/* viewprobe: the stub snapshots the fault VA through its own
+	 * view once the repair's PROTECT applies (read at the
+	 * PROTDONE below) — the wrong-backed view shows itself. */
+	d->viewprobe_addr = d->fault_addr;
 }
 
 /* [replay-check] verdict at the next syscall park. */
@@ -2590,6 +2594,38 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			*(unsigned long long *)
 				((char *)uml_boot.physmem_base + c->mc_off) =
 				c->mc_orig;
+		}
+		if (c->rp_active) {
+			/* The repair PROT_DONE for a replay-armed fault:
+			 * compare the stub's own-view read of the fault
+			 * qword with the VMA table's run content. */
+			unsigned long long tbl = 0;
+			int have = 0;
+
+			if (c->rp_active) {
+				long long vo = uml_nt_vma_translate(
+					c->mm, c->rp_va, 8);
+
+				if (vo >= 0) {
+					tbl = *(const unsigned long long *)
+						(const void *)
+						((char *)uml_boot.physmem_base
+						 + vo);
+					have = 1;
+				}
+			}
+			if (have && d->viewprobe_got != tbl)
+				os_info("[replay] VIEW-DIVERGED pid %lu "
+					"va=0x%llx stub-view=0x%llx "
+					"table-run=0x%llx — the conn's view "
+					"is NOT the VMA table's backing\n",
+					(unsigned long)c->pid, c->rp_va,
+					d->viewprobe_got, tbl);
+			else if (have)
+				os_info("[replay] view-ok pid %lu "
+					"va=0x%llx qword=0x%llx\n",
+					(unsigned long)c->pid, c->rp_va, tbl);
+			d->viewprobe_got = 0;
 		}
 		if (c->plan_left > 1) {
 			c->plan_left--;

@@ -256,6 +256,18 @@ static int do_action(void)
 				(unsigned)d->prot, GetLastError());
 			return 0;
 		}
+		/* viewprobe (stub_nt.h v9): the page is readable again
+		 * — snapshot the kernel's chosen qword THROUGH this
+		 * view so the kernel can compare it against the VMA
+		 * table's run. A divergence here is the wrong-backed
+		 * view itself. */
+		if (d->viewprobe_addr != 0) {
+			if (d->prot != 0 /* not NOACCESS */)
+				d->viewprobe_got =
+					*(volatile unsigned long long *)
+					(uintptr_t)d->viewprobe_addr;
+			d->viewprobe_addr = 0;
+		}
 		return verify_prot(page, d->prot);
 	}
 	case UML_STUB_ACTION_MAP: {
