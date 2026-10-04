@@ -461,21 +461,22 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 		{
-			ULONG old_prot;
-			void *pg = (void *)(uintptr_t)d->ss_page;
-
 			/* The store JUST executed — read its target
-			 * through THIS view before anything else can
-			 * run. The kernel compares against the VMA
-			 * table's run: a match-less pair is the
-			 * wrong-backed twin at the qword. */
+			 * through THIS view (the page is writable: the
+			 * store just ran — the read cannot fault).
+			 * The kernel compares against the VMA table's
+			 * run: a match-less pair is the wrong-backed
+			 * twin at the qword. NO page re-arm here: the
+			 * NOACCESS rode the next store into a second
+			 * arm whose repair died mid-PROT_DONE
+			 * (referees 37205147552/37207228247) — the
+			 * reverter-catch half is dropped, the
+			 * readback alone settles the twin. */
 			guest_read_site = 2;
 			d->ss_got = *(volatile unsigned long long *)
 				(uintptr_t)d->ss_va;
 			guest_read_site = 0;
 			c->EFlags &= ~(DWORD)0x100;
-			VirtualProtect(pg, (SIZE_T)0x1000, PAGE_NOACCESS,
-				       &old_prot);
 			d->ss_page = 0;
 		}
 		return EXCEPTION_CONTINUE_EXECUTION;

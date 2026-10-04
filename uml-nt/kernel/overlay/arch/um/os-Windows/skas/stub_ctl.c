@@ -1650,19 +1650,6 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	d->ss_page = d->fault_addr & ~0xfffull;
 	d->ss_va = d->fault_addr;
 	d->ss_got = ~0ull;
-	{
-		unsigned int k;
-
-		for (k = 0; k < UML_NT_COWTRAP_N; k++)
-			if (cowtraps[k].conn == NULL) {
-				cowtraps[k].conn = c;
-				cowtraps[k].lo = d->ss_page;
-				cowtraps[k].hi = d->ss_page +
-					UML_NT_FAULT_PAGE_SIZE;
-				cowtraps[k].run_off = c->rp_armrun;
-				break;
-			}
-	}
 }
 
 /* [replay-check] verdict at the next syscall park. */
