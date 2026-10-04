@@ -1626,6 +1626,10 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 	if (bw_qword(c->mm, c->rp_va, &now) < 0)
 		return;
 	if (now == c->rp_before && now != c->rp_want) {
+		unsigned long long run, sz = uml_boot.physmem_size;
+		const char *b = (const char *)uml_boot.physmem_base;
+		int nhits = 0;
+
 		rp_budget--;
 		os_info("[replay-lost] pid %lu va=0x%llx rip=0x%llx "
 			"want=0x%llx still=0x%llx (nr=%llu ret=%lld "
@@ -1635,6 +1639,36 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 			c->d->regs.rip);
 		dump_guest_bytes(c->mm, c->rp_va & ~0xfffull, 0x40,
 				 "replay-page");
+		/* WHERE did the store land? Sweep ALL of physmem for
+		 * the want-qword: a hit on another run = the store
+		 * executed against a WRONG-BACKED view (the twin run
+		 * names the stale op); zero hits = the store never
+		 * re-executed at all (the resume skipped it — the
+		 * signal-path shape). */
+		for (run = 0;
+		     run + 8 <= sz && nhits < 8;
+		     run += UML_NT_PHYS_RUN_SIZE) {
+			unsigned long long o;
+
+			for (o = 0;
+			     o + 8 <= UML_NT_PHYS_RUN_SIZE;
+			     o += 8)
+				if (*(const unsigned long long *)
+					(const void *)(b + run + o) ==
+				    c->rp_want) {
+					os_info("[replay-lost]   want-qword "
+						"FOUND at phys 0x%llx "
+						"(va's table run holds "
+						"the old value)\n",
+						run + o);
+					nhits++;
+					break;
+				}
+		}
+		if (nhits == 0)
+			os_info("[replay-lost]   want-qword ABSENT "
+				"from all physmem — the store never "
+				"re-executed\n");
 	}
 }
 
