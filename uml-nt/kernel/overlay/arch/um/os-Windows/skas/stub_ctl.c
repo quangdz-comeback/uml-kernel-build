@@ -1754,6 +1754,26 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 				"MEM_MAPPED — a section view" :
 				c->d->ss_vtype == 0x1000000ull ?
 				"MEM_IMAGE" : "?");
+		os_info("[replay-lost]   arm-run=0x%llx verify-run=0x%llx "
+			"(the piece's run at the fault vs now — a move "
+			"WITHOUT an op in the ledger is the table-side "
+			"disease)\n", c->rp_armrun, vrun);
+		{
+			/* The raw table entry for the fault VA: if its
+			 * run_off equals neither the last ledger MAP's
+			 * off nor the arm-run, the table moved with
+			 * no op at all. */
+			const struct uml_nt_vma *vv = uml_nt_vma_find(
+				c->mm, c->rp_va);
+
+			if (vv != NULL)
+				os_info("[replay-lost]   vma "
+					"[0x%llx,0x%llx) run_off=0x%llx "
+					"prot=0x%x flags=0x%x\n",
+					vv->start, vv->end,
+					(unsigned long long)vv->run_off,
+					vv->prot, vv->flags);
+		}
 		dump_guest_bytes(c->mm, c->rp_va & ~0xfffull, 0x40,
 				 "replay-page");
 		/* WHERE did the store land? Sweep ALL of physmem for
