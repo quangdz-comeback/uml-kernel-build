@@ -262,6 +262,18 @@ struct uml_nt_stub_data {
 	 * Matched against the conn's MAP-op history it names the exact
 	 * stream that left the wrong-backed view in place. */
 	unsigned long long ss_viewbase;
+	/* ss-regs (v11): the fault's full GP file, snapshotted by the
+	 * kernel at the arm. The post-store #DB compares the live
+	 * context against it: a pure store changes NO register, and
+	 * the trampoline touches only r11 (saved/restored), so ANY
+	 * mismatch is the register-tear class — the guest computing
+	 * with wrong inputs (a store to a computed-and-wrong VA never
+	 * faults and is invisible to every page witness). ss_regdiff
+	 * = the mismatch bitmask, ss_reglive[] = the live values. */
+	unsigned long long ss_regs[16];
+	unsigned long long ss_rflags;
+	unsigned long long ss_regdiff;
+	unsigned long long ss_reglive[16];
 	/* The covering region's Type (MEM_IMAGE/MAPPED/PRIVATE) and
 	 * RegionSize at the same #DB: referee 37209966901 proved the
 	 * store lands view-side yet its value exists in NO physmem run —

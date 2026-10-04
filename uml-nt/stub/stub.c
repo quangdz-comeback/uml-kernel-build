@@ -526,6 +526,32 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 				d->ss_vrsize = (unsigned long long)
 					mbi.RegionSize;
 			}
+			/* ss-regs (v11): a pure store changes no
+			 * register and the trampoline only borrows
+			 * r11 (restored) — the live file must equal
+			 * the fault's snapshot, else the guest is
+			 * computing with torn inputs (the one writer
+			 * class no page witness can see). */
+			{
+				unsigned long long live[16];
+				unsigned long long diff = 0;
+				int ri;
+
+				live[0] = c->Rax;  live[1] = c->Rcx;
+				live[2] = c->Rdx;  live[3] = c->Rbx;
+				live[4] = c->Rsp;  live[5] = c->Rbp;
+				live[6] = c->Rsi;  live[7] = c->Rdi;
+				live[8] = c->R8;   live[9] = c->R9;
+				live[10] = c->R10; live[11] = c->R11;
+				live[12] = c->R12; live[13] = c->R13;
+				live[14] = c->R14; live[15] = c->R15;
+				for (ri = 0; ri < 16; ri++) {
+					if (live[ri] != d->ss_regs[ri])
+						diff |= 1ull << ri;
+					d->ss_reglive[ri] = live[ri];
+				}
+				d->ss_regdiff = diff;
+			}
 			c->EFlags &= ~(DWORD)0x100;
 			d->ss_page = 0;
 			if (d->fs_base != 0 && have_fsgsbase) {

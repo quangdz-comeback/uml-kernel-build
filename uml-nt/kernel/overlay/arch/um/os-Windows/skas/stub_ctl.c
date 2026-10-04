@@ -1675,6 +1675,10 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	d->ss_va = d->fault_addr;
 	d->ss_got = ~0ull;
 	d->ss_flat = ~0ull;
+	/* ss-regs (v11): the fault's register file — the #DB compares */
+	__builtin_memcpy(d->ss_regs, &d->regs, 16 * 8);
+	d->ss_rflags = d->regs.rflags;
+	d->ss_regdiff = 0;
 	/* whole-page snapshot for the revert census at the verify */
 	if (c->rp_armrun != 0)
 		__builtin_memcpy(c->rp_pagesnap,
@@ -1743,6 +1747,27 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 				"loss is later)" :
 				"DIVERGED — THE COVERING VIEW IS NOT "
 				"THE PHYSMEM SECTION");
+		if (c->d->ss_regdiff != 0) {
+			static const char *const regnames[16] = {
+				"rax", "rcx", "rdx", "rbx",
+				"rsp", "rbp", "rsi", "rdi",
+				"r8", "r9", "r10", "r11",
+				"r12", "r13", "r14", "r15" };
+			int ri;
+
+			os_info("[ss-regs] pid %lu va=0x%llx REGISTER "
+				"TEAR: diff mask 0x%llx — the guest "
+				"resumed with wrong inputs\n",
+				(unsigned long)c->pid, c->rp_va,
+				c->d->ss_regdiff);
+			for (ri = 0; ri < 16; ri++)
+				if (c->d->ss_regdiff & (1ull << ri))
+					os_info("[ss-regs]   %s: fault "
+						"0x%llx live 0x%llx\n",
+						regnames[ri],
+						c->d->ss_regs[ri],
+						c->d->ss_reglive[ri]);
+		}
 		if (c->d->ss_got == ~0ull)
 			os_info("[replay-lost]   ss: the #DB NEVER "
 				"FIRED — the store never ran despite "
