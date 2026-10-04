@@ -435,8 +435,22 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		 * 37201007185 died in exactly that loop). Keep TF and
 		 * let the store run; the NEXT #DB (rip past the store)
 		 * is the real one. */
-		if ((unsigned long long)c->Rip == fs_tramp_target)
+		if ((unsigned long long)c->Rip == fs_tramp_target ||
+		    ((unsigned long long)c->Rip >=
+				(unsigned long long)(uintptr_t)
+					&fs_trampoline_fault_tf &&
+		     (unsigned long long)c->Rip <
+				(unsigned long long)(uintptr_t)
+					&fs_trampoline_fault_tf + 32)) {
+			/* Mid-trampoline or at the store's door. TF does
+			 * NOT survive the exception return (local wine
+			 * probe: the #DB-after-jmp's context return
+			 * drops TF — the store then ran untraced);
+			 * re-raise it at every hop until the store has
+			 * executed. */
+			c->EFlags |= (DWORD)0x100;
 			return EXCEPTION_CONTINUE_EXECUTION;
+		}
 		{
 			ULONG old_prot;
 			void *pg = (void *)(uintptr_t)d->ss_page;
