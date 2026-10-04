@@ -86,6 +86,13 @@ struct uml_nt_stub_conn {
 	 * one reverted qword = the natural chunk cycle; a page full
 	 * of reverted qwords = a wholesale rewrite by a sibling. */
 	unsigned char rp_pagesnap[4096];
+	/* The all-faults resume watchdog (M5.6a): every fault round
+	 * records its rip; the next round compares d->resume_rip — a
+	 * resume that is NOT the faulting rip is the broken-resume
+	 * class (the replay-check only ever watched armed pages; the
+	 * heap's mid-heap formation faults were never covered). */
+	unsigned long long last_fault_rip, last_fault_addr;
+	int last_fault_valid;
 	int rp_active;
 	/* process identity for the syscall surface: ppid = the stub
 	 * pid that forked us (0 for the root conn). */

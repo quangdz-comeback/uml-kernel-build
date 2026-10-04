@@ -2801,6 +2801,28 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * was produced up to the previous round (last_nr names it). */
 	tcache_watch(c);
 
+	/* The all-faults resume watchdog: the previous fault's answer
+	 * must have resumed AT the faulting instruction. Loud, not
+	 * fatal — the boot dies on its own if the divergence is
+	 * real. Skips verdicts where the resume never happened (the
+	 * conn died mid-plan). */
+	if (c->last_fault_valid && d->cmd != UML_STUB_CMD_PROT_DONE) {
+		static int rw_budget = 8;
+
+		c->last_fault_valid = 0;
+		if (rw_budget > 0 && d->resume_rip != 0 &&
+		    d->resume_rip != c->last_fault_rip) {
+			rw_budget--;
+			os_info("[resume-diverge] pid %lu fault "
+				"rip=0x%llx addr=0x%llx but resumed at "
+				"0x%llx — the guest never re-ran the "
+				"faulting instruction\n",
+				(unsigned long)c->pid,
+				c->last_fault_rip, c->last_fault_addr,
+				d->resume_rip);
+		}
+	}
+
 	if (d->cmd == UML_STUB_CMD_PROT_DONE) {
 		/* The stub reports its op result. Failure here means
 		 * the guest would re-fault forever — kill it instead
@@ -3315,6 +3337,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			d->err = 1;
 			return -1;
 		}
+		c->last_fault_rip = d->regs.rip;
+		c->last_fault_addr = d->fault_addr;
+		c->last_fault_valid = 1;
 		os_info("[stubtest] FAULT pid %lu addr=0x%llx type=%u -> "
 			"%d op(s)\n", (unsigned long)c->pid, d->fault_addr,
 			d->fault_type, c->plan.n_ops);
