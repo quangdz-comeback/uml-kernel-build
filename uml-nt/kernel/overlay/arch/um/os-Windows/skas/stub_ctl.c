@@ -48,6 +48,7 @@
 #include <syscall.h>
 #include <mm_id.h>
 #include <uaccess_walk.h>
+#include <physalloc.h>
 #include "internal.h"
 
 extern const char nt_guest_init_start[], nt_guest_init_end[];
@@ -1574,6 +1575,9 @@ static void mmdup_census(struct uml_nt_stub_conn *c)
 	}
 }
 
+static void cross_stub_census(struct uml_nt_stub_conn *self,
+			      unsigned long long arm_run);
+
 /* [replay-check] arm: decode the faulting qword store and snapshot
  * the target's BEFORE content. Pure x86 prefix decode for the two
  * glibc-metadata forms (mov r64->m64, mov imm32->m64) — the register
@@ -2796,8 +2800,8 @@ static void cross_stub_census(struct uml_nt_stub_conn *self,
 		    pc->mm == NULL ||
 		    pc->dead_magic == UML_NT_CONN_DEAD)
 			continue;
-		va = uml_boot.ram_base;
-		while (va < uml_boot.ram_base + uml_boot.physmem_size &&
+		va = UML_NT_GUEST_VA_BASE;
+		while (va < UML_NT_GUEST_VA_BASE + uml_boot.physmem_size &&
 		       bad < 3) {
 			MEMORY_BASIC_INFORMATION mbi;
 			SIZE_T got;
