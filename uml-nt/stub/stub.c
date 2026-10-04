@@ -190,6 +190,26 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
 	);
 }
 
+/* TF variant (stub_nt.h v10, the replay single-step): identical, but
+ * TF rises right before the jump — a TF in the VEH context would
+ * #DB on wrfsbase, inside the trampoline, before the guest store.
+ * With TF set here, the first guest instruction (the replayed
+ * store) executes and the #DB lands AFTER it: the handler re-arms
+ * the page NOACCESS, so the NEXT writer (the reverter, if any) is
+ * caught by the kernel's cowtrap. */
+__attribute__((naked)) static void fs_trampoline_fault_tf(void)
+{
+	__asm__ volatile (
+		"movq	fs_tramp_base(%rip), %r11\n\t"
+		"wrfsbase %r11\n\t"
+		"movq	fs_save_r11(%rip), %r11\n\t"
+		"pushfq\n\t"
+		"orq	$0x100, (%rsp)\n\t"
+		"popfq\n\t"
+		"jmp	*fs_tramp_target(%rip)\n\t"
+	);
+}
+
 /* FILE_MAP_* bits for a view with `prot` protection. FILE_MAP_EXECUTE
  * (0x20) must ride along on every executable view (M2.1 pitfall 9:
  * without it the first fetch dies with a DEP AV, info[0]=8).
@@ -403,6 +423,20 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	int is_fault = (er->ExceptionCode == STATUS_ACCESS_VIOLATION);
 	int verbatim;
 
+	/* Replay single-step (stub_nt.h v10): the repaired store just
+	 * executed; re-arm its page NOACCESS so the NEXT writer faults
+	 * into the kernel's cowtrap. Pure stub-local: no publish. */
+	if (er->ExceptionCode == STATUS_SINGLE_STEP && d->ss_page != 0) {
+		ULONG old_prot;
+		void *pg = (void *)(uintptr_t)d->ss_page;
+
+		c->EFlags &= ~(DWORD)0x100;
+		VirtualProtect(pg, (SIZE_T)0x1000, PAGE_NOACCESS,
+			       &old_prot);
+		d->ss_page = 0;
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+
 	if (!is_syscall && !is_fault) {
 		report_unowned(er, c);
 		return EXCEPTION_CONTINUE_SEARCH;
@@ -576,7 +610,11 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			fs_save_r11 = c->R11;
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = d->regs.rip;
-			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
+			c->Rip = (DWORD64)(uintptr_t)
+				(d->ss_page != 0 ? &fs_trampoline_fault_tf
+						 : &fs_trampoline_fault);
+		} else if (d->ss_page != 0) {
+			c->EFlags |= 0x100; /* TF: #DB after the store */
 		}
 		d->resume_rip = d->regs.rip;
 	}

@@ -234,6 +234,17 @@ struct uml_nt_stub_data {
 	 * the wrong-backed view itself, no scanning. */
 	unsigned long long viewprobe_addr;
 	unsigned long long viewprobe_got;
+
+	/* -- v10: the replay single-step (M5.6a) -------------------- */
+	/* replay-check proved the repair's view is correct (viewprobe)
+	 * and the resume targets the store (resume_rip), yet the qword
+	 * reads back as the pre-fault value one park later. Between
+	 * those witnesses the store either never ran or was overwritten
+	 * back. The single-step settles the order: nonzero ss_page makes
+	 * the fault resume trap exactly once after the replayed store;
+	 * the stub re-arms the page NOACCESS, so the next write to the
+	 * page faults into the kernel's cowtrap with its rip. */
+	unsigned long long ss_page;
 };
 
 #endif /* __UML_STUB_NT_H */

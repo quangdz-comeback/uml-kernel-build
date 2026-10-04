@@ -1632,6 +1632,24 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	 * view once the repair's PROTECT applies (read at the
 	 * PROTDONE below) — the wrong-backed view shows itself. */
 	d->viewprobe_addr = d->fault_addr;
+	/* single-step (v10): after the repair the stub resumes with
+	 * TF; the post-store #DB re-arms the page NOACCESS so the
+	 * NEXT writer (the replay proves itself first) is caught by
+	 * the re-armed cowtrap slot below. */
+	d->ss_page = d->fault_addr & ~0xfffull;
+	{
+		unsigned int k;
+
+		for (k = 0; k < UML_NT_COWTRAP_N; k++)
+			if (cowtraps[k].conn == NULL) {
+				cowtraps[k].conn = c;
+				cowtraps[k].lo = d->ss_page;
+				cowtraps[k].hi = d->ss_page +
+					UML_NT_FAULT_PAGE_SIZE;
+				cowtraps[k].run_off = c->rp_armrun;
+				break;
+			}
+	}
 }
 
 /* [replay-check] verdict at the next syscall park. */
