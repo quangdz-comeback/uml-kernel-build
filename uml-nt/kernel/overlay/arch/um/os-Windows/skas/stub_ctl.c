@@ -2767,6 +2767,76 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	}
 }
 
+/* M5.6a claim-audit: a phys run claimed by two live mms is legit
+ * ONLY while BOTH VMAs carry the COW flag (the fork marks both
+ * sides; the brk re-home's flags=0 rebuild wiped it once — see the
+ * syscall.c fix). A double-claim with a non-COW side means both
+ * owners take mm_fault's private path and write the SAME physical
+ * run concurrently (stubs run guest code in parallel — the pump
+ * serializes only the kernel side): the shared-heap tear. Runs at
+ * every 4096th syscall park, loud-budgeted. */
+static void claim_audit(void)
+{
+	static unsigned char claims[2048];
+	static unsigned short cow_ok[2048];
+	static int first_pid[2048];
+	static unsigned long rounds;
+	struct task_struct *p;
+	int runs = (int)(uml_boot.physmem_size / UML_NT_PHYS_RUN_SIZE);
+	static int audit_budget = 8;
+	int i;
+
+	if (runs > 2048)
+		runs = 2048;
+	if (++rounds % 4096 != 0 || audit_budget <= 0)
+		return;
+	memset(claims, 0, sizeof(claims));
+	memset(cow_ok, 0, sizeof(cow_ok));
+	for (i = 0; i < runs; i++)
+		first_pid[i] = -1;
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		int vi;
+
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			continue;
+		for (vi = 0; vi < pc->mm->nvma; vi++) {
+			struct uml_nt_vma *v = &pc->mm->vma[vi];
+			unsigned long long off;
+
+			for (off = v->run_off;
+			     off < v->run_off + (v->end - v->start);
+			     off += UML_NT_PHYS_RUN_SIZE) {
+				int r = (int)(off / UML_NT_PHYS_RUN_SIZE);
+
+				if (r >= runs)
+					continue;
+				if (claims[r] == 0)
+					first_pid[r] = (int)pc->pid;
+				if (claims[r] < 250)
+					claims[r]++;
+				if (v->flags & UML_NT_VMA_COW)
+					cow_ok[r]++;
+			}
+		}
+	}
+	for (i = 0; i < runs && audit_budget > 0; i++)
+		if (claims[i] >= 2 && cow_ok[i] < claims[i]) {
+			audit_budget--;
+			os_info("[claim-audit] run 0x%llx claimed by %d "
+				"mms but only %d COW-flagged (first "
+				"pid %d) — a non-COW owner's writes "
+				"never fault: shared-RW tear\n",
+				(unsigned long long)i *
+					UML_NT_PHYS_RUN_SIZE,
+				claims[i], cow_ok[i], first_pid[i]);
+		}
+}
+
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
@@ -2800,6 +2870,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * conn's tcache BEFORE serving this round; poison seen here
 	 * was produced up to the previous round (last_nr names it). */
 	tcache_watch(c);
+
+	if (d->cmd == UML_STUB_CMD_SYSCALL)
+		claim_audit();
 
 	/* The all-faults resume watchdog: the previous fault's answer
 	 * must have resumed AT the faulting instruction. Loud, not
