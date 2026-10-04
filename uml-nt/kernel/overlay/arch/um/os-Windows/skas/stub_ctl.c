@@ -1554,6 +1554,90 @@ static void mmdup_census(struct uml_nt_stub_conn *c)
 	}
 }
 
+/* [replay-check] arm: decode the faulting qword store and snapshot
+ * the target's BEFORE content. Pure x86 prefix decode for the two
+ * glibc-metadata forms (mov r64->m64, mov imm32->m64) — the register
+ * file order matches the hardware encoding (rax=0..r15=15). */
+static void replay_check_arm(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	struct uml_nt_mm *mm = c->mm;
+	unsigned long long want, before;
+	long long off;
+	unsigned char insn[8];
+	int rex_r = 0, i;
+	unsigned long long *rf = &d->regs.rax;
+
+	c->rp_active = 0;
+	if (d->fault_type != 1 || mm == NULL ||
+	    mm->heap_start == 0 ||
+	    d->fault_addr < mm->heap_start ||
+	    d->fault_addr >= mm->heap_end ||
+	    d->fault_addr & 7)
+		return;
+	off = uml_nt_vma_translate(mm, d->regs.rip, 8);
+	if (off < 0)
+		return;
+	for (i = 0; i < 8; i++)
+		insn[i] = ((const unsigned char *)
+			uml_boot.physmem_base)[off + i];
+	i = 0;
+	if ((insn[0] & 0xf0) == 0x40 && (insn[0] & 0x08)) { /* REX.W */
+		rex_r = (insn[0] >> 2) & 1;
+		i = 1;
+	} else
+		return;
+	if (insn[i] == (unsigned char)0x89 &&
+	    i + 2 < 8 && (insn[i + 1] & 0xc0) != 0xc0) {
+		int src = ((insn[i + 1] >> 3) & 7) + (rex_r ? 8 : 0);
+
+		want = rf[src];
+	} else if (insn[i] == (unsigned char)0xc7 &&
+		   i + 6 < 8 && ((insn[i + 1] >> 3) & 7) == 0 &&
+		   (insn[i + 1] & 0xc0) != 0xc0) {
+		int imm = (int)((unsigned int)insn[i + 2] |
+			((unsigned int)insn[i + 3] << 8) |
+			((unsigned int)insn[i + 4] << 16) |
+			((unsigned int)insn[i + 5] << 24));
+
+		want = (unsigned long long)(long long)imm;
+	} else
+		return;
+	if (bw_qword(mm, d->fault_addr, &before) < 0)
+		return;
+	c->rp_va = d->fault_addr;
+	c->rp_want = want;
+	c->rp_before = before;
+	c->rp_rip = d->regs.rip;
+	c->rp_active = 1;
+}
+
+/* [replay-check] verdict at the next syscall park. */
+static void replay_check_verify(struct uml_nt_stub_conn *c)
+{
+	static int rp_budget = 8;
+	unsigned long long now;
+
+	if (!c->rp_active)
+		return;
+	c->rp_active = 0;
+	if (rp_budget <= 0)
+		return;
+	if (bw_qword(c->mm, c->rp_va, &now) < 0)
+		return;
+	if (now == c->rp_before && now != c->rp_want) {
+		rp_budget--;
+		os_info("[replay-lost] pid %lu va=0x%llx rip=0x%llx "
+			"want=0x%llx still=0x%llx (nr=%llu ret=%lld "
+			"rip=0x%llx) — the repaired store NEVER LANDED\n",
+			(unsigned long)c->pid, c->rp_va, c->rp_rip,
+			c->rp_want, now, c->last_nr, c->last_ret,
+			c->d->regs.rip);
+		dump_guest_bytes(c->mm, c->rp_va & ~0xfffull, 0x40,
+				 "replay-page");
+	}
+}
+
 static void tcache_watch(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_mm *mm = c->mm;
@@ -1674,7 +1758,10 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	       sizeof(entries));
 	/* [binwatch]/[mmdup]: the arena-bin walk (the 37144114627
 	 * blind spot — unsorted-bin bk garbage with every tcache-side
-	 * witness silent) + the same-mm run-alias census. */
+	 * witness silent) + the same-mm run-alias census. The
+	 * [replay-check] verdict rides the same syscall park. */
+	if (c->d->cmd == UML_STUB_CMD_SYSCALL)
+		replay_check_verify(c);
 	binwatch(c, entries);
 	mmdup_census(c);
 	/* DELTA WATCH (referee 37085373580 decode): the cowtrap on the
