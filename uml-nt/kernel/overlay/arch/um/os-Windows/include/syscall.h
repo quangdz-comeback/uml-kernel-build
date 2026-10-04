@@ -80,7 +80,7 @@ struct uml_nt_stub_conn {
 	 * the lost-store class named at the store itself. */
 	unsigned long long rp_va, rp_want, rp_before, rp_rip,
 		rp_armrun;
-	unsigned long long op_log[8][5];
+	unsigned long long op_log[64][5];
 	int op_log_n;
 	/* whole-page snapshot at the arm (the (A)-vs-(B) rider):
 	 * one reverted qword = the natural chunk cycle; a page full

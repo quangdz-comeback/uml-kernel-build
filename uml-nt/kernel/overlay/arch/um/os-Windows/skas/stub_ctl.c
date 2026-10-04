@@ -581,14 +581,14 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 	/* OP LEDGER (M5.6a, referee 37212286263): the wrong-backed
 	 * twin is a MEM_MAPPED section view at the heap start whose
 	 * backing offset is stale — some MAP op carried an old run.
-	 * Record every op touching the first heap piece (8-deep ring);
-	 * the [replay-lost] fire dumps it — the stale MAP names
-	 * itself. */
-	if (c->mm != NULL && c->mm->heap_start != 0 &&
-	    op->va < c->mm->heap_start + 0x10000 &&
-	    op->va + op->len > c->mm->heap_start) {
+	 * Record EVERY view op (64-deep ring — the fires land on
+	 * pieces beyond the first, referee 37237334098: fire VAs at
+	 * 0x67c3-0x67cf while the first-piece-only filter saw
+	 * nothing). The [replay-lost] fire dumps the ops touching
+	 * the fire page — the stale MAP/re-protect names itself. */
+	if (1) {
 		unsigned long long *e =
-			c->op_log[c->op_log_n % 8];
+			c->op_log[c->op_log_n % 64];
 
 		e[0] = op->op;
 		e[1] = op->prot;
@@ -1783,12 +1783,18 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 				"the store's own value is absent even "
 				"view-side");
 		{
-			int k, n = c->op_log_n < 8 ? c->op_log_n : 8;
+			int k, n = c->op_log_n < 64 ? c->op_log_n : 64;
 
+			/* dump only the ops touching the fire page */
 			for (k = 0; k < n; k++) {
 				unsigned long long *e = c->op_log[
-					(c->op_log_n - n + k) % 8];
+					(c->op_log_n - n + k) % 64];
 
+				if (e[2] + e[3] <= (c->rp_va &
+						    ~0xfffull) ||
+				    e[2] >= (c->rp_va & ~0xfffull) +
+					    0x1000)
+					continue;
 				os_info("[replay-lost]   oplog[%d]: "
 					"op=%llu prot=0x%llx va=0x%llx "
 					"len=0x%llx off=0x%llx\n",
