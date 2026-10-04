@@ -139,6 +139,31 @@ static struct uml_nt_stub_conn *cowtrap_conn;
 static unsigned long long cowtrap_lo, cowtrap_hi;
 static int cowtrap_pending;
 
+/* M5.6a witness-exoneration switch: the three GUEST-VISIBLE
+ * witnesses (cowtrap RO arms, mapcanary nonce writes, the ss/TF
+ * single-step) are the only instrumentation that can perturb the
+ * guest at all. UML_NT_WITNESS=0 in the environment turns them off
+ * as a group: if the boot still corrupts, the witnesses are
+ * exonerated; if it survives, the hunt turns inward. */
+int uml_nt_witness_off = -1;
+static int witness_off(void)
+{
+	int i;
+
+	if (uml_nt_witness_off >= 0)
+		return uml_nt_witness_off;
+	uml_nt_witness_off = 0;
+	for (i = 0; i < uml_boot.argc; i++)
+		if (uml_boot.argv[i] != NULL &&
+		    __builtin_strcmp(uml_boot.argv[i],
+				     "uml_nt_witness=0") == 0)
+			uml_nt_witness_off = 1;
+	if (uml_nt_witness_off)
+		os_info("[witness] uml_nt_witness=0 — guest-visible "
+			"instrumentation OFF (cowtrap/mapcanary/ss)\n");
+	return uml_nt_witness_off;
+}
+
 static void uml_nt_cowtrap_arm(struct uml_nt_stub_conn *c,
 			       unsigned long long owner_va,
 			       unsigned long long hit_va,
@@ -238,6 +263,9 @@ void uml_nt_cowtrap_arm_alloc(struct uml_nt_stub_conn *c,
 	struct uml_nt_cowtrap *t;
 	unsigned int i, armed = 0;
 	unsigned long long page;
+
+	if (witness_off())
+		return;
 
 	/* A grow (and any MAP_FIXED replace) UNMAP+MAPs the span: trap
 	 * slots on this range watched views that no longer exist. A
@@ -599,6 +627,8 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 	}
 
 	d->mapcanary = 0;
+	if (witness_off())
+		c->mc_want = 0;
 	switch (op->op) {
 	case UML_NT_FOP_PROTECT:
 		d->action = UML_STUB_ACTION_PROT;
@@ -1671,7 +1701,11 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	 * TF; the post-store #DB re-arms the page NOACCESS so the
 	 * NEXT writer (the replay proves itself first) is caught by
 	 * the re-armed cowtrap slot below. */
-	d->ss_page = d->fault_addr & ~0xfffull;
+	if (witness_off()) {
+		d->ss_page = 0;
+	} else {
+		d->ss_page = d->fault_addr & ~0xfffull;
+	}
 	d->ss_va = d->fault_addr;
 	d->ss_got = ~0ull;
 	d->ss_flat = ~0ull;

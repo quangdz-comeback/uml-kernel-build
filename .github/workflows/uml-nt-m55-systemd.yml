@@ -23,6 +23,11 @@ name: "uml-nt M5.5a systemd boot (native referee)"
 
 on:
   workflow_dispatch:
+    inputs:
+      witness_off:
+        description: "append uml_nt_witness=0 (exonerate guest-visible witnesses)"
+        type: boolean
+        default: false
   push:
     branches: ["uml-nt/**"]
     paths: [".github/workflows/uml-nt-m55-systemd.yml"]
@@ -210,6 +215,10 @@ jobs:
           # first attempt after the prompt logs in, later ones are
           # shell noise (echo LOGIN-OK is idempotent). The designed
           # EOF "park loud" lands when the launcher dies.
+          WITNESS_ARG=""
+          if [ "${{ inputs.witness_off }}" = "true" ]; then
+            WITNESS_ARG="uml_nt_witness=0"
+          fi
           {
             i=0
             while [ $i -lt 36 ]; do
@@ -225,6 +234,7 @@ jobs:
             "mem=120M" \
             "root=98:0" "rw" \
             "SYSTEMD_LOG_TARGET=console" "SYSTEMD_LOG_LOCATION=1" \
+            ${WITNESS_ARG:+$WITNESS_ARG} \
             > systemd.log 2>&1
           code=$?
           set -e
