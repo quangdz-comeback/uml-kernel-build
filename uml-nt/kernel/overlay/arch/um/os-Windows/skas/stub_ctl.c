@@ -2897,6 +2897,12 @@ static void claim_audit(void)
 			struct uml_nt_vma *v = &pc->mm->vma[vi];
 			unsigned long long off;
 
+			/* The tear needs a WRITER: only writable VMAs
+			 * count (every process shares the kernel
+			 * image RO by design — dlT fired on exactly
+			 * that). */
+			if (!uml_nt_prot_writable(v->prot))
+				continue;
 			for (off = v->run_off;
 			     off < v->run_off + (v->end - v->start);
 			     off += UML_NT_PHYS_RUN_SIZE) {
@@ -2915,14 +2921,51 @@ static void claim_audit(void)
 	}
 	for (i = 0; i < runs && audit_budget > 0; i++)
 		if (claims[i] >= 2 && cow_ok[i] < claims[i]) {
+			unsigned long long target =
+				(unsigned long long)i *
+					UML_NT_PHYS_RUN_SIZE;
+
 			audit_budget--;
 			os_info("[claim-audit] run 0x%llx claimed by %d "
-				"mms but only %d COW-flagged (first "
-				"pid %d) — a non-COW owner's writes "
-				"never fault: shared-RW tear\n",
-				(unsigned long long)i *
-					UML_NT_PHYS_RUN_SIZE,
-				claims[i], cow_ok[i], first_pid[i]);
+				"WRITABLE mms but only %d COW-flagged "
+				"(first pid %d) — a non-COW owner's "
+				"writes never fault: shared-RW tear\n",
+				target, claims[i], cow_ok[i],
+				first_pid[i]);
+			for_each_process(p) {
+				struct uml_nt_stub_conn *pc;
+				int vi;
+
+				if (p->mm == NULL)
+					continue;
+				pc = ((struct mm_id *)
+					&p->mm->context.id)->nt_conn;
+				if (pc == NULL || pc->mm == NULL ||
+				    pc->dead_magic == UML_NT_CONN_DEAD)
+					continue;
+				for (vi = 0; vi < pc->mm->nvma; vi++) {
+					struct uml_nt_vma *v =
+						&pc->mm->vma[vi];
+
+					if (!uml_nt_prot_writable(v->prot))
+						continue;
+					if (target >= v->run_off &&
+					    target < v->run_off +
+						     (v->end - v->start))
+						os_info("[claim-audit]   "
+							"claimant pid %lu "
+							"vma=[0x%llx,0x%llx) "
+							"run_off=0x%llx "
+							"flags=0x%x prot=0x%x"
+							"\n",
+							(unsigned long)
+							pc->pid,
+							v->start, v->end,
+							v->run_off,
+							v->flags,
+							v->prot);
+				}
+			}
 		}
 }
 
