@@ -427,13 +427,25 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	 * executed; re-arm its page NOACCESS so the NEXT writer faults
 	 * into the kernel's cowtrap. Pure stub-local: no publish. */
 	if (er->ExceptionCode == STATUS_SINGLE_STEP && d->ss_page != 0) {
-		ULONG old_prot;
-		void *pg = (void *)(uintptr_t)d->ss_page;
+		/* The trampoline's popfq raises TF one instruction early:
+		 * the first #DB lands after the trampoline's JUMP, with
+		 * the store not yet executed (rip == fs_tramp_target).
+		 * Re-arming there loops forever (NOACCESS -> fault ->
+		 * repair -> TF -> #DB-after-jmp -> ... — referee
+		 * 37201007185 died in exactly that loop). Keep TF and
+		 * let the store run; the NEXT #DB (rip past the store)
+		 * is the real one. */
+		if ((unsigned long long)c->Rip == fs_tramp_target)
+			return EXCEPTION_CONTINUE_EXECUTION;
+		{
+			ULONG old_prot;
+			void *pg = (void *)(uintptr_t)d->ss_page;
 
-		c->EFlags &= ~(DWORD)0x100;
-		VirtualProtect(pg, (SIZE_T)0x1000, PAGE_NOACCESS,
-			       &old_prot);
-		d->ss_page = 0;
+			c->EFlags &= ~(DWORD)0x100;
+			VirtualProtect(pg, (SIZE_T)0x1000, PAGE_NOACCESS,
+				       &old_prot);
+			d->ss_page = 0;
+		}
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
