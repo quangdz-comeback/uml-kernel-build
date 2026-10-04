@@ -1637,6 +1637,8 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	 * NEXT writer (the replay proves itself first) is caught by
 	 * the re-armed cowtrap slot below. */
 	d->ss_page = d->fault_addr & ~0xfffull;
+	d->ss_va = d->fault_addr;
+	d->ss_got = ~0ull;
 	{
 		unsigned int k;
 
@@ -1695,6 +1697,20 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 			c->d->resume_rip == c->rp_rip ?
 			"RESUMED AT THE STORE — yet it never ran?!" :
 			"RESUME WENT ELSEWHERE — the skip path");
+		if (c->d->ss_got == ~0ull)
+			os_info("[replay-lost]   ss: the #DB NEVER "
+				"FIRED — the store never ran despite "
+				"the at-store resume\n");
+		else
+			os_info("[replay-lost]   ss: view read "
+				"0x%llx right after the store (want "
+				"0x%llx, table now 0x%llx) — %s\n",
+				c->d->ss_got, c->rp_want, now,
+				c->d->ss_got == c->rp_want ?
+				"STORE LANDED VIEW-SIDE; table lacks "
+				"it — THE WRONG-BACKED TWIN" :
+				"the store's own value is absent even "
+				"view-side");
 		dump_guest_bytes(c->mm, c->rp_va & ~0xfffull, 0x40,
 				 "replay-page");
 		/* WHERE did the store land? Sweep ALL of physmem for

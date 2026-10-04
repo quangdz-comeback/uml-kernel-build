@@ -245,6 +245,18 @@ struct uml_nt_stub_data {
 	 * the stub re-arms the page NOACCESS, so the next write to the
 	 * page faults into the kernel's cowtrap with its rip. */
 	unsigned long long ss_page;
+	/* The fault VA (for the post-store readback) and its result.
+	 * At the real #DB (rip past the store) the stub reads ss_va
+	 * through ITS OWN view into ss_got. The kernel sets ss_got to
+	 * ~0 at the arm; at the verify: ss_got==~0 means the #DB never
+	 * came (the store never ran); ss_got==want while the table run
+	 * lacks want is the wrong-backed twin proven at the qword —
+	 * content-equality at probe time can no longer fake it (the
+	 * view-ok content-match hole, referee 37201936990: a stale view
+	 * backing an old COW copy of the same page reads identical
+	 * bytes). */
+	unsigned long long ss_va;
+	unsigned long long ss_got;
 };
 
 #endif /* __UML_STUB_NT_H */

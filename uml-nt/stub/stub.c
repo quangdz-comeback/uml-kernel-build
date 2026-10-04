@@ -441,6 +441,13 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			ULONG old_prot;
 			void *pg = (void *)(uintptr_t)d->ss_page;
 
+			/* The store JUST executed — read its target
+			 * through THIS view before anything else can
+			 * run. The kernel compares against the VMA
+			 * table's run: a match-less pair is the
+			 * wrong-backed twin at the qword. */
+			d->ss_got = *(volatile unsigned long long *)
+				(uintptr_t)d->ss_va;
 			c->EFlags &= ~(DWORD)0x100;
 			VirtualProtect(pg, (SIZE_T)0x1000, PAGE_NOACCESS,
 				       &old_prot);
