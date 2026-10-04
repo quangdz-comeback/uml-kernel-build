@@ -262,6 +262,13 @@ struct uml_nt_stub_data {
 	 * Matched against the conn's MAP-op history it names the exact
 	 * stream that left the wrong-backed view in place. */
 	unsigned long long ss_viewbase;
+	/* The covering region's Type (MEM_IMAGE/MAPPED/PRIVATE) and
+	 * RegionSize at the same #DB: referee 37209966901 proved the
+	 * store lands view-side yet its value exists in NO physmem run —
+	 * the covering view may not be the physmem section at all (a
+	 * MEM_PRIVATE allocation squatting on the guest VA). */
+	unsigned long long ss_vtype;
+	unsigned long long ss_vrsize;
 };
 
 #endif /* __UML_STUB_NT_H */

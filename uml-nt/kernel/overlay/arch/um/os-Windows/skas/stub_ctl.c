@@ -1711,9 +1711,16 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 				"view-side");
 		if (c->d->ss_viewbase != 0)
 			os_info("[replay-lost]   view base VA "
-				"0x%llx backs the fault page — which "
-				"MAP era left it?\n",
-				c->d->ss_viewbase);
+				"0x%llx type=0x%llx rsize=0x%llx backs "
+				"the fault page (%s)\n",
+				c->d->ss_viewbase, c->d->ss_vtype,
+				c->d->ss_vrsize,
+				c->d->ss_vtype == 0x40000ull ?
+				"MEM_PRIVATE — NOT THE PHYSMEM SECTION!" :
+				c->d->ss_vtype == 0x4000000ull ?
+				"MEM_MAPPED — a section view" :
+				c->d->ss_vtype == 0x1000000ull ?
+				"MEM_IMAGE" : "?");
 		dump_guest_bytes(c->mm, c->rp_va & ~0xfffull, 0x40,
 				 "replay-page");
 		/* WHERE did the store land? Sweep ALL of physmem for

@@ -480,9 +480,13 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			guest_read_site = 0;
 			memset(&mbi, 0, sizeof(mbi));
 			if (VirtualQuery((void *)(uintptr_t)d->ss_va,
-					 &mbi, sizeof(mbi)) == sizeof(mbi))
+					 &mbi, sizeof(mbi)) == sizeof(mbi)) {
 				d->ss_viewbase = (unsigned long long)
 					(uintptr_t)mbi.AllocationBase;
+				d->ss_vtype = mbi.Type;
+				d->ss_vrsize = (unsigned long long)
+					mbi.RegionSize;
+			}
 			c->EFlags &= ~(DWORD)0x100;
 			d->ss_page = 0;
 		}
