@@ -60,6 +60,11 @@ struct uml_nt_stub_conn {
 	 * mapcanary_got and flat-restores the saved qword. */
 	unsigned long long mc_want, mc_off, mc_orig;
 	int mc_active;
+	/* binwatch (M5.6a, referee 37144114627): cached main_arena VA
+	 * discovered once by heap scan (0 = not yet); the per-round
+	 * arena-bin walk validates the glibc double-link invariant and
+	 * tcache overlap. */
+	unsigned long long bw_arena;
 	/* process identity for the syscall surface: ppid = the stub
 	 * pid that forked us (0 for the root conn). */
 	unsigned long long ppid;

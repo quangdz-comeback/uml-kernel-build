@@ -1203,6 +1203,257 @@ void uml_nt_alloc_alias_scan(long long off, int nruns)
 	}
 }
 
+/* ---- [binwatch]/[mmdup] (M5.6a, referee 37144114627) --------
+ * The tcache-side witnesses (tcdelta/tcchunk/kheap/cowtrap) and
+ * the MAP-side mapcanary are ALL clean while the heap still dies:
+ * 37144114627 aborted with ZERO poison fires — the unsorted-bin
+ * takeout dereferenced a non-canonical bk (0x86b7317835090b95,
+ * six SEGV victims sharing one corrupt heap state) and NO
+ * per-round witness had ever scanned the arena bins: they were
+ * the blind spot (only the abort audit walked them). This closes
+ * it per round, syscall parks only — a walk at a FAULT park can
+ * see a LEGITIMATE half-landed link update (the malloc sequence
+ * is suspended mid-flight at the page fault; the replay finishes
+ * it), while a desync visible at a SYSCALL park is real. */
+static int bw_qword(struct uml_nt_mm *mm, unsigned long long va,
+		     unsigned long long *out)
+{
+	long long off = uml_nt_vma_translate(mm, va, 8);
+
+	if (off < 0)
+		return -1;
+	*out = *(const unsigned long long *)(const void *)
+		((char *)uml_boot.physmem_base + off);
+	return 0;
+}
+
+/* glibc 2.36 malloc_state, pinned by the abort audit's field math:
+ * bin_at(1) (unsorted sentinel) = av+0x60, its fd/bk live at
+ * av+0x70/av+0x78 (bins[0]/bins[1]); the top pointer qword sits
+ * at av+0x60. Shape: top in-heap, unsorted fd/bk self-or-in-heap. */
+static int bw_arena_shape(struct uml_nt_stub_conn *c,
+			  unsigned long long av)
+{
+	struct uml_nt_mm *mm = c->mm;
+	unsigned long long top, fd, bk;
+
+	if (av == 0 || (av & 0xf))
+		return 0;
+	if (bw_qword(mm, av + 0x60, &top) < 0 ||
+	    bw_qword(mm, av + 0x70, &fd) < 0 ||
+	    bw_qword(mm, av + 0x78, &bk) < 0)
+		return 0;
+	if (top < mm->heap_start || top >= mm->heap_end || (top & 0xf))
+		return 0;
+	if (fd != av + 0x60 && (fd < mm->heap_start ||
+				fd >= mm->heap_end))
+		return 0;
+	if (bk != av + 0x60 && (bk < mm->heap_start ||
+				bk >= mm->heap_end))
+		return 0;
+	return 1;
+}
+
+/* Discover main_arena once per conn: walk the heap's chunk chain;
+ * a free chunk's fd pointing OUT of the heap but into a mapped VMA
+ * is a bin head (tcache/fastbin links never leave the heap) —
+ * av = fd - 0x50 - 16*i, pinned by the shape check. */
+static unsigned long long bw_find_arena(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_mm *mm = c->mm;
+	unsigned long long cur = mm->heap_start;
+	int n;
+
+	for (n = 0; n < 8192 && cur + 0x20 <= mm->heap_end; n++) {
+		unsigned long long sz, fd;
+		long long off = uml_nt_vma_translate(mm, cur + 8, 8);
+
+		if (off < 0)
+			return 0;
+		sz = *(const unsigned long long *)(const void *)
+			((char *)uml_boot.physmem_base + off);
+		sz &= ~7ull;
+		if (sz < 0x20)
+			return 0;
+		if (bw_qword(mm, cur + 0x10, &fd) == 0 &&
+		    (fd < mm->heap_start || fd >= mm->heap_end) &&
+		    (fd >> 48) == 0 && (fd & 0xf) == 0 &&
+		    fd >= 0x1000 &&
+		    uml_nt_vma_translate(mm, fd, 8) >= 0) {
+			int k;
+
+			for (k = 1; k <= 126; k++) {
+				unsigned long long av =
+					fd - 0x50 - 16ull * k;
+
+				if (av < 0x10000)
+					break;
+				if (bw_arena_shape(c, av))
+					return av;
+			}
+		}
+		cur += sz;
+	}
+	return 0;
+}
+
+static void binwatch(struct uml_nt_stub_conn *c,
+		     const unsigned long long *entries)
+{
+	static int bw_budget = 48, bw_discover = 64;
+	struct uml_nt_mm *mm = c->mm;
+	unsigned long long av;
+	int bi;
+
+	if (bw_budget <= 0)
+		return;
+	/* SYSCALL parks only: a FAULT park can hold a legit
+	 * half-landed link update (the sequence resumes at the
+	 * replay) — a desync seen here is the real class. */
+	if (c->d->cmd != UML_STUB_CMD_SYSCALL)
+		return;
+	if (c->bw_arena == 0) {
+		if (bw_discover-- <= 0)
+			return;
+		c->bw_arena = bw_find_arena(c);
+		if (c->bw_arena == 0)
+			return;
+		os_info("[binwatch] pid %lu main_arena=0x%llx "
+			"discovered\n", (unsigned long)c->pid,
+			c->bw_arena);
+	}
+	av = c->bw_arena;
+	for (bi = 1; bi <= 5 && bw_budget > 0; bi++) {
+		unsigned long long head = av + 0x50 + 16ull * bi;
+		unsigned long long cur;
+		int k, maxw = (bi == 1) ? 16 : 4;
+
+		if (bw_qword(mm, head + 0x10, &cur) < 0)
+			return; /* arena page not resident */
+		for (k = 0; k < maxw && cur != head; k++) {
+			unsigned long long sz, fd, bk, fdbk, bkfd,
+				badp = 0;
+			int di, dbl = -1;
+
+			if (bw_qword(mm, cur + 0x8, &sz) < 0 ||
+			    bw_qword(mm, cur + 0x10, &fd) < 0 ||
+			    bw_qword(mm, cur + 0x18, &bk) < 0) {
+				bw_budget--;
+				os_info("[binwatch] GARBAGE bin %d member "
+					"0x%llx untranslatable "
+					"(nr=%llu ret=%lld rip=0x%llx)\n",
+					bi, cur, c->last_nr,
+					c->last_ret,
+					c->d->regs.rip);
+				dump_guest_bytes(mm, head, 0x20,
+					 "binwatch-head");
+				break;
+			}
+			sz &= ~7ull;
+			if ((fd >> 48) != 0)
+				badp = fd;
+			else if ((bk >> 48) != 0)
+				badp = bk;
+			else if (fd != head && (fd < mm->heap_start ||
+						fd >= mm->heap_end))
+				badp = fd;
+			else if (bk != head && (bk < mm->heap_start ||
+						bk >= mm->heap_end))
+				badp = bk;
+			if (badp) {
+				bw_budget--;
+				os_info("[binwatch] GARBAGE bin %d member "
+					"0x%llx size=0x%llx fd=0x%llx "
+					"bk=0x%llx (nr=%llu ret=%lld "
+					"rip=0x%llx)\n", bi, cur, sz,
+					fd, bk, c->last_nr, c->last_ret,
+					c->d->regs.rip);
+				dump_guest_bytes(mm, cur, 0x40,
+					 "binwatch-chunk");
+				break;
+			}
+			if (bw_qword(mm, fd + 0x18, &fdbk) < 0 ||
+			    fdbk != cur ||
+			    bw_qword(mm, bk + 0x10, &bkfd) < 0 ||
+			    bkfd != cur) {
+				bw_budget--;
+				os_info("[binwatch] DESYNC bin %d member "
+					"0x%llx size=0x%llx fd=0x%llx "
+					"bk=0x%llx fd->bk=0x%llx "
+					"bk->fd=0x%llx (nr=%llu "
+					"ret=%lld rip=0x%llx)\n", bi,
+					cur, sz, fd, bk, fdbk, bkfd,
+					c->last_nr, c->last_ret,
+					c->d->regs.rip);
+				dump_guest_bytes(mm, cur, 0x40,
+					 "binwatch-chunk");
+				break;
+			}
+			for (di = 0; di < 64; di++)
+				if (entries[di] != 0 &&
+				    (entries[di] == cur + 0x10 ||
+				     entries[di] == cur)) {
+					dbl = di;
+					break;
+				}
+			if (dbl >= 0) {
+				bw_budget--;
+				os_info("[binwatch] DOUBLE-LISTED bin %d "
+					"member 0x%llx also tcache[%d] "
+					"(nr=%llu ret=%lld rip=0x%llx)\n",
+					bi, cur, dbl, c->last_nr,
+					c->last_ret,
+					c->d->regs.rip);
+				dump_guest_bytes(mm, cur, 0x40,
+					 "binwatch-chunk");
+				break;
+			}
+			cur = fd;
+		}
+	}
+}
+
+/* [mmdup]: two pieces of the SAME mm claiming overlapping run
+ * ranges — a same-mm alias (one run mapped at two VAs). Sharing
+ * is cross-mm by design (fork COW); within one mm a run backs
+ * exactly one piece. */
+static void mmdup_census(struct uml_nt_stub_conn *c)
+{
+	static int mmdup_budget = 8;
+	struct uml_nt_mm *mm = c->mm;
+	int i, j;
+
+	if (mmdup_budget <= 0)
+		return;
+	for (i = 0; i < mm->nvma; i++) {
+		if ((long long)mm->vma[i].run_off < 0)
+			continue;
+		for (j = i + 1; j < mm->nvma; j++) {
+			unsigned long long as = mm->vma[i].run_off,
+				ae = as + (mm->vma[i].end -
+					   mm->vma[i].start),
+				bs = mm->vma[j].run_off,
+				be = bs + (mm->vma[j].end -
+					   mm->vma[j].start);
+
+			if ((long long)mm->vma[j].run_off < 0)
+				continue;
+			if (as < be && bs < ae) {
+				mmdup_budget--;
+				os_info("[mmdup] pid %lu pieces %d "
+					"[0x%llx,0x%llx)@0x%llx and %d "
+					"[0x%llx,0x%llx)@0x%llx overlap "
+					"— same-mm run alias\n",
+					(unsigned long)c->pid, i,
+					mm->vma[i].start,
+					mm->vma[i].end, as, j,
+					mm->vma[j].start,
+					mm->vma[j].end, bs);
+			}
+		}
+	}
+}
+
 static void tcache_watch(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_mm *mm = c->mm;
@@ -1321,6 +1572,11 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	memcpy(counts, (const void *)(uintptr_t)base, sizeof(counts));
 	memcpy(entries, (const void *)(uintptr_t)base + sizeof(counts),
 	       sizeof(entries));
+	/* [binwatch]/[mmdup]: the arena-bin walk (the 37144114627
+	 * blind spot — unsorted-bin bk garbage with every tcache-side
+	 * witness silent) + the same-mm run-alias census. */
+	binwatch(c, entries);
+	mmdup_census(c);
 	/* DELTA WATCH (referee 37085373580 decode): the cowtrap on the
 	 * tcache page retires at the page's FIRST write — glibc's own
 	 * entry linking — so the 16-byte ASCII blob that killed three
