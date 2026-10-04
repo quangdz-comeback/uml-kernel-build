@@ -80,6 +80,8 @@ struct uml_nt_stub_conn {
 	 * the lost-store class named at the store itself. */
 	unsigned long long rp_va, rp_want, rp_before, rp_rip,
 		rp_armrun;
+	unsigned long long op_log[8][5];
+	int op_log_n;
 	int rp_active;
 	/* process identity for the syscall surface: ppid = the stub
 	 * pid that forked us (0 for the root conn). */

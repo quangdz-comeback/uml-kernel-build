@@ -577,6 +577,26 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 {
 	struct uml_nt_stub_data *d = c->d;
 
+	/* OP LEDGER (M5.6a, referee 37212286263): the wrong-backed
+	 * twin is a MEM_MAPPED section view at the heap start whose
+	 * backing offset is stale — some MAP op carried an old run.
+	 * Record every op touching the first heap piece (8-deep ring);
+	 * the [replay-lost] fire dumps it — the stale MAP names
+	 * itself. */
+	if (c->mm != NULL && c->mm->heap_start != 0 &&
+	    op->va < c->mm->heap_start + 0x10000 &&
+	    op->va + op->len > c->mm->heap_start) {
+		unsigned long long *e =
+			c->op_log[c->op_log_n % 8];
+
+		e[0] = op->op;
+		e[1] = op->prot;
+		e[2] = op->va;
+		e[3] = op->len;
+		e[4] = op->off;
+		c->op_log_n++;
+	}
+
 	d->mapcanary = 0;
 	switch (op->op) {
 	case UML_NT_FOP_PROTECT:
@@ -1709,6 +1729,19 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 				"it — THE WRONG-BACKED TWIN" :
 				"the store's own value is absent even "
 				"view-side");
+		{
+			int k, n = c->op_log_n < 8 ? c->op_log_n : 8;
+
+			for (k = 0; k < n; k++) {
+				unsigned long long *e = c->op_log[
+					(c->op_log_n - n + k) % 8];
+
+				os_info("[replay-lost]   oplog[%d]: "
+					"op=%llu prot=0x%llx va=0x%llx "
+					"len=0x%llx off=0x%llx\n",
+					k, e[0], e[1], e[2], e[3], e[4]);
+			}
+		}
 		if (c->d->ss_viewbase != 0)
 			os_info("[replay-lost]   view base VA "
 				"0x%llx type=0x%llx rsize=0x%llx backs "
