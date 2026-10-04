@@ -261,6 +261,9 @@ static int verify_prot(void *base, ULONG want)
 /* Execute one ACTION_* against this stub's views. Returns 1 = ok,
  * 0 = failed (the kernel sees it and kills us loudly — a silent
  * resume would loop the guest fault forever). */
+static volatile LONG guest_read_site; /* 1=viewprobe 2=ss-got */
+
+
 static int do_action(void)
 {
 	ULONG old_prot;
@@ -420,8 +423,6 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 				  (int)sizeof(line) - 1),
 			  &wrote, NULL);
 }
-
-static volatile LONG guest_read_site; /* 1=viewprobe 2=ss-got */
 
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
