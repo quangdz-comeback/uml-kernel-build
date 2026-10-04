@@ -257,6 +257,11 @@ struct uml_nt_stub_data {
 	 * bytes). */
 	unsigned long long ss_va;
 	unsigned long long ss_got;
+	/* VirtualQuery(ss_va).AllocationBase captured at the same #DB:
+	 * the base VA of the view that actually backs the fault address.
+	 * Matched against the conn's MAP-op history it names the exact
+	 * stream that left the wrong-backed view in place. */
+	unsigned long long ss_viewbase;
 };
 
 #endif /* __UML_STUB_NT_H */

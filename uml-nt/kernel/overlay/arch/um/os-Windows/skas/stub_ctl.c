@@ -1709,6 +1709,11 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 				"it — THE WRONG-BACKED TWIN" :
 				"the store's own value is absent even "
 				"view-side");
+		if (c->d->ss_viewbase != 0)
+			os_info("[replay-lost]   view base VA "
+				"0x%llx backs the fault page — which "
+				"MAP era left it?\n",
+				c->d->ss_viewbase);
 		dump_guest_bytes(c->mm, c->rp_va & ~0xfffull, 0x40,
 				 "replay-page");
 		/* WHERE did the store land? Sweep ALL of physmem for

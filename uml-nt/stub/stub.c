@@ -472,10 +472,17 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			 * (referees 37205147552/37207228247) — the
 			 * reverter-catch half is dropped, the
 			 * readback alone settles the twin. */
+			MEMORY_BASIC_INFORMATION mbi;
+
 			guest_read_site = 2;
 			d->ss_got = *(volatile unsigned long long *)
 				(uintptr_t)d->ss_va;
 			guest_read_site = 0;
+			memset(&mbi, 0, sizeof(mbi));
+			if (VirtualQuery((void *)(uintptr_t)d->ss_va,
+					 &mbi, sizeof(mbi)) == sizeof(mbi))
+				d->ss_viewbase = (unsigned long long)
+					(uintptr_t)mbi.AllocationBase;
 			c->EFlags &= ~(DWORD)0x100;
 			d->ss_page = 0;
 		}
