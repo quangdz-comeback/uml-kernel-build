@@ -194,6 +194,17 @@ extern uml_nt_phys_event_fn uml_nt_phys_event;
 typedef void (*uml_nt_alloc_alias_fn)(long long off, int nruns);
 extern uml_nt_alloc_alias_fn uml_nt_alloc_alias_probe;
 
+/* Handout zeroing (M5.6a, the zero-page contract): guest RAM is one
+ * pagefile-backed NT section and recycled runs carry the last
+ * owner's bytes; Linux guarantees fresh anonymous memory reads as
+ * ZERO and glibc relies on it in writing (_int_calloc skips the
+ * clear for freshly-sbrked top). The hook runs at every handout
+ * (span or single) after the refs/gen stamps; refs==0 is proven
+ * before the call, so the runs are dead — the zero cannot clobber
+ * a live owner. NULL in the Linux CI unit test. */
+typedef void (*uml_nt_phys_zero_fn)(long long off, int nruns);
+extern uml_nt_phys_zero_fn uml_nt_phys_zero_hook;
+
 /* D22 view-owner tagging: the conn layer sets THIS dispatch's owner
  * (the conn) at serve entry and at mmctx destroy's mm_drop; drops
  * made under a tag park their blocks instead of freeing them (see

@@ -73,6 +73,10 @@ void nt_main(struct uml_boot_info *bi)
 	 * alloc-over-live-run writer (heap-trasher family). */
 	uml_nt_alloc_alias_probe = uml_nt_alloc_alias_scan;
 
+	/* M5.6a (the zero-page contract): every phys handout leaves
+	 * the allocator zeroed — see physalloc.h. */
+	uml_nt_phys_zero_hook = uml_nt_phys_zero_flat;
+
 	linux_main(uml_boot.argc, uml_boot.argv, uml_boot.envp);
 
 	/* linux_main runs start_uml() → start_kernel() → (M1) panic

@@ -17,6 +17,10 @@ uml_nt_phys_event_fn uml_nt_phys_event = (uml_nt_phys_event_fn)0;
 uml_nt_alloc_alias_fn uml_nt_alloc_alias_probe =
 	(uml_nt_alloc_alias_fn)0;
 
+/* [zero] hook — pinned by main.c (the flat view), NULL in unit
+ * tests (they mock the backend and own no physmem). */
+uml_nt_phys_zero_fn uml_nt_phys_zero_hook = (uml_nt_phys_zero_fn)0;
+
 static int run_index(struct uml_nt_phys *p, long long off)
 {
 	long long i;
@@ -101,6 +105,24 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns)
 	p->epoch++;
 	for (k = 0; k < nruns; k++)
 		p->gen[i + k] = p->epoch;
+	/* THE ZERO-PAGE CONTRACT (M5.6a — the hunt's endgame): guest
+	 * RAM is one pagefile-backed NT section; NtExtendSection does
+	 * NOT zero the extension and the run recycling hands a freed
+	 * run's bytes to the next owner verbatim. Linux's contract is
+	 * that fresh anonymous memory reads as ZERO — glibc relies on
+	 * it in writing: _int_calloc skips the memset for the
+	 * freshly-sbrked portion of the top chunk ("clear only the
+	 * bytes from non-freshly-sbrked memory"), so a recycled heap
+	 * tail (a dead process's tcache bins, unit-file text — the
+	 * "SYSTEMD_" signature) came back from calloc as LIVE
+	 * POINTERS: systemd wrote through them and the arena tore.
+	 * Every fresh-memory consumer (brk re-home tail, anon mmap,
+	 * eager fork-seed dst, COW split dst) is then individually
+	 * wrong; the class fix is the handout: a span leaves the
+	 * allocator zeroed, like hardware. refs==0 is proven above,
+	 * so the span is dead — zeroing cannot clobber a live owner. */
+	if (uml_nt_phys_zero_hook != (uml_nt_phys_zero_fn)0)
+		uml_nt_phys_zero_hook(off, nruns);
 	/* [alloc-alias]: the table claims these runs were FREE — let
 	 * the conn layer name any live VMA that never stopped
 	 * translating into them (log-only; the handout stands). */

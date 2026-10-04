@@ -112,6 +112,7 @@ void uml_nt_alias_scan(unsigned long long lo, unsigned long long hi);
  * run the release-under-vma tripwire (the 0x3960000 tcache-run
  * recycle class — names the surviving conn's VMA, exempts the
  * dropping owner's own dying views). */
+void uml_nt_phys_zero_flat(long long off, int nruns);
 void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 			   int refs, const void *owner);
 

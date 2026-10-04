@@ -4274,6 +4274,17 @@ static void release_vma_sweep(const char *kind, long long off, int nruns,
 	}
 }
 
+void uml_nt_phys_zero_flat(long long off, int nruns)
+{
+	if (off < 0 ||
+	    (unsigned long long)off +
+	    (unsigned long long)nruns * UML_NT_PHYS_RUN_SIZE >
+	    uml_boot.physmem_size)
+		return;
+	memset((char *)uml_boot.physmem_base + off, 0,
+	       (unsigned long long)nruns * UML_NT_PHYS_RUN_SIZE);
+}
+
 void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 			   int refs, const void *owner)
 {
