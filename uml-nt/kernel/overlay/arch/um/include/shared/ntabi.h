@@ -61,6 +61,7 @@ typedef unsigned short WCHAR;
 typedef unsigned char BOOLEAN;
 typedef unsigned long long SIZE_T;
 typedef unsigned long long ULONG_PTR;
+typedef unsigned long long ULONGLONG;
 typedef long long LONG64;
 typedef int BOOL; /* win32 BOOL (4 bytes) — NOT the 1-byte BOOLEAN */
 typedef const char *LPCSTR; /* M5.6b quiet: GetEnvironmentVariableA */
@@ -509,6 +510,13 @@ PVOID UML_NTABI_CC MapViewOfFileEx(HANDLE mapping, ULONG desired_access,
 				   ULONG file_offset_hi, ULONG file_offset_lo,
 				   SIZE_T bytes, PVOID base);
 BOOLEAN UML_NTABI_CC UnmapViewOfFile(PVOID base);
+/* M5.6a cross-stub census (the launcher reads OTHER stubs' VA
+ * spaces — the last un-watched writer class is a foreign process's
+ * stale section view; no stub cooperation needed): */
+ULONGLONG UML_NTABI_CC VirtualQueryEx(HANDLE process, PVOID addr,
+		MEMORY_BASIC_INFORMATION *mbi, SIZE_T len);
+BOOL UML_NTABI_CC ReadProcessMemory(HANDLE process, PVOID addr,
+		PVOID buf, SIZE_T len, SIZE_T *got);
 BOOL UML_NTABI_CC CreateProcessA(char *app_name, char *cmd_line,
 				 SECURITY_ATTRIBUTES *pa, SECURITY_ATTRIBUTES *ta,
 				 BOOL inherit_handles, ULONG create_flags,
@@ -698,6 +706,11 @@ struct uml_nt_api_table {
 	ULONG (UML_NTABI_CC *ResumeThread)(HANDLE thread);
 	BOOL (UML_NTABI_CC *GetExitCodeProcess)(HANDLE process,
 			ULONG *exit_code);
+	ULONGLONG (UML_NTABI_CC *VirtualQueryEx)(HANDLE process,
+			PVOID addr, MEMORY_BASIC_INFORMATION *mbi,
+			SIZE_T len);
+	BOOL (UML_NTABI_CC *ReadProcessMemory)(HANDLE process,
+			PVOID addr, PVOID buf, SIZE_T len, SIZE_T *got);
 
 	/* ---- appended for M3.3 ------------------------------------------ */
 	ULONG (UML_NTABI_CC *WaitForMultipleObjects)(ULONG count,

@@ -164,6 +164,8 @@ static void resolve_api_table(void)
 	RESOLVE(CreateProcessA, k32, "CreateProcessA");
 	RESOLVE(ResumeThread, k32, "ResumeThread");
 	RESOLVE(GetExitCodeProcess, k32, "GetExitCodeProcess");
+	RESOLVE(VirtualQueryEx, k32, "VirtualQueryEx");
+	RESOLVE(ReadProcessMemory, k32, "ReadProcessMemory");
 	RESOLVE(WaitForMultipleObjects, k32, "WaitForMultipleObjects");
 
 	/* M3.5 additions (ubd host files) */

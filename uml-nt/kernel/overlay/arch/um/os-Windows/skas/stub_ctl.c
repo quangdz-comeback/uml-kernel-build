@@ -1958,12 +1958,14 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 							vrun);
 						nhits++;
 					}
-				if (nhits == 0)
+				if (nhits == 0) {
 					os_info("[replay-lost]   want "
 						"ABSENT at in-run offset "
 						"0x%llx on every run — "
 						"the store never "
 						"re-executed\n", inoff);
+					cross_stub_census(c, c->rp_armrun);
+				}
 			}
 		}
 	}
@@ -2764,6 +2766,89 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 		dump_guest_bytes(mm, tva + 0x290, 0x20, "tcwatch-after");
 		dump_guest_bytes(mm, tva + 0x80, 0x80, "tcwatch-entries");
 		return;
+	}
+}
+
+/* M5.6a cross-stub census: the launcher holds every stub's process
+ * handle (c->proc) — VirtualQueryEx reads ANY stub's VA space with
+ * no stub cooperation. At a [replay-lost] fire, walk every OTHER
+ * live conn's stub: a MEM_MAPPED region inside the guest span that
+ * the conn's own VMA table does not admit is a stale/foreign view
+ * of the shared section — the one object that could write the
+ * victim's run behind every per-view witness. */
+static void cross_stub_census(struct uml_nt_stub_conn *self,
+			      unsigned long long arm_run)
+{
+	struct task_struct *p;
+	static int census_budget = 4;
+
+	if (census_budget <= 0)
+		return;
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		unsigned long long va;
+		int bad = 0;
+
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc == self || pc->proc == NULL ||
+		    pc->mm == NULL ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			continue;
+		va = uml_boot.ram_base;
+		while (va < uml_boot.ram_base + uml_boot.physmem_size &&
+		       bad < 3) {
+			MEMORY_BASIC_INFORMATION mbi;
+			SIZE_T got;
+			int vi, admitted;
+
+			memset(&mbi, 0, sizeof(mbi));
+			got = nt->VirtualQueryEx(pc->proc,
+						 (void *)(uintptr_t)va,
+						 &mbi, sizeof(mbi));
+			if (got == 0 || mbi.RegionSize == 0)
+				break;
+			admitted = 0;
+			if (mbi.State == 0x1000 && mbi.Type == 0x40000) {
+				for (vi = 0; vi < pc->mm->nvma; vi++) {
+					struct uml_nt_vma *v =
+						&pc->mm->vma[vi];
+
+					if (va >= v->start &&
+					    va < v->end) {
+						admitted = 1;
+						break;
+					}
+				}
+				if (!admitted && census_budget > 0) {
+					unsigned long long probe;
+					unsigned long long vals[2];
+					SIZE_T rgot;
+
+					census_budget--;
+					memset(vals, 0, sizeof(vals));
+					nt->ReadProcessMemory(pc->proc,
+					    (void *)(uintptr_t)va,
+					    vals, 16, &rgot);
+					probe = *(unsigned long long *)
+						(uml_boot.physmem_base +
+						 arm_run + (va & 0xffff));
+					os_info("[xcensus] pid %lu holds "
+						"UNADMITTED MEM_MAPPED "
+						"region [0x%llx,+0x%llx) "
+						"prot=0x%x q0=0x%llx "
+						"(arm-run@same-off "
+						"0x%llx)\n",
+						(unsigned long)pc->pid, va,
+						(unsigned long long)
+						mbi.RegionSize,
+						mbi.Protect, vals[0], probe);
+					bad++;
+				}
+			}
+			va += mbi.RegionSize;
+		}
 	}
 }
 
