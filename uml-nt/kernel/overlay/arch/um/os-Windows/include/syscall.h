@@ -82,6 +82,10 @@ struct uml_nt_stub_conn {
 		rp_armrun;
 	unsigned long long op_log[8][5];
 	int op_log_n;
+	/* whole-page snapshot at the arm (the (A)-vs-(B) rider):
+	 * one reverted qword = the natural chunk cycle; a page full
+	 * of reverted qwords = a wholesale rewrite by a sibling. */
+	unsigned char rp_pagesnap[4096];
 	int rp_active;
 	/* process identity for the syscall surface: ppid = the stub
 	 * pid that forked us (0 for the root conn). */

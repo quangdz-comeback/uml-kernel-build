@@ -1671,6 +1671,14 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	d->ss_va = d->fault_addr;
 	d->ss_got = ~0ull;
 	d->ss_flat = ~0ull;
+	/* whole-page snapshot for the revert census at the verify */
+	if (c->rp_armrun != 0)
+		__builtin_memcpy(c->rp_pagesnap,
+				 (const char *)uml_boot.physmem_base +
+				 c->rp_armrun +
+				 (d->fault_addr & ~0xfffull &
+				  (UML_NT_PHYS_RUN_SIZE - 1)),
+				 4096);
 	/* The flat offset of the fault VA per the TABLE — the #DB
 	 * reads it through the stub's RO flat view: view vs flat at
 	 * one instant. The arm run is piece-aligned (run-multiple
@@ -1789,6 +1797,88 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 					vv->start, vv->end,
 					(unsigned long long)vv->run_off,
 					vv->prot, vv->flags);
+		}
+		{
+			/* (A) vs (B): count the page's reverted qwords.
+			 * One qword back to `before` = the natural
+			 * chunk cycle (a same-chunk free restores the
+			 * same mangled head — a FALSE replay-lost);
+			 * many reverted qwords = a wholesale rewrite
+			 * of the page by a sibling sharing the run. */
+			const unsigned char *cur =
+				(const char *)uml_boot.physmem_base +
+				vrun + (c->rp_va & ~0xfffull &
+					(UML_NT_PHYS_RUN_SIZE - 1));
+			int same = 0, diff = 0, i;
+
+			for (i = 0; i < 4096 / 8; i++) {
+				unsigned long long a, b;
+
+				__builtin_memcpy(&a, c->rp_pagesnap +
+						 i * 8, 8);
+				__builtin_memcpy(&b, cur + i * 8, 8);
+				if (a == b)
+					same++;
+				else
+					diff++;
+			}
+			os_info("[replay-lost]   page-diff: %d qwords "
+				"unchanged, %d changed since the arm — "
+				"%s\n", same, diff,
+				diff <= 2 ? "narrow (chunk-cycle shape)"
+					  : "WHOLESALE REWRITE — a "
+					    "sibling shares this run");
+		}
+		{
+			/* Cross-mm census AT THE FIRE: does any OTHER
+			 * live conn's VMA table cover the arm run? A
+			 * hit names the sibling whose (per-process,
+			 * un-watched by this conn's cowtrap) view can
+			 * write this run freely. */
+			struct task_struct *p;
+
+			for_each_process(p) {
+				struct uml_nt_stub_conn *pc;
+				int vi;
+
+				if (p->mm == NULL)
+					continue;
+				pc = ((struct mm_id *)&p->mm->context.id)
+					->nt_conn;
+				if (pc == NULL || pc == c ||
+				    pc->mm == NULL ||
+				    pc->dead_magic == UML_NT_CONN_DEAD)
+					continue;
+				for (vi = 0; vi < pc->mm->nvma; vi++) {
+					unsigned long long vlo =
+						pc->mm->vma[vi].run_off;
+					unsigned long long vhi = vlo +
+						(pc->mm->vma[vi].end -
+						 pc->mm->vma[vi].start);
+
+					if (c->rp_armrun >= vlo &&
+					    c->rp_armrun < vhi)
+						os_info("[replay-lost]   "
+							"SIBLING pid %lu "
+							"vma[%d] "
+							"[0x%llx,0x%llx) "
+							"off=0x%llx "
+							"prot=0x%x "
+							"flags=0x%x "
+							"covers the "
+							"run\n",
+							(unsigned long)
+							pc->pid, vi,
+							pc->mm->vma[vi]
+								.start,
+							pc->mm->vma[vi]
+								.end, vlo,
+							pc->mm->vma[vi]
+								.prot,
+							pc->mm->vma[vi]
+								.flags);
+				}
+			}
 		}
 		dump_guest_bytes(c->mm, c->rp_va & ~0xfffull, 0x40,
 				 "replay-page");
