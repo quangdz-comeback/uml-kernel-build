@@ -2864,6 +2864,9 @@ static void cross_stub_census(struct uml_nt_stub_conn *self,
  * run concurrently (stubs run guest code in parallel — the pump
  * serializes only the kernel side): the shared-heap tear. Runs at
  * every 4096th syscall park, loud-budgeted. */
+static int claim_audit_force_flag;
+void uml_nt_claim_audit_force(void) { claim_audit_force_flag = 1; }
+
 static void claim_audit(void)
 {
 	static unsigned char claims[2048];
@@ -2877,8 +2880,11 @@ static void claim_audit(void)
 
 	if (runs > 2048)
 		runs = 2048;
-	if (++rounds % 4096 != 0 || audit_budget <= 0)
+	if (audit_budget <= 0)
 		return;
+	if (++rounds % 4096 != 0 && !claim_audit_force_flag)
+		return;
+	claim_audit_force_flag = 0;
 	memset(claims, 0, sizeof(claims));
 	memset(cow_ok, 0, sizeof(cow_ok));
 	for (i = 0; i < runs; i++)
@@ -4590,6 +4596,7 @@ void uml_nt_fork_reprotect_parent(struct uml_nt_stub_conn *c)
 	if (vi_reprotect)
 		os_info("fork: re-protected %d parent view(s) "
 			"read-only\n", vi_reprotect);
+	uml_nt_claim_audit_force();
 }
 
 /* wait4 hook (D16): reap the ONE forked child when it is dead — a
