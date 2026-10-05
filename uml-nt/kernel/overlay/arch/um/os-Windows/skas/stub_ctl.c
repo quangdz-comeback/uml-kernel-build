@@ -367,7 +367,14 @@ void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,
 static struct uml_nt_stub_conn *tctrip_conn;
 static unsigned long long tctrip_page;
 static int tctrip_pending;
-static int tctrip_budget = 1 << 26;
+static int tctrip_budget; /* 0: DISARMED — the perpetual-RO arm
+	* stormed (dl6 37263914229: 19.4M-line log, boot starved): heap
+	* page 0 holds the first ~3.5KB of hot chunk DATA past the
+	* struct, and every chunk-data write faulted the page. The 12
+	* dl5-style trips proved all legit; the tear's writer must be
+	* caught surgically instead — DR0-3 write-watchpoints on the
+	* entries[] qwords (next slice). The emulate machinery stays:
+	 * its encoding matcher moves stub-side there. */
 
 static void uml_nt_tctrip_arm(struct uml_nt_stub_conn *c)
 {
@@ -1845,6 +1852,7 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 			(unsigned long long)roff &
 			~(unsigned long long)(UML_NT_PHYS_RUN_SIZE - 1);
 	}
+	c->rp_pd_done = 0;
 	c->rp_va = d->fault_addr;
 	c->rp_want = want;
 	c->rp_before = before;
@@ -3306,9 +3314,26 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		if (c->rp_active) {
 			/* The repair PROT_DONE for a replay-armed fault:
 			 * compare the stub's own-view read of the fault
-			 * qword with the VMA table's run content. */
+			 * qword with the VMA table's run content.
+			 * Budgeted: dl6 proved a stuck rp_active turns
+			 * every later PROTDONE into a re-print (19.4M
+			 * lines, disk-full). */
+			static int rp_pd_budget = 64;
 			unsigned long long tbl = 0;
 			int have = 0;
+
+			/* One print per arm: the plan stream's later
+			 * PROTDONEs for the same arm re-print forever
+			 * otherwise (dl6: 19.4M lines from a stuck
+			 * print on a per-round re-armed page). The
+			 * park-time [replay-lost] verify still owns
+			 * rp_active. */
+			if (c->rp_pd_done)
+				goto rp_pd_done;
+			if (rp_pd_budget <= 0)
+				goto rp_pd_done;
+			rp_pd_budget--;
+			c->rp_pd_done = 1;
 
 			if (c->rp_active) {
 				long long vo = uml_nt_vma_translate(
@@ -3333,6 +3358,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				os_info("[replay] view-ok pid %lu "
 					"va=0x%llx qword=0x%llx\n",
 					(unsigned long)c->pid, c->rp_va, tbl);
+			rp_pd_done:
 			d->viewprobe_got = 0;
 		}
 		if (c->plan_left > 1) {

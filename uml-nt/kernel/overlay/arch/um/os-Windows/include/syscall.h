@@ -94,6 +94,8 @@ struct uml_nt_stub_conn {
 	unsigned long long last_fault_rip, last_fault_addr;
 	int last_fault_valid;
 	int rp_active;
+	int rp_pd_done; /* one [replay] PROTDONE print per arm (dl6
+			 * storm lesson) */
 	/* process identity for the syscall surface: ppid = the stub
 	 * pid that forked us (0 for the root conn). */
 	unsigned long long ppid;
