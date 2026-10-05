@@ -1539,6 +1539,18 @@ static void binwatch(struct uml_nt_stub_conn *c,
 		c->bw_arena = bw_find_arena(c);
 		if (c->bw_arena == 0)
 			return;
+		/* DR slots 2/3 (dl7 37266648434 + dl8 37272697623: the
+		 * tear moved to the SMALL-BIN heads — bin[2].bk /
+		 * bin[3].bk are the fields glibc's unlink checks, the
+		 * slots the poison lands in). The stub's legit-churn
+		 * filter passes 0 / heap-shaped / the empty-bin self
+		 * value (slot-0x10 / slot-0x18 = the head itself). */
+		if (c->tctrip_want && !witness_off()) {
+			c->d->dr_watch[2] = c->bw_arena + 0x50 +
+				16 * 2 + 0x18;
+			c->d->dr_watch[3] = c->bw_arena + 0x50 +
+				16 * 3 + 0x18;
+		}
 		os_info("[binwatch] pid %lu main_arena=0x%llx "
 			"discovered\n", (unsigned long)c->pid,
 			c->bw_arena);
@@ -2319,7 +2331,11 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	if (c->tctrip_want && !witness_off()) {
 		int wi;
 
-		for (wi = 0; wi < 4; wi++)
+		/* slots 0/1: tcache entries[0..1] (the dl5 family);
+		 * slots 2/3: the arena bin heads' bk — armed at
+		 * binwatch discovery (bw_arena known only then);
+		 * keep heap-range for the churn filter either way. */
+		for (wi = 0; wi < 2; wi++)
 			c->d->dr_watch[wi] = mm->heap_start + 0x90 +
 				(unsigned long long)wi * 8;
 		c->d->dr_heap_lo = mm->heap_start;

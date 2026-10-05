@@ -449,14 +449,22 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	    (c->Dr6 & 0xf) != 0) {
 		int slot = (c->Dr6 & 1) ? 0 : (c->Dr6 & 2) ? 1 :
 			   (c->Dr6 & 4) ? 2 : 3;
-		unsigned long long v;
+		unsigned long long v, slot_va;
 
 		guest_read_site = 3;
+		slot_va = d->dr_watch[slot];
 		v = *(volatile unsigned long long *)
-			(uintptr_t)d->dr_watch[slot];
+			(uintptr_t)slot_va;
 		guest_read_site = 0;
+		/* Legit churn: 0, a heap-shaped pointer, or the
+		 * empty-bin self-link — slot-0x10 (an fd slot) /
+		 * slot-0x18 (a bk slot) = the bin head address
+		 * itself. Bin-head slots (dr_watch[2..3], armed at
+		 * arena discovery) legitimately take the head value
+		 * on every bin clear; without this they'd storm. */
 		if (v == 0 ||
-		    (v >= d->dr_heap_lo && v < d->dr_heap_hi)) {
+		    (v >= d->dr_heap_lo && v < d->dr_heap_hi) ||
+		    v == slot_va - 0x10 || v == slot_va - 0x18) {
 			c->Dr6 = 0;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
