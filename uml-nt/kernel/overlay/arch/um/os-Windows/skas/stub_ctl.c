@@ -3430,51 +3430,53 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				 * is the glibc-2.36 unlink check
 				 * (cmp %rcx,0x10(%rdx)) faulting on a
 				 * bin-listed chunk whose bk holds env
-				 * text ("STREAM=7"). rcx=P (the chunk)
-				 * was never printed; walk the unsorted
-				 * bin and flag members whose fd/bk is
-				 * neither heap nor arena — the torn
-				 * member names itself and the text's
-				 * full value names its source. */
+				 * text. rcx=P (the chunk). Walk the
+				 * unsorted bin and flag members whose
+				 * fd/bk is neither heap nor arena.
+				 * EVERY read goes through bw_qword
+				 * (translate + bounds, fail-safe): the
+				 * first version's hand-rolled ternary
+				 * dereferenced a raw phys offset and
+				 * AV'd the KERNEL (dl1/dl3b, rip
+				 * 6003cb35 — a witness must never be
+				 * the killer). */
 				if (c->bw_arena != 0) {
+					/* bin_at(1) sentinel = av+0x60
+					 * (its fd at +0x10 = av+0x70) */
 					unsigned long long head =
-						c->bw_arena + 0x70;
-					unsigned long long m;
+						c->bw_arena + 0x60;
+					unsigned long long m = 0;
 					int steps;
 
-					m = *(unsigned long long *)
-						(uml_boot.physmem_base +
-						 uml_nt_vma_translate(c->mm,
-							head, 8) == -1ll ? 0 :
-						 uml_nt_vma_translate(c->mm,
-							head, 8));
-					for (steps = 0; steps < 8 &&
-					     m != c->bw_arena + 0x70 &&
-					     m != 0; steps++) {
-						long long mt =
-							uml_nt_vma_translate(
-								c->mm, m,
-								0x20);
-						unsigned long long fd, bk;
+					if (bw_qword(c->mm, head + 0x10,
+						     &m) == 0)
+						for (steps = 0;
+						     steps < 8 &&
+						     m != head &&
+						     m != 0; steps++) {
+							unsigned long long fd, bk;
 
-						if (mt < 0)
-							break;
-						fd = *(unsigned long long *)
-							(uml_boot.physmem_base
-							 + mt + 0x10);
-						bk = *(unsigned long long *)
-							(uml_boot.physmem_base
-							 + mt + 0x18);
-						os_info("[stubtest]   "
-							"unsorted[%d] m="
-							"0x%llx fd=0x%llx "
-							"bk=0x%llx%s\n",
-							steps, m, fd, bk,
-							((bk >> 44) != 0x6 &&
-							 bk != 0) ?
-							"  <-- TORN" : "");
-						m = fd;
-					}
+							if (bw_qword(c->mm,
+								m + 0x10,
+								&fd) < 0 ||
+							    bw_qword(c->mm,
+								m + 0x18,
+								&bk) < 0)
+								break;
+							os_info("[stubtest]   "
+								"unsorted[%d] "
+								"m=0x%llx "
+								"fd=0x%llx "
+								"bk=0x%llx%s\n",
+								steps, m, fd,
+								bk,
+								((bk >> 44) !=
+								 0x6 &&
+								 bk != 0) ?
+								"  <-- TORN" :
+								"");
+							m = fd;
+						}
 				}
 				/* M5.4 c3: the wild-pointer autopsy —
 				 * run 36806296858's victims all die at
