@@ -1449,6 +1449,44 @@ static void binwatch(struct uml_nt_stub_conn *c,
 				}
 				break;
 			}
+			/* FORMATION CATCH (M5.6a, dl0 37245194777):
+			 * every witness so far sees the AFTERMATH.
+			 * The formation event itself = a LIVE chunk
+			 * sitting in a bin. Chunk X is in use iff
+			 * (X + size)->size has PREV_INUSE set; a
+			 * bin-listed member with PREV_INUSE set is
+			 * the double-listing caught mid-life. Parks
+			 * are between mallocs (malloc never syscalls
+			 * mid-operation), so a LIVE member here is
+			 * the real formation, with the round. */
+			{
+				unsigned long long csz =
+					rec[0] & ~7ull;
+				unsigned long long nq;
+
+				if (csz >= 0x20 && csz < 0x100000 &&
+				    bw_qword(mm, cur + csz + 0x8,
+					     &nq) == 0 &&
+				    (nq & 1) != 0) {
+					bw_budget--;
+					os_info("[binwatch-LIVE] pid %lu "
+						"bin %d member 0x%llx "
+						"size=0x%llx fd=0x%llx "
+						"bk=0x%llx IS LIVE "
+						"(next-chunk PREV_INUSE "
+						"set) at nr=%llu "
+						"ret=%lld rip=0x%llx — "
+						"FORMATION: a handed-out "
+						"chunk sits in the bin\n",
+						(unsigned long)c->pid,
+						bi, cur, rec[0],
+						rec[1], rec[2],
+						c->last_nr, c->last_ret,
+						c->d->regs.rip);
+					dump_guest_bytes(mm, cur, 0x40,
+							 "binwatch-live");
+				}
+			}
 			/* v3 FIELD DIFF (37177116246: the fires only
 			 * showed the after-state): the transition of
 			 * fd/bk/fd->bk/bk->fd INTO an illegal value
