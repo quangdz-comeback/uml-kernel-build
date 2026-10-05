@@ -2228,13 +2228,21 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 
 	if (!c->task_backed || mm == NULL || mm->heap_start == 0)
 		return;
-	/* TCACHE TRIP arm/re-arm: after this conn's first fork seed
-	 * the poison window is open — keep the struct page tripped
-	 * (one live trap; the writer's rip = the hunt's end). */
-	if (c->tctrip_want &&
-	    (tctrip_conn == NULL || tctrip_conn == c) &&
-	    tctrip_budget > 0)
-		uml_nt_tctrip_arm(c);
+	/* TCACHE WATCH arm (v13): after this conn's first fork seed
+	 * the poison window is open — load DR watchpoints on
+	 * entries[0..3] (heap+0x90+i*8). Hardware: no page trap, no
+	 * storm; the stub filters legit put/get churn in place and
+	 * reports only non-heap landings. (Supersedes the tctrip RO
+	 * arm — dl6's storm killed that design.) */
+	if (c->tctrip_want && !witness_off()) {
+		int wi;
+
+		for (wi = 0; wi < 4; wi++)
+			c->d->dr_watch[wi] = mm->heap_start + 0x90 +
+				(unsigned long long)wi * 8;
+		c->d->dr_heap_lo = mm->heap_start;
+		c->d->dr_heap_hi = mm->heap_end;
+	}
 	tva = mm->heap_start + 0x10; /* chunk data past the header */
 	/* The glibc shape check first: the heap's first chunk must be
 	 * the tcache itself (chunk size 0x290 | PREV_INUSE = 0x291 in
@@ -3456,6 +3464,47 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	if (d->cmd == UML_STUB_CMD_FAULT) {
 		int rc;
 		static int cowbreak_seen;
+		static int watch_budget = 48;
+
+		/* v13 DR-watchpoint report: a write to a watched tcache
+		 * entries[] qword landed with a NON-heap, non-zero
+		 * value (the stub filtered the legit put/get churn
+		 * in-place). The store already landed (native
+		 * semantics — the witness never alters); regs.rip is
+		 * the POST-store instruction. Print the writer, read
+		 * the value table-side, resume verbatim (empty plan,
+		 * no repair — nothing faulted). */
+		if (d->fault_type == UML_NT_FAULT_WATCHPT) {
+			if (watch_budget > 0) {
+				long long vo = uml_nt_vma_translate(
+					c->mm, d->fault_addr, 8);
+				unsigned long long v = ~0ull;
+
+				watch_budget--;
+				if (vo >= 0)
+					v = *(const unsigned long long *)
+						(const void *)
+						((char *)
+						 uml_boot.physmem_base + vo);
+				os_info("[tcwatch-HIT] pid %lu va=0x%llx "
+					"value=0x%llx post-rip=0x%llx "
+					"rsp=0x%llx nr=%llu ret=%lld — "
+					"tear caught AT the store\n",
+					(unsigned long)c->pid,
+					d->fault_addr, v, d->regs.rip,
+					d->regs.rsp, c->last_nr,
+					c->last_ret);
+				os_info("[tcwatch-HIT]   rax=0x%llx "
+					"rcx=0x%llx rdx=0x%llx rsi=0x%llx "
+					"rdi=0x%llx r9=0x%llx r10=0x%llx "
+					"r11=0x%llx\n",
+					d->regs.rax, d->regs.rcx,
+					d->regs.rdx, d->regs.rsi,
+					d->regs.rdi, d->regs.r9,
+					d->regs.r10, d->regs.r11);
+			}
+			return 0;
+		}
 
 		/* [cowtrap] trip: the trapped page's accessor = the
 		 * writer, with LIVE regs (the scan snapshots were

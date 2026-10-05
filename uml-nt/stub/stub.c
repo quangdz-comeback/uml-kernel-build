@@ -53,6 +53,9 @@
 #include <io.h>
 
 #include "../kernel/overlay/arch/um/include/shared/stub_nt.h"
+/* fault.h drags vma.h (kernel-side); the one constant the stub
+ * needs is pinned here — keep in sync with fault.h. */
+#define UML_NT_FAULT_WATCHPT 0x10u
 
 /* Fixed stub_data placement: BELOW the guest span, mapped before
  * anything else — see the bootstrap comment. */
@@ -431,12 +434,43 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	CONTEXT *c = ep->ContextRecord;
 	int is_syscall = (er->ExceptionCode == STATUS_ILLEGAL_INSTRUCTION);
 	int is_fault = (er->ExceptionCode == STATUS_ACCESS_VIOLATION);
+	int is_watch = 0;
+	unsigned long long watch_va = 0;
 	int verbatim;
+
+	/* v13 DR watchpoint (the tcache entries[] tear-hunt): a write
+	 * hit lands AFTER the store — c->Rip is the NEXT instruction.
+	 * The landed qword discriminates: 0 or heap-shaped = legit
+	 * tcache_put/get churn (silent continue, no round-trip);
+	 * anything else = the tear — report it down the FAULT flow
+	 * with fault_type = UML_NT_FAULT_WATCHPT. Runs BEFORE the
+	 * ss_page #DB branch (a TF #DB has Dr6.Bn clear). */
+	if (er->ExceptionCode == STATUS_SINGLE_STEP &&
+	    (c->Dr6 & 0xf) != 0) {
+		int slot = (c->Dr6 & 1) ? 0 : (c->Dr6 & 2) ? 1 :
+			   (c->Dr6 & 4) ? 2 : 3;
+		unsigned long long v;
+
+		guest_read_site = 3;
+		v = *(volatile unsigned long long *)
+			(uintptr_t)d->dr_watch[slot];
+		guest_read_site = 0;
+		if (v == 0 ||
+		    (v >= d->dr_heap_lo && v < d->dr_heap_hi)) {
+			c->Dr6 = 0;
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
+		is_watch = 1;
+		watch_va = d->dr_watch[slot];
+		c->Dr6 = 0;
+		/* fall through into the common report flow */
+	}
 
 	/* Replay single-step (stub_nt.h v10): the repaired store just
 	 * executed; re-arm its page NOACCESS so the NEXT writer faults
 	 * into the kernel's cowtrap. Pure stub-local: no publish. */
-	if (er->ExceptionCode == STATUS_SINGLE_STEP && d->ss_page != 0) {
+	if (er->ExceptionCode == STATUS_SINGLE_STEP && !is_watch &&
+	    d->ss_page != 0) {
 		/* The trampoline's popfq raises TF one instruction early:
 		 * the first #DB lands after the trampoline's JUMP, with
 		 * the store not yet executed (rip == fs_tramp_target).
@@ -649,9 +683,17 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	} else {
 		/* Fault round-trip: ExceptionInformation[0] = access
 		 * class (0 read / 1 write / 8 DEP-execute), [1] = the
-		 * faulting VA. */
-		d->fault_addr = (unsigned long long)er->ExceptionInformation[1];
-		d->fault_type = (u32_nt)er->ExceptionInformation[0];
+		 * faulting VA. A v13 watchpoint report carries the
+		 * watched VA + the WATCHPT marker instead (the
+		 * ExceptionInformation of a #DB is meaningless). */
+		if (is_watch) {
+			d->fault_addr = watch_va;
+			d->fault_type = UML_NT_FAULT_WATCHPT;
+		} else {
+			d->fault_addr = (unsigned long long)
+				er->ExceptionInformation[1];
+			d->fault_type = (u32_nt)er->ExceptionInformation[0];
+		}
 		publish(UML_STUB_CMD_FAULT);
 	}
 
@@ -665,6 +707,24 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	 * re-executes on the now-fixed view (the kernel-pushed SIGSEGV
 	 * handler state from S4d rides the same verbatim shape). */
 	gp_to_context(c, &d->regs);
+
+	/* v13: re-assert the watchpoints at every resume — the context
+	 * restore is wholesale, so a slot left over from an earlier
+	 * round without a fresh dr_watch would watch a stale VA.
+	 * DR7: L0-L3 local enable (0x55) + RWn=01 (write) +
+	 * LENn=10 (8 bytes) per slot -> 0x99990000. */
+	if (d->dr_watch[0] | d->dr_watch[1] | d->dr_watch[2] |
+	    d->dr_watch[3]) {
+		c->Dr0 = (DWORD64)d->dr_watch[0];
+		c->Dr1 = (DWORD64)d->dr_watch[1];
+		c->Dr2 = (DWORD64)d->dr_watch[2];
+		c->Dr3 = (DWORD64)d->dr_watch[3];
+		c->Dr6 = 0;
+		c->Dr7 = 0x99990055;
+	} else {
+		c->Dr7 = 0;
+	}
+	c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
 
 	/* S4d: apply the kernel's FP/XSTATE (upstream parity:
 	 * put_fp_registers before every continue). Today the bytes

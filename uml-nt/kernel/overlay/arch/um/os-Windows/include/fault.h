@@ -32,6 +32,9 @@
 #define UML_NT_FAULT_READ  0u
 #define UML_NT_FAULT_WRITE 1u
 #define UML_NT_FAULT_EXEC  8u
+#define UML_NT_FAULT_WATCHPT 0x10u /* v13 DR watchpoint report (no
+				    * repair; the store already
+				    * landed — pure witness) */
 
 /* Stub ops in a plan — the codes ARE the stub actions (1:1 with
  * UML_STUB_ACTION_*; test_mm asserts the mirroring). */

@@ -305,6 +305,22 @@ struct uml_nt_stub_data {
 	 * READONLY to it before continuing — the free-run hole shrinks
 	 * from "until the next serve round" to "one store". 0 = none. */
 	unsigned long long ss_rearm_ro;
+	/* -- v13: DR watchpoints on the tcache entries[] (M5.6a) ------
+	 * Page traps can't isolate the tcache struct from its page-mate
+	 * chunks (the dl6 storm: 38k faults on ONE hot qword, 19.4M
+	 * log lines, boot starved). Hardware watchpoints can: the
+	 * kernel fills dr_watch[0..3] with the watched qword VAs
+	 * (entries[0..3] = heap+0x90+i*8; 0 = slot off) and
+	 * dr_heap_lo/hi with the conn's heap span; the stub loads
+	 * Dr0-3/Dr7 at every resume. A write hit (#DB, Dr6.Bn) lands
+	 * AFTER the store; the stub reads the qword: 0 or heap-shaped
+	 * = legit tcache_put/get churn (silent continue, no
+	 * round-trip); anything else = the tear — reported as cmd
+	 * FAULT with fault_type = UML_NT_FAULT_WATCHPT, the post-store
+	 * rip in regs.rip. The store stays landed (native semantics;
+	 * the witness observes, never alters). */
+	unsigned long long dr_watch[4];
+	unsigned long long dr_heap_lo, dr_heap_hi;
 };
 
 #endif /* __UML_STUB_NT_H */
