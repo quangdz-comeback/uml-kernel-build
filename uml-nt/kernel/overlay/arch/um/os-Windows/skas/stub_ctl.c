@@ -1513,30 +1513,19 @@ static void binwatch(struct uml_nt_stub_conn *c,
 		     const unsigned long long *entries)
 {
 	static int bw_budget = 64;
-	static int bw_torn_budget = 64;
 	static unsigned long long bw_seen[16];
 	static int bw_nseen;
 	struct uml_nt_mm *mm = c->mm;
 	unsigned long long av;
-	int torn;
 	int bi;
 
 	if (bw_budget <= 0)
 		return;
-	/* dl9 (37275977178): the bin-head DR slots stayed CLEAN while
-	 * a bin[2] member's link landed half-way (head.fd = the member,
-	 * member.bk = stale text) — the formation lives in FAULT-park
-	 * stretches the syscall-park watch never saw. Walk at fault
-	 * parks too: fires there print with the -TORN tag (a mid-update
-	 * snapshot is EXPECTED torn — the replay is supposed to land
-	 * the other half; a persistent tear re-fires as the real
-	 * [binwatch] DESYNC at the next syscall park), skip dedup
-	 * registration and the diff snapshot, and draw from a separate
-	 * budget. FIELD diffs still compare against the last SYSCALL
-	 * snapshot — the exact before/after of the fault stretch. */
-	torn = (c->d->cmd != UML_STUB_CMD_SYSCALL);
-#define BW_FIRE() (torn ? (bw_torn_budget > 0 ? (bw_torn_budget--, 1) : 0) \
-			: (bw_budget > 0 ? (bw_budget--, 1) : 0))
+	/* SYSCALL parks only: a FAULT park can hold a legit
+	 * half-landed link update (the sequence resumes at the
+	 * replay) — a desync seen here is the real class. */
+	if (c->d->cmd != UML_STUB_CMD_SYSCALL)
+		return;
 	if (c->bw_arena == 0) {
 		static unsigned int bw_tick;
 
@@ -1594,22 +1583,20 @@ static void binwatch(struct uml_nt_stub_conn *c,
 				 * outside the heap (a heap VA failing
 				 * translate = a mid-rehome piece —
 				 * retry later, not evidence). */
-				if ((cur < mm->heap_start ||
-				    cur >= mm->heap_end) && BW_FIRE()) {
-					os_info("[binwatch%s] pid %lu "
+				if (cur < mm->heap_start ||
+				    cur >= mm->heap_end) {
+					bw_budget--;
+					os_info("[binwatch] pid %lu "
 						"GARBAGE bin %d member "
 						"0x%llx untranslatable "
 						"(nr=%llu ret=%lld "
 						"rip=0x%llx)\n",
-						torn ? "-TORN" : "",
 						(unsigned long)c->pid,
 						bi, cur, c->last_nr,
 						c->last_ret,
 						c->d->regs.rip);
-					if (!torn)
-						dump_guest_bytes(mm, head,
-							0x20,
-							"binwatch-head");
+					dump_guest_bytes(mm, head, 0x20,
+							 "binwatch-head");
 				}
 				break;
 			}
@@ -1681,13 +1668,13 @@ static void binwatch(struct uml_nt_stub_conn *c,
 					      pv >= mm->heap_end));
 				ill_prev = ill_prev ||
 					(pv >> 48) != 0;
-				if (ill && !ill_prev && have && BW_FIRE()) {
-					os_info("[binwatch%s] pid %lu "
-						"FIELD bin %d member 0x%llx "
+				if (ill && !ill_prev && have) {
+					bw_budget--;
+					os_info("[binwatch] pid %lu FIELD "
+						"bin %d member 0x%llx "
 						"[%s] 0x%llx -> 0x%llx "
 						"(nr=%llu ret=%lld "
 						"rip=0x%llx)\n",
-						torn ? "-TORN" : "",
 						(unsigned long)c->pid,
 						bi, cur,
 						f == 1 ? "fd" :
@@ -1697,16 +1684,12 @@ static void binwatch(struct uml_nt_stub_conn *c,
 						pv, v, c->last_nr,
 						c->last_ret,
 						c->d->regs.rip);
-					if (!torn)
-						dump_guest_bytes(mm, cur,
-							0x40,
-							"binwatch-chunk");
+					dump_guest_bytes(mm, cur, 0x40,
+							 "binwatch-chunk");
 				}
 			}
-			/* record for the next round's diff — syscall
-			 * parks only: a torn snapshot would poison the
-			 * transition baseline. */
-			if (slot < 8 && !torn) {
+			/* record for the next round's diff */
+			if (slot < 8) {
 				for (f = 0; f < 5; f++)
 					c->bw_snap[bi - 1][slot][f] =
 						rec[f];
@@ -1716,41 +1699,31 @@ static void binwatch(struct uml_nt_stub_conn *c,
 				mems[nmem++] = cur;
 			/* dedup persistent-state fires so the budget
 			 * survives to NEW events (37177116246 burned
-			 * 48 fires on one member). Fault-park fires
-			 * skip registration: the SAME member firing
-			 * again at the next syscall park = the tear
-			 * survived the replay = the real event. */
+			 * 48 fires on one member). */
 			dedup = ((unsigned long long)bi << 48) ^ cur;
-			if (!torn)
-				for (di = 0; di < bw_nseen; di++)
-					if (bw_seen[di] == dedup)
-						seen2 = 1;
+			for (di = 0; di < bw_nseen; di++)
+				if (bw_seen[di] == dedup)
+					seen2 = 1;
 			if (!seen2) {
 				if (rec[3] != cur || rec[4] != cur) {
-					if (!torn && bw_nseen < 16)
+					if (bw_nseen < 16)
 						bw_seen[bw_nseen++] = dedup;
-					if (BW_FIRE()) {
-						os_info("[binwatch%s] pid %lu "
-							"DESYNC bin %d member "
-							"0x%llx size=0x%llx "
-							"fd=0x%llx bk=0x%llx "
-							"fd->bk=0x%llx "
-							"bk->fd=0x%llx (nr=%llu "
-							"ret=%lld rip=0x%llx)\n",
-							torn ? "-TORN" : "",
-							(unsigned long)c->pid,
-							bi, cur, rec[0] & ~7ull,
-							rec[1], rec[2], rec[3],
-							rec[4], c->last_nr,
-							c->last_ret,
-							c->d->regs.rip);
-						if (!torn)
-							dump_guest_bytes(mm, cur,
-								0x40,
-								"binwatch-chunk");
-					}
+					bw_budget--;
+					os_info("[binwatch] pid %lu DESYNC "
+						"bin %d member 0x%llx "
+						"size=0x%llx fd=0x%llx "
+						"bk=0x%llx fd->bk=0x%llx "
+						"bk->fd=0x%llx (nr=%llu "
+						"ret=%lld rip=0x%llx)\n",
+						(unsigned long)c->pid,
+						bi, cur, rec[0] & ~7ull,
+						rec[1], rec[2], rec[3],
+						rec[4], c->last_nr,
+						c->last_ret,
+						c->d->regs.rip);
+					dump_guest_bytes(mm, cur, 0x40,
+							 "binwatch-chunk");
 				}
-				if (!torn)
 				for (di = 0; di < 64; di++)
 					if (entries[di] != 0 &&
 					    (entries[di] == cur + 0x10 ||
@@ -1785,11 +1758,9 @@ static void binwatch(struct uml_nt_stub_conn *c,
 		 * the chain nodes = the chunk is in BOTH structures —
 		 * the double-listing caught one park from formation.
 		 * A repeated node = a chain cycle (the pop-lost-update
-		 * signature: a chunk the get never unlinked). Fault parks
-		 * skip the chain walk: a torn chain would false-fire
-		 * the reveal walk. */
-		if (!torn && nmem > 0 && bi >= 2 &&
-		    bi - 2 < UML_NT_TCACHE_COUNTS && entries != NULL) {
+		 * signature: a chunk the get never unlinked). */
+		if (nmem > 0 && bi >= 2 && bi - 2 < UML_NT_TCACHE_COUNTS &&
+		    entries != NULL) {
 			unsigned long long chain[8];
 			unsigned long long node = entries[bi - 2];
 			int nch = 0;
@@ -1857,12 +1828,9 @@ static void binwatch(struct uml_nt_stub_conn *c,
 				node = raw ^ (node >> 12);
 			}
 		}
-		if (!torn)
-			c->bw_nslot[bi - 1] = slot;
+		c->bw_nslot[bi - 1] = slot;
 	}
-	if (!torn)
-		c->bw_snap_valid = 1;
-#undef BW_FIRE
+	c->bw_snap_valid = 1;
 }
 
 /* [mmdup]: two pieces of the SAME mm claiming overlapping run
