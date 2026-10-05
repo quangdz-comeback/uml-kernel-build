@@ -3023,6 +3023,19 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 						~(unsigned long long)
 						(UML_NT_PHYS_RUN_SIZE - 1);
 
+					/* WIRE-PAIRING (dl12 37286247065):
+					 * the poisoned chunk's RUN on its
+					 * own line — grep-pair against
+					 * the [wire] run_off ledger names
+					 * whether the text landed via an
+					 * exec stack table sharing the
+					 * run; the line order vs the
+					 * wire line says which side owned
+					 * the run first. */
+					os_info("[tcchunk-run] pid %lu "
+						"va=0x%llx run=0x%llx\n",
+						(unsigned long)c->pid,
+						chunk, frun);
 					dump_guest_bytes(mm, chunk, 0x20,
 							 "tcchunk-head");
 					/* ARM-ON-FIRE (referee 37120127074
