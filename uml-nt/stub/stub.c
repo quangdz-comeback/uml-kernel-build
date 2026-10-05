@@ -466,11 +466,29 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		    (v >= d->dr_heap_lo && v < d->dr_heap_hi) ||
 		    v == slot_va - 0x10 || v == slot_va - 0x18) {
 			c->Dr6 = 0;
-			return EXCEPTION_CONTINUE_EXECUTION;
+			if (d->ss_page == 0 ||
+			    ((unsigned long long)c->Rip -
+			     fs_tramp_target) > 16)
+				return EXCEPTION_CONTINUE_EXECUTION;
+			/* dl10 (37279719927): a fault-repaired store
+			 * INTO a watched slot (a4364e8 put slots on the
+			 * bin heads = the arena page = exactly what the
+			 * fs_tramp replay crosses) fires ONE #DB that
+			 * is both the DR hit and the replay's
+			 * post-store step. Taking the early return
+			 * here consumes it: the readback/re-arm below
+			 * never runs and ss_page stays armed on a
+			 * stale fault. Fall through into the replay
+			 * branch (is_watch stays 0) so the bookkeeping
+			 * completes — but only when rip sits at the
+			 * trampoline store or just past it (the real
+			 * interleave); a random watched-slot write
+			 * elsewhere keeps the old early return. */
+		} else {
+			is_watch = 1;
+			watch_va = d->dr_watch[slot];
+			c->Dr6 = 0;
 		}
-		is_watch = 1;
-		watch_va = d->dr_watch[slot];
-		c->Dr6 = 0;
 		/* fall through into the common report flow */
 	}
 
