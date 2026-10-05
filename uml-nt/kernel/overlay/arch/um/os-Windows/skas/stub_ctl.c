@@ -1410,7 +1410,10 @@ static void binwatch(struct uml_nt_stub_conn *c,
 			c->bw_arena);
 	}
 	av = c->bw_arena;
-	for (bi = 1; bi <= 5 && bw_budget > 0; bi++) {
+	/* dl2 (37248232176): the corrupting bin sat beyond the watched
+	 * 1..5 — widen to 16 (the small-bin range; walk cost stays
+	 * bounded by maxw). */
+	for (bi = 1; bi <= 16 && bw_budget > 0; bi++) {
 		unsigned long long head = av + 0x50 + 16ull * bi;
 		unsigned long long cur;
 		int k, maxw = (bi == 1) ? 8 : 4, slot = 0;

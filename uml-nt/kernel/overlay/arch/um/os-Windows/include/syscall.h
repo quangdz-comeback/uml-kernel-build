@@ -67,9 +67,9 @@ struct uml_nt_stub_conn {
 	 * snapshots — a transition into an ILLEGAL value names the
 	 * exact qword + round (the foreign write itself). */
 	unsigned long long bw_arena;
-	unsigned long long bw_snap[5][8][5]; /* bin,slot,{va,fd,bk,
+	unsigned long long bw_snap[16][8][5]; /* bin,slot,{va,fd,bk,
 		fdbk,bkfd} */
-	int bw_nslot[5];
+	int bw_nslot[16];
 	int bw_snap_valid;
 	/* [replay-check] (M5.6a, referee 37179076089): a write fault's
 	 * repair replays the faulting store on the fixed view — nothing
