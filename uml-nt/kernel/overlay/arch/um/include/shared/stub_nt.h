@@ -296,6 +296,15 @@ struct uml_nt_stub_data {
 	 * witness is blind to. */
 	unsigned int ss_ndump;
 	unsigned long long ss_dump[48][3]; /* base, len, prot|type */
+	/* -- v12: the tctrip RO re-arm (M5.6a) -------------------------
+	 * tctrip-emulate covers the five tcache-struct store shapes;
+	 * a CHUNK-data write on the same page (heap page 0 holds the
+	 * first ~3.5KB of chunks past the struct) matches none of
+	 * them. For those the kernel repairs normally and sets
+	 * ss_rearm_ro = the armed page: the post-store #DB re-applies
+	 * READONLY to it before continuing — the free-run hole shrinks
+	 * from "until the next serve round" to "one store". 0 = none. */
+	unsigned long long ss_rearm_ro;
 };
 
 #endif /* __UML_STUB_NT_H */

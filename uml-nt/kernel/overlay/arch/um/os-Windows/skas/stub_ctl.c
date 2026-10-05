@@ -367,40 +367,167 @@ void uml_nt_cowtrap_trip(struct uml_nt_stub_conn *c,
 static struct uml_nt_stub_conn *tctrip_conn;
 static unsigned long long tctrip_page;
 static int tctrip_pending;
-static int tctrip_budget = 12;
+static int tctrip_budget = 1 << 26;
 
 static void uml_nt_tctrip_arm(struct uml_nt_stub_conn *c)
 {
-	if (tctrip_budget <= 0 || tctrip_conn != NULL)
-		return; /* one live trip — the log names re-arms */
+	int fresh = 0;
+
+	if (tctrip_budget <= 0 || witness_off())
+		return;
+	if (tctrip_conn != NULL && tctrip_conn != c)
+		return; /* one live trip */
 	if (c->mm == NULL || c->mm->heap_start == 0)
 		return;
 	if (uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
 			       UML_NT_PAGE_READONLY, c->mm->heap_start,
 			       UML_NT_FAULT_PAGE_SIZE, 0) < 0)
 		return;
+	fresh = (tctrip_conn != c || tctrip_page != c->mm->heap_start);
 	tctrip_conn = c;
 	tctrip_page = c->mm->heap_start;
 	tctrip_pending = 1;
-	os_info("[tctrip] armed tcache page 0x%llx pid %lu "
-		"READ-ONLY — every write to the struct page names "
-		"its rip\n", tctrip_page, (unsigned long)c->pid);
+	if (fresh)
+		os_info("[tctrip] armed tcache page 0x%llx pid %lu "
+			"READ-ONLY + emulate-skip — every struct write "
+			"transits the dispatch, page never writable\n",
+			tctrip_page, (unsigned long)c->pid);
 }
 
-static void uml_nt_tctrip_trip(struct uml_nt_stub_conn *c,
-			       struct uml_nt_stub_data *d)
+static int tctrip_loud_budget = 24;
+static unsigned long long tctrip_emulated;
+
+/* M5.6a tctrip-EMULATE: the RO tcache page's writes are emulated
+ * kernel-side and the guest resumes PAST the store — the page never
+ * becomes writable, so EVERY write to the tcache struct transits
+ * this dispatch (the old trip-then-repair flow opened a whole
+ * free-run hole per trip, and its 12-trip budget died at line ~80k
+ * — dl5's entries[] tear landed at ~88k, unseen). Five encodings
+ * cover all observed traffic: tcache_put's pair (entries[i]=e at
+ * libc+0x965d2, counts[i]++ at +0x965da) and tcache_get's triple
+ * (entries[i]=REVEAL(e->next) at +0x98a9a, counts[i]-- at +0x98a9e,
+ * e->key=NULL at +0x98aa2). Anything else prints LOUD with the full
+ * register file and falls through to the normal repair. A legit
+ * encoding with a non-heap value = the chain was torn upstream:
+ * emulate anyway (native semantics — a witness observes, never
+ * alters) but shout. Returns 1 when the store was emulated (skip
+ * mm_fault; empty plan; rip advanced). */
+static int uml_nt_tctrip_emulate(struct uml_nt_stub_conn *c,
+				 struct uml_nt_stub_data *d)
 {
-	if (tctrip_conn != c || d->fault_addr < tctrip_page ||
-	    d->fault_addr >= tctrip_page + UML_NT_FAULT_PAGE_SIZE)
-		return;
-	os_info("[tctrip] WRITE pid %lu rip=0x%llx rsp=0x%llx "
-		"rcx=0x%llx addr=0x%llx type=%u nr=%llu ret=%lld\n",
-		(unsigned long)c->pid, d->regs.rip, d->regs.rsp,
-		d->regs.rcx, d->fault_addr, d->fault_type,
-		c->last_nr, c->last_ret);
-	tctrip_conn = NULL;
-	tctrip_pending = 0;
-	tctrip_budget--; /* re-armed at the next serve round */
+	unsigned char ib[8];
+	long long it, off;
+	unsigned long long dst = 0, val = 0;
+	int len = 0, size = 8, badval = 0;
+	const char *what = NULL;
+
+	if (tctrip_conn != c || c->mm == NULL ||
+	    d->fault_addr < tctrip_page ||
+	    d->fault_addr >= tctrip_page + UML_NT_FAULT_PAGE_SIZE ||
+	    d->fault_type != UML_NT_FAULT_WRITE)
+		return 0;
+	it = uml_nt_vma_translate(c->mm, d->regs.rip, 8);
+	if (it < 0)
+		return 0;
+	memcpy(ib, (char *)uml_boot.physmem_base + it, 8);
+	if (!memcmp(ib, "\x4c\x89\x8c\xc8\x80\x00\x00\x00", 8)) {
+		/* mov %r9,0x80(%rax,%rcx,8) — tcache_put entries[i]=e */
+		dst = d->regs.rax + 0x80 + d->regs.rcx * 8;
+		val = d->regs.r9;
+		len = 8;
+		what = "put";
+		if (val < c->mm->heap_start || val >= c->mm->heap_end)
+			badval = 1;
+	} else if (!memcmp(ib, "\x66\x89\x34\x48", 4)) {
+		/* mov %si,(%rax,%rcx,2) — tcache_put counts[i]++ */
+		dst = d->regs.rax + d->regs.rcx * 2;
+		val = d->regs.rsi & 0xffff;
+		len = 4;
+		size = 2;
+		what = "put-count";
+	} else if (!memcmp(ib, "\x48\x89\x34\xfa", 4)) {
+		/* mov %rsi,(%rdx,%rdi,8) — tcache_get entries[i]=next */
+		dst = d->regs.rdx + d->regs.rdi * 8;
+		val = d->regs.rsi;
+		len = 4;
+		what = "get";
+		if (val != 0 && (val < c->mm->heap_start ||
+				 val >= c->mm->heap_end))
+			badval = 1;
+	} else if (!memcmp(ib, "\x66\x89\x0c\x6a", 4)) {
+		/* mov %cx,(%rdx,%rbp,2) — tcache_get counts[i]-- */
+		dst = d->regs.rdx + d->regs.rbp * 2;
+		val = d->regs.rcx & 0xffff;
+		len = 4;
+		size = 2;
+		what = "get-count";
+	} else if (!memcmp(ib, "\x48\xc7\x40\x08\x00\x00\x00\x00",
+			   8)) {
+		/* movq $0,0x8(%rax) — tcache_get e->key=NULL */
+		dst = d->regs.rax + 8;
+		val = 0;
+		len = 8;
+		what = "key-null";
+	} else {
+		if (tctrip_loud_budget > 0) {
+			tctrip_loud_budget--;
+			os_info("[tctrip-WRITER] pid %lu rip=0x%llx "
+				"insn=%02x %02x %02x %02x %02x %02x %02x "
+				"%02x addr=0x%llx rsp=0x%llx nr=%llu "
+				"ret=%lld\n",
+				(unsigned long)c->pid, d->regs.rip,
+				ib[0], ib[1], ib[2], ib[3], ib[4], ib[5],
+				ib[6], ib[7], d->fault_addr, d->regs.rsp,
+				c->last_nr, c->last_ret);
+			os_info("[tctrip-WRITER]   rax=0x%llx rcx=0x%llx "
+				"rdx=0x%llx rsi=0x%llx rdi=0x%llx "
+				"r8=0x%llx r9=0x%llx r10=0x%llx "
+				"r11=0x%llx\n",
+				d->regs.rax, d->regs.rcx, d->regs.rdx,
+				d->regs.rsi, d->regs.rdi, d->regs.r8,
+				d->regs.r9, d->regs.r10, d->regs.r11);
+		}
+		/* The chunk-data case: repair writable, and have the
+		 * stub's post-store #DB put the tripwire back (v12) —
+		 * the hole is this one store, not the whole round. */
+		d->ss_rearm_ro = tctrip_page;
+		return 0; /* the writer is named above */
+	}
+	if (dst != d->fault_addr) {
+		if (tctrip_loud_budget > 0) {
+			tctrip_loud_budget--;
+			os_info("[tctrip-DSTMATCH] pid %lu %s dst=0x%llx "
+				"but fault=0x%llx — NOT emulating\n",
+				(unsigned long)c->pid, what, dst,
+				d->fault_addr);
+		}
+		return 0;
+	}
+	off = uml_nt_vma_translate(c->mm, dst, size);
+	if (off < 0)
+		return 0;
+	if (size == 2)
+		*(unsigned short *)((char *)uml_boot.physmem_base + off) =
+			(unsigned short)val;
+	else
+		*(unsigned long long *)((char *)uml_boot.physmem_base +
+					off) = val;
+	d->regs.rip += len;
+	tctrip_emulated++;
+	if (badval && tctrip_loud_budget > 0) {
+		tctrip_loud_budget--;
+		os_info("[tctrip-BADVAL] pid %lu %s val=0x%llx NOT in "
+			"heap [0x%llx,0x%llx) rip=0x%llx nr=%llu — "
+			"emulated (native), chain torn upstream\n",
+			(unsigned long)c->pid, what, val,
+			c->mm->heap_start, c->mm->heap_end, d->regs.rip,
+			c->last_nr);
+	}
+	if ((tctrip_emulated & 0x3ff) == 1)
+		os_info("[tctrip] %llu emulated struct writes (page "
+			"never writable — every write transits here)\n",
+			tctrip_emulated);
+	return 1;
 }
 
 /* [copyver] (see syscall.h): memcpy + read-back verify for the
@@ -1744,6 +1871,7 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	 * the re-armed cowtrap slot below. */
 	if (witness_off()) {
 		d->ss_page = 0;
+		d->ss_rearm_ro = 0;
 	} else {
 		d->ss_page = d->fault_addr & ~0xfffull;
 	}
@@ -2095,7 +2223,9 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	/* TCACHE TRIP arm/re-arm: after this conn's first fork seed
 	 * the poison window is open — keep the struct page tripped
 	 * (one live trap; the writer's rip = the hunt's end). */
-	if (c->tctrip_want && tctrip_conn == NULL && tctrip_budget > 0)
+	if (c->tctrip_want &&
+	    (tctrip_conn == NULL || tctrip_conn == c) &&
+	    tctrip_budget > 0)
 		uml_nt_tctrip_arm(c);
 	tva = mm->heap_start + 0x10; /* chunk data past the header */
 	/* The glibc shape check first: the heap's first chunk must be
@@ -3307,7 +3437,13 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * the normal mm_fault flow — the log line is the
 		 * whole cost. */
 		uml_nt_cowtrap_trip(c, d);
-		uml_nt_tctrip_trip(c, d);
+		/* tctrip-EMULATE: a tcache-struct write on the armed
+		 * page is performed kernel-side and the guest resumes
+		 * past it — the page stays RO, no hole. */
+		if (uml_nt_tctrip_emulate(c, d)) {
+			uml_nt_cowtrap_pending(c); /* don't starve it */
+			return 0;
+		}
 		if (cowtrap_conn == c &&
 		    d->fault_addr >= cowtrap_lo &&
 		    d->fault_addr < cowtrap_hi) {

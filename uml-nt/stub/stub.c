@@ -552,6 +552,18 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 				}
 				d->ss_regdiff = diff;
 			}
+			if (d->ss_rearm_ro != 0) {
+				/* v12: a tctrip-page store matched no
+				 * known encoding — the kernel repaired
+				 * the page writable for this store; put
+				 * the tripwire back now. */
+				DWORD oldp;
+				VirtualProtect(
+					(LPVOID)(uintptr_t)d->ss_rearm_ro,
+					(SIZE_T)0x1000, PAGE_READONLY,
+					&oldp);
+				d->ss_rearm_ro = 0;
+			}
 			c->EFlags &= ~(DWORD)0x100;
 			d->ss_page = 0;
 			if (d->fs_base != 0 && have_fsgsbase) {
