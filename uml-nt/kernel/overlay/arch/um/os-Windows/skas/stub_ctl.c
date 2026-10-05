@@ -1550,6 +1550,8 @@ static void binwatch(struct uml_nt_stub_conn *c,
 	for (bi = 1; bi <= 16 && bw_budget > 0; bi++) {
 		unsigned long long head = av + 0x50 + 16ull * bi;
 		unsigned long long cur;
+		unsigned long long mems[8];
+		int nmem = 0;
 		int k, maxw = (bi == 1) ? 8 : 4, slot = 0;
 
 		if (bw_qword(mm, head + 0x10, &cur) < 0)
@@ -1681,6 +1683,8 @@ static void binwatch(struct uml_nt_stub_conn *c,
 						rec[f];
 				slot++;
 			}
+			if (nmem < 8)
+				mems[nmem++] = cur;
 			/* dedup persistent-state fires so the budget
 			 * survives to NEW events (37177116246 burned
 			 * 48 fires on one member). */
@@ -1733,6 +1737,84 @@ static void binwatch(struct uml_nt_stub_conn *c,
 				}
 			}
 			cur = rec[1];
+		}
+		/* DOUBLE-LIST, full-chain (dl7 37266648434): the head-only
+		 * entries[] compare misses a member buried mid-chain.
+		 * bin bi holds chunks of size 0x10*bi = tcache bin
+		 * bi-2's class. Walk that chain with the glibc reveal
+		 * (next = raw ^ (mem>>12)); a bin member's base among
+		 * the chain nodes = the chunk is in BOTH structures —
+		 * the double-listing caught one park from formation.
+		 * A repeated node = a chain cycle (the pop-lost-update
+		 * signature: a chunk the get never unlinked). */
+		if (nmem > 0 && bi >= 2 && bi - 2 < UML_NT_TCACHE_COUNTS &&
+		    entries != NULL) {
+			unsigned long long chain[8];
+			unsigned long long node = entries[bi - 2];
+			int nch = 0;
+
+			for (k = 0; k < 8 && node != 0; k++) {
+				unsigned long long raw;
+				int ci, cyc = 0;
+
+				if (node < mm->heap_start ||
+				    node >= mm->heap_end ||
+				    (node & 0xf) != 0)
+					break;
+				for (ci = 0; ci < nch; ci++)
+					if (chain[ci] == node) {
+						cyc = 1;
+						break;
+					}
+				if (cyc) {
+					if (bw_budget > 0) {
+						bw_budget--;
+						os_info("[binwatch-CYCLE] "
+							"pid %lu tcache[%d] "
+							"node 0x%llx twice "
+							"(chain head 0x%llx, "
+							"step %d) nr=%llu "
+							"ret=%lld\n",
+							(unsigned long)
+							c->pid, bi - 2,
+							node,
+							entries[bi - 2], k,
+							c->last_nr,
+							c->last_ret);
+					}
+					break;
+				}
+				chain[nch++] = node;
+				for (ci = 0; ci < nmem; ci++)
+					if (mems[ci] == node - 0x10) {
+						if (bw_budget <= 0)
+							break;
+						bw_budget--;
+						os_info("[binwatch-XLIST] "
+							"pid %lu bin %d "
+							"member 0x%llx IS "
+							"tcache[%d] chain "
+							"node #%d (mem "
+							"0x%llx) nr=%llu "
+							"ret=%lld rip="
+							"0x%llx — DOUBLE-"
+							"LISTED live\n",
+							(unsigned long)
+							c->pid, bi,
+							mems[ci], bi - 2,
+							k, node,
+							c->last_nr,
+							c->last_ret,
+							c->d->regs.rip);
+						dump_guest_bytes(mm,
+							mems[ci], 0x40,
+							"binwatch-xlist");
+						break;
+					}
+				if (bw_qword(mm, node, &raw) < 0)
+					break;
+				node = raw ^ (node >> 12);
+			}
 		}
 		c->bw_nslot[bi - 1] = slot;
 	}
