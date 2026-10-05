@@ -1927,6 +1927,69 @@ static void abrt_arena_audit(struct uml_nt_stub_conn *c,
 	 * class; see abrt_twin_scan). */
 	if (desync != 0)
 		abrt_twin_scan(c, av, desync);
+	/* M5.6a P-hunter: the aborting check's chunk P sits in a
+	 * callee-saved register (unlink_chunk's caller keeps it
+	 * there). For each callee-saved reg that names a heap chunk
+	 * whose fd/bk are heap-or-arena pointers, P is bin-shaped:
+	 * scan ALL bin heads (1..127) and name the bin whose chain
+	 * holds it — the corrupting bin, exactly (dl2's audit walked
+	 * only bins 1..5 and saw a clean world; dl4's tear lived in
+	 * bin[102]). */
+	{
+		unsigned long long cand[5];
+		int ci, bj;
+
+		cand[0] = d->regs.rbx;
+		cand[1] = d->regs.r12;
+		cand[2] = d->regs.r13;
+		cand[3] = d->regs.r14;
+		cand[4] = d->regs.r15;
+		for (ci = 0; ci < 5; ci++) {
+			unsigned long long pv = cand[ci], pfd, pbk;
+
+			if (pv < c->mm->heap_start ||
+			    pv >= c->mm->heap_end)
+				continue;
+			if (abrt_qword(c, pv + 0x10, &pfd) < 0 ||
+			    abrt_qword(c, pv + 0x18, &pbk) < 0)
+				continue;
+			if (!((pfd >= c->mm->heap_start &&
+			       pfd < c->mm->heap_end) ||
+			      (pfd >= av && pfd < av + 0x900)) ||
+			    !((pbk >= c->mm->heap_start &&
+			       pbk < c->mm->heap_end) ||
+			      (pbk >= av && pbk < av + 0x900)))
+				continue;
+			os_info("[abrt]   P-candidate 0x%llx fd=0x%llx "
+				"bk=0x%llx (bin-shaped)\n",
+				pv, pfd, pbk);
+			for (bj = 1; bj <= 127; bj++) {
+				unsigned long long bh =
+					av + 0x50 + 16ull * bj;
+				unsigned long long m;
+				int st;
+
+				if (abrt_qword(c, bh + 0x10, &m) < 0)
+					continue;
+				for (st = 0; st < 24 && m != bh;
+				     st++) {
+					if (m == pv) {
+						os_info("[abrt]   P IS "
+							"bin[%d] member "
+							"#%d\n",
+							bj, st);
+						break;
+					}
+					if (m < c->mm->heap_start ||
+					    m >= c->mm->heap_end)
+						break;
+					if (abrt_qword(c, m + 0x10,
+						       &m) < 0)
+						break;
+				}
+			}
+		}
+	}
 	/* The caller hint: libc-text qwords above __libc_message's
 	 * frame — the first hit past the unlink frame (libc+0x95114)
 	 * is unlink_chunk's caller. */
