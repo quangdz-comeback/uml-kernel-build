@@ -3020,6 +3020,23 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		   * (guest pointer). */
 		ret = sys_clock_gettime(c, a);
 		break;
+	case 250: /* keyctl — systemd's exec KEYRING step calls
+		   * keyctl(KEYCTL_JOIN_SESSION_KEYRING) for every
+		   * sandboxed service; ENOSYS fails the whole spawn
+		   * (status=237/KEYRING — the dl1 networkd crash-loop).
+		   * We keep no keyring: JOIN returns a fake positive
+		   * serial (the step succeeds, the session keyring is
+		   * a phantom — nothing in the boot reads it back).
+		   * Other commands stay loud-ENOSYS so real keyring
+		   * users name themselves. */
+		if (a[0] == 1 /* KEYCTL_JOIN_SESSION_KEYRING */)
+			ret = 0x2e9;
+		else {
+			os_info("[syscall] keyctl cmd=%llu not "
+				"implemented → ENOSYS\n", a[0]);
+			ret = SC_RET(SC_ENOSYS);
+		}
+		break;
 	default:
 		/* [fork-entry] audit: a fork-class nr that reaches the
 		 * default = the child's conn spawns WITHOUT the arm/
