@@ -48,6 +48,20 @@ struct uml_nt_stub_conn {
 	/* plan runner: ops stream one round-trip each */
 	struct uml_nt_fault_plan plan;
 	int plan_next, plan_left;
+	/* K6 (M5.6a, cowcopy-race-class-fix): the per-conn VIEW LEDGER
+	 * — every stub view this conn's op stream has issued (recorded
+	 * at MAP issue in stub_ctl.c issue_plan_op, retired at UNMAP
+	 * bases, prot-refreshed on PROTECTs). The prime-time release
+	 * set (uml_nt_view_release_complete) gives every re-homing
+	 * plan the COMPLETE per-view release set over the ranges it
+	 * releases, and the drain-side census refuses loudly if any
+	 * committed mapping over a released range survives outside the
+	 * ledger — a writable view of an abandoned backing is the dl26
+	 * 37539992560 conviction (the tcache_put pair in the
+	 * abandoned source run), never again silent. kzalloc init =
+	 * empty. */
+	struct uml_nt_view views[UML_NT_VIEW_MAX];
+	int nviews;
 	/* M3.7: a syscall response may carry ops (mmap/munmap/
 	 * mprotect) — the stub reports each op result THROUGH
 	 * d->retval (do_action's 1/0), clobbering the syscall return
@@ -461,6 +475,22 @@ int uml_nt_sc_plan_reserve(struct uml_nt_stub_conn *c, int need);
  * a plan reset (the syscall entry and the fault handler both call
  * this). Defined in stub_ctl.c next to the cowwatch machinery. */
 void uml_nt_cowtrap_pending(struct uml_nt_stub_conn *c);
+
+/* K6 (M5.6a, cowcopy-race-class-fix, dl26 37539992560): the
+ * release-set completeness pass — call at every PRIME site (the
+ * fault repair's prime, the syscall tail, the pump-side signal
+ * delivery) before op 0 issues. Augments c->plan with the COMPLETE
+ * per-view release set for every range the plan's UNMAPs release
+ * (each release at the stranded view's OWN base — the ledger is
+ * the enumeration), then ARMS the stream (plan_next = 0,
+ * plan_left = n_ops) so every queued op streams even when the
+ * round queued only uaccess fixup ops (the eaten-swap class: ops
+ * queued without arming never streamed, and the whole table<->view
+ * swap silently never applied). Returns 0, or -1 with the conn
+ * already KILLED loud (release-set overflow — a dropped release is
+ * the stranding class itself; the D22/D25 invariant is never left
+ * to chance). */
+int uml_nt_view_release_complete(struct uml_nt_stub_conn *c);
 
 /* K6 [cowrace] (M5.6a, feature cowcopy-race-witness): the copy-vs-
  * in-flight-store witness's ARM — called at every run copy+re-home

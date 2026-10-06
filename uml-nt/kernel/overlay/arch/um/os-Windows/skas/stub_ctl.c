@@ -1072,6 +1072,20 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 		c->mc_want = 0;
 	switch (op->op) {
 	case UML_NT_FOP_PROTECT:
+		/* VIEW LEDGER: a prot change refreshes every ledger
+		 * view it overlaps (the drain census prints the
+		 * prot a surviving region carries). */
+		{
+			int vi;
+
+			for (vi = 0; vi < c->nviews; vi++) {
+				if (c->views[vi].va >= op->va + op->len ||
+				    c->views[vi].va + c->views[vi].len <=
+					op->va)
+					continue;
+				c->views[vi].prot = op->prot;
+			}
+		}
 		d->action = UML_STUB_ACTION_PROT;
 		d->prot = op->prot;
 		d->map_va = op->va;  /* PROTECT target page/range */
@@ -1127,6 +1141,27 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 				(unsigned long)c->pid, op->va, op->len,
 				op->off);
 		}
+		/* VIEW LEDGER (K6 cowcopy-race-class-fix): record the
+		 * view this op materializes — AFTER the guard (a
+		 * refused MAP never enters the ledger). This is the
+		 * census's bookkeeping and the release-set's
+		 * enumeration source; an overflow is a broken
+		 * protocol state (more views than the VMA cap —
+		 * views are 1:1 with table VMAs), refused LOUD. */
+		if (uml_nt_view_track(c->views, &c->nviews,
+				      UML_NT_VIEW_MAX, op->va, op->len,
+				      op->off, op->prot) < 0) {
+			os_info("[viewswap] pid %lu LEDGER-OVERFLOW "
+				"MAP va=0x%llx len=0x%llx (%d view(s) "
+				"already) — more views than the VMA "
+				"cap is a broken protocol state — "
+				"KILLING (never a wrong-backed "
+				"view)\n", (unsigned long)c->pid,
+				op->va, op->len, c->nviews);
+			d->action = UML_STUB_ACTION_KILL;
+			d->err = 1;
+			return;
+		}
 		d->action = UML_STUB_ACTION_MAP;
 		d->map_prot = op->prot;
 		d->map_va = op->va;
@@ -1174,12 +1209,190 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 		}
 		break;
 	default: /* UML_NT_FOP_UNMAP */
+		/* VIEW LEDGER: the stub releases the WHOLE view at
+		 * op->va — retire the ledger entry at that base (the
+		 * census below then refuses any mapping the ledger
+		 * no longer admits over the released ranges). */
+		{
+			int vi;
+
+			for (vi = 0; vi < c->nviews; vi++) {
+				if (c->views[vi].va != op->va)
+					continue;
+				memmove(&c->views[vi],
+					&c->views[vi + 1],
+					(size_t)(c->nviews - vi - 1) *
+						sizeof(c->views[0]));
+				c->nviews--;
+				break;
+			}
+		}
 		d->action = UML_STUB_ACTION_UNMAP;
 		d->map_va = op->va;
 		d->map_len = op->len;
 		break;
 	}
 	c->plan_next++;
+}
+
+/* K6 (M5.6a, cowcopy-race-class-fix, dl26 37539992560): the
+ * release-set completeness pass + stream arming. Call at EVERY
+ * prime site before op 0 issues — the fault repair's prime, the
+ * syscall tail, the pump-side signal delivery. Two classes close
+ * here (fault.h's block comment has the conviction):
+ *   1. RELEASE SET: the plan's UNMAP at a range start releases
+ *      only the view at that base — the augment inserts the
+ *      ledger's per-view releases for every other issued view
+ *      intersecting a released range, each at ITS OWN base,
+ *      before any later re-MAP can collide with the occupied
+ *      range.
+ *   2. ARMING: uaccess COW fixups queue ops WITHOUT arming the
+ *      stream (uacc_plan_op appends, only sc_plan_add set
+ *      plan_left) — a round whose only view ops were fixups
+ *      never streamed, the table had already moved (the fixup's
+ *      cow_split mutated it kernel-side), and the stale view
+ *      served every later guest store into the abandoned backing
+ *      with NO fault and NO catch. plan_left = n_ops here makes
+ *      "every queued op streams" the invariant, round shape
+ *      independent.
+ * Overflow of the complete set refuses LOUD here (the caller only
+ * checks the return) — a dropped release is the stranding class
+ * itself. */
+int uml_nt_view_release_complete(struct uml_nt_stub_conn *c)
+{
+	int ins;
+
+	ins = uml_nt_fault_augment_release_set(&c->plan, c->views,
+					       c->nviews);
+	if (ins < 0) {
+		os_info("[viewswap] pid %lu RELEASE-SET OVERFLOW — the "
+			"plan (%d op(s)) cannot hold the complete "
+			"per-view release set — KILLING (never a "
+			"wrong-backed view)\n",
+			(unsigned long)c->pid, c->plan.n_ops);
+		c->d->action = UML_STUB_ACTION_KILL;
+		c->d->err = 1;
+		return -1;
+	}
+	if (ins > 0) {
+		static int rel_budget = 8;
+
+		if (rel_budget > 0) {
+			rel_budget--;
+			os_info("[viewswap] pid %lu EXTRA-RELEASE: %d "
+				"stale ledger view(s) over re-homed "
+				"range(s) released by own base (the "
+				"plan's UNMAP covered only its range "
+				"start)\n", (unsigned long)c->pid, ins);
+		}
+	}
+	c->plan_next = 0;
+	c->plan_left = c->plan.n_ops;
+	return 0;
+}
+
+/* K6 (M5.6a, cowcopy-race-class-fix): the drain-side census — the
+ * swap's COMPLETION guard (extending the apply-time MAP guard to
+ * the whole swap). When a plan that re-homed ranges drains, walk
+ * the stub's VA space over every released range: every committed
+ * MEM_MAPPED region must lie inside the conn's view ledger (a
+ * view its own op stream issued and never released). Anything
+ * else is a view the swap should have released but did not — a
+ * writable (or readable) view over a backing the table no longer
+ * owns, the dl26 conviction class. The census line lists the
+ * survivor WITH the plan op that should have released it (the
+ * brief's read-only pin), then the conn is REFUSED — no silent
+ * continue, ever: the corruption this class produced (pid 7484's
+ * tcache_put pair in the abandoned source run, dl26 37539992560)
+ * was exactly a tolerated survivor. */
+static int viewswap_stale_budget = 8;
+
+static int view_swap_guard(struct uml_nt_stub_conn *c)
+{
+	int i;
+
+	if (c->proc == NULL)
+		return 0; /* no handle, no census (destroy races) */
+	for (i = 0; i < c->plan.n_ops; i++) {
+		unsigned long long va, end;
+		int iters = 0;
+
+		if (c->plan.ops[i].op != UML_NT_FOP_UNMAP ||
+		    c->plan.ops[i].len == 0)
+			continue;
+		va = c->plan.ops[i].va;
+		end = va + c->plan.ops[i].len;
+		while (va < end && iters++ < 128) {
+			MEMORY_BASIC_INFORMATION mbi;
+			unsigned long long rbase, rnext;
+			SIZE_T got;
+
+			memset(&mbi, 0, sizeof(mbi));
+			got = nt->VirtualQueryEx(c->proc,
+						 (void *)(uintptr_t)va,
+						 &mbi, sizeof(mbi));
+			if (got == 0 || mbi.RegionSize == 0)
+				break;
+			rbase = (unsigned long long)
+				(uintptr_t)mbi.BaseAddress;
+			rnext = rbase +
+				(unsigned long long)mbi.RegionSize;
+			/* committed section views only — the stub's
+			 * own image/heap never intersects guest VA
+			 * ranges, and free regions are releases
+			 * done right */
+			if (mbi.State == 0x1000 && mbi.Type == 0x40000 &&
+			    !uml_nt_view_region_covered(
+				    c->views, c->nviews, rbase,
+				    (unsigned long long)mbi.RegionSize)) {
+				if (viewswap_stale_budget > 0) {
+					int ei;
+
+					viewswap_stale_budget--;
+					os_info("[viewswap] pid %lu "
+						"STALE-VIEW region="
+						"[0x%llx,+0x%llx) prot=0x%x "
+						"— the re-homed range "
+						"[0x%llx,+0x%llx) (plan op "
+						"#%d) still maps it; no "
+						"issued view covers it\n",
+						(unsigned long)c->pid,
+						rbase,
+						(unsigned long long)
+							mbi.RegionSize,
+						mbi.Protect, va,
+						c->plan.ops[i].len, i);
+					/* the empirical pin: the last ops
+					 * the stream applied — the op
+					 * that stranded the survivor
+					 * names itself here */
+					for (ei = 3; ei >= 1; ei--) {
+						int idx =
+							c->op_log_n - ei;
+
+						if (idx < 0)
+							continue;
+						os_info("[viewswap] pid %lu "
+							"op-ring -%d: o=%u "
+							"va=0x%llx l=0x%llx "
+							"off=0x%llx\n",
+							(unsigned long)
+								c->pid, ei,
+							(unsigned)
+							c->op_log[idx % 64][0],
+							c->op_log[idx % 64][2],
+							c->op_log[idx % 64][3],
+							c->op_log[idx % 64][4]);
+					}
+				}
+				return -1;
+			}
+			if (rnext <= va)
+				break; /* defensive */
+			va = rnext;
+		}
+	}
+	return 0;
 }
 
 /* Publish one plan op into the stub slot (d->action operands) and
@@ -4298,6 +4511,17 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			return 0;
 		}
 		c->plan_left = 0;
+		/* K6 (cowcopy-race-class-fix): the swap's COMPLETION
+		 * guard — a plan that re-homed ranges must leave NO
+		 * mapping over them outside the issued-view ledger.
+		 * The census refuses loud (never a silent continue):
+		 * a surviving writable view over an abandoned backing
+		 * is the dl26 corruption family itself. */
+		if (view_swap_guard(c) < 0) {
+			d->action = UML_STUB_ACTION_KILL;
+			d->err = 1;
+			return -1;
+		}
 		if (c->plan_has_retval) {
 			/* A syscall carried these ops: re-publish its
 			 * return value (the stub's op results traveled
@@ -4977,8 +5201,15 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		}
 		}
 		stack_window_reassert(c);
-		c->plan_next = 0;
-		c->plan_left = c->plan.n_ops;
+		/* K6 (cowcopy-race-class-fix): the COMPLETE per-view
+		 * release set + stream arming before op 0 issues — a
+		 * surviving view over the re-homed range (the dl26
+		 * conviction: pid 7484's own tcache_put pair landing
+		 * in the abandoned source run) is released HERE, by
+		 * ledger base, and any that somehow survive meet the
+		 * drain census below. */
+		if (uml_nt_view_release_complete(c) < 0)
+			return -1; /* release_complete already KILLed */
 		issue_plan_op(c, &c->plan.ops[0]);
 		return 0;
 	}
@@ -5005,6 +5236,17 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		return 2;
 	}
 	stack_window_reassert(c);
+	/* K6 (cowcopy-race-class-fix): the release set + ARMING.
+	 * uaccess COW fixups queue UNMAP/MAP ops without arming the
+	 * stream (uacc_plan_op appends; only sc_plan_add set
+	 * plan_left) — a round whose only view ops were fixups
+	 * never streamed, the fixup's cow_split had already moved
+	 * the table, and the stale view served every later guest
+	 * store into the abandoned backing with no fault and no
+	 * catch. plan_left = n_ops HERE makes "every queued op
+	 * streams" the invariant for every round shape. */
+	if (uml_nt_view_release_complete(c) < 0)
+		return -1; /* release_complete already KILLed */
 	if (c->plan_left > 0)
 		issue_plan_op(c, &c->plan.ops[c->plan_next]);
 	return 0;
@@ -6050,6 +6292,8 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	c->exit_code = 0;
 	c->plan_next = 0;
 	c->plan_left = 0;
+	c->nviews = 0; /* the view ledger starts empty: the INIT
+		       * plan's MAPs populate it as they issue */
 	/* M5.6b: join the launcher's kill-on-close job (boot-info v4)
 	 * — the launcher/kernel dying for ANY reason takes every stub
 	 * down (the zombie-stub report: park_forever outlived a dead

@@ -1961,6 +1961,197 @@ static void test_swap_window(void)
 				       (void *)0) == 0);
 }
 
+/* K6 (M5.6a, feature cowcopy-race-class-fix, dl26 37539992560):
+ * the per-view release-set completeness. UnmapViewOfFile releases
+ * the ONE view at the given base — a re-homing plan's UNMAP-at-
+ * range-start releases only the view whose base equals that start,
+ * and any other issued view covering the re-homed range (a chained
+ * COW split's piece view, a stale survivor) stays mapped over the
+ * abandoned backing: pid 7484's own tcache_put pair (e->next,
+ * e->key) landed in the abandoned source run 0x4090000 after the
+ * fault-path COW copy moved the table to 0x11b0000 (dl26 verdict —
+ * same stub, running=0 at all arms). The fix is by CLASS: the
+ * issue-side view ledger + uml_nt_fault_augment_release_set give
+ * every re-homing plan the COMPLETE per-view release set for the
+ * range it re-homes, and the drain-side census refuses loudly when
+ * anything survives. Host regression: a chained split over
+ * multiple views with different bases — the release set must cover
+ * ALL of them. */
+static void test_release_set(void)
+{
+	struct uml_nt_fault_plan plan;
+	struct uml_nt_view views[8];
+	int nv = 0;
+
+	memset(&plan, 0, sizeof(plan));
+	memset(views, 0, sizeof(views));
+
+	/* --- the view ledger: base-exact upsert --- */
+	CHECK(uml_nt_view_track(views, &nv, 8, RAM, 4 * RUN, 0x100000,
+				UML_NT_PAGE_READWRITE) == 0);
+	CHECK(nv == 1);
+	/* re-track at the same base = update, not append */
+	CHECK(uml_nt_view_track(views, &nv, 8, RAM, 4 * RUN, 0x300000,
+				UML_NT_PAGE_READONLY) == 0);
+	CHECK(nv == 1);
+	CHECK(views[0].off == 0x300000 &&
+	      views[0].prot == UML_NT_PAGE_READONLY);
+	/* two more views: a DIFFERENT base inside the range (the
+	 * stranded class — a chained split's piece view) and an
+	 * adjacent view outside it */
+	CHECK(uml_nt_view_track(views, &nv, 8, RAM + 2 * RUN, RUN,
+				0x120000, UML_NT_PAGE_READWRITE) == 0);
+	CHECK(uml_nt_view_track(views, &nv, 8, RAM + 4 * RUN, RUN,
+				0x140000, UML_NT_PAGE_READWRITE) == 0);
+	CHECK(nv == 3);
+	/* overflow is loud, never a silent drop */
+	nv = 8;
+	CHECK(uml_nt_view_track(views, &nv, 8, RAM + 5 * RUN, RUN,
+				0x150000, UML_NT_PAGE_READWRITE) == -1);
+	CHECK(nv == 8);
+	nv = 3;
+	/* bad shapes */
+	CHECK(uml_nt_view_track((void *)0, &nv, 8, RAM, RUN, 0, 0) ==
+	      -1);
+	CHECK(uml_nt_view_track(views, (void *)0, 8, RAM, RUN, 0, 0) ==
+	      -1);
+
+	/* --- union containment (the drain census's core): adjacent
+	 * same-prot section views can read as ONE VirtualQueryEx
+	 * region — coverage is by UNION of issued views, never by a
+	 * single one --- */
+	CHECK(uml_nt_view_region_covered(views, nv, RAM, 5 * RUN) == 1);
+	CHECK(uml_nt_view_region_covered(views, nv, RAM + 2 * RUN,
+					 RUN) == 1);
+	CHECK(uml_nt_view_region_covered(views, nv, RAM + RUN / 2,
+					 RUN / 2) == 1);
+	/* past the covered union */
+	CHECK(uml_nt_view_region_covered(views, nv, RAM + 5 * RUN,
+					 RUN) == 0);
+	/* a gap inside the "region" (two views with a hole between
+	 * them — union coverage must find it) */
+	{
+		struct uml_nt_view v2[2];
+
+		memset(v2, 0, sizeof(v2));
+		v2[0].va = RAM;
+		v2[0].len = RUN;
+		v2[1].va = RAM + 2 * RUN;
+		v2[1].len = RUN;
+		CHECK(uml_nt_view_region_covered(v2, 2, RAM, 3 * RUN) ==
+		      0);
+		CHECK(uml_nt_view_region_covered(v2, 2, RAM, RUN) == 1);
+	}
+	CHECK(uml_nt_view_region_covered((void *)0, 0, RAM, RUN) == 0);
+
+	/* --- THE regression: the chained re-home's release set must
+	 * cover EVERY view over the re-homed range, at each view's
+	 * OWN base --- */
+	memset(&plan, 0, sizeof(plan));
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = 4 * RUN;
+	plan.ops[1].op = UML_NT_FOP_MAP;
+	plan.ops[1].prot = UML_NT_PAGE_READWRITE;
+	plan.ops[1].va = RAM;
+	plan.ops[1].len = 4 * RUN;
+	plan.ops[1].off = 0x400000;
+	plan.n_ops = 2;
+	/* WITHOUT the augment, the single UNMAP at the range start
+	 * releases only the base view; the mid-range view (a
+	 * writable view over the abandoned span) survives the swap. */
+	CHECK(uml_nt_fault_augment_release_set(&plan, views, nv) == 1);
+	CHECK(plan.n_ops == 3);
+	/* the extra release rides directly AFTER the triggering
+	 * UNMAP — before the re-MAP can collide with the still-
+	 * occupied range — and releases the survivor at ITS base */
+	CHECK(plan.ops[1].op == UML_NT_FOP_UNMAP);
+	CHECK(plan.ops[1].va == RAM + 2 * RUN);
+	CHECK(plan.ops[1].len == RUN);
+	CHECK(plan.ops[2].op == UML_NT_FOP_MAP);
+	/* the adjacent view (outside the re-homed range) untouched */
+
+	/* --- dedup: a view whose base the plan already releases
+	 * never gets a second UNMAP --- */
+	memset(&plan, 0, sizeof(plan));
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = 4 * RUN;
+	plan.ops[1].op = UML_NT_FOP_UNMAP;
+	plan.ops[1].va = RAM + 2 * RUN;
+	plan.ops[1].len = RUN;
+	plan.ops[2].op = UML_NT_FOP_MAP;
+	plan.ops[2].prot = UML_NT_PAGE_READWRITE;
+	plan.ops[2].va = RAM;
+	plan.ops[2].len = 4 * RUN;
+	plan.ops[2].off = 0x400000;
+	plan.n_ops = 3;
+	CHECK(uml_nt_fault_augment_release_set(&plan, views, nv) == 0);
+	CHECK(plan.n_ops == 3);
+
+	/* --- chained split over MULTIPLE views with different bases:
+	 * every survivor over the re-homed range is covered, in
+	 * ledger order, each at its own base --- */
+	memset(&plan, 0, sizeof(plan));
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = 4 * RUN;
+	plan.ops[1].op = UML_NT_FOP_MAP;
+	plan.ops[1].prot = UML_NT_PAGE_READWRITE;
+	plan.ops[1].va = RAM;
+	plan.ops[1].len = 4 * RUN;
+	plan.ops[1].off = 0x400000;
+	plan.n_ops = 2;
+	{
+		struct uml_nt_view chain[8];
+		int nc = 0;
+
+		memset(chain, 0, sizeof(chain));
+		CHECK(uml_nt_view_track(chain, &nc, 8, RAM, 4 * RUN,
+					0x100000,
+					UML_NT_PAGE_READWRITE) == 0);
+		CHECK(uml_nt_view_track(chain, &nc, 8, RAM + RUN, RUN,
+					0x110000,
+					UML_NT_PAGE_READWRITE) == 0);
+		CHECK(uml_nt_view_track(chain, &nc, 8, RAM + 3 * RUN,
+					RUN, 0x130000,
+					UML_NT_PAGE_READWRITE) == 0);
+		CHECK(uml_nt_view_track(chain, &nc, 8, RAM + 6 * RUN,
+					RUN, 0x160000,
+					UML_NT_PAGE_READWRITE) == 0);
+		CHECK(nc == 4);
+		CHECK(uml_nt_fault_augment_release_set(&plan, chain,
+						       nc) == 2);
+		CHECK(plan.n_ops == 4);
+		CHECK(plan.ops[1].op == UML_NT_FOP_UNMAP &&
+		      plan.ops[1].va == RAM + RUN);
+		CHECK(plan.ops[2].op == UML_NT_FOP_UNMAP &&
+		      plan.ops[2].va == RAM + 3 * RUN);
+		CHECK(plan.ops[3].op == UML_NT_FOP_MAP);
+	}
+
+	/* --- overflow refuses loud: a full plan NEVER silently
+	 * drops a release --- */
+	memset(&plan, 0, sizeof(plan));
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = 4 * RUN;
+	plan.n_ops = UML_NT_FAULT_MAX_OPS;
+	CHECK(uml_nt_fault_augment_release_set(&plan, views, nv) == -1);
+	/* no UNMAP, no range: nothing to do */
+	memset(&plan, 0, sizeof(plan));
+	plan.ops[0].op = UML_NT_FOP_PROTECT;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = 4 * RUN;
+	plan.n_ops = 1;
+	CHECK(uml_nt_fault_augment_release_set(&plan, views, nv) == 0);
+	CHECK(uml_nt_fault_augment_release_set((void *)0, views, nv) ==
+	      0);
+	CHECK(uml_nt_fault_augment_release_set(&plan, (void *)0, 0) ==
+	      0);
+}
+
+
 int main(void)
 {
 	test_phys();
@@ -1983,6 +2174,7 @@ int main(void)
 	test_drop_audit();
 	test_fork_storm();
 	test_swap_window();
+	test_release_set();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);

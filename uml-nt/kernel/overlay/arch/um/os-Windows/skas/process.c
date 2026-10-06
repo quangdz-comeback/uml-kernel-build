@@ -373,12 +373,16 @@ void uml_nt_signal_check(struct uml_nt_stub_conn *c)
 	 * private mid-write): prime the plan streaming — the answer
 	 * becomes the first op, the rest stream on the PROT_DONE
 	 * rounds, and the VERBATIM push below survives until the
-	 * stub's final resume (it clears the flags only there). */
-	if (c->plan.n_ops > 0) {
-		c->plan_next = 0;
-		c->plan_left = c->plan.n_ops;
+	 * stub's final resume (it clears the flags only there).
+	 * K6 (cowcopy-race-class-fix): uml_nt_view_release_complete
+	 * gives this re-homing stream its COMPLETE per-view release
+	 * set and arms it — a fixup stream that never applied left
+	 * the table moved and the stale view serving guest stores
+	 * into the abandoned backing (dl26 37539992560). On refusal
+	 * the conn is already KILLED loud — skip the prime. */
+	if (c->plan.n_ops > 0 &&
+	    uml_nt_view_release_complete(c) == 0)
 		uml_nt_plan_issue_op(c, &c->plan.ops[0]);
-	}
 
 	/* M5.4 c3 (map 057): a delivery ON A WATCHED CONN is one of
 	 * the two candidate writers of the fork-residue cluster (the

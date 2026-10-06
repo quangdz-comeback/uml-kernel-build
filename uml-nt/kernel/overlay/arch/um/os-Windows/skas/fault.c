@@ -545,3 +545,132 @@ int uml_nt_fault_munmap_views(const struct uml_nt_mm *mm,
 	}
 	return n;
 }
+
+/* ---- K6 (M5.6a, cowcopy-race-class-fix): the view ledger ----
+ * See fault.h's block comment for the class conviction (dl26
+ * 37539992560: the tcache_put pair in the abandoned source run —
+ * a writable view the re-homing plan never released). Pure
+ * logic, host-tested in test_mm.c test_release_set. */
+int uml_nt_view_track(struct uml_nt_view *vs, int *n, int max,
+		      unsigned long long va, unsigned long long len,
+		      unsigned long long off, unsigned prot)
+{
+	int i;
+
+	if (vs == (struct uml_nt_view *)0 || n == (int *)0 ||
+	    va == 0 || len == 0)
+		return -1;
+	for (i = 0; i < *n; i++) {
+		if (vs[i].va != va)
+			continue;
+		vs[i].len = len;
+		vs[i].off = off;
+		vs[i].prot = prot;
+		return 0;
+	}
+	if (*n >= max)
+		return -1;
+	vs[*n].va = va;
+	vs[*n].len = len;
+	vs[*n].off = off;
+	vs[*n].prot = prot;
+	(*n)++;
+	return 0;
+}
+
+int uml_nt_view_region_covered(const struct uml_nt_view *vs, int n,
+			       unsigned long long base,
+			       unsigned long long len)
+{
+	unsigned long long pos = base;
+
+	if (vs == (const struct uml_nt_view *)0 || n <= 0 ||
+	    len == 0)
+		return 0;
+	while (pos < base + len) {
+		int i, hit = 0;
+
+		for (i = 0; i < n; i++) {
+			if (pos >= vs[i].va &&
+			    pos < vs[i].va + vs[i].len) {
+				pos = vs[i].va + vs[i].len;
+				hit = 1;
+				break;
+			}
+		}
+		if (!hit)
+			return 0;
+	}
+	return 1;
+}
+
+int uml_nt_fault_augment_release_set(struct uml_nt_fault_plan *plan,
+				     const struct uml_nt_view *vs, int n)
+{
+	int i = 0, inserted = 0;
+
+	if (plan == (struct uml_nt_fault_plan *)0 ||
+	    vs == (const struct uml_nt_view *)0)
+		return 0;
+	while (i < plan->n_ops) {
+		int v, added = 0;
+
+		if (plan->ops[i].op != UML_NT_FOP_UNMAP ||
+		    plan->ops[i].len == 0) {
+			i++;
+			continue;
+		}
+		/* reverse ledger walk: each insert lands directly
+		 * after the trigger, so descending order leaves the
+		 * extras in LEDGER order (deterministic op streams —
+		 * same coverage either way, all before any re-MAP) */
+		for (v = n - 1; v >= 0; v--) {
+			int j, released;
+
+			if (vs[v].va == 0 || vs[v].len == 0)
+				continue;
+			if (vs[v].va >= plan->ops[i].va +
+					    plan->ops[i].len ||
+			    vs[v].va + vs[v].len <= plan->ops[i].va)
+				continue; /* disjoint from the release */
+			/* The plan's own UNMAPs (original + the
+			 * extras already inserted) release at
+			 * bases — a view whose base is covered
+			 * needs no second op. */
+			released = 0;
+			for (j = 0; j < plan->n_ops; j++) {
+				if (plan->ops[j].op == UML_NT_FOP_UNMAP &&
+				    plan->ops[j].va == vs[v].va) {
+					released = 1;
+					break;
+				}
+			}
+			if (released)
+				continue;
+			if (plan->n_ops >= UML_NT_FAULT_MAX_OPS)
+				return -1;
+			/* Insert directly AFTER the triggering UNMAP:
+			 * every release lands before the plan's later
+			 * re-MAPs, so a surviving view can never
+			 * collide with a fresh mapping at the occupied
+			 * range. Explicit shift loop — the file stays
+			 * pure (no libc; vma.c's convention). */
+			for (j = plan->n_ops; j > i + 1; j--)
+				plan->ops[j] = plan->ops[j - 1];
+			plan->ops[i + 1].op = UML_NT_FOP_UNMAP;
+			plan->ops[i + 1].prot = 0;
+			plan->ops[i + 1].va = vs[v].va;
+			plan->ops[i + 1].len = vs[v].len;
+			plan->ops[i + 1].off = 0;
+			plan->n_ops++;
+			inserted++;
+			added++;
+		}
+		/* step past the triggering op AND its inserted
+		 * releases (they are complete by construction and
+		 * never re-trigger) */
+		i += added + 1;
+	}
+	return inserted;
+}
+

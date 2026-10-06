@@ -253,4 +253,86 @@ int uml_nt_fault_munmap_views(const struct uml_nt_mm *mm,
 			      unsigned long long s, unsigned long long e,
 			      struct uml_nt_fault_op *ops, int max);
 
+/* ---- K6 (M5.6a, feature cowcopy-race-class-fix, dl26 37539992560):
+ * the per-view release-set completeness — the view ledger ----
+ *
+ * The dl26 verdict (cowcopy-race-witness, af7aa78): pid 7484's own
+ * tcache_put pair (e->next, e->key) landed in the ABANDONED source
+ * run 0x4090000 AFTER the fault-path COW copy moved the table to
+ * 0x11b0000 (running=0 at all 129 arms — the vector is the SAME
+ * stub, not a concurrent sharer). UnmapViewOfFile releases the ONE
+ * view at the given base, so a re-homing plan's UNMAP-at-range-
+ * start releases only the view whose base equals that start — any
+ * other issued view covering the re-homed range (a chained COW
+ * split's piece view, a stale survivor) stays mapped, writable,
+ * over the abandoned backing, and every later guest store through
+ * it lands in a run the table no longer owns (the D22/D25
+ * invariant broken silently). This is the same class that
+ * uml_nt_fault_munmap_views closed for munmap in 6d3c932,
+ * generalized: the conn keeps a LEDGER of every view its op
+ * stream issues (stub_ctl.c issue_plan_op records MAPs, retires
+ * at UNMAP bases, updates prots on PROTECTs), and every re-homing
+ * plan — fault-path COW split/copy, uaccess COW fixup, brk
+ * re-home, mmap MAP_FIXED replace, fork re-protect — is AUGMENTED
+ * at prime time with the COMPLETE per-view release set for the
+ * ranges it releases, each release at the view's OWN base.
+ *
+ * The helpers are pure logic, host-tested in test_mm.c
+ * (test_release_set): the chained-split-over-multiple-bases
+ * regression the fix mandates. */
+
+/* One issued stub view (the ledger entry). va IS the view's BASE —
+ * the only address UnmapViewOfFile accepts; len/off/prot are the
+ * census's bookkeeping (what the view maps, and how). */
+struct uml_nt_view {
+	unsigned long long va;  /* the view's BASE */
+	unsigned long long len; /* byte length of the view */
+	unsigned long long off; /* section offset the view maps */
+	unsigned prot;          /* the NT prot the view last carried */
+};
+
+/* The ledger cap: views are 1:1 with table VMAs (every MAP op
+ * pairs with the VMA it materializes), so the VMA table's own cap
+ * bounds it — an overflow is a broken protocol state, killed
+ * loud at issue time, never silently dropped. */
+#define UML_NT_VIEW_MAX UML_NT_VMA_MAX
+
+/*
+ * Record/refresh one view in the ledger (base-exact upsert: a
+ * re-MAP at an occupied base replaces the entry — the stub would
+ * refuse the mapping outright otherwise). Returns 0, -1 when the
+ * ledger is full (the caller refuses loud) or the args are bad.
+ * Pure logic.
+ */
+int uml_nt_view_track(struct uml_nt_view *vs, int *n, int max,
+		      unsigned long long va, unsigned long long len,
+		      unsigned long long off, unsigned prot);
+
+/*
+ * Union containment — the drain-side census's core test: 1 when
+ * every byte of [base, base+len) lies inside SOME ledger view.
+ * Adjacent same-prot section views can read as ONE VirtualQueryEx
+ * region, so coverage must be by UNION, never by a single view
+ * (a single-view test false-refuses exactly the healthy fork
+ * re-protect drains). 0 when any part is uncovered. Pure logic.
+ */
+int uml_nt_view_region_covered(const struct uml_nt_view *vs, int n,
+			       unsigned long long base,
+			       unsigned long long len);
+
+/*
+ * THE release-set completeness: walk `plan`'s UNMAP ops and, for
+ * every ledger view that INTERSECTS a released range but is NOT
+ * already released at its own base by the plan's own UNMAPs,
+ * insert an UNMAP at that view's base directly after the
+ * triggering op — BEFORE any later re-MAP can collide with the
+ * still-occupied range. Inserted ops are releases themselves and
+ * never re-trigger. Returns the number inserted, -1 when the plan
+ * cannot hold the complete set (the caller refuses LOUD — a
+ * dropped release is the stranding class itself). Pure logic,
+ * host-tested (test_mm.c test_release_set).
+ */
+int uml_nt_fault_augment_release_set(struct uml_nt_fault_plan *plan,
+				     const struct uml_nt_view *vs, int n);
+
 #endif /* __UM_OS_WINDOWS_FAULT_H */

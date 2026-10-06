@@ -3454,10 +3454,20 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			}
 		}
 	}
-	if (c->plan_left > 0) {
+	if (c->plan.n_ops > 0) {
 		/* The syscall carries stub ops: park the return value —
 		 * the op results travel through d->retval and the plan
-		 * re-publishes ours on the final NONE. */
+		 * re-publishes ours on the final NONE. K6 (cowcopy-
+		 * race-class-fix): the test is the PLAN CONTENT, not
+		 * plan_left — a round whose only view ops were uaccess
+		 * COW fixups (uacc_plan_op appends without arming)
+		 * left plan_left == 0, the retval never parked, and
+		 * the ops never streamed: the fixup's cow_split had
+		 * already moved the table while the stale view kept
+		 * serving guest stores into the abandoned backing (the
+		 * dl26 37539992560 conviction class). The tail's
+		 * uml_nt_view_release_complete arms the stream from
+		 * the same count. */
 		c->plan_has_retval = 1;
 		c->plan_retval = ret;
 	}
