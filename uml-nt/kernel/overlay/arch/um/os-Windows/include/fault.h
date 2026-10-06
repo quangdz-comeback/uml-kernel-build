@@ -177,4 +177,46 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 unsigned uml_nt_vma_effective_prot(const struct uml_nt_vma *vma,
 				   struct uml_nt_phys *ph);
 
+/* ---- M5.6a root-cause fix: the table<->view swap window airtight --
+ * Pure protocol core, host-tested in test_mm.c. See the block comment
+ * at the helpers' definitions in fault.c (dl18 37512134759, [tcekey]
+ * verdict MATCH: run-granular lost-update at the swap window). */
+
+/*
+ * All-or-nothing capacity: 0 when plan can hold `need` MORE ops
+ * (n_ops + need <= MAX_OPS), -1 when not. A table mutation that
+ * queues view ops reserves FIRST and refuses (Linux failure
+ * semantics) when this fails — a view op silently dropped by a full
+ * plan strands the stub's view on a run the table no longer owns
+ * (the K3 uaccess-fixup precedent, referee 37137513174).
+ */
+int uml_nt_fault_plan_reserve(const struct uml_nt_fault_plan *plan,
+			      int need);
+
+/*
+ * The apply-time guard for a MAP op: 1 when the CURRENT VMA table
+ * still backs the op's exact range with the op's own run (both
+ * endpoints translate to op->off), 0 when the table moved under the
+ * op (re-home/munmap/fixup after queueing) or the op claims a range
+ * the table does not own. PROTECT/UNMAP carry no backing claim and
+ * always pass. The conn layer REFUSES (kills) a MAP op that fails
+ * this — applying it would hand the guest a wrong-backed view.
+ */
+int uml_nt_fault_op_backed(const struct uml_nt_fault_op *op,
+			   const struct uml_nt_mm *mm);
+
+/*
+ * The COMPLETE view-release set for a whole-VMA munmap of [s, e):
+ * one UNMAP op per VMA fully inside the range, into ops[0..max).
+ * Returns the op count, 0 when the range intersects nothing,
+ * -1 when there are more views than max, -2 when a VMA straddles
+ * the range edges (whole views only — the munmap contract).
+ * UnmapViewOfFile releases the WHOLE view at map_va: one op for a
+ * multi-VMA range released only the first view and stranded the
+ * rest over dropped, recycled runs (the split-brain class).
+ */
+int uml_nt_fault_munmap_views(const struct uml_nt_mm *mm,
+			      unsigned long long s, unsigned long long e,
+			      struct uml_nt_fault_op *ops, int max);
+
 #endif /* __UM_OS_WINDOWS_FAULT_H */

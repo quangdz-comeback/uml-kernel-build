@@ -408,3 +408,91 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		return -1;
 	return 0;
 }
+
+/* ---- M5.6a root-cause fix: the table<->view swap window airtight --
+ *
+ * dl18 (37512134759, [tcekey] verdict MATCH) named the tear's
+ * formation class: stores a guest issued in the run-migration window
+ * land in a backing the VMA table no longer owns — the run-granular
+ * lost-update (a tcache_put's two CHUNK-side stores vanished while
+ * its two STRUCT-side stores landed, the loss straddling the piece
+ * boundary). The stub's views are built ONLY by plan ops streaming
+ * from the table, so that window is exactly "a view op that does not
+ * match the table": an op silently DROPPED by a full plan (the K3
+ * uaccess-fixup precedent, referee 37137513174: "a plan overflow
+ * AFTER the copy+split left the stub's view stranded on the OLD
+ * run"), a view STRANDED by the one-UNMAP-multi-view munmap geometry
+ * (UnmapViewOfFile releases the WHOLE view at map_va — one op for a
+ * multi-VMA range left every later VMA's view alive over dropped,
+ * recycled runs), or a STALE op issued after the table moved under
+ * it. The three pure helpers below are the fix's protocol core
+ * (host-tested in test_mm.c): reserve the capacity BEFORE the table
+ * moves, enumerate the COMPLETE view-release set, and guard every
+ * MAP at apply time against the table's current truth. */
+int uml_nt_fault_plan_reserve(const struct uml_nt_fault_plan *plan,
+			      int need)
+{
+	if (plan == (const struct uml_nt_fault_plan *)0 || need < 0)
+		return -1;
+	if (plan->n_ops + need > UML_NT_FAULT_MAX_OPS)
+		return -1;
+	return 0;
+}
+
+int uml_nt_fault_op_backed(const struct uml_nt_fault_op *op,
+			   const struct uml_nt_mm *mm)
+{
+	long long lo, hi;
+
+	if (op == (const struct uml_nt_fault_op *)0 ||
+	    mm == (const struct uml_nt_mm *)0)
+		return 0;
+	if (op->op != UML_NT_FOP_MAP)
+		return 1; /* PROTECT/UNMAP carry no backing claim */
+	if (op->len < 8)
+		return 0;
+	/* Both endpoints: a MAP op's range is always exactly one
+	 * VMA (every producer pairs it with its own vma_add /
+	 * cow_split piece), so the first and last qword must both
+	 * translate to the op's own span. A table that moved under
+	 * the op (re-home, munmap, a later fixup) breaks one of the
+	 * two — the refused-op signal. */
+	lo = uml_nt_vma_translate(mm, op->va, 8);
+	if (lo < 0)
+		return 0;
+	hi = uml_nt_vma_translate(mm, op->va + op->len - 8, 8);
+	if (hi < 0)
+		return 0;
+	return (unsigned long long)lo == op->off &&
+	       (unsigned long long)hi == op->off + op->len - 8;
+}
+
+int uml_nt_fault_munmap_views(const struct uml_nt_mm *mm,
+			      unsigned long long s, unsigned long long e,
+			      struct uml_nt_fault_op *ops, int max)
+{
+	int i, n = 0;
+
+	if (mm == (const struct uml_nt_mm *)0 || s >= e)
+		return 0;
+	for (i = 0; i < mm->nvma; i++) {
+		unsigned long long vs = mm->vma[i].start;
+		unsigned long long ve = mm->vma[i].end;
+
+		if (vs >= e || ve <= s)
+			continue; /* disjoint */
+		if (vs < s || ve > e)
+			return -2; /* partial VMA — whole views only */
+		if (n >= max)
+			return -1;
+		if (ops != (struct uml_nt_fault_op *)0) {
+			ops[n].op = UML_NT_FOP_UNMAP;
+			ops[n].prot = 0;
+			ops[n].va = vs;
+			ops[n].len = ve - vs;
+			ops[n].off = 0;
+		}
+		n++;
+	}
+	return n;
+}

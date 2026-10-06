@@ -441,6 +441,16 @@ int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
 		       unsigned long long va, unsigned long long len,
 		       unsigned long long off);
 
+/* M5.6a root-cause fix (the table<->view swap window airtight): 0
+ * when the conn's plan can hold `need` MORE ops, -1 when not. Every
+ * handler that mutates the VMA table and queues view ops reserves
+ * FIRST and refuses the syscall (Linux failure semantics) on a full
+ * plan — a view op silently dropped by a full plan strands the
+ * stub's view on a run the table no longer owns (the K3 uaccess-
+ * fixup precedent, referee 37137513174; dl18 37512134759 named the
+ * class as the heap-tear's formation window). */
+int uml_nt_sc_plan_reserve(struct uml_nt_stub_conn *c, int need);
+
 /* [cowtrap] (M5.6a): re-queue the armed poison-page NOACCESS op after
  * a plan reset (the syscall entry and the fault handler both call
  * this). Defined in stub_ctl.c next to the cowwatch machinery. */

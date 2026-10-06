@@ -1632,6 +1632,152 @@ static void test_fork_storm(void)
 	}
 }
 
+/* ---- M5.6a root-cause fix: the table<->view swap window ----
+ * The pure protocol core the conn layer enforces: reserve capacity
+ * BEFORE the table moves (a dropped view op strands the view on a
+ * run the table no longer owns), enumerate the COMPLETE munmap
+ * view-release set (one UNMAP per removed VMA), and refuse a MAP
+ * op whose backing the table no longer claims. */
+static void test_swap_window(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	struct uml_nt_fault_plan plan;
+	struct uml_nt_fault_op ops[UML_NT_VMA_MAX];
+	unsigned long long r0, r1, r2;
+	int n, i;
+
+	/* --- reserve: all-or-nothing capacity --- */
+	memset(&plan, 0, sizeof(plan));
+	CHECK(uml_nt_fault_plan_reserve(&plan, 0) == 0);
+	CHECK(uml_nt_fault_plan_reserve(&plan, UML_NT_FAULT_MAX_OPS) ==
+	      0); /* exact fit */
+	plan.n_ops = 1;
+	CHECK(uml_nt_fault_plan_reserve(&plan,
+					UML_NT_FAULT_MAX_OPS) == -1);
+	plan.n_ops = UML_NT_FAULT_MAX_OPS - 2;
+	CHECK(uml_nt_fault_plan_reserve(&plan, 2) == 0);
+	CHECK(uml_nt_fault_plan_reserve(&plan, 3) == -1);
+	CHECK(uml_nt_fault_plan_reserve(&plan, -1) == -1);
+	CHECK(uml_nt_fault_plan_reserve((void *)0, 1) == -1);
+
+	/* --- munmap geometry: one UNMAP per removed whole VMA --- */
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 64 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	r0 = uml_nt_phys_alloc_span(&ph, 1);
+	r1 = uml_nt_phys_alloc_span(&ph, 1);
+	r2 = uml_nt_phys_alloc_span(&ph, 1);
+	CHECK((long long)r0 >= 0 && (long long)r1 >= 0 &&
+	      (long long)r2 >= 0);
+	CHECK(uml_nt_vma_add_gen(&mm, RAM, RAM + RUN, r0,
+				 UML_NT_PAGE_READWRITE, 0, 1) == 0);
+	CHECK(uml_nt_vma_add_gen(&mm, RAM + RUN, RAM + 2 * RUN, r1,
+				 UML_NT_PAGE_READWRITE, 0, 1) == 0);
+	CHECK(uml_nt_vma_add_gen(&mm, RAM + 2 * RUN, RAM + 3 * RUN, r2,
+				 UML_NT_PAGE_READWRITE, 0, 1) == 0);
+	/* THE regression: a multi-VMA munmap must release EVERY view
+	 * (the one-op shape stranded views 2..N over recycled runs) */
+	n = uml_nt_fault_munmap_views(&mm, RAM, RAM + 3 * RUN, ops,
+				      UML_NT_VMA_MAX);
+	CHECK(n == 3);
+	CHECK(ops[0].op == UML_NT_FOP_UNMAP && ops[0].va == RAM &&
+	      ops[0].len == RUN);
+	CHECK(ops[1].op == UML_NT_FOP_UNMAP &&
+	      ops[1].va == RAM + RUN && ops[1].len == RUN);
+	CHECK(ops[2].op == UML_NT_FOP_UNMAP &&
+	      ops[2].va == RAM + 2 * RUN && ops[2].len == RUN);
+	/* subrange: only the middle VMA */
+	n = uml_nt_fault_munmap_views(&mm, RAM + RUN, RAM + 2 * RUN,
+				      ops, UML_NT_VMA_MAX);
+	CHECK(n == 1 && ops[0].va == RAM + RUN);
+	/* disjoint: nothing to release */
+	n = uml_nt_fault_munmap_views(&mm, RAM + 9 * RUN,
+				      RAM + 10 * RUN, ops,
+				      UML_NT_VMA_MAX);
+	CHECK(n == 0);
+	/* straddler: whole views only */
+	n = uml_nt_fault_munmap_views(&mm, RAM + RUN / 2,
+				      RAM + 2 * RUN, ops, UML_NT_VMA_MAX);
+	CHECK(n == -2);
+	/* overflow */
+	n = uml_nt_fault_munmap_views(&mm, RAM, RAM + 3 * RUN, ops, 2);
+	CHECK(n == -1);
+
+	/* --- apply-time guard: a MAP op must match the table --- */
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	r0 = uml_nt_phys_alloc_span(&ph, 1);
+	CHECK(uml_nt_vma_add_gen(&mm, RAM, RAM + RUN, r0,
+				 UML_NT_PAGE_READWRITE, 0, 1) == 0);
+	memset(&plan, 0, sizeof(plan));
+	plan.ops[0].op = UML_NT_FOP_MAP;
+	plan.ops[0].prot = UML_NT_PAGE_READWRITE;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = RUN;
+	plan.ops[0].off = r0;
+	plan.n_ops = 1;
+	/* the fresh op: backed by its own table */
+	CHECK(uml_nt_fault_op_backed(&plan.ops[0], &mm) == 1);
+	/* PROTECT/UNMAP carry no backing claim */
+	plan.ops[0].op = UML_NT_FOP_PROTECT;
+	CHECK(uml_nt_fault_op_backed(&plan.ops[0], &mm) == 1);
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	CHECK(uml_nt_fault_op_backed(&plan.ops[0], &mm) == 1);
+	/* THE window: the table RE-HOMED (munmap dropped the VMA, a
+	 * new one took its place on another run) — the stale queued
+	 * op must be refused, never applied. The fresh span is
+	 * allocated BEFORE the old run is released (re-home order),
+	 * so the two offsets differ. */
+	r1 = uml_nt_phys_alloc_span(&ph, 1);
+	CHECK((long long)r1 >= 0 && r1 != r0);
+	CHECK(uml_nt_vma_del(&mm, RAM, RAM + RUN) == 0);
+	CHECK(uml_nt_phys_unref(&ph, (long long)r0) == 0);
+	CHECK(uml_nt_vma_add_gen(&mm, RAM, RAM + RUN, r1,
+				 UML_NT_PAGE_READWRITE, 0, 1) == 0);
+	plan.ops[0].op = UML_NT_FOP_MAP;
+	CHECK(uml_nt_fault_op_backed(&plan.ops[0], &mm) == 0);
+	/* an op for a range the table dropped entirely */
+	CHECK(uml_nt_vma_del(&mm, RAM, RAM + RUN) == 0);
+	CHECK(uml_nt_fault_op_backed(&plan.ops[0], &mm) == 0);
+	/* bad shapes */
+	CHECK(uml_nt_fault_op_backed((void *)0, &mm) == 0);
+	CHECK(uml_nt_fault_op_backed(&plan.ops[0], (void *)0) == 0);
+	plan.ops[0].len = 0;
+	CHECK(uml_nt_fault_op_backed(&plan.ops[0], &mm) == 0);
+
+	/* --- the COW-split shape: every piece's own MAP validates --- */
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 64 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	r0 = uml_nt_phys_alloc_span(&ph, 2);
+	CHECK((long long)r0 >= 0);
+	CHECK(uml_nt_phys_ref(&ph, (long long)r0) == 2);
+	CHECK(uml_nt_phys_ref(&ph, (long long)(r0 + RUN)) == 2);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + 2 * RUN, r0,
+			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
+	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + RUN + 0x8000,
+			      UML_NT_FAULT_WRITE, &plan) == 0);
+	CHECK(!plan.kill);
+	for (i = 0; i < plan.n_ops; i++)
+		if (plan.ops[i].op == UML_NT_FOP_MAP)
+			CHECK(uml_nt_fault_op_backed(&plan.ops[i],
+						     &mm) == 1);
+	/* and the pre-split whole-range op is now refused (the exact
+	 * in-flight window the fix closes) */
+	{
+		struct uml_nt_fault_op old;
+
+		old.op = UML_NT_FOP_MAP;
+		old.prot = UML_NT_PAGE_READWRITE;
+		old.va = RAM;
+		old.len = 2 * RUN;
+		old.off = r0;
+		CHECK(uml_nt_fault_op_backed(&old, &mm) == 0);
+	}
+}
+
 int main(void)
 {
 	test_phys();
@@ -1653,6 +1799,7 @@ int main(void)
 	test_stack_window();
 	test_drop_audit();
 	test_fork_storm();
+	test_swap_window();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);

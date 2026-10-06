@@ -771,6 +771,32 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 		d->map_len = op->len;
 		break;
 	case UML_NT_FOP_MAP:
+		/* M5.6a root-cause fix — THE APPLY-TIME GUARD of the
+		 * table<->view swap window (dl18 37512134759 named the
+		 * formation class: a store landing in a backing the
+		 * table no longer owns). A MAP op is legal ONLY while
+		 * the CURRENT table still backs its exact range with
+		 * the op's own run; a mismatch = the table moved under
+		 * the queued op (a re-home/munmap/fixup between queue
+		 * and apply) = applying it would hand the guest a
+		 * WRONG-BACKED view — the silent split-brain behind
+		 * the run-granular lost-updates. Never apply, never
+		 * stay quiet: refuse and kill the conn loudly (M1
+		 * pitfall 17 — fail loud, never guess). This subsumes
+		 * the old ISSUE-MISMATCH print (writable prots only,
+		 * log-only): ALL MAP prots, fatal. */
+		if (c->mm != NULL &&
+		    !uml_nt_fault_op_backed(op, c->mm)) {
+			os_info("[viewswap] pid %lu REFUSED stale MAP "
+				"va=0x%llx len=0x%llx op_off=0x%llx — "
+				"the VMA table backs another run; "
+				"KILLING (never a wrong-backed "
+				"view)\n", (unsigned long)c->pid,
+				op->va, op->len, op->off);
+			d->action = UML_STUB_ACTION_KILL;
+			d->err = 1;
+			return;
+		}
 		d->action = UML_STUB_ACTION_MAP;
 		d->map_prot = op->prot;
 		d->map_va = op->va;
@@ -795,14 +821,6 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 				(tbl >= 0) ? (unsigned long long)tbl
 					   : op->off + op->len - 8;
 
-			if (tbl >= 0 &&
-			    (unsigned long long)tbl != op->off + op->len - 8)
-				os_info("[mapcanary] ISSUE-MISMATCH pid %lu "
-					"va=0x%llx len=0x%llx op_off=0x%llx "
-					"tbl_off=0x%llx — the plan op carries a "
-					"run the VMA table does not own\n",
-					(unsigned long)c->pid, op->va, op->len,
-					op->off, (unsigned long long)tbl);
 			if (uml_nt_phys_refs(c->ph, (long long)plant) == 1) {
 				unsigned long long *qp =
 					(unsigned long long *)

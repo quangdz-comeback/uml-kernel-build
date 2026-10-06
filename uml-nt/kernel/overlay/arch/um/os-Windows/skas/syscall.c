@@ -100,6 +100,14 @@ int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
 	return 0;
 }
 
+/* M5.6a root-cause fix: the all-or-nothing capacity check for the
+ * table<->view swap (see syscall.h). Pure delegation to the fault
+ * core's host-tested helper. */
+int uml_nt_sc_plan_reserve(struct uml_nt_stub_conn *c, int need)
+{
+	return uml_nt_fault_plan_reserve(&c->plan, need);
+}
+
 /* Route one VFS-backed syscall through the REAL kernel table —
  * upstream handle_syscall parity (sys_call_table[nr](args...)). This
  * is the M3.8 answer to "bytes nằm trong ext4": getname()'s
@@ -221,6 +229,32 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 			(unsigned long long)nruns * UML_NT_PHYS_RUN_SIZE;
 		old_off = hv->run_off;
 		old_len = old_end - mm->heap_start;
+
+		/* M5.6a root-cause fix: the re-home's view swap (UNMAP
+		 * old + MAP new + the guards' NOACCESS re-arms) is
+		 * reserved BEFORE anything moves. A dropped op here is
+		 * the worst class of the swap window: the table would
+		 * point at the fresh span while the stub's view kept
+		 * serving the old runs — every later guest store lands
+		 * in a backing the table no longer owns (run-granular
+		 * lost-update, the dl18 37512134759 formation window).
+		 * Refusal keeps the old brk (Linux failure semantics,
+		 * same shape as the exhausted path below). */
+		{
+			int gi, guards = 0;
+
+			for (gi = 0; gi < mm->nguard; gi++)
+				if (mm->guard[gi].start < new_end &&
+				    mm->guard[gi].end > mm->heap_start)
+					guards++;
+			if (uml_nt_sc_plan_reserve(c, 2 + guards) < 0) {
+				os_info("[syscall] brk re-home: view-swap "
+					"plan full (%d op(s) needed) — "
+					"kept 0x%llx\n", 2 + guards,
+					mm->brk);
+				return mm->brk;
+			}
+		}
 
 		new_off = (unsigned long long)
 			uml_nt_phys_alloc_span(c->ph, (int)nruns);
@@ -421,8 +455,25 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 								 va + req_len);
 
 				if (prot == UML_NT_PAGE_NOACCESS) {
-					if (uml_nt_guard_add(c->mm, va,
-							     va + req_len) < 0)
+					/* M5.6a root-cause fix: the guard's
+					 * NOACCESS view op is reserved
+					 * BEFORE the guard state moves —
+					 * a dropped op would leave a guard
+					 * the guest writes straight
+					 * through (fault truth and view
+					 * silently diverged). All or
+					 * nothing: no op, no guard. */
+					if (uml_nt_sc_plan_reserve(c, 1) <
+					    0) {
+						os_info("[syscall] mmap "
+							"MAP_FIXED 0x%llx: "
+							"view-swap plan "
+							"full — guard "
+							"unmaterialized\n",
+							va);
+					} else if (uml_nt_guard_add(
+							c->mm, va,
+							va + req_len) < 0)
 						os_info("[syscall] mmap "
 							"MAP_FIXED 0x%llx: "
 							"guard table full — "
@@ -515,14 +566,48 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 		if (nfree < 0)
 			return SC_RET(SC_ENOMEM);
 		if (nfree > 0) {
+			/* M5.6a root-cause fix: all-or-nothing — the
+			 * replace's whole op set (one UNMAP per removed
+			 * VMA + the fresh MAP below) is reserved BEFORE
+			 * the table moves. A dropped op here strands the
+			 * stub's view on a dropped, recycled run (the
+			 * K3 uaccess-fixup precedent, 37137513174).
+			 * Refusal is Linux-shaped (-ENOMEM, loud). */
+			int nvict = 0;
+
+			for (i = 0; i < c->mm->nvma; i++) {
+				unsigned long long s =
+					c->mm->vma[i].start;
+				unsigned long long e = c->mm->vma[i].end;
+
+				if (s < va + len && e > va)
+					nvict++;
+			}
+			if (uml_nt_sc_plan_reserve(c, nvict + 1) < 0) {
+				os_info("[syscall] mmap MAP_FIXED "
+					"0x%llx+%llu: view-swap plan "
+					"full (%d op(s) needed) — "
+					"ENOMEM\n", va, len, nvict + 1);
+				return SC_RET(SC_ENOMEM);
+			}
 			for (i = 0; i < c->mm->nvma; i++) {
 				unsigned long long s = c->mm->vma[i].start;
 				unsigned long long e = c->mm->vma[i].end;
 
 				if (s >= va + len || e <= va)
 					continue;
-				uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0,
-						   s, e - s, 0);
+				if (uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP,
+						       0, s, e - s, 0) < 0) {
+					/* Cannot happen (reserved above):
+					 * the invariant is the fix's
+					 * core — never silent. */
+					os_info("[viewswap] replace UNMAP "
+						"dropped post-reserve — "
+						"INVARIANT BROKEN (pid "
+						"%lu)\n",
+						(unsigned long)c->pid);
+					break;
+				}
 			}
 			uml_nt_vma_del(c->mm, va, va + len);
 			for (i = 0; i < nfree; i++)
@@ -537,6 +622,14 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 			return SC_RET(SC_ENOMEM);
 	}
 	nruns = (unsigned)(len / UML_NT_PHYS_RUN_SIZE);
+	/* M5.6a root-cause fix: the fresh span's MAP op is reserved
+	 * BEFORE the table moves (a dropped op strands the range on a
+	 * stale view over recycled runs — the swap-window class). */
+	if (uml_nt_sc_plan_reserve(c, 1) < 0) {
+		os_info("[syscall] mmap 0x%llx+%llu: view-swap plan "
+			"full — ENOMEM\n", va, len);
+		return SC_RET(SC_ENOMEM);
+	}
 	sp = uml_nt_phys_alloc_span(c->ph, (int)nruns);
 	if (sp < 0) {
 		/* Exhaustion or the backend double-alloc reject (the
@@ -902,6 +995,27 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 			}
 			map_start = va;
 		}
+		/* M5.6a root-cause fix: the chunk MAPs are reserved
+		 * BEFORE the first chunk's span is allocated — a
+		 * dropped chunk op strands that chunk's view over
+		 * runs the table dropped (the swap-window class).
+		 * n_chunks = ceil(slen / (SPAN_RUNS * RUN)). */
+		{
+			unsigned long long chunk =
+				UML_NT_MMAP_SPAN_RUNS *
+				UML_NT_PHYS_RUN_SIZE;
+
+			if (uml_nt_sc_plan_reserve(
+				    c, (int)((slen + chunk - 1) / chunk)) <
+			    0) {
+				fdput(fdesc);
+				os_info("[syscall] mmap file 0x%llx+%llu: "
+					"view-swap plan full (%llu "
+					"chunk(s)) — ENOMEM\n", addr, len,
+					(slen + chunk - 1) / chunk);
+				return SC_RET(SC_ENOMEM);
+			}
+		}
 		for (cur = va; cur < va + slen; cur += nruns *
 						     UML_NT_PHYS_RUN_SIZE) {
 			unsigned long long clen = va + slen - cur;
@@ -966,27 +1080,54 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 				     const unsigned long long *a)
 {
+	/* M5.6a root-cause fix: the COMPLETE view-release set, one
+	 * UNMAP op per removed whole VMA. Kernel-side serving is
+	 * serialized (the pump owns it), so one shared static buffer
+	 * serves every conn (the tce/claim_audit pattern) — the
+	 * 16K-stack discipline forbids a second 10KB frame here. */
+	static struct uml_nt_fault_op mun_views[UML_NT_VMA_MAX];
 	unsigned long long addr = a[0], len = a[1];
 	struct uml_nt_mm *mm = c->mm;
 	unsigned long long runs[UML_NT_VMA_MAX]; /* section offsets */
-	int i, nruns;
+	int i, nruns, nviews;
 
 	if (addr & (UML_NT_PHYS_RUN_SIZE - 1) || len == 0)
 		return SC_RET(SC_EINVAL);
 	len = (len + UML_NT_PHYS_RUN_SIZE - 1) &
 	      ~(UML_NT_PHYS_RUN_SIZE - 1);
-	for (i = 0; i < mm->nvma; i++) {
-		unsigned long long s = mm->vma[i].start;
-		unsigned long long e = mm->vma[i].end;
+	/* Partial-VMA refusal + the view enumeration in one pass:
+	 * UnmapViewOfFile releases the WHOLE view at map_va, so the
+	 * release op set is exactly one op per removed VMA (whole
+	 * views only). The old code queued ONE op for the whole
+	 * range: it released only the view containing `addr` and
+	 * STRANDED every later VMA's view over runs the table had
+	 * just dropped and recycled — the silent table-vs-view
+	 * split-brain (guest stores through a stranded view land in
+	 * a backing the table no longer owns, and the recycled runs
+	 * are other mms' memory: the run-granular lost-update, dl18
+	 * 37512134759's formation class). */
+	nviews = uml_nt_fault_munmap_views(mm, addr, addr + len,
+					   mun_views, UML_NT_VMA_MAX);
+	if (nviews == -2) {
+		for (i = 0; i < mm->nvma; i++) {
+			unsigned long long s = mm->vma[i].start;
+			unsigned long long e = mm->vma[i].end;
 
-		if (s >= addr + len || e <= addr)
-			continue;
-		if (s < addr || e > addr + len) {
-			os_info("[syscall] munmap 0x%llx+%llu: partial "
-				"VMA [0x%llx, 0x%llx) — unsupported "
-				"(whole views only)\n", addr, len, s, e);
-			return SC_RET(SC_EINVAL);
+			if (s < addr + len && e > addr &&
+			    (s < addr || e > addr + len)) {
+				os_info("[syscall] munmap 0x%llx+%llu: "
+					"partial VMA [0x%llx, 0x%llx) — "
+					"unsupported (whole views "
+					"only)\n", addr, len, s, e);
+				break;
+			}
 		}
+		return SC_RET(SC_EINVAL);
+	}
+	if (nviews < 0) {
+		os_info("[syscall] munmap 0x%llx+%llu: view set overflow\n",
+			addr, len);
+		return SC_RET(SC_ENOMEM);
 	}
 	/* The unref set: each selected VMA contributes ITS OWN backing
 	 * span, deduped per physical run (review M3.8: looping
@@ -1001,12 +1142,31 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 	}
 	if (nruns == 0)
 		return 0; /* unmapped range: Linux succeeds */
+	/* All-or-nothing: reserve the view ops BEFORE the table moves.
+	 * A full plan refuses the munmap (loud) instead of dropping
+	 * an op — a dropped op is the stranded-view class above. */
+	if (uml_nt_sc_plan_reserve(c, nviews) < 0) {
+		os_info("[syscall] munmap 0x%llx+%llu: view-swap plan "
+			"full (%d op(s) needed) — ENOMEM\n", addr, len,
+			nviews);
+		return SC_RET(SC_ENOMEM);
+	}
 	if (uml_nt_vma_del(mm, addr, addr + len) < 0)
 		return SC_RET(SC_ENOMEM);
 	for (i = 0; i < nruns; i++)
 		uml_nt_phys_unref(c->ph, (long long)runs[i]);
 	uml_nt_guard_del_range(mm, addr, addr + len); /* guards die too */
-	uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0, addr, len, 0);
+	for (i = 0; i < nviews; i++)
+		if (uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0,
+				       mun_views[i].va,
+				       mun_views[i].len, 0) < 0) {
+			/* Cannot happen (reserved above) — never
+			 * silent: the invariant is the fix's core. */
+			os_info("[viewswap] munmap op dropped "
+				"post-reserve — INVARIANT BROKEN "
+				"(pid %lu)\n", (unsigned long)c->pid);
+			break;
+		}
 	return 0;
 }
 
@@ -1050,6 +1210,16 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 			"VMA — view stays RWX, %d guard(s) cleared)\n",
 			addr, len, prot, killed);
 		return 0;
+	}
+	/* M5.6a root-cause fix: the view PROTECT is reserved BEFORE the
+	 * guard state / VMA prot moves — a dropped op here leaves the
+	 * fault truth (the guard table / VMA prot) and the stub's view
+	 * silently diverged (e.g. a NOACCESS guard the guest writes
+	 * straight through). Refusal is loud, Linux-shaped. */
+	if (uml_nt_sc_plan_reserve(c, 1) < 0) {
+		os_info("[syscall] mprotect 0x%llx+%llu: view-swap plan "
+			"full — ENOMEM\n", addr, len);
+		return SC_RET(SC_ENOMEM);
 	}
 	if (addr == v->start && addr + len == v->end) {
 		int killed = uml_nt_guard_del_range(c->mm, addr,
