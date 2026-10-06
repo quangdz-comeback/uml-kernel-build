@@ -3324,7 +3324,18 @@ void uml_nt_claim_audit_force(void) { claim_audit_force_flag = 1; }
  * keeps a persistent torn state from eating the 64-line budgets;
  * the armed/census lines prove the witness ran when flags are
  * zero. Read-only: no guest state is ever touched (unlike the
- * ss/TF or DR witnesses, this cannot destabilize the boot). */
+ * ss/TF or DR witnesses, this cannot destabilize the boot).
+ * READER ACCURACY (scrutiny round on b147569): every member qword
+ * goes through its OWN translate — a chunk whose DATA va sits at
+ * a COW-piece/VMA boundary (size hdr in one piece, data/key in
+ * the next) is still read; the old single 24B window rejected
+ * exactly those members (FALSE break at the head → FALSE
+ * COUNT-MISMATCH, no key/run row). The backing run recorded is
+ * the chunk's DATA qword's read. The snapshot holds the FULL
+ * healthy tcache (64 bins x 7 = 448); a walk past it (only a
+ * bin deeper than healthy can) drops honestly: the census line
+ * carries the conn's cumulative trunc= and the COUNT-MISMATCH
+ * line this park's trunc= — never a silent omission. */
 static int tcekey_budget = 64;
 static int tcekey_run_budget = 64;
 static int tcekey_armed_budget = 64;
@@ -3367,24 +3378,24 @@ static void tce_dedup_add(struct uml_nt_stub_conn *c, int cls,
 	c->ek_dedup_head = (c->ek_dedup_head + 1) & 15;
 }
 
-/* the chunk reader: one 24B window [va-8, va+16) = size hdr +
- * e->next + e->key; the run comes off the translate (the CURRENT
- * table's backing — the same math [tcchunk-run]/[uawrite] report). */
+/* the chunk-qword reader: each qword goes through its OWN
+ * translate — a member whose 24B window [va-8, va+16) straddles
+ * a COW-piece/VMA boundary (size hdr in one piece, data/key in
+ * the next) is still readable; the old single-window translate
+ * rejected exactly those members (FALSE break at the head →
+ * FALSE COUNT-MISMATCH, no key/run row for the member). The run
+ * is the CURRENT backing of THE READ ITSELF — the walk keeps the
+ * one off the chunk's DATA qword (the member, not its header). */
 static int tce_read(void *ctx, unsigned long long va,
-		     unsigned long long *next_raw, unsigned long long *key,
-		     unsigned long long *size, unsigned long long *run)
+		     unsigned long long *qword, unsigned long long *run)
 {
 	struct uml_nt_mm *mm = (struct uml_nt_mm *)ctx;
-	long long off = uml_nt_vma_translate(mm, va - 8, 24);
-	unsigned long long q[3];
+	long long off = uml_nt_vma_translate(mm, va, 8);
 
 	if (off < 0)
 		return -1;
-	memcpy(q, (const void *)(uintptr_t)
-	       ((char *)uml_boot.physmem_base + off), sizeof(q));
-	*size = q[0];
-	*next_raw = q[1];
-	*key = q[2];
+	*qword = *(const unsigned long long *)(const void *)
+		 ((char *)uml_boot.physmem_base + off);
 	*run = (unsigned long long)off &
 	       ~(UML_NT_PHYS_RUN_SIZE - 1);
 	return 0;
@@ -3442,7 +3453,7 @@ static void tcache_ekey_watch(struct uml_nt_stub_conn *c)
 		struct uml_nt_tce_rd rd;
 		struct tce_binsum *bn = tce_bn;
 		unsigned long long want = 0;
-		int i2, best = 0;
+		int i2, best = 0, dropped = 0;
 
 		rd.read = tce_read;
 		rd.ctx = mm;
@@ -3477,6 +3488,14 @@ static void tcache_ekey_watch(struct uml_nt_stub_conn *c)
 				struct uml_nt_tce_chunk *ch = &wb.ch[d2];
 				int r = uml_nt_tce_record(cur, ch);
 
+				if (r == -2)
+					dropped++; /* the snapshot is
+						   * full — the honest
+						   * trunc the census/
+						   * flag lines carry
+						   * (possible only past
+						   * a full healthy
+						   * tcache) */
 				if (r >= 0 && tcekey_budget > 0 &&
 				    !tce_dedup_seen(c, TCE_CLS_DUP,
 						    ch->va)) {
@@ -3569,19 +3588,26 @@ static void tcache_ekey_watch(struct uml_nt_stub_conn *c)
 					    bn[i].head)) {
 				tce_dedup_add(c, TCE_CLS_COUNT, bn[i].head);
 				tcekey_budget--;
+				/* trunc: walked members this park's
+				 * snapshot could NOT hold — the phase-2
+				 * checks below see only cur->ch[0..n),
+				 * so a truncation silently omits them;
+				 * 0 = the snapshot is complete. */
 				os_info("[tcekey] pid %lu COUNT-MISMATCH bin "
 					"%d counts=%u walked=%d capped=%d "
 					"head=0x%llx broke_va=0x%llx "
 					"broke_next=0x%llx prev_head=0x%llx"
-					" prev_counts=%u (park-nr=%llu "
+					" prev_counts=%u trunc=%d "
+					"(park-nr=%llu "
 					"nr=%llu ret=%lld)\n",
 					(unsigned long)c->pid, i,
 					bn[i].counts, bn[i].walked,
 					bn[i].capped, bn[i].head,
 					bn[i].broke_va, bn[i].broke_next,
 					c->ek_prev_entries[i],
-					c->ek_prev_counts[i], d->regs.rax,
-					c->last_nr, c->last_ret);
+					c->ek_prev_counts[i], dropped,
+					d->regs.rax, c->last_nr,
+					c->last_ret);
 			}
 			pvh = (bn[i].head != 0) ?
 			      uml_nt_tce_find(&c->ek_prev, bn[i].head) : -1;
@@ -3611,6 +3637,7 @@ static void tcache_ekey_watch(struct uml_nt_stub_conn *c)
 		}
 		/* this park's snapshot becomes the next park's prev */
 		c->ek_prev = *cur;
+		c->ek_trunc += dropped;
 		memcpy(c->ek_prev_counts, counts,
 		       sizeof(c->ek_prev_counts));
 		memcpy(c->ek_prev_entries, entries,
@@ -3621,11 +3648,18 @@ static void tcache_ekey_watch(struct uml_nt_stub_conn *c)
 	 * nothing flagged, budget alive). */
 	if ((c->ek_parks & 0xfffull) == 0 && tcekey_census_budget > 0) {
 		tcekey_census_budget--;
+		/* trunc: the conn's CUMULATIVE dropped walked members
+		 * (snapshot full) — 0 = every snapshot this conn took
+		 * was complete; a non-zero trunc is the explicit
+		 * disclosure that some key/run/dup checks were
+		 * omitted, never a silent drop. */
 		os_info("[tcekey] census pid %lu parks=%llu chunks=%d "
-			"budget=%d run-budget=%d (park-nr=%llu nr=%llu "
+			"trunc=%llu budget=%d run-budget=%d "
+			"(park-nr=%llu nr=%llu "
 			"ret=%lld)\n", (unsigned long)c->pid, c->ek_parks,
-			cur->n, tcekey_budget, tcekey_run_budget,
-			d->regs.rax, c->last_nr, c->last_ret);
+			cur->n, c->ek_trunc, tcekey_budget,
+			tcekey_run_budget, d->regs.rax, c->last_nr,
+			c->last_ret);
 	}
 	/* (d) heap-piece run_off watch: the dl14 re-home (heap VMA
 	 * run_off 0xe00000 -> 0x5600000) with old/new run + the park's

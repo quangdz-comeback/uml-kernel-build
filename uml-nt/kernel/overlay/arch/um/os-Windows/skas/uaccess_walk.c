@@ -597,13 +597,25 @@ int uml_nt_tce_walk_bin(const struct uml_nt_tce_rd *rd,
 		return 0;
 	}
 	for (d = 0; d < UML_NT_TCE_DEPTH; d++) {
-		unsigned long long nxt_raw, nxt;
+		unsigned long long nxt_raw, nxt, run_sz, run_key;
 
 		out->ch[d].va = cur;
 		out->ch[d].bin = bin;
 		out->ch[d].depth = d;
-		if (rd->read(rd->ctx, cur, &nxt_raw, &out->ch[d].key,
-			     &out->ch[d].size, &out->ch[d].run) < 0) {
+		/* BOUNDARY-AWARE: each qword through its OWN read — a
+		 * member whose 24B window straddles a COW-piece/VMA
+		 * boundary (size hdr in one piece, data/key in the
+		 * next) is still readable; the old single-window read
+		 * rejected exactly those members (FALSE break at the
+		 * head → FALSE COUNT-MISMATCH, no key/run row). The
+		 * backing run recorded is the CHUNK'S DATA qword's
+		 * read (the member itself, not its size header). */
+		if (rd->read(rd->ctx, cur - 8, &out->ch[d].size,
+			     &run_sz) < 0 ||
+		    rd->read(rd->ctx, cur, &nxt_raw,
+			     &out->ch[d].run) < 0 ||
+		    rd->read(rd->ctx, cur + 8, &out->ch[d].key,
+			     &run_key) < 0) {
 			/* the member's own qwords are unreadable in the
 			 * CURRENT view — the chain broke here. */
 			out->walked = d;

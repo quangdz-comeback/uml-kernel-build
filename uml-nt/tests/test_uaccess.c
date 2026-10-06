@@ -677,16 +677,30 @@ static void test_uaw_nr_context(void)
  * record with dup detect, and the three fire predicates. Drives the
  * REAL functions stub_ctl.c's snapshotter calls (same pattern as
  * test_uaw_nr_context); the guest reads are mocked through the
- * reader callback (va -> next_raw/key/size/run). */
+ * per-qword reader callback (va -> qword/run, the kernel's one
+ * translate per qword — a COW-piece boundary between the member's
+ * size hdr and its data/key no longer rejects the member). */
 #define TCE_HS 0x67d00000ull
 #define TCE_HE 0x67d80000ull
 #define TCE_TC (TCE_HS + 0x10ull) /* the tcache ptr glibc stores in e->key */
 #define TCE_RUNX 0x3300000ull
 #define TCE_RUNY 0x5600000ull
 
+/* a COW-piece/VMA boundary INSIDE the heap: chunks below it are
+ * backed by one piece (run RUNX), chunks at/above it by another
+ * (RUNY). A member whose DATA va sits exactly at the boundary
+ * has its size header in the piece BELOW — the scrutiny-blocker
+ * shape (the reader's window [va-8, va+16) straddles pieces). */
+#define TCE_PB 0x67d01000ull
+
+static unsigned long long tce_piece_run(unsigned long long va)
+{
+	return va < TCE_PB ? TCE_RUNX : TCE_RUNY;
+}
+
 static struct {
-	unsigned long long va, next_raw, key, size, run;
-} tce_tab[24];
+	unsigned long long va, next_raw, key, size;
+} tce_tab[512];
 static int tce_ntab;
 
 static void tce_reset(void)
@@ -698,32 +712,45 @@ static void tce_reset(void)
  * stored raw = PROTECT_PTR(pos, ptr) = (va>>12) ^ ptr, which for
  * the end member (NULL ptr) is exactly va>>12 — glibc's shape. */
 static void tce_put(unsigned long long va, unsigned long long next,
-		    unsigned long long key, unsigned long long size,
-		    unsigned long long run)
+		    unsigned long long key, unsigned long long size)
 {
 	tce_tab[tce_ntab].va = va;
 	tce_tab[tce_ntab].next_raw = (va >> 12) ^ next;
 	tce_tab[tce_ntab].key = key;
 	tce_tab[tce_ntab].size = size;
-	tce_tab[tce_ntab].run = run;
 	tce_ntab++;
 }
 
 static int tce_rd(void *ctx, unsigned long long va,
-		  unsigned long long *next_raw, unsigned long long *key,
-		  unsigned long long *size, unsigned long long *run)
+		  unsigned long long *qword, unsigned long long *run)
 {
 	int i;
 
 	(void)ctx;
-	for (i = 0; i < tce_ntab; i++)
-		if (tce_tab[i].va == va) {
-			*next_raw = tce_tab[i].next_raw;
-			*key = tce_tab[i].key;
-			*size = tce_tab[i].size;
-			*run = tce_tab[i].run;
+	/* translate-granularity model, per qword: a read crossing a
+	 * piece boundary is REFUSED (uml_nt_vma_translate rejects
+	 * multi-VMA buffers) — but each member qword sits whole in
+	 * one piece, so a member AT the boundary reads fine (the
+	 * old single 24B window crossed and was refused). */
+	if (va < TCE_PB && va + 8 > TCE_PB)
+		return -1;
+	for (i = 0; i < tce_ntab; i++) {
+		if (tce_tab[i].va == va) { /* the DATA qword: e->next */
+			*qword = tce_tab[i].next_raw;
+			*run = tce_piece_run(va);
 			return 0;
 		}
+		if (tce_tab[i].va - 8 == va) { /* the size hdr */
+			*qword = tce_tab[i].size;
+			*run = tce_piece_run(va);
+			return 0;
+		}
+		if (tce_tab[i].va + 8 == va) { /* e->key */
+			*qword = tce_tab[i].key;
+			*run = tce_piece_run(va);
+			return 0;
+		}
+	}
 	return -1;
 }
 
@@ -754,9 +781,9 @@ static void test_tce_helpers(void)
 	/* clean 3-chain A->B->C->end, counts==3: walked==3, no break,
 	 * no cap; per-chunk key/size/run recorded from the reader. */
 	tce_reset();
-	tce_put(A, B, TCE_TC, 0x91, TCE_RUNX);
-	tce_put(B, C, TCE_TC, 0xa1, TCE_RUNX);
-	tce_put(C, 0, TCE_TC, 0xb1, TCE_RUNY);
+	tce_put(A, B, TCE_TC, 0x91);
+	tce_put(B, C, TCE_TC, 0xa1);
+	tce_put(C, 0, TCE_TC, 0xb1);
 	CHECK(uml_nt_tce_walk_bin(&rd, A, TCE_HS, TCE_HE, 2, &wb) == 0);
 	CHECK(wb.walked == 3);
 	CHECK(wb.broke == 0);
@@ -767,13 +794,35 @@ static void test_tce_helpers(void)
 	CHECK(wb.ch[1].size == 0xa1 && wb.ch[2].run == TCE_RUNY);
 	CHECK(uml_nt_tce_counts_bad(3, wb.walked, wb.capped) == 0);
 
+	/* BOUNDARY MEMBER (scrutiny blocker 1): a chunk whose DATA
+	 * va sits exactly at the COW-piece/VMA boundary TCE_PB —
+	 * its size header lives in the piece BELOW, its data/key
+	 * in the piece ABOVE. The chain M1 -> M2 -> end must record
+	 * BOTH members: a member at a piece boundary is ordinary
+	 * memory, and rejecting it reads as a FALSE break at the
+	 * head (FALSE COUNT-MISMATCH, no key/run row for it). */
+	tce_reset();
+	tce_put(0x67d00fe0ull, TCE_PB, TCE_TC, 0xb1); /* M1 below */
+	tce_put(TCE_PB, 0, TCE_TC, 0xc1);              /* M2 AT it */
+	CHECK(uml_nt_tce_walk_bin(&rd, 0x67d00fe0ull, TCE_HS, TCE_HE,
+				 6, &wb) == 0);
+	CHECK(wb.walked == 2);
+	CHECK(wb.broke == 0);
+	CHECK(wb.capped == 0);
+	CHECK(wb.ch[1].va == TCE_PB);
+	CHECK(wb.ch[1].size == 0xc1); /* the header, piece below */
+	CHECK(wb.ch[1].key == TCE_TC);
+	CHECK(wb.ch[1].run == TCE_RUNY); /* backing = the DATA qword */
+	CHECK(wb.ch[0].run == TCE_RUNX);
+	CHECK(uml_nt_tce_counts_bad(2, wb.walked, wb.capped) == 0);
+
 	/* THE KNOWN TEAR (insert store #1 lost): the new head's next
 	 * holds stale content (the dl13 poison text), the chain
 	 * breaks at the head while counts sits above it. */
 	tce_reset();
-	tce_put(A, B, TCE_TC, 0x91, TCE_RUNX); /* overwritten below */
+	tce_put(A, B, TCE_TC, 0x91); /* overwritten below */
 	tce_tab[0].next_raw = 0x5f444d4554535953ull; /* stale "SYSTEMD_" */
-	tce_put(B, 0, TCE_TC, 0xa1, TCE_RUNX);
+	tce_put(B, 0, TCE_TC, 0xa1);
 	CHECK(uml_nt_tce_walk_bin(&rd, A, TCE_HS, TCE_HE, 5, &wb) == 0);
 	CHECK(wb.walked == 1);
 	CHECK(wb.broke == 1);
@@ -787,7 +836,7 @@ static void test_tce_helpers(void)
 	 * snapshot record flags the second listing (dup = the
 	 * double-free shape). */
 	tce_reset();
-	tce_put(A, A, TCE_TC, 0x91, TCE_RUNX);
+	tce_put(A, A, TCE_TC, 0x91);
 	CHECK(uml_nt_tce_walk_bin(&rd, A, TCE_HS, TCE_HE, 0, &wb) == 0);
 	CHECK(wb.walked == UML_NT_TCE_DEPTH);
 	CHECK(wb.capped == 1);
@@ -852,6 +901,51 @@ static void test_tce_helpers(void)
 	snap.n = UML_NT_TCE_MAX;
 	CHECK(uml_nt_tce_record(&snap, &c) == -2);
 	CHECK(snap.n == UML_NT_TCE_MAX);
+
+	/* FULL-TCACHE CAPACITY (scrutiny blocker 2): 64 bins x 7
+	 * members = 448 — every one must record. The old 128 cap
+	 * silently dropped 320 of them and the later checks never
+	 * saw them (walk summaries said walked=7 while the
+	 * snapshot held less than half). Drives the real walk +
+	 * record path, one chain per bin. */
+	memset(&snap, 0, sizeof(snap));
+	tce_reset();
+	{
+		int b2, m;
+		unsigned long long base = 0x67d40000ull;
+
+		for (b2 = 0; b2 < 64; b2++)
+			for (m = 0; m < 7; m++) {
+				unsigned long long va = base +
+					((unsigned long long)(b2 * 7 + m))
+					* 0x20ull;
+
+				tce_put(va, m < 6 ? va + 0x20 : 0,
+					TCE_TC, 0x90);
+			}
+		for (b2 = 0; b2 < 64; b2++) {
+			CHECK(uml_nt_tce_walk_bin(&rd, base +
+				  (unsigned long long)b2 * 7 * 0x20ull,
+				  TCE_HS, TCE_HE, b2, &wb) == 0);
+			CHECK(wb.walked == 7);
+			CHECK(wb.broke == 0);
+			CHECK(wb.capped == 0);
+			for (m = 0; m < wb.walked; m++)
+				CHECK(uml_nt_tce_record(&snap,
+							&wb.ch[m]) == -1);
+		}
+		CHECK(snap.n == 448);
+		/* the 449th: the honest -2 the census/flag trunc
+		 * disclosure carries — never a silent drop. */
+		c.va = base + 448ull * 0x20ull;
+		c.key = TCE_TC;
+		c.size = 0x90;
+		c.run = TCE_RUNY;
+		c.bin = 0;
+		c.depth = 0;
+		CHECK(uml_nt_tce_record(&snap, &c) == -2);
+		CHECK(snap.n == 448);
+	}
 
 	/* the stale-key predicate: listed chunk with e->key != the
 	 * tcache ptr = glibc's dup-check blinded. */

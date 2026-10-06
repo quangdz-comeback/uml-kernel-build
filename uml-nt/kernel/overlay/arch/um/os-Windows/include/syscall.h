@@ -279,6 +279,12 @@ struct uml_nt_stub_conn {
 	int ek_pv_n;
 	int ek_pv_valid;
 	unsigned long long ek_parks;
+	/* cumulative walked members DROPPED because a park's
+	 * snapshot filled (UML_NT_TCE_MAX = 448 = the full healthy
+	 * tcache, so a drop needs a bin deeper than healthy — the
+	 * census/flag trunc disclosure; kzalloc init = 0 = every
+	 * snapshot complete). */
+	unsigned long long ek_trunc;
 	unsigned long long ek_dedup_va[16];
 	unsigned char ek_dedup_cls[16];
 	int ek_dedup_head;

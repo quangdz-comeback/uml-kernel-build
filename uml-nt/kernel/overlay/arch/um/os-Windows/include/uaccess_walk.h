@@ -152,7 +152,14 @@ unsigned long long uml_nt_uacc_nr_switch(const unsigned long long *slot);
  *               ends early (broke next) under a higher count is
  *               exactly the missing store #1 fingerprint. */
 #define UML_NT_TCE_DEPTH 8   /* walk cap per bin (a healthy bin holds <= 7) */
-#define UML_NT_TCE_MAX 128   /* chunks recorded per snapshot, all bins */
+/* chunks recorded per snapshot, all bins: the FULL tcache —
+ * 64 bins x 7 members (glibc's tcache_count default) = 448. The
+ * old 128 cap silently dropped the rest and every later check
+ * (dup / stale-key / run diff) silently omitted them; the caller
+ * discloses the honest -2 on the census/flag lines (a drop is
+ * possible only in corrupt states: it takes > 448 walked, i.e.
+ * a bin deeper than a healthy one). */
+#define UML_NT_TCE_MAX 448   /* chunks recorded per snapshot, all bins */
 #define UML_NT_TCE_PIECES 12 /* heap VMA pieces snapshot (run watch) */
 
 struct uml_nt_tce_chunk {
@@ -172,12 +179,19 @@ struct uml_nt_tce_bin {
 	struct uml_nt_tce_chunk ch[UML_NT_TCE_DEPTH];
 };
 
-/* chunk-data reader: return <0 when [va-8, va+16) is unreadable
- * (unmapped member); fills the qwords + the CURRENT backing run. */
+/* chunk-qword reader: read the 8 bytes at `va` through its OWN
+ * translation (BOUNDARY-AWARE: a member whose 24B window
+ * [va-8, va+16) straddles a COW-piece/VMA boundary — size hdr in
+ * one piece, data/key in the next — is read per qword, so it is
+ * still readable; the old single-window reader rejected exactly
+ * those members: FALSE break at the head → FALSE COUNT-MISMATCH,
+ * no key/run row). Return <0 when the qword is unreadable
+ * (unmapped member); fills the qword + the CURRENT backing run
+ * OF THIS READ (the walk keeps the one off the chunk's DATA
+ * qword). */
 struct uml_nt_tce_rd {
 	int (*read)(void *ctx, unsigned long long va,
-		    unsigned long long *next_raw, unsigned long long *key,
-		    unsigned long long *size, unsigned long long *run);
+		    unsigned long long *qword, unsigned long long *run);
 	void *ctx;
 };
 
