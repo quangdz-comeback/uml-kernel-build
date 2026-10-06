@@ -3122,6 +3122,16 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		   * users name themselves. */
 		if (a[0] == 1 /* KEYCTL_JOIN_SESSION_KEYRING */)
 			ret = 0x2e9;
+		else if (a[0] == 5 /* KEYCTL_SETPERM — the phantom
+			   * serial add_key now returns (0x2ea, b64ef19)
+			   * invites the caller's next step: the spawn's
+			   * keyring setup chmods its fresh key (dl17
+			   * 37497293608, task 48 modprobe@configfs —
+			   * the loud branch below failed the spawn at
+			   * step KEYRING). On a phantom keyring the
+			   * permission change is a no-op: 0 lets the
+			   * step pass. */)
+			ret = 0;
 		else {
 			os_info("[syscall] keyctl cmd=%llu not "
 				"implemented → ENOSYS\n", a[0]);
