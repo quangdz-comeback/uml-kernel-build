@@ -299,4 +299,146 @@ extern unsigned long uml_nt_uacc_refuse_kind;
 char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 			    unsigned long long va);
 
+/* ---- K6 [cowrace] (M5.6a, feature cowcopy-race-witness) — the
+ * copy-vs-in-flight-store witness's PURE logic. Unit-tested
+ * standalone (test_uaccess.c drives the REAL functions stub_ctl.c's
+ * armer/checker call); this file stays log-free (stub_ctl.c owns
+ * os_info and the watch table).
+ *
+ * The hunt state (dl24/dl25): the tear survived 6d3c932/fc4381a —
+ * chunk-side stores (e->next/e->key) lost at RUN granularity while
+ * the tcache-struct-side stores land, [cowcopy] activity on runs
+ * ADJACENT to the torn chunks' run at the fire round, 0 [viewswap]
+ * lines (the plan-op guard class is not the vector). Hypothesis: a
+ * run copy+re-home races an in-flight guest store — the store lands
+ * in the SOURCE run after/while the copy, the view swaps to the
+ * copy, and the store is lost canonically.
+ *
+ * Protocol: at every run copy ([cowcopy] fault-path COW copy, the
+ * brk re-home) the kernel side records src/dst run, va range, the
+ * copying conn/pid, the source's t0 hash (src == dst byte-for-byte
+ * AT the copy — uml_nt_copy_verify memcpys AND memcmps), the
+ * source's phys gen/refs, and the RUNNING-vs-PARKED snapshot of
+ * every other conn sharing that mm or mapping that src run. At the
+ * NEXT SYSCALL PARKS (the witness placement rule) the src range is
+ * re-hashed: src != t0 with the lifecycle gates intact means a
+ * store landed in the SOURCE after the copy — a lost update. */
+#define UML_NT_COWRACE_N       16  /* watch ring (kernel side owns it) */
+#define UML_NT_COWRACE_CHECKS  4   /* syscall-park checks per arm: the
+				    * lost store lands within a park or
+				    * two of the copy — the fire window */
+#define UML_NT_COWRACE_PIDS    4   /* RUNNING sharers recorded per arm */
+#define UML_NT_COWRACE_DIFFS   4   /* differing qwords reported per fire */
+
+/* verdicts (gate + verdict + spend compose the check round) */
+#define UML_NT_COWRACE_QUIET    0 /* src unchanged since the copy */
+#define UML_NT_COWRACE_LOST     1 /* src moved, dst untouched: the
+				   * pure lost update — a store landed in
+				   * the abandoned source */
+#define UML_NT_COWRACE_MIXED    2 /* both ends moved: decode the
+				   * qword diffs (src-side writes are
+				   * still lost) */
+#define UML_NT_COWRACE_RECYCLE  3 /* src re-handed (gen moved): the
+				   * run's bytes are a new generation's,
+				   * not a lost update */
+#define UML_NT_COWRACE_RELEASE  4 /* src unclaimed (refs==0): dead
+				   * backing, retire */
+#define UML_NT_COWRACE_SHARED  5 /* fire class (cowrace_class): the
+				   * remaining owner wrote on after
+				   * re-privatizing — benign, the
+				   * decode correlates it */
+
+/* One armed copy watch. `ph` is kernel-side only (the table the
+ * gates read); host tests leave it NULL and never reach it. */
+struct uml_nt_cowrace_watch {
+	struct uml_nt_phys *ph;
+	unsigned long long src_off;   /* the copied range in the source */
+	unsigned long long dst_off;  /* the fresh copy (canonical now) */
+	unsigned long long len;       /* copied bytes */
+	unsigned long long va_base;  /* the range's guest VA in the
+				      * COPYING mm */
+	unsigned long long gen_src;  /* phys gen of src at the copy */
+	unsigned long long h0;       /* fnv(src range) at the copy — the
+				      * t0 both ends shared */
+	unsigned long long pid;      /* the copying conn */
+	unsigned long run_pids[UML_NT_COWRACE_PIDS]; /* RUNNING sharers
+						 * of the src run */
+	int n_run, n_park, n_samm, trunc;
+	unsigned char checks;        /* checks left (spend) */
+	unsigned char armed;
+};
+
+/* The park-protocol classifier (stub_nt.h): the stub bumps req_seq
+ * when it PUBLISHES a park and done_seq when it consumes the answer
+ * and resumes, so req==done is RUNNING (answer consumed, no park
+ * published since) and req==done+1 is PARKED — exactly the pump's
+ * own desync invariant. Cross-process coherent through the shared
+ * section (Interlocked, S2). The caller gates the never-resumed
+ * shape (req==done==0 = a conn that never ran guest code) on
+ * conn->resumed. 1 RUNNING, 0 PARKED, -1 desync. */
+int uml_nt_cowrace_run_state(unsigned long long req,
+			     unsigned long long done);
+
+/* Arm a watch (fill the slot the kernel side picked): a re-arm of
+ * the SAME src refreshes in place (checks reset, dst/h0/pids
+ * updated — the src content may have changed between copies, so h0
+ * is always the caller's fresh hash); a free slot is taken; a full
+ * ring evicts by *cursor (round-robin, the cowwatch pattern).
+ * Returns the slot index. */
+int uml_nt_cowrace_slot_arm(struct uml_nt_cowrace_watch *w, int n,
+			    unsigned int *cursor,
+			    unsigned long long src_off,
+			    unsigned long long dst_off,
+			    unsigned long long len,
+			    unsigned long long va_base,
+			    unsigned long long gen_src,
+			    unsigned long long h0,
+			    unsigned long pid,
+			    const unsigned long *run_pids, int n_run,
+			    int n_park, int n_samm, int trunc);
+
+/* One check pass over a watch. gate: the run's LIFECYCLE retires
+ * before any byte comparison — a re-handed (gen moved) or released
+ * (refs==0) source's content changes are recycle class, not lost
+ * updates; refs dropping but >0 (a sharer COW'd out) stays live. */
+int uml_nt_cowrace_gate(const struct uml_nt_cowrace_watch *w,
+			unsigned long long gen_now, int refs_now);
+
+/* The byte verdict (gates passed): src vs dst against the t0 they
+ * shared at the copy. */
+int uml_nt_cowrace_verdict(const struct uml_nt_cowrace_watch *w,
+			   unsigned long long h_src,
+			   unsigned long long h_dst);
+
+/* Spend one check: 0 while the watch stays armed, and the watch
+ * disarms itself when the last check is spent (silent expiry —
+ * the fire/retire paths print, the routine expiry does not). -1
+ * when not armed (the round skips it). */
+int uml_nt_cowrace_spend(struct uml_nt_cowrace_watch *w);
+
+/* Scan two byte ranges qword-wise: returns the TOTAL count of
+ * differing qwords (honest — the caller discloses "+N more"),
+ * recording the first `max` offsets + both values. */
+int uml_nt_cowrace_diff(const unsigned char *src, const unsigned char *dst,
+			unsigned long long len,
+			unsigned long long *offs,
+			unsigned long long *sv,
+			unsigned long long *dv, int max);
+
+/* The fire classifier: a store landed in the SOURCE after the
+ * copy (gates intact) — who can still legitimately write it? A
+ * run with refs >= 2 is mapped READ-ONLY by every sharer (the COW
+ * contract), so ANY write into it bypassed the fault path; a run
+ * no live mm maps is nobody's canonical bytes. Both are the LOST
+ * shape. refs == 1 with a live mapper is the remaining owner
+ * writing on after re-privatizing (the benign class — the decode
+ * correlates it against the tear). */
+int uml_nt_cowrace_class(int refs_now, int n_mappers);
+
+/* Does this mm map the run at src_off anywhere? (the vma's backing
+ * span is [run_off, run_off + end - start) — the same predicate
+ * the claim audit walks.) */
+int uml_nt_cowrace_maps_run(const struct uml_nt_mm *mm,
+			    unsigned long long src_off);
+
 #endif /* __UM_OS_WINDOWS_UACCESS_WALK_H */

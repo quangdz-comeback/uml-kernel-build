@@ -92,6 +92,7 @@ static void test_gen_stale(void);
 static void test_uaw_helpers(void);
 static void test_uaw_nr_context(void);
 static void test_tce_helpers(void);
+static void test_cowrace_helpers(void);
 
 int main(void)
 {
@@ -221,6 +222,12 @@ int main(void)
 	/* K6 step 2: the [tcekey] syscall-park witness's pure tcache
 	 * chain logic — reveal / chain walk / dup detect / counts. */
 	test_tce_helpers();
+
+	/* K6 [cowrace]: the copy-vs-in-flight-store witness's pure
+	 * logic — run-state classifier, slot policy, recycle/release
+	 * gates, the verdict machine, the qword diff scan, the
+	 * mm-maps-run predicate (feature cowcopy-race-witness). */
+	test_cowrace_helpers();
 
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
@@ -971,4 +978,189 @@ static void test_tce_helpers(void)
 	CHECK(uml_nt_tce_counts_bad(0, 1, 0) == 1); /* count 0, listed */
 	CHECK(uml_nt_tce_counts_bad(8, 8, 1) == 1); /* cap always bad */
 	CHECK(uml_nt_tce_counts_bad(7, 7, 0) == 0);
+}
+
+/* ---- K6 [cowrace] (feature cowcopy-race-witness) --------------------
+ * The pure logic of the copy-vs-in-flight-store witness: the tear
+ * survived 6d3c932/fc4381a (dl24/dl25) with chunk-side stores lost at
+ * RUN granularity while tcache-struct-side stores land, [cowcopy]
+ * activity on adjacent runs at the fire round and 0 [viewswap]
+ * lines. The witness arms at every run copy+re-home (src/dst/va/
+ * pid/t0-hash/gen/refs + the RUNNING-vs-PARKED sharer snapshot),
+ * checks at the next syscall parks: src != t0 with the gates intact
+ * = a store landed in the SOURCE after the copy (lost update). */
+static void test_cowrace_helpers(void)
+{
+	static struct uml_nt_cowrace_watch w[UML_NT_COWRACE_N];
+	unsigned int cursor = 0;
+	unsigned char src[RUN], dst[RUN];
+	unsigned long long offs[UML_NT_COWRACE_DIFFS];
+	unsigned long long sv[UML_NT_COWRACE_DIFFS];
+	unsigned long long dv[UML_NT_COWRACE_DIFFS];
+	unsigned long pids[2] = { 4321, 8765 };
+	struct uml_nt_mm mm;
+	int i, nd;
+
+	memset(w, 0, sizeof(w));
+
+	/* run-state classifier — the stub park protocol (stub_nt.h):
+	 * the stub bumps req_seq at park publish and done_seq at
+	 * resume, so req==done is RUNNING (answer consumed, no park
+	 * since) and req==done+1 is PARKED (the pump's own desync
+	 * check is exactly req != done+1). */
+	CHECK(uml_nt_cowrace_run_state(0, 0) == 1);   /* never parked: caller gates !resumed */
+	CHECK(uml_nt_cowrace_run_state(7, 7) == 1);  /* released, running */
+	CHECK(uml_nt_cowrace_run_state(7, 6) == 0);  /* park published */
+	CHECK(uml_nt_cowrace_run_state(1, 0) == 0);  /* first park (INIT) */
+	CHECK(uml_nt_cowrace_run_state(8, 6) == -1); /* desync shape */
+
+	/* slot policy: fresh arms fill 0..N-1; a re-arm of the SAME
+	 * src refreshes in place (checks reset, dst/h0 updated); a
+	 * full ring evicts by cursor. */
+	i = uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				    0x110000, 0x220000, RUN, RAM, 9, 0xaaaa,
+				    100, pids, 2, 1, 0, 0);
+	CHECK(i == 0);
+	CHECK(w[0].armed == 1);
+	CHECK(w[0].checks == UML_NT_COWRACE_CHECKS);
+	CHECK(w[0].n_run == 2);
+	CHECK(w[0].run_pids[0] == 4321 && w[0].run_pids[1] == 8765);
+	CHECK(w[0].n_park == 1);
+	CHECK(w[0].h0 == 0xaaaa && w[0].dst_off == 0x220000);
+	i = uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				    0x330000, 0x440000, RUN, RAM + RUN, 4,
+				    0xbbbb, 200, pids, 0, 3, 0, 0);
+	CHECK(i == 1);
+	/* spend two checks on slot 0, then re-arm the same src: the
+	 * refresh resets checks and updates dst without moving. */
+	CHECK(uml_nt_cowrace_spend(&w[0]) == 0); /* still armed */
+	CHECK(w[0].checks == UML_NT_COWRACE_CHECKS - 1);
+	CHECK(uml_nt_cowrace_spend(&w[0]) == 0);
+	i = uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				    0x110000, 0x550000, RUN, RAM, 9, 0xcccc,
+				    100, pids, 1, 2, 1, 1);
+	CHECK(i == 0);
+	CHECK(w[0].checks == UML_NT_COWRACE_CHECKS);
+	CHECK(w[0].dst_off == 0x550000);
+	CHECK(w[0].h0 == 0xcccc);
+	CHECK(w[0].n_samm == 1 && w[0].trunc == 1);
+	/* fill the ring with distinct srcs (free slots 0..N-1), then
+	 * the N+1'th arm evicts BY CURSOR (slot 0) and the cursor
+	 * advances — the eviction target is a fresh watch, the
+	 * neighbours keep theirs. */
+	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				      0x660000, 0x1, RUN, RAM, 1, 0, 3,
+				      pids, 0, 0, 0, 0);
+	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				      0x770000, 0x1, RUN, RAM, 1, 0, 4,
+				      pids, 0, 0, 0, 0);
+	for (i = 4; i < UML_NT_COWRACE_N; i++) {
+		unsigned long long s = 0x1000000ull +
+			(unsigned long long)i * 0x100000ull;
+
+		CHECK(uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+					      s, 0x1, RUN, RAM, 1, 0,
+					      3 + i, pids, 0, 0, 0, 0) == i);
+	}
+	for (i = 0; i < UML_NT_COWRACE_N; i++)
+		CHECK(w[i].armed == 1);
+	/* full: the next distinct src evicts slot 0 (cursor 0). */
+	i = uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				     0x880000, 0x1, RUN, RAM, 1, 0, 5,
+				     pids, 0, 0, 0, 0);
+	CHECK(i == 0);
+	CHECK(w[0].src_off == 0x880000);
+	CHECK(w[1].src_off == 0x330000); /* neighbour kept */
+
+	/* spend to expiry: armed clears, further spends refused. */
+	memset(w, 0, sizeof(w));
+	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				      0x110000, 0x220000, RUN, RAM, 9, 0,
+				      100, pids, 0, 0, 0, 0);
+	for (i = 0; i < UML_NT_COWRACE_CHECKS; i++)
+		CHECK(uml_nt_cowrace_spend(&w[0]) == 0);
+	CHECK(w[0].armed == 0);
+	CHECK(uml_nt_cowrace_spend(&w[0]) == -1);
+
+	/* gates: the run's lifecycle retires the watch BEFORE any
+	 * hash comparison — a recycled (gen moved) or released
+	 * (refs==0) src is not a lost update. */
+	memset(w, 0, sizeof(w));
+	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				      0x110000, 0x220000, RUN, RAM, 9, 0,
+				      100, pids, 0, 0, 0, 0);
+	CHECK(uml_nt_cowrace_gate(&w[0], 9, 1) == 0);   /* intact */
+	CHECK(uml_nt_cowrace_gate(&w[0], 10, 1) == UML_NT_COWRACE_RECYCLE);
+	CHECK(uml_nt_cowrace_gate(&w[0], 9, 0) == UML_NT_COWRACE_RELEASE);
+	CHECK(uml_nt_cowrace_gate(&w[0], 9, 2) == 0);   /* refs may drop, not to 0 */
+
+	/* fire classifier: refs>=2 = every view READ-ONLY (any write
+	 * bypassed the COW fault path); no mapper = nobody's
+	 * canonical bytes — both the LOST shape; refs==1 with a live
+	 * mapper = the remaining owner wrote on (benign class). */
+	CHECK(uml_nt_cowrace_class(2, 1) == UML_NT_COWRACE_LOST);
+	CHECK(uml_nt_cowrace_class(3, 2) == UML_NT_COWRACE_LOST);
+	CHECK(uml_nt_cowrace_class(1, 0) == UML_NT_COWRACE_LOST);
+	CHECK(uml_nt_cowrace_class(1, 1) == UML_NT_COWRACE_SHARED);
+	CHECK(uml_nt_cowrace_class(1, 4) == UML_NT_COWRACE_SHARED);
+
+	/* verdict machine: h_src vs the arm-time t0, h_dst vs the
+	 * same t0 (src == dst byte-for-byte AT the copy — the copy
+	 * itself is memcmp-verified by uml_nt_copy_verify). */
+	memset(w, 0, sizeof(w));
+	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				      0x110000, 0x220000, RUN, RAM, 9, 0xaaaa,
+				      100, pids, 0, 0, 0, 0);
+	CHECK(uml_nt_cowrace_verdict(&w[0], 0xaaaa, 0xaaaa) ==
+	      UML_NT_COWRACE_QUIET);  /* nothing moved */
+	CHECK(uml_nt_cowrace_verdict(&w[0], 0x1111, 0xaaaa) ==
+	      UML_NT_COWRACE_LOST);   /* src-only: the lost update */
+	CHECK(uml_nt_cowrace_verdict(&w[0], 0xaaaa, 0x2222) ==
+	      UML_NT_COWRACE_QUIET);  /* dst-only: the owner wrote on —
+				       * legit, the copy race did not
+				       * happen */
+	CHECK(uml_nt_cowrace_verdict(&w[0], 0x1111, 0x2222) ==
+	      UML_NT_COWRACE_MIXED);
+
+	/* the qword diff scan: identical buffers report 0; known
+	 * qword differences report offset + both values; more than
+	 * max diffs are COUNTED honestly (the caller discloses). */
+	memset(src, 0x5a, sizeof(src));
+	memcpy(dst, src, sizeof(dst));
+	CHECK(uml_nt_cowrace_diff(src, dst, RUN, offs, sv, dv,
+				  UML_NT_COWRACE_DIFFS) == 0);
+	memcpy(dst + 0x08, "\x01\x02\x03\x04\x05\x06\x07\x08", 8);
+	memcpy(dst + 0x18, "\x11\x12\x13\x14\x15\x16\x17\x18", 8);
+	memcpy(dst + 0x30, "\x21\x22\x23\x24\x25\x26\x27\x28", 8);
+	nd = uml_nt_cowrace_diff(src, dst, RUN, offs, sv, dv,
+				 UML_NT_COWRACE_DIFFS);
+	CHECK(nd == 3);
+	CHECK(offs[0] == 0x08 && sv[0] == 0x5a5a5a5a5a5a5a5aull);
+	CHECK(dv[0] == 0x0807060504030201ull);
+	CHECK(offs[1] == 0x18 && offs[2] == 0x30);
+	CHECK(sv[1] == 0x5a5a5a5a5a5a5a5aull && dv[1] == 0x1817161514131211ull);
+	CHECK(sv[2] == 0x5a5a5a5a5a5a5a5aull && dv[2] == 0x2827262524232221ull);
+	/* six differing qwords, max 4: 6 counted, 4 recorded. */
+	memcpy(dst + 0x40, "\x31", 1);
+	memcpy(dst + 0x50, "\x41", 1);
+	memcpy(dst + 0x60, "\x51", 1);
+	nd = uml_nt_cowrace_diff(src, dst, RUN, offs, sv, dv,
+				 UML_NT_COWRACE_DIFFS);
+	CHECK(nd == 6);
+	CHECK(offs[3] == 0x40); /* first four recorded in order */
+
+	/* maps_run: does this mm map the src run anywhere? (the
+	 * vma's backing span [run_off, run_off + end - start)). */
+	uml_nt_mm_init(&mm);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + 2 * RUN, 0,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_vma_add(&mm, RAM + 3 * RUN, RAM + 4 * RUN, 3 * RUN,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_cowrace_maps_run(&mm, 0) == 1);
+	CHECK(uml_nt_cowrace_maps_run(&mm, RUN - 1) == 1);
+	CHECK(uml_nt_cowrace_maps_run(&mm, 2 * RUN - 1) == 1);
+	CHECK(uml_nt_cowrace_maps_run(&mm, 2 * RUN) == 0);
+	CHECK(uml_nt_cowrace_maps_run(&mm, 3 * RUN) == 1);
+	CHECK(uml_nt_cowrace_maps_run(&mm, 4 * RUN) == 0);
+	CHECK(uml_nt_cowrace_maps_run(&mm, 0x7fffffff0000ull) == 0);
 }

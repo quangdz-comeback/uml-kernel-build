@@ -712,3 +712,171 @@ int uml_nt_tce_reentry_bad(int head_changed, int head_in_prev,
 {
 	return head_changed && head_in_prev && counts > prev_counts;
 }
+
+/* ---- K6 [cowrace] (M5.6a, feature cowcopy-race-witness) — the
+ * copy-vs-in-flight-store witness's pure helpers. See uaccess_walk.h
+ * for the protocol; stub_ctl.c owns the watch ring, the conn
+ * enumeration and every log line (this file stays log-free). Byte
+ * ops spelled out like the rest of this file: no <string.h>, it
+ * compiles freestanding in the kernel AND in the unit test. */
+int uml_nt_cowrace_run_state(unsigned long long req,
+			     unsigned long long done)
+{
+	if (req == done)
+		return 1; /* RUNNING: answer consumed, no park since */
+	if (req == done + 1)
+		return 0; /* PARKED: a park is published */
+	return -1;    /* desync shape (the pump's own check) */
+}
+
+int uml_nt_cowrace_slot_arm(struct uml_nt_cowrace_watch *w, int n,
+			    unsigned int *cursor,
+			    unsigned long long src_off,
+			    unsigned long long dst_off,
+			    unsigned long long len,
+			    unsigned long long va_base,
+			    unsigned long long gen_src,
+			    unsigned long long h0,
+			    unsigned long pid,
+			    const unsigned long *run_pids, int n_run,
+			    int n_park, int n_samm, int trunc)
+{
+	int i, slot = -1, free_i = -1;
+
+	for (i = 0; i < n; i++) {
+		if (w[i].armed && w[i].src_off == src_off) {
+			slot = i; /* refresh in place: the content may
+				   * have changed between copies of the
+				   * same src, h0 is the fresh hash */
+			break;
+		}
+		if (!w[i].armed && free_i < 0)
+			free_i = i;
+	}
+	if (slot < 0) {
+		if (free_i >= 0) {
+			slot = free_i;
+		} else {
+			/* full ring: evict by cursor (cowwatch pattern)
+			 * — the advance happens ONLY on a real evict,
+			 * never on a refresh or a free-slot fill. */
+			slot = (int)*cursor;
+			*cursor = (*cursor + 1) % (unsigned int)n;
+		}
+	}
+	w[slot].src_off = src_off;
+	w[slot].dst_off = dst_off;
+	w[slot].len = len;
+	w[slot].va_base = va_base;
+	w[slot].gen_src = gen_src;
+	w[slot].h0 = h0;
+	w[slot].pid = pid;
+	for (i = 0; i < UML_NT_COWRACE_PIDS; i++)
+		w[slot].run_pids[i] =
+			(i < n_run && run_pids != (const unsigned long *)0) ?
+			run_pids[i] : 0;
+	w[slot].n_run = n_run;
+	w[slot].n_park = n_park;
+	w[slot].n_samm = n_samm;
+	w[slot].trunc = trunc;
+	w[slot].checks = UML_NT_COWRACE_CHECKS;
+	w[slot].armed = 1;
+	return slot;
+}
+
+int uml_nt_cowrace_gate(const struct uml_nt_cowrace_watch *w,
+			unsigned long long gen_now, int refs_now)
+{
+	if (gen_now != w->gen_src)
+		return UML_NT_COWRACE_RECYCLE; /* re-handed: a new
+					 * generation's bytes */
+	if (refs_now == 0)
+		return UML_NT_COWRACE_RELEASE; /* dead backing */
+	return 0; /* intact — refs may DROP (a sharer COW'd out)
+		   * without retiring the watch */
+}
+
+int uml_nt_cowrace_verdict(const struct uml_nt_cowrace_watch *w,
+			   unsigned long long h_src,
+			   unsigned long long h_dst)
+{
+	if (h_src != w->h0 && h_dst == w->h0)
+		return UML_NT_COWRACE_LOST; /* src-only write: the
+					     * store landed in the
+					     * abandoned source */
+	if (h_src == w->h0)
+		return UML_NT_COWRACE_QUIET;
+	return UML_NT_COWRACE_MIXED; /* both ends moved: the owner
+				      * wrote on (legit) AND/OR src
+				      * writes — decode the qwords */
+}
+
+int uml_nt_cowrace_spend(struct uml_nt_cowrace_watch *w)
+{
+	if (!w->armed)
+		return -1;
+	if (w->checks > 0)
+		w->checks--;
+	if (w->checks == 0)
+		w->armed = 0; /* routine expiry: silent (the
+			       * fire/retire paths print) */
+	return 0;
+}
+
+int uml_nt_cowrace_diff(const unsigned char *src, const unsigned char *dst,
+			unsigned long long len,
+			unsigned long long *offs,
+			unsigned long long *sv,
+			unsigned long long *dv, int max)
+{
+	unsigned long long o;
+	int nd = 0;
+
+	for (o = 0; o + 8 <= len; o += 8) {
+		unsigned long long q1, q2;
+		int i;
+
+		for (i = 0; i < 8; i++) {
+			((unsigned char *)&q1)[i] = src[o + i];
+			((unsigned char *)&q2)[i] = dst[o + i];
+		}
+		if (q1 == q2)
+			continue;
+		if (nd < max) {
+			offs[nd] = o;
+			sv[nd] = q1;
+			dv[nd] = q2;
+		}
+		nd++; /* honest total: the caller discloses "+N more" */
+	}
+	return nd;
+}
+
+int uml_nt_cowrace_class(int refs_now, int n_mappers)
+{
+	if (refs_now >= 2)
+		return UML_NT_COWRACE_LOST; /* every view of a shared
+					     * run is READ-ONLY: the
+					     * write bypassed the COW
+					     * fault path */
+	if (n_mappers == 0)
+		return UML_NT_COWRACE_LOST; /* nobody's canonical bytes
+					     * — an orphaned write */
+	return UML_NT_COWRACE_SHARED; /* the remaining owner wrote
+				       * on (re-privatized) */
+}
+
+int uml_nt_cowrace_maps_run(const struct uml_nt_mm *mm,
+			    unsigned long long src_off)
+{
+	int i;
+
+	for (i = 0; i < mm->nvma; i++) {
+		const struct uml_nt_vma *v = &mm->vma[i];
+
+		if (src_off >= v->run_off &&
+		    src_off < v->run_off + (v->end - v->start))
+			return 1;
+	}
+	return 0;
+}

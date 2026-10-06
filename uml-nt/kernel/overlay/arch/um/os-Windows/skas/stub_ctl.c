@@ -692,6 +692,306 @@ void uml_nt_cowwatch_touch(unsigned long long off, unsigned long long len,
 	}
 }
 
+/* ---- [cowrace] (M5.6a, feature cowcopy-race-witness) ---------------
+ * The tear survived 6d3c932/fc4381a (dl24 37532472713 / dl25
+ * 37534293014): the chunk-side stores (e->next/e->key) are lost at
+ * RUN granularity while the tcache-struct-side stores land, with
+ * [cowcopy] activity on runs ADJACENT to the torn chunks' run at the
+ * fire round and 0 [viewswap] lines (the plan-op guard class is not
+ * the vector). Hypothesis: a COW/re-home content copy races an
+ * in-flight guest store — the store lands in the SOURCE run after or
+ * while the copy, the view swaps to the copy, and the store is lost
+ * canonically.
+ *
+ * Witness (read-only: NO ss/TF, NO DR, NO page protects; the only
+ * fault-park work is the recording the brief mandates AT the copy —
+ * a 64K hash + the sharer snapshot, no guest-visible state, no new
+ * walks of guest memory at fault parks):
+ *   ARM at every run copy+re-home — the [cowcopy] fault-path COW
+ *   copy (serve_conn) and the brk re-home (sys_brk): src/dst run,
+ *   va range, the copying conn/pid, the source's t0 hash (src == dst
+ *   byte-for-byte AT the copy — uml_nt_copy_verify memcpys AND
+ *   memcmps), its phys gen/refs, and the RUNNING-vs-PARKED snapshot
+ *   of every other conn sharing that mm or mapping that src run
+ *   (the stub park protocol: req_seq/done_seq are cross-process
+ *   coherent; req==done is RUNNING, req==done+1 is PARKED).
+ *   CHECK at the NEXT SYSCALL PARKS only (the witness placement
+ *   rule — nothing at fault parks): gate on the run's lifecycle
+ *   (gen moved = recycled, refs==0 = released: retire), then re-hash
+ *   the src range. src != t0 = a store landed in the SOURCE after
+ *   the copy. Classified at fire: refs>=2 or no live mm maps src =
+ *   LOST (every view of a shared run is READ-ONLY — the write
+ *   bypassed the COW fault path; nobody owns these bytes writable);
+ *   refs==1 with a live mapper = SHARED-WRITE (the remaining owner
+ *   re-privatized and wrote on — the benign class, decode
+ *   correlates). Reports the differing qword offsets + both values
+ *   + the arm-time RUNNING sharers.
+ * Budgets: ring 16 (UML_NT_COWRACE_N), UML_NT_COWRACE_CHECKS
+ * syscall parks per arm (the lost store lands within a park or two
+ * of the copy), 512MB hashed bytes, 128 arm lines, 32 LOST fires,
+ * 16 SHARED-WRITE fires, 16 retire notes — one-shots per watch. */
+#define UML_NT_COWRACE_HASH_BUDGET (512ull * 1024 * 1024)
+static struct uml_nt_cowrace_watch cowrace_w[UML_NT_COWRACE_N];
+static unsigned int cowrace_cursor;
+static unsigned long long cowrace_hashed;
+static unsigned long long cowrace_arms;
+static int cowrace_arm_budget = 128;
+static int cowrace_fire_budget = 32;
+static int cowrace_shared_budget = 16;
+static int cowrace_ret_budget = 16;
+static int cowrace_arm_said, cowrace_hash_said;
+
+/* Live conns whose mm maps the run at src_off (the vma backing span
+ * predicate). Fills up to max pids; returns the count found. */
+static int cowrace_mappers(unsigned long long src_off,
+			   unsigned long *pids, int max)
+{
+	struct task_struct *p;
+	int n = 0;
+
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL ||
+		    pc->dead_magic == UML_NT_CONN_DEAD || !pc->alive)
+			continue;
+		if (!uml_nt_cowrace_maps_run(pc->mm, src_off))
+			continue;
+		if (pids != NULL && n < max)
+			pids[n] = (unsigned long)pc->pid;
+		n++;
+	}
+	return n;
+}
+
+void uml_nt_cowrace_arm(struct uml_nt_stub_conn *c,
+			unsigned long long src_off,
+			unsigned long long dst_off,
+			unsigned long long len,
+			unsigned long long va_base,
+			const char *what)
+{
+	unsigned long run_pids[UML_NT_COWRACE_PIDS];
+	int n_run = 0, n_park = 0, n_samm = 0, trunc = 0;
+	struct task_struct *p;
+	unsigned long long h0;
+	int slot, i;
+
+	if (c == NULL || c->ph == NULL || src_off == 0 || len == 0)
+		return;
+	if (cowrace_hashed >= UML_NT_COWRACE_HASH_BUDGET) {
+		if (!cowrace_hash_said) {
+			cowrace_hash_said = 1;
+			os_info("[cowrace] hash budget exhausted "
+				"(%llu bytes hashed, %llu arms) — "
+				"checks stopped\n", cowrace_hashed,
+				cowrace_arms);
+		}
+		return;
+	}
+	/* The t0 both ends share at the copy: uml_nt_copy_verify
+	 * just memcpy'd AND memcmp'd src==dst over [0, len). */
+	h0 = uml_nt_uacc_fnv1a64(
+		(const void *)((char *)uml_boot.physmem_base + src_off),
+		(unsigned long)len);
+	cowrace_hashed += len;
+
+	/* The RUNNING-vs-PARKED sharer snapshot: every OTHER live conn
+	 * that shares the copying mm or maps the src run. The copying
+	 * conn is parked at its fault/syscall by definition (skipped);
+	 * a never-resumed conn never ran guest code (skipped). */
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		int shares = 0, st;
+
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc == c || pc->mm == NULL ||
+		    pc->d == NULL || !pc->alive || !pc->resumed ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			continue;
+		if (pc->mm == c->mm) {
+			shares = 1;
+			n_samm++;
+		} else if (uml_nt_cowrace_maps_run(pc->mm, src_off))
+			shares = 1;
+		if (!shares)
+			continue;
+		st = uml_nt_cowrace_run_state(pc->d->req_seq,
+					      pc->d->done_seq);
+		if (st == 1) {
+			/* RUNNING: its guest stores can be in flight
+			 * against the copy RIGHT NOW. */
+			if (n_run < UML_NT_COWRACE_PIDS)
+				run_pids[n_run] = (unsigned long)pc->pid;
+			else
+				trunc = 1;
+			n_run++;
+		} else {
+			n_park++; /* parked (or desync — cannot write) */
+		}
+	}
+	for (i = n_run < UML_NT_COWRACE_PIDS ? n_run :
+		     UML_NT_COWRACE_PIDS;
+	     i < UML_NT_COWRACE_PIDS; i++)
+		run_pids[i] = 0;
+
+	slot = uml_nt_cowrace_slot_arm(cowrace_w, UML_NT_COWRACE_N,
+				       &cowrace_cursor, src_off, dst_off,
+				       len, va_base,
+				       uml_nt_phys_gen(c->ph,
+						       (long long)src_off),
+				       h0, (unsigned long)c->pid,
+				       run_pids, n_run, n_park, n_samm,
+				       trunc);
+	cowrace_w[slot].ph = c->ph;
+	cowrace_arms++;
+	if (cowrace_arm_budget > 0) {
+		cowrace_arm_budget--;
+		os_info("[cowrace] arm %s src=0x%llx dst=0x%llx "
+			"len=0x%llx va=0x%llx pid=%lu running=%d "
+			"[%lu %lu %lu %lu] parked=%d samm=%d "
+			"h0=0x%llx\n", what, src_off, dst_off, len,
+			va_base, (unsigned long)c->pid, n_run,
+			run_pids[0], run_pids[1], run_pids[2],
+			run_pids[3], n_park, n_samm, h0);
+	} else if (!cowrace_arm_said) {
+		cowrace_arm_said = 1;
+		os_info("[cowrace] arm prints exhausted (%llu arms "
+			"total) — watches continue silently\n",
+			cowrace_arms);
+	}
+}
+
+/* The check pass — SYSCALL PARKS ONLY (the placement rule). For
+ * every armed watch: lifecycle gates first (cheap), then the src
+ * hash; a divergence fires once and retires the watch. */
+static void cowrace_round(struct uml_nt_stub_conn *c)
+{
+	int i;
+
+	for (i = 0; i < UML_NT_COWRACE_N; i++) {
+		struct uml_nt_cowrace_watch *w = &cowrace_w[i];
+		unsigned long long gen_now, hsrc = 0, hdst = 0;
+		unsigned long mpids[UML_NT_COWRACE_PIDS] = { 0 };
+		unsigned long long offs[UML_NT_COWRACE_DIFFS];
+		unsigned long long sv[UML_NT_COWRACE_DIFFS];
+		unsigned long long dv[UML_NT_COWRACE_DIFFS];
+		int refs_now, v, k, nd, nm, cls;
+
+		if (!w->armed)
+			continue;
+		if (cowrace_hashed >= UML_NT_COWRACE_HASH_BUDGET) {
+			if (!cowrace_hash_said) {
+				cowrace_hash_said = 1;
+				os_info("[cowrace] hash budget exhausted "
+					"(%llu bytes hashed, %llu arms) — "
+					"checks stopped\n", cowrace_hashed,
+					cowrace_arms);
+			}
+			return;
+		}
+		gen_now = uml_nt_phys_gen(w->ph,
+					   (long long)w->src_off);
+		refs_now = uml_nt_phys_refs(w->ph,
+					    (long long)w->src_off);
+		v = uml_nt_cowrace_gate(w, gen_now, refs_now);
+		if (v == 0) {
+			hsrc = uml_nt_uacc_fnv1a64(
+				(const void *)((char *)
+					uml_boot.physmem_base +
+					w->src_off),
+				(unsigned long)w->len);
+			cowrace_hashed += w->len;
+			if (hsrc == w->h0) {
+				/* nothing moved in the source: spend
+				 * one check, stay armed until the
+				 * K-th (the fire window is the few
+				 * parks right after the copy). */
+				(void)uml_nt_cowrace_spend(w);
+				continue;
+			}
+			hdst = uml_nt_uacc_fnv1a64(
+				(const void *)((char *)
+					uml_boot.physmem_base +
+					w->dst_off),
+				(unsigned long)w->len);
+			cowrace_hashed += w->len;
+			v = uml_nt_cowrace_verdict(w, hsrc, hdst);
+		}
+		/* fire or retire: one-shot. */
+		w->armed = 0;
+		if (v == UML_NT_COWRACE_RECYCLE ||
+		    v == UML_NT_COWRACE_RELEASE) {
+			if (cowrace_ret_budget > 0) {
+				cowrace_ret_budget--;
+				os_info("[cowrace] retire src=0x%llx "
+					"(%s: gen 0x%llx->0x%llx refs=%d) "
+					"— %s\n", w->src_off,
+					v == UML_NT_COWRACE_RECYCLE ?
+					"recycled" : "released",
+					w->gen_src, gen_now, refs_now,
+					v == UML_NT_COWRACE_RECYCLE ?
+					"a new generation's bytes, not a "
+					"lost update" :
+					"dead backing");
+			}
+			continue;
+		}
+		/* src moved with the gates intact: a store landed in
+		 * the SOURCE after the copy. Classify: who can still
+		 * legitimately write it? */
+		nm = cowrace_mappers(w->src_off, mpids,
+				     UML_NT_COWRACE_PIDS);
+		cls = uml_nt_cowrace_class(refs_now, nm);
+		if (cls == UML_NT_COWRACE_LOST) {
+			if (cowrace_fire_budget <= 0)
+				continue;
+			cowrace_fire_budget--;
+		} else {
+			if (cowrace_shared_budget <= 0)
+				continue;
+			cowrace_shared_budget--;
+		}
+		os_info("[cowrace] %s src=0x%llx dst=0x%llx "
+			"va=0x%llx len=0x%llx arm-pid=%lu refs=%d "
+			"mappers=%d — h0=0x%llx hsrc=0x%llx "
+			"hdst=0x%llx (dst %s)\n",
+			cls == UML_NT_COWRACE_LOST ? "LOST" :
+			"SHARED-WRITE",
+			w->src_off, w->dst_off, w->va_base, w->len,
+			(unsigned long)w->pid, refs_now, nm, w->h0,
+			hsrc, hdst,
+			hdst == w->h0 ? "untouched" : "moved too");
+		nd = uml_nt_cowrace_diff(
+			(const unsigned char *)
+				uml_boot.physmem_base + w->src_off,
+			(const unsigned char *)
+				uml_boot.physmem_base + w->dst_off,
+			w->len, offs, sv, dv, UML_NT_COWRACE_DIFFS);
+		for (k = 0; k < nd && k < UML_NT_COWRACE_DIFFS; k++)
+			os_info("[cowrace]   diff +0x%llx "
+				"src=0x%016llx dst=0x%016llx\n",
+				offs[k], sv[k], dv[k]);
+		if (nd > UML_NT_COWRACE_DIFFS)
+			os_info("[cowrace]   +%d more differing "
+				"qwords\n", nd - UML_NT_COWRACE_DIFFS);
+		os_info("[cowrace]   found at park pid=%lu nr=%llu "
+			"ret=%lld rip=0x%llx; arm-time sharers: "
+			"running=%d [%lu %lu %lu %lu] parked=%d; "
+			"fire-time mappers: [%lu %lu %lu %lu]\n",
+			(unsigned long)c->pid, c->last_nr, c->last_ret,
+			c->d->regs.rip, w->n_run,
+			w->run_pids[0], w->run_pids[1], w->run_pids[2],
+			w->run_pids[3], w->n_park,
+			mpids[0], mpids[1], mpids[2], mpids[3]);
+	}
+}
+
 static char stub_path[512];
 static int have_stub_path;
 
@@ -3882,6 +4182,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		/* K6 step 2: the e->key double-free witness — syscall
 		 * parks ONLY, next to claim_audit (the hook point). */
 		tcache_ekey_watch(c);
+		/* K6 [cowrace]: the copy-vs-in-flight-store witness's
+		 * check pass — syscall parks only, same hook point. */
+		cowrace_round(c);
 	}
 
 	/* The all-faults resume watchdog: the previous fault's answer
@@ -4658,6 +4961,18 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					dvbase,
 					UML_NT_PHYS_RUN_SIZE,
 					c->plan.copy_dst_off);
+				/* K6 [cowrace]: the copy-vs-in-flight-
+				 * store witness's arm — the recording
+				 * the brief mandates AT the copy (t0
+				 * hash + the RUNNING sharers of the
+				 * source). Read-only, no guest-visible
+				 * state; the check pass runs at the
+				 * next syscall parks. */
+				uml_nt_cowrace_arm(c,
+					c->plan.copy_src_off,
+					c->plan.copy_dst_off,
+					UML_NT_PHYS_RUN_SIZE,
+					dvbase, "cowcopy");
 			}
 		}
 		}

@@ -289,6 +289,13 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 		 * fresh span — census both ends. */
 		uml_nt_cowwatch_touch(old_off, old_len, "brk-rehome-src");
 		uml_nt_cowwatch_touch(new_off, old_len, "brk-rehome-dst");
+		/* K6 [cowrace]: the copy-vs-in-flight-store witness's
+		 * arm at the re-home (feature cowcopy-race-witness) —
+		 * the t0 hash both ends share + the RUNNING sharers of
+		 * the old span; the check pass runs at the next
+		 * syscall parks. */
+		uml_nt_cowrace_arm(c, old_off, new_off, old_len,
+				   mm->heap_start, "brk-rehome");
 
 		if (uml_nt_vma_del(mm, mm->heap_start, old_end) < 0 ||
 		    uml_nt_vma_add_gen(mm, mm->heap_start, new_end,

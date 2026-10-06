@@ -462,6 +462,23 @@ int uml_nt_sc_plan_reserve(struct uml_nt_stub_conn *c, int need);
  * this). Defined in stub_ctl.c next to the cowwatch machinery. */
 void uml_nt_cowtrap_pending(struct uml_nt_stub_conn *c);
 
+/* K6 [cowrace] (M5.6a, feature cowcopy-race-witness): the copy-vs-
+ * in-flight-store witness's ARM — called at every run copy+re-home
+ * (the [cowcopy] fault-path COW copy in stub_ctl.c and the brk
+ * re-home here in syscall.c) with the copied range. Records the
+ * src/dst run, va range, copying conn, the source's t0 hash +
+ * gen/refs and the RUNNING-vs-PARKED sharer snapshot; the CHECK pass
+ * (cowrace_round, stub_ctl.c) runs at the next syscall parks and
+ * fires [cowrace] when a store landed in the source after the copy.
+ * Read-only, budgeted; the pure logic is in uaccess_walk.c (host-
+ * tested). */
+void uml_nt_cowrace_arm(struct uml_nt_stub_conn *c,
+			unsigned long long src_off,
+			unsigned long long dst_off,
+			unsigned long long len,
+			unsigned long long va_base,
+			const char *what);
+
 /* [cowtrap] alloc-side arm (the closing slice): READ-ONLY the first
  * page of a freshly allocated multi-run anon span / re-homed heap so
  * the run's FIRST write faults back with the writer's live regs.
