@@ -434,3 +434,75 @@ long long uml_nt_uacc_strnlen(const struct uml_nt_mm *mm, char *base,
 {
 	return uacc_str_walk((char *)0, mm, base, va, maxlen, 1);
 }
+
+/* K6 (M5.6a) uawrite full-buffer witness — see uaccess_walk.h.
+ * Byte ops spelled out like the rest of this file: no <string.h>,
+ * it compiles freestanding in the kernel AND in the unit test. */
+unsigned long long uml_nt_uacc_fnv1a64(const void *buf, unsigned long n)
+{
+	const unsigned char *p = (const unsigned char *)buf;
+	unsigned long long h = 0xcbf29ce484222325ull;
+	unsigned long i;
+
+	for (i = 0; i < n; i++) {
+		h ^= p[i];
+		h *= 0x100000001b3ull;
+	}
+	return h;
+}
+
+unsigned long long uml_nt_uacc_fnv_mix_nr(unsigned long long h,
+					  unsigned long long nr)
+{
+	int i;
+
+	for (i = 0; i < 8; i++) {
+		h ^= (nr >> (8 * i)) & 0xff;
+		h *= 0x100000001b3ull;
+	}
+	return h;
+}
+
+/* does [from, from+n) contain needle verbatim? */
+static int uacc_has(const void *from, unsigned long n,
+		    const char *nd, unsigned long nl)
+{
+	unsigned long i;
+
+	if (nl == 0 || n < nl)
+		return 0;
+	for (i = 0; i + nl <= n; i++) {
+		unsigned long j;
+
+		for (j = 0; j < nl; j++)
+			if (((const char *)from)[i + j] != nd[j])
+				break;
+		if (j == nl)
+			return 1;
+	}
+	return 0;
+}
+
+int uml_nt_uacc_dump_gate(const void *from, unsigned long n,
+			  unsigned long long va,
+			  unsigned long long heap_start)
+{
+	static const char poison[] = "SYSTEMD_";
+	static const char locale[] = "LANG=en_US.UTF-8";
+
+	if (uacc_has(from, n, poison, sizeof(poison) - 1))
+		return 1;
+	if (uacc_has(from, n, locale, sizeof(locale) - 1))
+		return 1;
+	/* tcache-page dest: ANY overlap with [heap_start, +0x1000)
+	 * (the small-mode dests, plus a bulk write starting inside).
+	 * va+n guarded against wrap. */
+	if (va < heap_start + 0x1000ull) {
+		unsigned long long vend = (n > ~0ull - va) ?
+					  ~0ull : va + n;
+
+		if (vend > heap_start)
+			return 1;
+	}
+	return 0;
+}

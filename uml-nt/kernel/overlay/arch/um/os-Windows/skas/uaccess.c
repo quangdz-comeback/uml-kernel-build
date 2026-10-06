@@ -50,6 +50,23 @@ struct uml_nt_mm *uml_nt_syscall_mm(void)
 	return uacc_mm;
 }
 
+/* K6 (M5.6a): the CURRENT syscall nr of the dispatch running on
+ * this host thread — set_mm's twin, installed by
+ * uml_nt_syscall_handle at entry and restored at exit (dispatches
+ * nest on the one host thread, M4.2). The [uawrite] witness folds
+ * it into every line's fnv= (and prints it as nr=): c->last_nr is
+ * only stamped at the handler's EXIT (syscall.c), so DURING the
+ * handler it still names the PREVIOUS round — this setter is the
+ * "current nr" the full-buffer witness needs. */
+static unsigned long long uacc_nr;
+unsigned long long uml_nt_uacc_set_nr(unsigned long long nr)
+{
+	unsigned long long prev = uacc_nr;
+
+	uacc_nr = nr;
+	return prev;
+}
+
 /* M5.4 c3 EFAULT census (043 item 2 follow-up). The one-shot trace
  * spent itself on the boot's FIRST to_user EFAULT — an early
  * fork-child site (va=0x61300c10 len=4, tasks 30/31 in runs
@@ -72,6 +89,14 @@ struct uml_nt_mm *uml_nt_syscall_mm(void)
 static unsigned int uacc_heap_writes;
 /* The tcache-page small-write witness (its own, tiny budget). */
 static unsigned int uacc_small_writes;
+/* K6 (M5.6a): the [uawrite-dump] budget — full hex dumps are gated
+ * (needle SYSTEMD_ / LANG=en_US.UTF-8 in the payload, or a dest in
+ * the tcache page) and deduped by fnv, so 64 rides the whole boot.
+ * The cap print below names exhaustion: a decode with 0 dump lines
+ * and NO cap line proves a true zero (gate never fired), not a
+ * budget-blinded one. */
+static unsigned int uacc_dumps;
+static unsigned long long uacc_dump_last_fnv;
 
 /* [deadwrite] witness (M5.6a, lead 115): armed ONLY while a dying
  * task's exit/destroy path runs on this thread. The decode of both
@@ -108,10 +133,15 @@ void uml_nt_deadwrite_disarm(void)
 /* Shared print for both writeback witnesses: task + payload + the
  * VMA/run coordinates the walker will translate through — a
  * WRONG-run_off VMA shows up right in the line as run= pointing at
- * foreign bytes (the cow_split-base sibling class). */
+ * foreign bytes (the cow_split-base sibling class). K6: fnv= is
+ * FNV-1a over the FULL from[0..n) buffer mixed with the current
+ * syscall nr (fnv_mix_nr(fnv1a64(from, n), nr)) — dl13 proved the
+ * poison text can sit mid-buffer beyond q0/q1's 16B window, so the
+ * hash carries the whole payload and nr attributes the round. */
 static void uacc_wlog(const char *tag, unsigned int idx,
 		      unsigned long long va, unsigned long n,
-		      unsigned long long q0, unsigned long long q1)
+		      unsigned long long q0, unsigned long long q1,
+		      unsigned long long fnv, unsigned long long nr)
 {
 	struct uml_nt_vma *v;
 	unsigned long long page, run_start, old_run;
@@ -122,10 +152,46 @@ static void uacc_wlog(const char *tag, unsigned int idx,
 	run_start = page & ~(UML_NT_PHYS_RUN_SIZE - 1);
 	old_run = v ? v->run_off + (run_start - v->start) : 0;
 	os_info("%s #%u task=%d va=0x%llx len=%lu q0=0x%llx q1=0x%llx "
+		"fnv=0x%llx nr=%llu "
 		"vma=[0x%llx,0x%llx) run_off=0x%llx run=0x%llx\n",
-		tag, idx, task, va, n, q0, q1,
+		tag, idx, task, va, n, q0, q1, fnv, nr,
 		v ? v->start : 0, v ? v->end : 0,
 		v ? v->run_off : 0, old_run);
+}
+
+/* K6 (M5.6a): the [uawrite-dump] emitter — full hex of from[0..n)
+ * in 64-byte rows (os_info truncates at 256 chars, so a wider row
+ * would be cut mid-line and the payload shape lost exactly where
+ * it matters; same shape as dump_guest_bytes, stub_ctl.c). Each row
+ * correlates with its [uawrite] line by va (fnv= lives there; the
+ * row prefix stays short enough that 64 hex bytes survive the
+ * truncation): off is the row's offset inside the buffer, so the
+ * payload qword at a poison address va+off decodes straight from
+ * the row. */
+static void uacc_wdump(unsigned int idx, unsigned long long va,
+		       const char *from, unsigned long n)
+{
+	char row[3 * 64 + 1];
+	unsigned long i;
+
+	for (i = 0; i < n; i += 64) {
+		unsigned long chunk = (n - i < 64) ? n - i : 64;
+		unsigned long j;
+
+		for (j = 0; j < chunk; j++) {
+			unsigned char b = (unsigned char)from[i + j];
+			unsigned t = b >> 4;
+
+			row[3 * j] = (t < 10) ? ('0' + t) : ('a' + t - 10);
+			t = b & 0xf;
+			row[3 * j + 1] =
+				(t < 10) ? ('0' + t) : ('a' + t - 10);
+			row[3 * j + 2] = ' ';
+		}
+		row[3 * chunk] = 0;
+		os_info("[uawrite-dump] #%u va=0x%llx off=0x%lx: %s\n",
+			idx, va, i, row);
+	}
 }
 
 /* [deadwrite]: the armed-window check + print. Same VMA/run coords
@@ -373,6 +439,7 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 		const unsigned long long *q =
 			(const unsigned long long *)from;
 		unsigned long long q0, q1;
+		unsigned long long fnv;
 		int bulk = n >= 24;
 		int small = !bulk && n >= 4 &&
 			    va >= uacc_mm->heap_start &&
@@ -401,6 +468,17 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 			d_q0 = q0;
 			d_q1 = q1;
 		}
+		/* K6 (M5.6a): FNV-1a over the FULL from[0..n) buffer
+		 * + this round's nr — computed once per logged
+		 * candidate (after the quadruple dedup, so identical
+		 * re-reads don't pay the hash). dl13's ledger showed
+		 * only q0/q1 and the poison qword never sat in the
+		 * first 16B; the full-buffer hash closes that blind
+		 * spot — the offline decoder pairs it against the
+		 * [uawrite-dump] payload bytes and the [tcchunk-POISON]
+		 * fire lines. */
+		fnv = uml_nt_uacc_fnv_mix_nr(uml_nt_uacc_fnv1a64(from, n),
+					     uacc_nr);
 		/* v3 (referee 37124011556): bulk budget 256 -> 4096.
 		 * The census went blind EXACTLY at the fire window —
 		 * [uawrite] saturated at #256 around line 20k of a
@@ -410,11 +488,37 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 		if (bulk) {
 			if (++uacc_heap_writes <= 4096)
 				uacc_wlog("[uawrite]", uacc_heap_writes,
-					  va, n, q0, q1);
+					  va, n, q0, q1, fnv, uacc_nr);
 		} else {
 			if (++uacc_small_writes <= 16)
 				uacc_wlog("[uawrite-s]", uacc_small_writes,
-					  va, n, q0, q1);
+					  va, n, q0, q1, fnv, uacc_nr);
+		}
+		/* K6 (M5.6a): the gated full-buffer dump — the hash
+		 * above covers the payload but is not decodable
+		 * backwards; the dump hands the decoder the raw bytes
+		 * when the buffer is interesting: it carries the poison
+		 * needles ("SYSTEMD_" / "LANG=en_US.UTF-8" — the env
+		 * text dl13 caught in the tcache next-fields), or the
+		 * dest sits in the tcache page. Budget 64, dedup by
+		 * fnv (re-reads of the same unit file die; the fire
+		 * window's value-changing buffers survive). Rides the
+		 * dedup'd/logged lines — the syscall path only. */
+		if (uacc_dumps >= 64) {
+			static int uacc_dump_capped;
+
+			if (!uacc_dump_capped) {
+				uacc_dump_capped = 1;
+				os_info("[uawrite-dump] budget exhausted "
+					"(64) — later gated buffers are "
+					"NOT dumped\n");
+			}
+		} else if (fnv != uacc_dump_last_fnv &&
+			   uml_nt_uacc_dump_gate(from, n, va,
+						 uacc_mm->heap_start)) {
+			uacc_dump_last_fnv = fnv;
+			uacc_dumps++;
+			uacc_wdump(uacc_dumps, va, (const char *)from, n);
 		}
 	}
 walk:

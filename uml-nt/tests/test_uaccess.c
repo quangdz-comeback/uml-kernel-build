@@ -89,6 +89,7 @@ static void fill_pattern(unsigned char *b, unsigned long n)
 static void test_cow_fixup(void);
 static void test_stolen_run(void);
 static void test_gen_stale(void);
+static void test_uaw_helpers(void);
 
 int main(void)
 {
@@ -203,6 +204,11 @@ int main(void)
 	/* Map 121 (đáp 122): the per-run generation (stale claim)
 	 * guard. */
 	test_gen_stale();
+
+	/* K6 (M5.6a): the [uawrite] full-buffer witness's pure
+	 * helpers — FNV-1a 64 over the whole source buffer, the nr
+	 * mix, and the [uawrite-dump] gate. */
+	test_uaw_helpers();
 
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
@@ -519,4 +525,63 @@ static void test_gen_stale(void)
 	}
 
 	uml_nt_uacc_set_sink(NULL);
+}
+
+/* K6 (M5.6a): the [uawrite] full-buffer witness (uaccess.c's
+ * logging) leans on three pure helpers — fnv1a64 over the WHOLE
+ * copy source, an 8-byte mix of the current syscall nr, and the
+ * dump gate (needle SYSTEMD_ / LANG=en_US.UTF-8 anywhere in the
+ * buffer, or a dest overlapping the tcache page). The baseline
+ * ledger only printed q0/q1 (first 16B) and dl13 proved the
+ * poison text can hide mid-buffer — these make the hash verifiable
+ * offline and the gate exactly as narrow as designed. */
+static void test_uaw_helpers(void)
+{
+	char buf[64];
+	unsigned long long hs = 0x67d00000ull;
+	unsigned long long h;
+
+	/* FNV-1a 64 reference vectors (the canonical test set). */
+	CHECK(uml_nt_uacc_fnv1a64("", 0) ==
+	      0xcbf29ce484222325ull);
+	CHECK(uml_nt_uacc_fnv1a64("a", 1) ==
+	      0xaf63dc4c8601ec8cull);
+	CHECK(uml_nt_uacc_fnv1a64("foobar", 6) ==
+	      0x85944171f73967e8ull);
+
+	/* the nr mix: deterministic, and a different nr on the same
+	 * buffer yields a different final hash (the [uawrite] line's
+	 * fnv= is buffer+nr — round attribution without cross-
+	 * correlating c->last_nr). */
+	h = uml_nt_uacc_fnv1a64("foobar", 6);
+	CHECK(uml_nt_uacc_fnv_mix_nr(h, 0) ==
+	      uml_nt_uacc_fnv_mix_nr(h, 0));
+	CHECK(uml_nt_uacc_fnv_mix_nr(h, 1) !=
+	      uml_nt_uacc_fnv_mix_nr(h, 0));
+
+	/* needle gate fires mid-buffer, beyond q0/q1's 16B window */
+	memset(buf, 'x', sizeof(buf));
+	memcpy(buf + 31, "SYSTEMD_", 8);
+	CHECK(uml_nt_uacc_dump_gate(buf, sizeof(buf), 0, hs) == 1);
+	memset(buf, 'x', sizeof(buf));
+	memcpy(buf + 20, "LANG=en_US.UTF-8", 16);
+	CHECK(uml_nt_uacc_dump_gate(buf, sizeof(buf), 0, hs) == 1);
+
+	/* unrelated text with a dest outside the tcache page: no */
+	memset(buf, 'y', sizeof(buf));
+	CHECK(uml_nt_uacc_dump_gate(buf, sizeof(buf),
+				   hs + 0x2000, hs) == 0);
+
+	/* buffer too short to hold the needle: no false hit */
+	CHECK(uml_nt_uacc_dump_gate("SYSTE", 5, hs + 0x2000, hs) == 0);
+
+	/* tcache-page dest (the gate's third arm) fires on plain
+	 * bytes; a dest past the page does not. */
+	memset(buf, 'z', 16);
+	CHECK(uml_nt_uacc_dump_gate(buf, 16, hs + 0x40, hs) == 1);
+	CHECK(uml_nt_uacc_dump_gate(buf, 16, hs + 0x1000, hs) == 0);
+
+	/* dest straddling the tcache-page edge still counts (any
+	 * overlap — the small bulk writes may start inside). */
+	CHECK(uml_nt_uacc_dump_gate(buf, 16, hs + 0xff8, hs) == 1);
 }

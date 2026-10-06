@@ -284,6 +284,14 @@ struct uml_nt_mm *uml_nt_syscall_mm(void);
  * at entry and restore at exit; see uaccess_walk.h. */
 struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
 
+/* K6 (M5.6a): install the CURRENT round's syscall nr — set_mm's
+ * twin, same save/restore nesting pattern. The [uawrite]
+ * full-buffer witness (uaccess.c) folds it into every line's fnv=
+ * and prints it as nr=: during the handler c->last_nr still names
+ * the PREVIOUS round (it is stamped at the handler's EXIT), so the
+ * dispatch hands the witness the live one at entry. */
+unsigned long long uml_nt_uacc_set_nr(unsigned long long nr);
+
 /* Spawn one stub.exe process for this conn (S5 pattern, suspended,
  * bootstrap via inherited handles + value cmdline). Used by the probe
  * fork path AND the real mm-context lifecycle (mmctx.c) — one

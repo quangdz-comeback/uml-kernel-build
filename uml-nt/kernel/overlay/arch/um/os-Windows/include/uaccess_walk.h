@@ -76,6 +76,27 @@ long long uml_nt_uacc_strnlen(const struct uml_nt_mm *mm, char *base,
 			      unsigned long long va,
 			      unsigned long long maxlen);
 
+/* K6 (M5.6a) uawrite full-buffer witness — pure helpers, unit-
+ * tested standalone (test_uaccess.c) and used by uaccess.c's
+ * logging (this file stays log-free):
+ *   fnv1a64:   FNV-1a 64 over buf[0..n) — canonical vectors.
+ *   fnv_mix_nr: 8 more FNV rounds mixing the syscall nr in (LE
+ *              bytes) — the [uawrite] line prints fnv= as
+ *              fnv_mix_nr(fnv1a64(from, n), nr): buffer AND
+ *              round in one word, no cross-correlation with
+ *              c->last_nr (which is only stamped at handler EXIT).
+ *   dump_gate: 1 when the buffer deserves a full hex dump: it
+ *              holds "SYSTEMD_" or "LANG=en_US.UTF-8" anywhere
+ *              (dl13 proved the poison text can sit mid-buffer,
+ *              beyond the q0/q1 16B window), or the dest overlaps
+ *              the tcache page [heap_start, heap_start+0x1000). */
+unsigned long long uml_nt_uacc_fnv1a64(const void *buf, unsigned long n);
+unsigned long long uml_nt_uacc_fnv_mix_nr(unsigned long long h,
+					  unsigned long long nr);
+int uml_nt_uacc_dump_gate(const void *from, unsigned long n,
+			  unsigned long long va,
+			  unsigned long long heap_start);
+
 /* Flat-view pointer for the byte at `va` after ensuring a kernel
  * WRITE to its page is safe: COW-shared runs are copied private
  * first (surgery + remap ops through the sink), read-only VMAs fault.

@@ -2571,6 +2571,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	 * EFAULT the woken outer dispatch's writebacks. */
 	struct uml_nt_mm *uacc_prev_mm;
 	struct uml_nt_uacc_sink uacc_prev_sink;
+	unsigned long long uacc_prev_nr;
 
 	/* [deadwrite] leak guard (lead 115): the exit route arms the
 	 * destroy-path witness and do_exit never returns, so a fresh
@@ -2579,6 +2580,10 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	uml_nt_deadwrite_disarm();
 
 	uacc_prev_mm = uml_nt_uacc_set_mm(c->mm);
+	/* K6 (M5.6a): the current round's nr for the [uawrite]
+	 * full-buffer witness — see uml_nt_uacc_set_nr (syscall.h).
+	 * Same nesting save/restore as the mm above. */
+	uacc_prev_nr = uml_nt_uacc_set_nr(nr);
 	/* The write-fixup channel (hazard 3): the handler's to_user/
 	 * clear_user/futex writes force COW-shared runs private and
 	 * queue their remap ops into THIS plan — streamed after the
@@ -3268,5 +3273,6 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	}
 out:
 	uml_nt_uacc_set_mm(uacc_prev_mm);
+	uml_nt_uacc_set_nr(uacc_prev_nr);
 	uml_nt_uacc_set_sink(&uacc_prev_sink);
 }
