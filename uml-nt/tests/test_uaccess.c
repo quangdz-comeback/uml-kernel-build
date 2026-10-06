@@ -90,6 +90,7 @@ static void test_cow_fixup(void);
 static void test_stolen_run(void);
 static void test_gen_stale(void);
 static void test_uaw_helpers(void);
+static void test_uaw_nr_context(void);
 
 int main(void)
 {
@@ -209,6 +210,12 @@ int main(void)
 	 * helpers — FNV-1a 64 over the whole source buffer, the nr
 	 * mix, and the [uawrite-dump] gate. */
 	test_uaw_helpers();
+
+	/* K6 scrutiny fix: the [uawrite] nr-context protocol — the
+	 * resumed-parent attribution (a do_exit'd child never
+	 * unwinds the dispatch; the switch boundary must re-arm the
+	 * parent's own nr). */
+	test_uaw_nr_context();
 
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
@@ -584,4 +591,77 @@ static void test_uaw_helpers(void)
 	/* dest straddling the tcache-page edge still counts (any
 	 * overlap — the small bulk writes may start inside). */
 	CHECK(uml_nt_uacc_dump_gate(buf, 16, hs + 0xff8, hs) == 1);
+}
+
+/* K6 scrutiny fix: the [uawrite] nr-context protocol — the
+ * resumed-parent attribution bug. The global nr was installed/
+ * restored ONLY at dispatch entry/exit, so a parent blocked in
+ * wait4 (61) that resumed after the child's exit/exit_group went
+ * through do_exit — which never unwinds the dispatch — hashed and
+ * reported the child's 60/231 on its own rusage writeback. The
+ * fix stamps the nr per conn at entry and re-arms it at the
+ * stack-switch boundary (mm/sink's twin, stub_ctl.c). This drives
+ * the REAL protocol: the exact functions syscall.c's dispatch,
+ * stub_ctl.c's uml_nt_switch_trace and uaccess.c's logger call. */
+static void test_uaw_nr_context(void)
+{
+	/* two conn slots (kzalloc-init 0, like c->active_nr) */
+	unsigned long long parent_nr = 0, child_nr = 0;
+	unsigned long long prev_parent, prev_child;
+
+	/* boot: conn-less switch-in (kthread / stale-refused) re-arms
+	 * 0 — the honest "no active handler" attribution. */
+	CHECK(uml_nt_uacc_nr_current() == 0);
+	CHECK(uml_nt_uacc_nr_switch(NULL) == 0);
+	CHECK(uml_nt_uacc_nr_current() == 0);
+
+	/* THE BUG TIMELINE. Parent's wait4 dispatch: entry stamps its
+	 * conn slot AND installs the global (prev = boot state 0). */
+	prev_parent = uml_nt_uacc_nr_enter(&parent_nr, 61);
+	CHECK(prev_parent == 0);
+	CHECK(parent_nr == 61);
+	CHECK(uml_nt_uacc_nr_current() == 61);
+
+	/* schedule() switches to the child BEFORE its dispatch: the
+	 * boundary re-arm reads the child's still-zero slot, then the
+	 * child's own exit_group dispatch entry installs 231. */
+	CHECK(uml_nt_uacc_nr_switch(&child_nr) == 0);
+	prev_child = uml_nt_uacc_nr_enter(&child_nr, 231);
+	CHECK(prev_child == 0);
+	CHECK(uml_nt_uacc_nr_current() == 231);
+
+	/* the child exits through do_exit: NO exit restore runs (the
+	 * dispatch never unwinds) — the global still names 231. */
+	CHECK(uml_nt_uacc_nr_current() == 231);
+
+	/* the stack switch back to the parent re-arms the parent's
+	 * OWN nr: the resumed wait4 rusage writeback hashes/reports
+	 * 61, not the dead child's 231. */
+	CHECK(uml_nt_uacc_nr_switch(&parent_nr) == 61);
+	CHECK(uml_nt_uacc_nr_current() == 61);
+
+	/* the resumed parent's handler finally returns: its exit
+	 * restore (out: in syscall.c) unwinds to the PRE-DISPATCH
+	 * global it saved at entry — nesting stays intact. */
+	CHECK(uml_nt_uacc_set_nr(prev_parent) == 61);
+	CHECK(uml_nt_uacc_nr_current() == 0);
+
+	/* ORDINARY NESTED RETURN (M4.2, no do_exit involved): the
+	 * outer dispatch stamps 61, a nested dispatch on another conn
+	 * stamps 231, and the nested exit's local prev + set_nr
+	 * restores the OUTER's 61 — the slots stay per-conn. */
+	prev_parent = uml_nt_uacc_nr_enter(&parent_nr, 61);
+	CHECK(prev_parent == 0);
+	prev_child = uml_nt_uacc_nr_enter(&child_nr, 231);
+	CHECK(prev_child == 61);
+	CHECK(uml_nt_uacc_nr_current() == 231);
+	CHECK(uml_nt_uacc_set_nr(prev_child) == 231);
+	CHECK(uml_nt_uacc_nr_current() == 61);
+	CHECK(child_nr == 231);
+	CHECK(parent_nr == 61);
+	CHECK(uml_nt_uacc_set_nr(prev_parent) == 61);
+	CHECK(uml_nt_uacc_nr_current() == 0);
+
+	/* teardown: no state leaks into the other tests. */
+	(void)uml_nt_uacc_set_nr(0);
 }

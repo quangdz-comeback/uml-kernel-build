@@ -2581,9 +2581,14 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 
 	uacc_prev_mm = uml_nt_uacc_set_mm(c->mm);
 	/* K6 (M5.6a): the current round's nr for the [uawrite]
-	 * full-buffer witness — see uml_nt_uacc_set_nr (syscall.h).
-	 * Same nesting save/restore as the mm above. */
-	uacc_prev_nr = uml_nt_uacc_set_nr(nr);
+	 * full-buffer witness — uml_nt_uacc_nr_enter installs the
+	 * global AND stamps c->active_nr, the slot the stack-switch
+	 * boundary re-arms from (stub_ctl.c uml_nt_switch_trace: a
+	 * task woken inside its blocked handler keeps its OWN nr even
+	 * after an intervening do_exit'd task never unwound its
+	 * dispatch). Same nesting save/restore as the mm above (the
+	 * local prev + plain set_nr at out:) — see uaccess_walk.h. */
+	uacc_prev_nr = uml_nt_uacc_nr_enter(&c->active_nr, nr);
 	/* The write-fixup channel (hazard 3): the handler's to_user/
 	 * clear_user/futex writes force COW-shared runs private and
 	 * queue their remap ops into THIS plan — streamed after the

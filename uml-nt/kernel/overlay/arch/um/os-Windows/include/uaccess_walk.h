@@ -97,6 +97,36 @@ int uml_nt_uacc_dump_gate(const void *from, unsigned long n,
 			  unsigned long long va,
 			  unsigned long long heap_start);
 
+/* K6 (M5.6a, scrutiny fix) — the [uawrite] nr-context protocol:
+ * the CURRENT handler nr of the dispatch on this host thread.
+ * nr_current feeds the fnv_mix_nr above and the line's nr=. The
+ * state lives in this file's .c on purpose — the whole protocol is
+ * unit-tested standalone on Linux CI (test_uaccess.c drives the
+ * REAL functions, not a replica). Installed three ways, mirroring
+ * set_mm/set_sink:
+ *   nr_enter: the dispatch at entry — stamps the conn's slot
+ *             (c->active_nr, syscall.h) AND installs the global
+ *             in one call; the local prev the dispatch saves
+ *             covers NESTED handler returns at exit (set_nr).
+ *   set_nr:   plain install, returns the PREVIOUS value (the
+ *             dispatch's exit restore).
+ *   nr_switch: the stack-switch boundary (stub_ctl.c
+ *             uml_nt_switch_trace, beside the mm/sink re-arm):
+ *             installs the incoming task's conn-stamped nr — the
+ *             path a parent woken INSIDE its blocked wait4 (61)
+ *             crosses after an intervening child exited through
+ *             do_exit (exit/exit_group never unwinds the dispatch,
+ *             so the global still names the child's 60/231; the
+ *             stamp re-arms the parent's own). NULL slot
+ *             (conn-less/stale-refused) installs 0 — the honest
+ *             "no active handler" attribution. Returns the value
+ *             installed. */
+unsigned long long uml_nt_uacc_nr_current(void);
+unsigned long long uml_nt_uacc_set_nr(unsigned long long nr);
+unsigned long long uml_nt_uacc_nr_enter(unsigned long long *slot,
+					unsigned long long nr);
+unsigned long long uml_nt_uacc_nr_switch(const unsigned long long *slot);
+
 /* Flat-view pointer for the byte at `va` after ensuring a kernel
  * WRITE to its page is safe: COW-shared runs are copied private
  * first (surgery + remap ops through the sink), read-only VMAs fault.

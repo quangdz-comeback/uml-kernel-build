@@ -50,23 +50,6 @@ struct uml_nt_mm *uml_nt_syscall_mm(void)
 	return uacc_mm;
 }
 
-/* K6 (M5.6a): the CURRENT syscall nr of the dispatch running on
- * this host thread — set_mm's twin, installed by
- * uml_nt_syscall_handle at entry and restored at exit (dispatches
- * nest on the one host thread, M4.2). The [uawrite] witness folds
- * it into every line's fnv= (and prints it as nr=): c->last_nr is
- * only stamped at the handler's EXIT (syscall.c), so DURING the
- * handler it still names the PREVIOUS round — this setter is the
- * "current nr" the full-buffer witness needs. */
-static unsigned long long uacc_nr;
-unsigned long long uml_nt_uacc_set_nr(unsigned long long nr)
-{
-	unsigned long long prev = uacc_nr;
-
-	uacc_nr = nr;
-	return prev;
-}
-
 /* M5.4 c3 EFAULT census (043 item 2 follow-up). The one-shot trace
  * spent itself on the boot's FIRST to_user EFAULT — an early
  * fork-child site (va=0x61300c10 len=4, tasks 30/31 in runs
@@ -440,6 +423,7 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 			(const unsigned long long *)from;
 		unsigned long long q0, q1;
 		unsigned long long fnv;
+		unsigned long long nr;
 		int bulk = n >= 24;
 		int small = !bulk && n >= 4 &&
 			    va >= uacc_mm->heap_start &&
@@ -476,9 +460,13 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 		 * first 16B; the full-buffer hash closes that blind
 		 * spot — the offline decoder pairs it against the
 		 * [uawrite-dump] payload bytes and the [tcchunk-POISON]
-		 * fire lines. */
+		 * fire lines. The nr comes through the nr-context
+		 * protocol (uaccess_walk.h): dispatch entry installs
+		 * it, the stack-switch boundary re-arms a resumed
+		 * blocked handler's own — the scrutiny fix. */
+		nr = uml_nt_uacc_nr_current();
 		fnv = uml_nt_uacc_fnv_mix_nr(uml_nt_uacc_fnv1a64(from, n),
-					     uacc_nr);
+					     nr);
 		/* v3 (referee 37124011556): bulk budget 256 -> 4096.
 		 * The census went blind EXACTLY at the fire window —
 		 * [uawrite] saturated at #256 around line 20k of a
@@ -488,11 +476,11 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 		if (bulk) {
 			if (++uacc_heap_writes <= 4096)
 				uacc_wlog("[uawrite]", uacc_heap_writes,
-					  va, n, q0, q1, fnv, uacc_nr);
+					  va, n, q0, q1, fnv, nr);
 		} else {
 			if (++uacc_small_writes <= 16)
 				uacc_wlog("[uawrite-s]", uacc_small_writes,
-					  va, n, q0, q1, fnv, uacc_nr);
+					  va, n, q0, q1, fnv, nr);
 		}
 		/* K6 (M5.6a): the gated full-buffer dump — the hash
 		 * above covers the payload but is not decodable

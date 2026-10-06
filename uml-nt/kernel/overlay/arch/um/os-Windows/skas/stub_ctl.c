@@ -4467,7 +4467,14 @@ void uml_nt_switch_trace(void *from, void *to)
 	 * crosses: install the incoming task's conn mm + fixup
 	 * channel here, NULL-safe (kthreads and conn-less tasks fail
 	 * safe). Content-identical to what the incoming dispatch
-	 * would install, so re-entry stays coherent. */
+	 * would install, so re-entry stays coherent.
+	 * K6 (M5.6a scrutiny fix): the [uawrite] nr context rides the
+	 * SAME re-arm — uml_nt_uacc_nr_switch installs the conn's
+	 * active_nr (stamped at dispatch entry, uaccess_walk.h), so a
+	 * resumed parent blocked in wait4 (61) hashes/reports its OWN
+	 * nr, not the do_exit'd child's exit/exit_group 60/231 still
+	 * sitting in the global (that dispatch never unwound to
+	 * restore it). */
 	{
 		struct mm_id *id = (t->mm != NULL) ?
 			&t->mm->context.id : NULL;
@@ -4498,9 +4505,11 @@ void uml_nt_switch_trace(void *from, void *to)
 			s.ph = c->ph;
 			s.plan = &c->plan;
 			(void)uml_nt_uacc_set_sink(&s);
+			(void)uml_nt_uacc_nr_switch(&c->active_nr);
 		} else {
 			uml_nt_uacc_set_mm(NULL);
 			(void)uml_nt_uacc_set_sink(NULL);
+			(void)uml_nt_uacc_nr_switch(NULL);
 		}
 	}
 

@@ -151,6 +151,17 @@ struct uml_nt_stub_conn {
 	 * persona bits are no-ops on this port — loads are
 	 * fixed-position, so ADDR_NO_RANDOMIZE changes nothing). */
 	unsigned long long persona;
+	/* K6 (M5.6a, scrutiny fix): the nr of the handler CURRENTLY
+	 * in flight on this conn — stamped at dispatch entry
+	 * (uml_nt_uacc_nr_enter) and re-armed at the stack-switch
+	 * boundary beside mm/sink (uml_nt_switch_trace →
+	 * uml_nt_uacc_nr_switch, both uaccess_walk.h). last_nr below
+	 * only names COMPLETED rounds (stamped at exit): without this
+	 * stamp a parent woken inside its blocked wait4 (61) would
+	 * hash/report a do_exit'd child's exit/exit_group nr (60/231)
+	 * — that dispatch never unwinds to restore the global. kzalloc
+	 * init = 0. */
+	unsigned long long active_nr;
 	/* M5.4 c3 diag: the last syscall round this conn served. The
 	 * SIGSEGV print names it — a retval the guest consumed as a
 	 * pointer/length is attributable at the death site without
@@ -284,13 +295,15 @@ struct uml_nt_mm *uml_nt_syscall_mm(void);
  * at entry and restore at exit; see uaccess_walk.h. */
 struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
 
-/* K6 (M5.6a): install the CURRENT round's syscall nr — set_mm's
- * twin, same save/restore nesting pattern. The [uawrite]
- * full-buffer witness (uaccess.c) folds it into every line's fnv=
- * and prints it as nr=: during the handler c->last_nr still names
- * the PREVIOUS round (it is stamped at the handler's EXIT), so the
- * dispatch hands the witness the live one at entry. */
-unsigned long long uml_nt_uacc_set_nr(unsigned long long nr);
+/* K6 (M5.6a, scrutiny fix): the [uawrite] nr-context protocol
+ * (nr_enter / set_nr / nr_switch / nr_current) lives in
+ * uaccess_walk.h beside the witness helpers it feeds — it is
+ * unit-tested standalone on Linux CI with the walker. During a
+ * handler c->last_nr still names the PREVIOUS round (it is
+ * stamped at the handler's EXIT); the dispatch hands the witness
+ * the live nr at entry (nr_enter stamps c->active_nr) and
+ * uml_nt_switch_trace re-arms it at the scheduler boundary
+ * (nr_switch) beside mm/sink. */
 
 /* Spawn one stub.exe process for this conn (S5 pattern, suspended,
  * bootstrap via inherited handles + value cmdline). Used by the probe

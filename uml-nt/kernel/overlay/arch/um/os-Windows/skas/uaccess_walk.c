@@ -463,6 +463,54 @@ unsigned long long uml_nt_uacc_fnv_mix_nr(unsigned long long h,
 	return h;
 }
 
+/* K6 (M5.6a, scrutiny fix) — the [uawrite] nr-context protocol;
+ * see uaccess_walk.h. The state lives HERE (not uaccess.c, which
+ * only reads it through nr_current) so the whole protocol compiles
+ * into the Linux CI unit test: the tests drive the REAL functions
+ * the dispatch (syscall.c), the switch boundary (stub_ctl.c
+ * uml_nt_switch_trace) and the logger (uaccess.c) call. */
+static unsigned long long uacc_nr;
+
+unsigned long long uml_nt_uacc_nr_current(void)
+{
+	return uacc_nr;
+}
+
+/* Plain install, returns the PREVIOUS nr — the dispatch's exit
+ * restore (out: in syscall.c): nested handler returns keep the
+ * outer handler's nr installed (M4.2, set_mm/set_sink's twin). */
+unsigned long long uml_nt_uacc_set_nr(unsigned long long nr)
+{
+	unsigned long long prev = uacc_nr;
+
+	uacc_nr = nr;
+	return prev;
+}
+
+/* Dispatch entry: stamp the conn's slot AND install the global in
+ * one call — the slot (c->active_nr, kzalloc-init 0) is what the
+ * stack-switch boundary re-arms from. */
+unsigned long long uml_nt_uacc_nr_enter(unsigned long long *slot,
+					unsigned long long nr)
+{
+	if (slot != 0)
+		*slot = nr;
+	return uml_nt_uacc_set_nr(nr);
+}
+
+/* The stack-switch boundary: install the incoming task's conn-
+ * stamped nr — the nr of ITS in-flight handler (a task woken
+ * inside its blocked wait4 keeps its own 61 even though an
+ * intervening child exited through do_exit with 60/231 still in
+ * the global, never unwound). NULL slot = conn-less or stale-
+ * refused: install 0, the honest "no active handler" value.
+ * Returns the value installed. */
+unsigned long long uml_nt_uacc_nr_switch(const unsigned long long *slot)
+{
+	uacc_nr = (slot != 0) ? *slot : 0;
+	return uacc_nr;
+}
+
 /* does [from, from+n) contain needle verbatim? */
 static int uacc_has(const void *from, unsigned long n,
 		    const char *nd, unsigned long nl)
