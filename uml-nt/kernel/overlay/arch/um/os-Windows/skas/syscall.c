@@ -3088,6 +3088,24 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		   * (guest pointer). */
 		ret = sys_clock_gettime(c, a);
 		break;
+	case 221: /* fadvise64 — the boot's single nr=221 of the
+		   * referee ENOSYS table (dl13 + dl15, one call).
+		   * POSIX_FADV_* is a page-cache hint: with no page
+		   * cache to advise (the M4 mem model keeps none),
+		   * the honest kernel answer is a no-op success —
+		   * callers tolerate ENOSYS too, but the login-path
+		   * table must go quiet. */
+		ret = 0;
+		break;
+	case 248: /* add_key — the table's other straggler (dl13 +
+		   * dl15, one call per boot). Same phantom-keyring
+		   * family as keyctl JOIN below (b583f28): we keep
+		   * no keyring, so the "added" key is a phantom
+		   * serial — if a real keyring user reads it back
+		   * through keyctl, the loud-ENOSYS branch below
+		   * names it. */
+		ret = 0x2ea; /* phantom key serial (keyring is 0x2e9) */
+		break;
 	case 250: /* keyctl — systemd's exec KEYRING step calls
 		   * keyctl(KEYCTL_JOIN_SESSION_KEYRING) for every
 		   * sandboxed service; ENOSYS fails the whole spawn
