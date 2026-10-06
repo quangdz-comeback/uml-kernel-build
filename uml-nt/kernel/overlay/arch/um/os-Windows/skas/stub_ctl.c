@@ -734,11 +734,18 @@ __uml_setup("uml_nt_stubtest=", uml_nt_stubtest_setup,
 "    M3 probe: boot a static guest init (fault round-trips + fork)\n"
 "    across stub.exe processes.\n");
 
+/* The [viewswap] transition-note budget: the composed-plan
+ * guard's allowed intermediate MAPs (superseded in-plan) print
+ * once each up to this cap, so a decode can see the chained-COW
+ * class working without per-fixup noise. */
+static int viewswap_transition_logged;
+
 /* Push one plan op into the conn's slot. */
 static void issue_plan_op(struct uml_nt_stub_conn *c,
 			  const struct uml_nt_fault_op *op)
 {
 	struct uml_nt_stub_data *d = c->d;
+	int sup = 0;
 
 	/* OP LEDGER (M5.6a, referee 37212286263): the wrong-backed
 	 * twin is a MEM_MAPPED section view at the heap start whose
@@ -774,28 +781,51 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 		/* M5.6a root-cause fix — THE APPLY-TIME GUARD of the
 		 * table<->view swap window (dl18 37512134759 named the
 		 * formation class: a store landing in a backing the
-		 * table no longer owns). A MAP op is legal ONLY while
-		 * the CURRENT table still backs its exact range with
-		 * the op's own run; a mismatch = the table moved under
-		 * the queued op (a re-home/munmap/fixup between queue
-		 * and apply) = applying it would hand the guest a
+		 * table no longer owns). A composed plan can queue
+		 * SEVERAL COW surgeries before op 0 streams (a
+		 * writeback crossing a run boundary runs two fixups
+		 * into ONE plan), so the table is already the FINAL
+		 * one when the guard sees the first op: an
+		 * INTERMEDIATE MAP (the first fixup's still-shared
+		 * tail re-map, superseded by the second fixup's
+		 * corrective UNMAP/MAP queued behind it) is legal
+		 * against the state the plan itself produces — the
+		 * guest stays parked in the stub's action_chain until
+		 * the plan drains, so nothing observes the transient
+		 * view. The invariant that must hold is the FINAL one
+		 * (fault.c uml_nt_fault_op_allowed): a MAP whose view
+		 * SURVIVES the plan must be backed by the table's own
+		 * run; a mismatch with NO same-base release behind it
+		 * in the plan = the table moved under the op with no
+		 * repair = applying it would hand the guest a
 		 * WRONG-BACKED view — the silent split-brain behind
 		 * the run-granular lost-updates. Never apply, never
 		 * stay quiet: refuse and kill the conn loudly (M1
 		 * pitfall 17 — fail loud, never guess). This subsumes
 		 * the old ISSUE-MISMATCH print (writable prots only,
 		 * log-only): ALL MAP prots, fatal. */
+		sup = uml_nt_fault_op_superseded(op, &c->plan);
 		if (c->mm != NULL &&
-		    !uml_nt_fault_op_backed(op, c->mm)) {
+		    !uml_nt_fault_op_allowed(op, &c->plan, c->mm)) {
 			os_info("[viewswap] pid %lu REFUSED stale MAP "
 				"va=0x%llx len=0x%llx op_off=0x%llx — "
-				"the VMA table backs another run; "
+				"the VMA table backs another run and no "
+				"in-plan op releases this view; "
 				"KILLING (never a wrong-backed "
 				"view)\n", (unsigned long)c->pid,
 				op->va, op->len, op->off);
 			d->action = UML_STUB_ACTION_KILL;
 			d->err = 1;
 			return;
+		}
+		if (sup && viewswap_transition_logged < 8) {
+			viewswap_transition_logged++;
+			os_info("[viewswap] pid %lu TRANSITION MAP "
+				"va=0x%llx len=0x%llx off=0x%llx — "
+				"superseded in-plan (release queued), "
+				"allowed as an intermediate view\n",
+				(unsigned long)c->pid, op->va, op->len,
+				op->off);
 		}
 		d->action = UML_STUB_ACTION_MAP;
 		d->map_prot = op->prot;
@@ -810,8 +840,15 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 		 * MAPs with a private table run (refs==1): no shared
 		 * run is ever clobbered (the RO/shared maps skip —
 		 * the cowbreak audits own that class), and the parked
-		 * guest never sees the transient plant. */
-		if ((op->prot == UML_NT_PAGE_READWRITE ||
+		 * guest never sees the transient plant. SUPERSEDED
+		 * (transitional) MAPs skip the canary: their backing
+		 * intentionally differs from the final table's run
+		 * (the corrective pair behind them repairs the view
+		 * before the guest resumes), so a table-side plant
+		 * would only compare mismatched worlds — the
+		 * surviving re-map carries the canary instead. */
+		if (!sup &&
+		    (op->prot == UML_NT_PAGE_READWRITE ||
 		     op->prot == UML_NT_PAGE_WRITECOPY ||
 		     op->prot == UML_NT_PAGE_EXECUTE_READWRITE) &&
 		    op->len >= 16 && c->mm != NULL) {

@@ -425,10 +425,16 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
  * (UnmapViewOfFile releases the WHOLE view at map_va — one op for a
  * multi-VMA range left every later VMA's view alive over dropped,
  * recycled runs), or a STALE op issued after the table moved under
- * it. The three pure helpers below are the fix's protocol core
+ * it. The pure helpers below are the fix's protocol core
  * (host-tested in test_mm.c): reserve the capacity BEFORE the table
- * moves, enumerate the COMPLETE view-release set, and guard every
- * MAP at apply time against the table's current truth. */
+ * moves, enumerate the COMPLETE view-release set, guard every MAP
+ * at apply time against the table's truth, and — the composed-plan
+ * refinement (the scrutiny blocker on 6d3c932) — validate each MAP
+ * against the state the plan ITSELF produces: a composed plan can
+ * queue several COW surgeries before op 0 streams, so an
+ * intermediate MAP superseded by a later same-base UNMAP in the
+ * SAME plan is a legal transition, while a MAP whose view
+ * SURVIVES the plan must still be final-table-backed. */
 int uml_nt_fault_plan_reserve(const struct uml_nt_fault_plan *plan,
 			      int need)
 {
@@ -465,6 +471,49 @@ int uml_nt_fault_op_backed(const struct uml_nt_fault_op *op,
 		return 0;
 	return (unsigned long long)lo == op->off &&
 	       (unsigned long long)hi == op->off + op->len - 8;
+}
+
+int uml_nt_fault_op_superseded(const struct uml_nt_fault_op *op,
+			       const struct uml_nt_fault_plan *plan)
+{
+	int i, self;
+
+	if (op == (const struct uml_nt_fault_op *)0 ||
+	    plan == (const struct uml_nt_fault_plan *)0)
+		return 0;
+	if (op->op != UML_NT_FOP_MAP)
+		return 0; /* PROTECT/UNMAP establish no view */
+	self = (int)(op - &plan->ops[0]);
+	if (self < 0 || self >= plan->n_ops)
+		return 0; /* not a member of this plan */
+	/* Release-at-base: UnmapViewOfFile tears the view AT the
+	 * given va down whole (the stub's do_action), so a later
+	 * same-base UNMAP releases exactly the view this MAP
+	 * establishes — views at one base alternate UNMAP/MAP, and
+	 * a re-MAP at an occupied base would fail outright. */
+	for (i = self + 1; i < plan->n_ops; i++)
+		if (plan->ops[i].op == UML_NT_FOP_UNMAP &&
+		    plan->ops[i].va == op->va)
+			return 1;
+	return 0;
+}
+
+int uml_nt_fault_op_allowed(const struct uml_nt_fault_op *op,
+			    const struct uml_nt_fault_plan *plan,
+			    const struct uml_nt_mm *mm)
+{
+	/* The two legal MAP classes at apply time: a view that
+	 * SURVIVES the plan must be backed by the table's own run
+	 * (the final-backing invariant), and a view the plan itself
+	 * releases before it completes may transition through a
+	 * backing the final table no longer owns (the corrective
+	 * ops queued behind it repair the view state — the guest
+	 * stays parked while the plan streams, so nothing observes
+	 * the transient view). Anything else would strand a
+	 * wrong-backed view: refuse. */
+	if (uml_nt_fault_op_backed(op, mm))
+		return 1;
+	return uml_nt_fault_op_superseded(op, plan);
 }
 
 int uml_nt_fault_munmap_views(const struct uml_nt_mm *mm,

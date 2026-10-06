@@ -1645,6 +1645,7 @@ static void test_swap_window(void)
 	struct uml_nt_fault_plan plan;
 	struct uml_nt_fault_op ops[UML_NT_VMA_MAX];
 	unsigned long long r0, r1, r2;
+	unsigned long long n1, n2;
 	int n, i;
 
 	/* --- reserve: all-or-nothing capacity --- */
@@ -1776,6 +1777,188 @@ static void test_swap_window(void)
 		old.off = r0;
 		CHECK(uml_nt_fault_op_backed(&old, &mm) == 0);
 	}
+
+	/* --- THE chained multi-run COW writeback (the scrutiny
+	 * blocker on 6d3c932): a 16-byte writeback crossing the run
+	 * boundary of a two-run shared VMA runs TWO cow fixups into
+	 * ONE uaccess plan — the exact uml_nt_uacc_write_ptr op
+	 * shape — so the FINAL table (both runs private) is already
+	 * standing when op 0 streams. The intermediate shared-second
+	 * MAP is NOT final-table-backed, and the old backed-only
+	 * guard ACTION_KILL'd the syscall before the corrective
+	 * UNMAP/MAP pair behind it applied. The protocol guard must
+	 * allow the transition (superseded in-plan) with no false
+	 * refusal — the guest sits parked until the plan drains. */
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 64 * RUN) == 0);
+	uml_nt_mm_init(&mm);
+	memset(&plan, 0, sizeof(plan));
+	r0 = uml_nt_phys_alloc_span(&ph, 2);
+	CHECK((long long)r0 >= 0);
+	CHECK(uml_nt_phys_ref(&ph, (long long)r0) == 2);
+	CHECK(uml_nt_phys_ref(&ph, (long long)(r0 + RUN)) == 2);
+	CHECK(uml_nt_vma_add(&mm, RAM, RAM + 2 * RUN, r0,
+			     UML_NT_PAGE_READWRITE, UML_NT_VMA_COW) == 0);
+	/* fixup 1 — the byte at the LAST page of run 1: the split
+	 * re-homes run 1 private in the table, then write_ptr
+	 * queues UNMAP(whole view), MAP(private first),
+	 * MAP(shared second, read-only). */
+	{
+		struct uml_nt_vma *v = uml_nt_vma_find(&mm,
+						       RAM + RUN - 1);
+
+		CHECK(v != (struct uml_nt_vma *)0);
+		n1 = (unsigned long long)uml_nt_phys_alloc(&ph);
+		CHECK((long long)n1 >= 0);
+		CHECK(uml_nt_vma_cow_split(&mm, &ph, v,
+					   RAM + RUN - 0x1000, n1) == 0);
+		CHECK(uml_nt_fault_plan_reserve(&plan, 3) == 0);
+		plan.ops[plan.n_ops].op = UML_NT_FOP_UNMAP;
+		plan.ops[plan.n_ops].prot = 0;
+		plan.ops[plan.n_ops].va = RAM;
+		plan.ops[plan.n_ops].len = 2 * RUN;
+		plan.ops[plan.n_ops].off = 0;
+		plan.n_ops++;
+		plan.ops[plan.n_ops].op = UML_NT_FOP_MAP;
+		plan.ops[plan.n_ops].prot = UML_NT_PAGE_READWRITE;
+		plan.ops[plan.n_ops].va = RAM;
+		plan.ops[plan.n_ops].len = RUN;
+		plan.ops[plan.n_ops].off = n1;
+		plan.n_ops++;
+		plan.ops[plan.n_ops].op = UML_NT_FOP_MAP;
+		plan.ops[plan.n_ops].prot = UML_NT_PAGE_READONLY;
+		plan.ops[plan.n_ops].va = RAM + RUN;
+		plan.ops[plan.n_ops].len = RUN;
+		plan.ops[plan.n_ops].off = r0 + RUN;
+		plan.n_ops++;
+	}
+	/* fixup 2 — the byte at the FIRST page of run 2 (the same
+	 * writeback's second half): the post piece re-homes private,
+	 * write_ptr queues UNMAP(second), MAP(private second). */
+	{
+		struct uml_nt_vma *v = uml_nt_vma_find(&mm, RAM + RUN);
+
+		CHECK(v != (struct uml_nt_vma *)0);
+		CHECK(v->start == RAM + RUN && v->end == RAM + 2 * RUN);
+		n2 = (unsigned long long)uml_nt_phys_alloc(&ph);
+		CHECK((long long)n2 >= 0);
+		CHECK(uml_nt_vma_cow_split(&mm, &ph, v, RAM + RUN,
+					   n2) == 0);
+		CHECK(uml_nt_fault_plan_reserve(&plan, 2) == 0);
+		plan.ops[plan.n_ops].op = UML_NT_FOP_UNMAP;
+		plan.ops[plan.n_ops].prot = 0;
+		plan.ops[plan.n_ops].va = RAM + RUN;
+		plan.ops[plan.n_ops].len = RUN;
+		plan.ops[plan.n_ops].off = 0;
+		plan.n_ops++;
+		plan.ops[plan.n_ops].op = UML_NT_FOP_MAP;
+		plan.ops[plan.n_ops].prot = UML_NT_PAGE_READWRITE;
+		plan.ops[plan.n_ops].va = RAM + RUN;
+		plan.ops[plan.n_ops].len = RUN;
+		plan.ops[plan.n_ops].off = n2;
+		plan.n_ops++;
+	}
+	CHECK(plan.n_ops == 5);
+	CHECK(plan.ops[0].op == UML_NT_FOP_UNMAP &&
+	      plan.ops[0].va == RAM && plan.ops[0].len == 2 * RUN);
+	CHECK(plan.ops[1].op == UML_NT_FOP_MAP &&
+	      plan.ops[1].va == RAM && plan.ops[1].len == RUN);
+	CHECK(plan.ops[2].op == UML_NT_FOP_MAP &&
+	      plan.ops[2].va == RAM + RUN && plan.ops[2].len == RUN &&
+	      plan.ops[2].off == r0 + RUN);
+	CHECK(plan.ops[3].op == UML_NT_FOP_UNMAP &&
+	      plan.ops[3].va == RAM + RUN);
+	CHECK(plan.ops[4].op == UML_NT_FOP_MAP &&
+	      plan.ops[4].va == RAM + RUN && plan.ops[4].len == RUN);
+	/* the intermediate shared-second MAP is genuinely NOT
+	 * final-table-backed (both runs went private) — this is the
+	 * exact op the 6d3c932 backed-only guard refused */
+	CHECK(uml_nt_fault_op_backed(&plan.ops[2], &mm) == 0);
+	/* …but the plan itself releases that view before it
+	 * completes: the corrective UNMAP at the same base sits
+	 * behind it */
+	CHECK(uml_nt_fault_op_superseded(&plan.ops[2], &plan) == 1);
+	/* NO FALSE REFUSAL: every op of the chained writeback may
+	 * issue */
+	for (i = 0; i < plan.n_ops; i++)
+		CHECK(uml_nt_fault_op_allowed(&plan.ops[i], &plan,
+					       &mm) == 1);
+	/* the final-backing invariant holds: every MAP whose view
+	 * SURVIVES the plan (not superseded) is final-table-backed */
+	for (i = 0; i < plan.n_ops; i++)
+		if (plan.ops[i].op == UML_NT_FOP_MAP &&
+		    !uml_nt_fault_op_superseded(&plan.ops[i], &plan))
+			CHECK(uml_nt_fault_op_backed(&plan.ops[i],
+						      &mm) == 1);
+
+	/* --- the stale-op refusal SURVIVES the composed-plan
+	 * protocol: a MAP the table re-homed under, with NO
+	 * same-base release behind it in the plan, is still
+	 * refused — the transition allowance is not a license for
+	 * wrong-backed finals --- */
+	r1 = uml_nt_phys_alloc_span(&ph, 1);
+	CHECK((long long)r1 >= 0 && r1 != r0);
+	CHECK(uml_nt_vma_del(&mm, RAM, RAM + RUN) == 0);
+	CHECK(uml_nt_phys_unref(&ph, (long long)n1) == 0);
+	CHECK(uml_nt_vma_add_gen(&mm, RAM, RAM + RUN, r1,
+				 UML_NT_PAGE_READWRITE, 0, 1) == 0);
+	memset(&plan, 0, sizeof(plan));
+	/* the stale MAP: the pre-re-home private run the table no
+	 * longer claims at [RAM, RAM+RUN) — a later UNMAP at a
+	 * DIFFERENT base does not release its view */
+	plan.ops[0].op = UML_NT_FOP_MAP;
+	plan.ops[0].prot = UML_NT_PAGE_READWRITE;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = RUN;
+	plan.ops[0].off = n1;
+	plan.ops[1].op = UML_NT_FOP_UNMAP;
+	plan.ops[1].prot = 0;
+	plan.ops[1].va = RAM + RUN;
+	plan.ops[1].len = RUN;
+	plan.ops[1].off = 0;
+	plan.n_ops = 2;
+	CHECK(uml_nt_fault_op_backed(&plan.ops[0], &mm) == 0);
+	CHECK(uml_nt_fault_op_superseded(&plan.ops[0], &plan) == 0);
+	CHECK(uml_nt_fault_op_allowed(&plan.ops[0], &plan, &mm) == 0);
+	/* an EARLIER same-base UNMAP released the PRE-plan view,
+	 * not this MAP's — not superseded either */
+	plan.ops[1] = plan.ops[0]; /* the stale MAP moves behind */
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	plan.ops[0].prot = 0;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = RUN;
+	plan.ops[0].off = 0;
+	CHECK(uml_nt_fault_op_superseded(&plan.ops[1], &plan) == 0);
+	CHECK(uml_nt_fault_op_allowed(&plan.ops[1], &plan, &mm) == 0);
+	/* the transitional shape done RIGHT: the stale MAP carries
+	 * its corrective UNMAP + fresh final behind it — allowed,
+	 * and the surviving final is backed (no false refusal in
+	 * either direction) */
+	plan.ops[2].op = UML_NT_FOP_UNMAP;
+	plan.ops[2].prot = 0;
+	plan.ops[2].va = RAM;
+	plan.ops[2].len = RUN;
+	plan.ops[2].off = 0;
+	plan.ops[3].op = UML_NT_FOP_MAP;
+	plan.ops[3].prot = UML_NT_PAGE_READWRITE;
+	plan.ops[3].va = RAM;
+	plan.ops[3].len = RUN;
+	plan.ops[3].off = r1;
+	plan.n_ops = 4;
+	CHECK(uml_nt_fault_op_superseded(&plan.ops[1], &plan) == 1);
+	CHECK(uml_nt_fault_op_allowed(&plan.ops[1], &plan, &mm) == 1);
+	CHECK(uml_nt_fault_op_superseded(&plan.ops[3], &plan) == 0);
+	CHECK(uml_nt_fault_op_allowed(&plan.ops[3], &plan, &mm) == 1);
+	/* PROTECT establishes no view: never superseded */
+	plan.ops[2].op = UML_NT_FOP_PROTECT;
+	CHECK(uml_nt_fault_op_superseded(&plan.ops[2], &plan) == 0);
+	/* bad shapes */
+	CHECK(uml_nt_fault_op_superseded((void *)0, &plan) == 0);
+	CHECK(uml_nt_fault_op_superseded(&plan.ops[3],
+					  (void *)0) == 0);
+	CHECK(uml_nt_fault_op_allowed((void *)0, &plan, &mm) == 0);
+	CHECK(uml_nt_fault_op_allowed(&plan.ops[3], &plan,
+				       (void *)0) == 0);
 }
 
 int main(void)

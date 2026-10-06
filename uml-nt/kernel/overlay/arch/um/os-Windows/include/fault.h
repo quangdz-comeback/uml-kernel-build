@@ -206,6 +206,40 @@ int uml_nt_fault_op_backed(const struct uml_nt_fault_op *op,
 			   const struct uml_nt_mm *mm);
 
 /*
+ * A MAP op whose view the plan itself tears down before it
+ * completes: 1 when a LATER op in the SAME plan is an UNMAP at
+ * the op's own base va (UnmapViewOfFile releases the view AT its
+ * base — the stub's do_action — so a same-base UNMAP queued
+ * behind the MAP is exactly "this view gets released in-plan").
+ * The chained multi-run COW writeback queues this shape: a
+ * writeback crossing the run boundary of a multi-run shared VMA
+ * runs two cow fixups into ONE plan, and the first fixup's
+ * re-map of the still-shared tail is superseded by the second
+ * fixup's corrective UNMAP/MAP pair. Intermediate views are
+ * invisible to the guest: it stays parked in the stub's
+ * action_chain until the plan drains (ACTION_NONE). 0 when the
+ * op is NULL, not a MAP, outside the plan, or nothing behind it
+ * releases its view.
+ */
+int uml_nt_fault_op_superseded(const struct uml_nt_fault_op *op,
+			       const struct uml_nt_fault_plan *plan);
+
+/*
+ * The apply-time MAP decision: 1 when the op may issue — its
+ * view survives the plan AND the CURRENT VMA table backs its
+ * exact range with its own run (uml_nt_fault_op_backed: the
+ * final-backing invariant — no surviving view may map a backing
+ * the table does not own), OR its view is superseded in-plan
+ * (released before the plan completes; the corrective ops
+ * queued behind it repair the view state the plan itself will
+ * produce). 0 = refuse: applying it would strand a wrong-backed
+ * view with no in-plan repair.
+ */
+int uml_nt_fault_op_allowed(const struct uml_nt_fault_op *op,
+			    const struct uml_nt_fault_plan *plan,
+			    const struct uml_nt_mm *mm);
+
+/*
  * The COMPLETE view-release set for a whole-VMA munmap of [s, e):
  * one UNMAP op per VMA fully inside the range, into ops[0..max).
  * Returns the op count, 0 when the range intersects nothing,
