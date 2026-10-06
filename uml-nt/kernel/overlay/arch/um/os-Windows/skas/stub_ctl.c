@@ -3230,6 +3230,422 @@ static void cross_stub_census(struct uml_nt_stub_conn *self,
 static int claim_audit_force_flag;
 void uml_nt_claim_audit_force(void) { claim_audit_force_flag = 1; }
 
+/* K6 step 2 (M5.6a decision-tree step 2): [tcekey] — the
+ * double-free-via-stale-e->key witness. SYSCALL PARKS ONLY (hooked
+ * beside claim_audit; the fault-park A/B lesson). At each park of
+ * a glibc-shaped heap: snapshot counts[]/entries[], walk every
+ * non-empty bin with the safe-linked reveal (uaccess_walk.c's
+ * host-tested pure logic), record each listed chunk's e->key
+ * (chunk+8; == the tcache ptr expected — a listed chunk with a
+ * stale/missing key is glibc's dup-check BLINDED), size header
+ * (chunk-8) and backing run, then diff against the previous park:
+ *   [tcekey] STALE-KEY     (a) key != tcache ptr on a listed chunk
+ *   [tcekey] DUP-CHUNK     (b) same va twice in one snapshot's
+ *                           walk = the dup insert (double free)
+ *   [tcekey] HEAD-REENTRY  (b) new head already listed at the
+ *                           previous park while counts ROSE (a
+ *                           legit pop+re-push cannot raise counts)
+ *   [tcekey] COUNT-MISMATCH (c) counts[i] != walked length — the
+ *                           known tear (insert store #1 lost)
+ *                           reads exactly like this: chain broke
+ *                           at the new head, counts above it
+ *   [tcekey-run]           (d) the same chunk VA on a different
+ *                           backing run between parks + every
+ *                           heap-piece run_off change — the dl14
+ *                           re-home signature (chunk 0x67ce3010
+ *                           read via run 0xee0000, detected on
+ *                           run 0x56e0000)
+ * The (a) comparator: e->key == the tcache ptr only on glibc
+ * < 2.34 — 2.34+ (the referee's Debian 2.36) stores a RANDOM
+ * per-boot tcache_key there. The honest comparator is learned by
+ * MAJORITY VOTE over the walked chunks (the modal key — identical
+ * for every legitimately listed chunk in one process, whichever
+ * scheme glibc uses), learned once per conn and kept (the value
+ * lives in libc data, untouched by heap re-homes). A listed chunk
+ * whose key lost the vote = the stale/missing key store — glibc's
+ * dup-check BLINDED for that chunk.
+ * Each flag names the park's incoming nr (park-nr), the last
+ * served nr/ret and the trap rip. Per-conn dedup ring (class, va)
+ * keeps a persistent torn state from eating the 64-line budgets;
+ * the armed/census lines prove the witness ran when flags are
+ * zero. Read-only: no guest state is ever touched (unlike the
+ * ss/TF or DR witnesses, this cannot destabilize the boot). */
+static int tcekey_budget = 64;
+static int tcekey_run_budget = 64;
+static int tcekey_armed_budget = 64;
+static int tcekey_census_budget = 64;
+static int tcekey_exhaust_line;
+/* the current park's snapshot — static, not stack: the boot/vCPU
+ * stack is a UML THREAD_SIZE (16K) stack by discipline (the
+ * claim_audit pattern); kernel-side serving is serialized (the
+ * pump owns it), so one shared buffer serves every conn. */
+static struct uml_nt_tce_snap tce_cur;
+static struct tce_binsum {
+	unsigned int counts;
+	unsigned long long head;
+	int walked, capped, broke;
+	unsigned long long broke_va, broke_next;
+} tce_bn[64];
+
+enum {
+	TCE_CLS_KEY = 1, TCE_CLS_DUP, TCE_CLS_REENTRY, TCE_CLS_COUNT,
+	TCE_CLS_RUNCHUNK, TCE_CLS_RUNPIECE
+};
+
+static int tce_dedup_seen(struct uml_nt_stub_conn *c, int cls,
+			  unsigned long long va)
+{
+	int i;
+
+	for (i = 0; i < 16; i++)
+		if (c->ek_dedup_cls[i] == (unsigned char)cls &&
+		    c->ek_dedup_va[i] == va)
+			return 1;
+	return 0;
+}
+
+static void tce_dedup_add(struct uml_nt_stub_conn *c, int cls,
+			  unsigned long long va)
+{
+	c->ek_dedup_cls[c->ek_dedup_head] = (unsigned char)cls;
+	c->ek_dedup_va[c->ek_dedup_head] = va;
+	c->ek_dedup_head = (c->ek_dedup_head + 1) & 15;
+}
+
+/* the chunk reader: one 24B window [va-8, va+16) = size hdr +
+ * e->next + e->key; the run comes off the translate (the CURRENT
+ * table's backing — the same math [tcchunk-run]/[uawrite] report). */
+static int tce_read(void *ctx, unsigned long long va,
+		     unsigned long long *next_raw, unsigned long long *key,
+		     unsigned long long *size, unsigned long long *run)
+{
+	struct uml_nt_mm *mm = (struct uml_nt_mm *)ctx;
+	long long off = uml_nt_vma_translate(mm, va - 8, 24);
+	unsigned long long q[3];
+
+	if (off < 0)
+		return -1;
+	memcpy(q, (const void *)(uintptr_t)
+	       ((char *)uml_boot.physmem_base + off), sizeof(q));
+	*size = q[0];
+	*next_raw = q[1];
+	*key = q[2];
+	*run = (unsigned long long)off &
+	       ~(UML_NT_PHYS_RUN_SIZE - 1);
+	return 0;
+}
+
+static void tcache_ekey_watch(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_mm *mm = c->mm;
+	struct uml_nt_stub_data *d = c->d;
+	unsigned short counts[64];
+	unsigned long long entries[64];
+	struct uml_nt_tce_snap *cur = &tce_cur;
+	unsigned long long tva;
+	long long off;
+	int i;
+
+	if (witness_off())
+		return;
+	if (!c->task_backed || mm == NULL || mm->heap_start == 0)
+		return;
+	/* the same glibc shape gate as tcache_watch: the heap's
+	 * first chunk must be the tcache struct (size hdr 0x291);
+	 * a musl guest stays silent. */
+	off = uml_nt_vma_translate(mm, mm->heap_start, 16);
+	if (off < 0)
+		return;
+	{
+		unsigned long long hdr = *(const unsigned long long *)
+			(const void *)((char *)uml_boot.physmem_base +
+				       off + 8);
+
+		if (hdr != 0x291)
+			return;
+	}
+	tva = mm->heap_start + 0x10;
+	off = uml_nt_vma_translate(mm, tva, 0x290);
+	if (off < 0)
+		return;
+	memcpy(counts, (const void *)(uintptr_t)
+	       ((char *)uml_boot.physmem_base + off), sizeof(counts));
+	memcpy(entries, (const void *)(uintptr_t)
+	       ((char *)uml_boot.physmem_base + off + 0x80),
+	       sizeof(entries));
+
+	c->ek_parks++;
+	if (!c->ek_valid && tcekey_armed_budget > 0) {
+		tcekey_armed_budget--;
+		os_info("[tcekey] armed pid %lu heap=[0x%llx,0x%llx) "
+			"tcache=0x%llx (park-nr=%llu nr=%llu ret=%lld)\n",
+			(unsigned long)c->pid, mm->heap_start, mm->heap_end,
+			tva, d->regs.rax, c->last_nr, c->last_ret);
+	}
+	memset(cur, 0, sizeof(*cur));
+	if (tcekey_budget > 0 || tcekey_run_budget > 0) {
+		struct uml_nt_tce_rd rd;
+		struct tce_binsum *bn = tce_bn;
+		unsigned long long want = 0;
+		int i2, best = 0;
+
+		rd.read = tce_read;
+		rd.ctx = mm;
+		/* PHASE 1 — walk every non-empty bin and record its
+		 * chunks. The dup flag fires here (va-only, no key
+		 * knowledge needed); the per-bin walk summaries go to
+		 * bn[] for the phase-2 counts/reentry checks. */
+		for (i = 0; i < 64; i++) {
+			struct uml_nt_tce_bin wb;
+			unsigned int ncnt = counts[i];
+			unsigned long long ev = entries[i];
+			int d2, walked;
+
+			bn[i].counts = ncnt;
+			bn[i].head = ev;
+			bn[i].walked = 0;
+			bn[i].capped = 0;
+			bn[i].broke = 0;
+			bn[i].broke_va = 0;
+			bn[i].broke_next = 0;
+			if (ev == 0 && ncnt == 0)
+				continue;
+			uml_nt_tce_walk_bin(&rd, ev, mm->heap_start,
+					    mm->heap_end, i, &wb);
+			bn[i].walked = wb.walked;
+			bn[i].capped = wb.capped;
+			bn[i].broke = wb.broke;
+			bn[i].broke_va = wb.broke_va;
+			bn[i].broke_next = wb.broke_next;
+			walked = wb.walked;
+			for (d2 = 0; d2 < walked; d2++) {
+				struct uml_nt_tce_chunk *ch = &wb.ch[d2];
+				int r = uml_nt_tce_record(cur, ch);
+
+				if (r >= 0 && tcekey_budget > 0 &&
+				    !tce_dedup_seen(c, TCE_CLS_DUP,
+						    ch->va)) {
+					tce_dedup_add(c, TCE_CLS_DUP,
+						      ch->va);
+					tcekey_budget--;
+					os_info("[tcekey] pid %lu DUP-CHUNK "
+						"va=0x%llx bin %d depth %d "
+						"also bin %d depth %d "
+						"(DOUBLE-FREE; park-nr=%llu"
+						" nr=%llu ret=%lld "
+						"rip=0x%llx)\n",
+						(unsigned long)c->pid,
+						ch->va, ch->bin, d2,
+						cur->ch[r].bin,
+						cur->ch[r].depth,
+						d->regs.rax, c->last_nr,
+						c->last_ret, d->regs.rip);
+				}
+			}
+		}
+		/* PHASE 2a — the (a) comparator: majority vote over
+		 * the walked chunks' keys (uml_nt_tce_modal_key —
+		 * tcache_key is one value per process; a NULL key is
+		 * the pop marker / the missing store and never gets a
+		 * vote). Learned once per conn (>= 2 agreeing chunks)
+		 * and kept: the value lives in libc data, immune to
+		 * heap moves. */
+		want = uml_nt_tce_modal_key(cur, &best);
+		if (c->ek_want_key == 0 && best >= 2)
+			c->ek_want_key = want;
+		if (c->ek_want_key != 0)
+			want = c->ek_want_key;
+		/* PHASE 2b — per-chunk flags: (a) the stale key (a
+		 * listed chunk that lost the vote = the missing key
+		 * store, glibc's dup-check blind), (d) the chunk's
+		 * backing run vs the previous park. */
+		for (i2 = 0; i2 < cur->n; i2++) {
+			struct uml_nt_tce_chunk *ch = &cur->ch[i2];
+			int pv = uml_nt_tce_find(&c->ek_prev, ch->va);
+
+			if (want != 0 &&
+			    uml_nt_tce_key_stale(ch->key, want) &&
+			    tcekey_budget > 0 &&
+			    !tce_dedup_seen(c, TCE_CLS_KEY, ch->va)) {
+				tce_dedup_add(c, TCE_CLS_KEY, ch->va);
+				tcekey_budget--;
+				os_info("[tcekey] pid %lu STALE-KEY bin "
+					"%d va=0x%llx key=0x%llx want=0x%llx"
+					" size=0x%llx run=0x%llx prev=%s ("
+					"park-nr=%llu nr=%llu ret=%lld "
+					"rip=0x%llx)\n",
+					(unsigned long)c->pid, ch->bin,
+					ch->va, ch->key, want, ch->size,
+					ch->run,
+					pv >= 0 ? "listed" : "new",
+					d->regs.rax, c->last_nr,
+					c->last_ret, d->regs.rip);
+			}
+			if (pv >= 0 &&
+			    c->ek_prev.ch[pv].run != ch->run &&
+			    tcekey_run_budget > 0 &&
+			    !tce_dedup_seen(c, TCE_CLS_RUNCHUNK,
+					    ch->va)) {
+				tce_dedup_add(c, TCE_CLS_RUNCHUNK,
+					      ch->va);
+				tcekey_run_budget--;
+				os_info("[tcekey-run] pid %lu va=0x%llx "
+					"chunk run 0x%llx -> 0x%llx bin %d "
+					"(park-nr=%llu nr=%llu ret=%lld)\n",
+					(unsigned long)c->pid, ch->va,
+					c->ek_prev.ch[pv].run, ch->run,
+					ch->bin, d->regs.rax, c->last_nr,
+					c->last_ret);
+			}
+		}
+		/* PHASE 2c — per-bin flags: (c) counts vs the walked
+		 * length (the missing-store fingerprint), (b) the head
+		 * re-entry that raised counts (the dup insert). */
+		for (i = 0; i < 64; i++) {
+			int pvh;
+
+			if (bn[i].head == 0 && bn[i].counts == 0)
+				continue;
+			if (uml_nt_tce_counts_bad(bn[i].counts,
+						  bn[i].walked,
+						  bn[i].capped) &&
+			    tcekey_budget > 0 &&
+			    !tce_dedup_seen(c, TCE_CLS_COUNT,
+					    bn[i].head)) {
+				tce_dedup_add(c, TCE_CLS_COUNT, bn[i].head);
+				tcekey_budget--;
+				os_info("[tcekey] pid %lu COUNT-MISMATCH bin "
+					"%d counts=%u walked=%d capped=%d "
+					"head=0x%llx broke_va=0x%llx "
+					"broke_next=0x%llx prev_head=0x%llx"
+					" prev_counts=%u (park-nr=%llu "
+					"nr=%llu ret=%lld)\n",
+					(unsigned long)c->pid, i,
+					bn[i].counts, bn[i].walked,
+					bn[i].capped, bn[i].head,
+					bn[i].broke_va, bn[i].broke_next,
+					c->ek_prev_entries[i],
+					c->ek_prev_counts[i], d->regs.rax,
+					c->last_nr, c->last_ret);
+			}
+			pvh = (bn[i].head != 0) ?
+			      uml_nt_tce_find(&c->ek_prev, bn[i].head) : -1;
+			if (c->ek_valid &&
+			    c->ek_prev_entries[i] != bn[i].head && pvh >= 0 &&
+			    uml_nt_tce_reentry_bad(1, 1, bn[i].counts,
+						   c->ek_prev_counts[i]) &&
+			    tcekey_budget > 0 &&
+			    !tce_dedup_seen(c, TCE_CLS_REENTRY,
+					    bn[i].head)) {
+				tce_dedup_add(c, TCE_CLS_REENTRY,
+					      bn[i].head);
+				tcekey_budget--;
+				os_info("[tcekey] pid %lu HEAD-REENTRY bin "
+					"%d head=0x%llx prev bin %d depth "
+					"%d counts=%u prev_counts=%u (dup "
+					"insert; park-nr=%llu nr=%llu "
+					"ret=%lld)\n",
+					(unsigned long)c->pid, i,
+					bn[i].head,
+					c->ek_prev.ch[pvh].bin,
+					c->ek_prev.ch[pvh].depth,
+					bn[i].counts,
+					c->ek_prev_counts[i], d->regs.rax,
+					c->last_nr, c->last_ret);
+			}
+		}
+		/* this park's snapshot becomes the next park's prev */
+		c->ek_prev = *cur;
+		memcpy(c->ek_prev_counts, counts,
+		       sizeof(c->ek_prev_counts));
+		memcpy(c->ek_prev_entries, entries,
+		       sizeof(c->ek_prev_entries));
+		c->ek_valid = 1;
+	}
+	/* census every 4096 parks: the explicit zero (the witness ran,
+	 * nothing flagged, budget alive). */
+	if ((c->ek_parks & 0xfffull) == 0 && tcekey_census_budget > 0) {
+		tcekey_census_budget--;
+		os_info("[tcekey] census pid %lu parks=%llu chunks=%d "
+			"budget=%d run-budget=%d (park-nr=%llu nr=%llu "
+			"ret=%lld)\n", (unsigned long)c->pid, c->ek_parks,
+			cur->n, tcekey_budget, tcekey_run_budget,
+			d->regs.rax, c->last_nr, c->last_ret);
+	}
+	/* (d) heap-piece run_off watch: the dl14 re-home (heap VMA
+	 * run_off 0xe00000 -> 0x5600000) with old/new run + the park's
+	 * nr — the migration's own lines, not just its aftermath. */
+	{
+		unsigned long long ps[UML_NT_TCE_PIECES];
+		unsigned long long pe[UML_NT_TCE_PIECES];
+		unsigned long long po[UML_NT_TCE_PIECES];
+		int np = 0, vi;
+
+		for (vi = 0; vi < mm->nvma && np < UML_NT_TCE_PIECES;
+		     vi++) {
+			const struct uml_nt_vma *v = &mm->vma[vi];
+
+			if (v->end <= mm->heap_start ||
+			    v->start >= mm->heap_end)
+				continue;
+			ps[np] = v->start;
+			pe[np] = v->end;
+			po[np] = v->run_off;
+			np++;
+		}
+		if (c->ek_pv_valid && tcekey_run_budget > 0) {
+			for (i = 0; i < np; i++) {
+				int j;
+
+				for (j = 0; j < c->ek_pv_n; j++)
+					if (c->ek_pv_start[j] == ps[i])
+						break;
+				if (j < c->ek_pv_n &&
+				    c->ek_pv_off[j] != po[i] &&
+				    !tce_dedup_seen(c, TCE_CLS_RUNPIECE,
+						    ps[i])) {
+					tce_dedup_add(c, TCE_CLS_RUNPIECE,
+						      ps[i]);
+					tcekey_run_budget--;
+					os_info("[tcekey-run] pid %lu heap "
+						"piece [0x%llx,0x%llx) "
+						"run_off 0x%llx -> 0x%llx "
+						"(park-nr=%llu nr=%llu "
+						"ret=%lld)\n",
+						(unsigned long)c->pid,
+						ps[i], pe[i],
+						c->ek_pv_off[j], po[i],
+						d->regs.rax, c->last_nr,
+						c->last_ret);
+				}
+			}
+			if (np != c->ek_pv_n &&
+			    !tce_dedup_seen(c, TCE_CLS_RUNPIECE, 0)) {
+				tce_dedup_add(c, TCE_CLS_RUNPIECE, 0);
+				tcekey_run_budget--;
+				os_info("[tcekey-run] pid %lu heap pieces "
+					"%d -> %d (split/merge/re-home; "
+					"park-nr=%llu nr=%llu ret=%lld)\n",
+					(unsigned long)c->pid, c->ek_pv_n,
+					np, d->regs.rax, c->last_nr,
+					c->last_ret);
+			}
+		}
+		memcpy(c->ek_pv_start, ps,
+		       sizeof(unsigned long long) * (unsigned)np);
+		memcpy(c->ek_pv_off, po,
+		       sizeof(po[0]) * (unsigned)np);
+		c->ek_pv_n = np;
+		c->ek_pv_valid = 1;
+	}
+	if (tcekey_budget <= 0 && tcekey_run_budget <= 0 &&
+	    !tcekey_exhaust_line) {
+		tcekey_exhaust_line = 1;
+		os_info("[tcekey] budget exhausted — later torn states "
+			"stay unwitnessed\n");
+	}
+}
+
 static void claim_audit(void)
 {
 	static unsigned char claims[2048];
@@ -3372,8 +3788,12 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * was produced up to the previous round (last_nr names it). */
 	tcache_watch(c);
 
-	if (d->cmd == UML_STUB_CMD_SYSCALL)
+	if (d->cmd == UML_STUB_CMD_SYSCALL) {
 		claim_audit();
+		/* K6 step 2: the e->key double-free witness — syscall
+		 * parks ONLY, next to claim_audit (the hook point). */
+		tcache_ekey_watch(c);
+	}
 
 	/* The all-faults resume watchdog: the previous fault's answer
 	 * must have resumed AT the faulting instruction. Loud, not

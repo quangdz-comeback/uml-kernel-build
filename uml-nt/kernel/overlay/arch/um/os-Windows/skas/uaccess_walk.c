@@ -554,3 +554,149 @@ int uml_nt_uacc_dump_gate(const void *from, unsigned long n,
 	}
 	return 0;
 }
+
+/* K6 step 2 (M5.6a decision-tree step 2) — the [tcekey] syscall-park
+ * witness's pure tcache-chain logic (see uaccess_walk.h for the glibc
+ * contract). Compiled freestanding in the kernel AND in the unit
+ * test; the guest reads arrive through the reader callback. */
+unsigned long long uml_nt_tce_reveal(unsigned long long raw,
+				      unsigned long long va)
+{
+	return raw ^ (va >> 12);
+}
+
+int uml_nt_tce_member_ok(unsigned long long va,
+			 unsigned long long heap_start,
+			 unsigned long long heap_end)
+{
+	return (va & 0xfull) == 0 && (va >> 48) == 0 &&
+	       va >= heap_start && va < heap_end;
+}
+
+int uml_nt_tce_walk_bin(const struct uml_nt_tce_rd *rd,
+			unsigned long long head,
+			unsigned long long heap_start,
+			unsigned long long heap_end, int bin,
+			struct uml_nt_tce_bin *out)
+{
+	unsigned long long cur = head;
+	int d;
+
+	out->walked = 0;
+	out->capped = 0;
+	out->broke = 0;
+	out->broke_va = 0;
+	out->broke_next = 0;
+	if (!uml_nt_tce_member_ok(cur, heap_start, heap_end)) {
+		/* empty (0) or illegal head: no members to record; the
+		 * caller's counts predicate turns any counts>0 (or a
+		 * non-zero pair state) into the (c) flag. */
+		out->broke = 1;
+		out->broke_va = head;
+		out->broke_next = head;
+		return 0;
+	}
+	for (d = 0; d < UML_NT_TCE_DEPTH; d++) {
+		unsigned long long nxt_raw, nxt;
+
+		out->ch[d].va = cur;
+		out->ch[d].bin = bin;
+		out->ch[d].depth = d;
+		if (rd->read(rd->ctx, cur, &nxt_raw, &out->ch[d].key,
+			     &out->ch[d].size, &out->ch[d].run) < 0) {
+			/* the member's own qwords are unreadable in the
+			 * CURRENT view — the chain broke here. */
+			out->walked = d;
+			out->broke = 1;
+			out->broke_va = cur;
+			out->broke_next = 0;
+			return 0;
+		}
+		out->walked = d + 1;
+		nxt = uml_nt_tce_reveal(nxt_raw, cur);
+		if (nxt == 0)
+			return 0; /* clean chain end */
+		if (!uml_nt_tce_member_ok(nxt, heap_start, heap_end)) {
+			/* the missing-store fingerprint: the member's
+			 * next is stale/garbage (poison text decodes
+			 * out-of-heap/misaligned) — everything counts[]
+			 * still claims below it is orphaned. */
+			out->broke = 1;
+			out->broke_va = cur;
+			out->broke_next = nxt;
+			return 0;
+		}
+		if (d + 1 == UML_NT_TCE_DEPTH) {
+			out->capped = 1;
+			return 0;
+		}
+		cur = nxt;
+	}
+	return 0;
+}
+
+int uml_nt_tce_find(const struct uml_nt_tce_snap *s,
+		    unsigned long long va)
+{
+	int i;
+
+	for (i = 0; i < s->n; i++)
+		if (s->ch[i].va == va)
+			return i;
+	return -1;
+}
+
+unsigned long long uml_nt_tce_modal_key(const struct uml_nt_tce_snap *s,
+					int *best)
+{
+	unsigned long long want = 0;
+	int i, j, b = 0;
+
+	for (i = 0; i < s->n; i++) {
+		int cnt = 0;
+
+		if (s->ch[i].key == 0)
+			continue; /* no vote: pop marker / missing store */
+		for (j = 0; j < s->n; j++)
+			if (s->ch[j].key == s->ch[i].key)
+				cnt++;
+		if (cnt > b) {
+			b = cnt;
+			want = s->ch[i].key;
+		}
+	}
+	*best = b;
+	return want;
+}
+
+int uml_nt_tce_record(struct uml_nt_tce_snap *s,
+		      const struct uml_nt_tce_chunk *ch)
+{
+	int i = uml_nt_tce_find(s, ch->va);
+
+	if (i >= 0)
+		return i; /* dup — the double-free shape */
+	if (s->n >= UML_NT_TCE_MAX)
+		return -2;
+	s->ch[s->n++] = *ch;
+	return -1;
+}
+
+int uml_nt_tce_key_stale(unsigned long long key,
+			 unsigned long long want)
+{
+	return key != want;
+}
+
+int uml_nt_tce_counts_bad(unsigned int counts, int walked, int capped)
+{
+	if (capped)
+		return 1; /* deeper than a healthy bin can ever be */
+	return counts != (unsigned int)walked;
+}
+
+int uml_nt_tce_reentry_bad(int head_changed, int head_in_prev,
+			   unsigned int counts, unsigned int prev_counts)
+{
+	return head_changed && head_in_prev && counts > prev_counts;
+}

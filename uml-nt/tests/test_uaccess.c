@@ -91,6 +91,7 @@ static void test_stolen_run(void);
 static void test_gen_stale(void);
 static void test_uaw_helpers(void);
 static void test_uaw_nr_context(void);
+static void test_tce_helpers(void);
 
 int main(void)
 {
@@ -216,6 +217,10 @@ int main(void)
 	 * unwinds the dispatch; the switch boundary must re-arm the
 	 * parent's own nr). */
 	test_uaw_nr_context();
+
+	/* K6 step 2: the [tcekey] syscall-park witness's pure tcache
+	 * chain logic — reveal / chain walk / dup detect / counts. */
+	test_tce_helpers();
 
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
@@ -664,4 +669,212 @@ static void test_uaw_nr_context(void)
 
 	/* teardown: no state leaks into the other tests. */
 	(void)uml_nt_uacc_set_nr(0);
+}
+
+/* K6 step 2 (M5.6a decision-tree step 2): the [tcekey] syscall-park
+ * witness's PURE tcache-chain logic — the safe-linked reveal, the
+ * per-bin walk (clean end / broken next / depth cap), the snapshot
+ * record with dup detect, and the three fire predicates. Drives the
+ * REAL functions stub_ctl.c's snapshotter calls (same pattern as
+ * test_uaw_nr_context); the guest reads are mocked through the
+ * reader callback (va -> next_raw/key/size/run). */
+#define TCE_HS 0x67d00000ull
+#define TCE_HE 0x67d80000ull
+#define TCE_TC (TCE_HS + 0x10ull) /* the tcache ptr glibc stores in e->key */
+#define TCE_RUNX 0x3300000ull
+#define TCE_RUNY 0x5600000ull
+
+static struct {
+	unsigned long long va, next_raw, key, size, run;
+} tce_tab[24];
+static int tce_ntab;
+
+static void tce_reset(void)
+{
+	tce_ntab = 0;
+}
+
+/* add a chunk whose DECODED next is `next` (0 = chain end): the
+ * stored raw = PROTECT_PTR(pos, ptr) = (va>>12) ^ ptr, which for
+ * the end member (NULL ptr) is exactly va>>12 — glibc's shape. */
+static void tce_put(unsigned long long va, unsigned long long next,
+		    unsigned long long key, unsigned long long size,
+		    unsigned long long run)
+{
+	tce_tab[tce_ntab].va = va;
+	tce_tab[tce_ntab].next_raw = (va >> 12) ^ next;
+	tce_tab[tce_ntab].key = key;
+	tce_tab[tce_ntab].size = size;
+	tce_tab[tce_ntab].run = run;
+	tce_ntab++;
+}
+
+static int tce_rd(void *ctx, unsigned long long va,
+		  unsigned long long *next_raw, unsigned long long *key,
+		  unsigned long long *size, unsigned long long *run)
+{
+	int i;
+
+	(void)ctx;
+	for (i = 0; i < tce_ntab; i++)
+		if (tce_tab[i].va == va) {
+			*next_raw = tce_tab[i].next_raw;
+			*key = tce_tab[i].key;
+			*size = tce_tab[i].size;
+			*run = tce_tab[i].run;
+			return 0;
+		}
+	return -1;
+}
+
+static void test_tce_helpers(void)
+{
+	struct uml_nt_tce_rd rd = { tce_rd, 0 };
+	struct uml_nt_tce_bin wb;
+	struct uml_nt_tce_snap snap;
+	unsigned long long A = 0x67d005e0ull, B = 0x67d00a10ull;
+	unsigned long long C = 0x67d02010ull, X = 0x67d02b90ull;
+	struct uml_nt_tce_chunk c;
+	int i;
+
+	/* reveal = the PROTECT_PTR inverse, keyed by the member's OWN
+	 * va (map-053); the dl13 poison qword decodes out-of-heap. */
+	CHECK(uml_nt_tce_reveal(0x5f444d4554535953ull, A) ==
+	      (0x5f444d4554535953ull ^ (A >> 12)));
+	CHECK(uml_nt_tce_reveal((A >> 12) ^ B, A) == B);
+
+	/* member gate: 16-aligned, top-16 clear, inside the heap. */
+	CHECK(uml_nt_tce_member_ok(A, TCE_HS, TCE_HE) == 1);
+	CHECK(uml_nt_tce_member_ok(A + 8, TCE_HS, TCE_HE) == 0);
+	CHECK(uml_nt_tce_member_ok(TCE_HS - 0x10, TCE_HS, TCE_HE) == 0);
+	CHECK(uml_nt_tce_member_ok(TCE_HE, TCE_HS, TCE_HE) == 0);
+	CHECK(uml_nt_tce_member_ok(0x5f444d4554535953ull, TCE_HS,
+				   TCE_HE) == 0);
+
+	/* clean 3-chain A->B->C->end, counts==3: walked==3, no break,
+	 * no cap; per-chunk key/size/run recorded from the reader. */
+	tce_reset();
+	tce_put(A, B, TCE_TC, 0x91, TCE_RUNX);
+	tce_put(B, C, TCE_TC, 0xa1, TCE_RUNX);
+	tce_put(C, 0, TCE_TC, 0xb1, TCE_RUNY);
+	CHECK(uml_nt_tce_walk_bin(&rd, A, TCE_HS, TCE_HE, 2, &wb) == 0);
+	CHECK(wb.walked == 3);
+	CHECK(wb.broke == 0);
+	CHECK(wb.capped == 0);
+	CHECK(wb.ch[0].va == A && wb.ch[1].va == B && wb.ch[2].va == C);
+	CHECK(wb.ch[0].bin == 2 && wb.ch[2].depth == 2);
+	CHECK(wb.ch[0].key == TCE_TC && wb.ch[2].key == TCE_TC);
+	CHECK(wb.ch[1].size == 0xa1 && wb.ch[2].run == TCE_RUNY);
+	CHECK(uml_nt_tce_counts_bad(3, wb.walked, wb.capped) == 0);
+
+	/* THE KNOWN TEAR (insert store #1 lost): the new head's next
+	 * holds stale content (the dl13 poison text), the chain
+	 * breaks at the head while counts sits above it. */
+	tce_reset();
+	tce_put(A, B, TCE_TC, 0x91, TCE_RUNX); /* overwritten below */
+	tce_tab[0].next_raw = 0x5f444d4554535953ull; /* stale "SYSTEMD_" */
+	tce_put(B, 0, TCE_TC, 0xa1, TCE_RUNX);
+	CHECK(uml_nt_tce_walk_bin(&rd, A, TCE_HS, TCE_HE, 5, &wb) == 0);
+	CHECK(wb.walked == 1);
+	CHECK(wb.broke == 1);
+	CHECK(wb.broke_va == A);
+	CHECK(wb.broke_next ==
+	      (0x5f444d4554535953ull ^ (A >> 12)));
+	CHECK(uml_nt_tce_member_ok(wb.broke_next, TCE_HS, TCE_HE) == 0);
+	CHECK(uml_nt_tce_counts_bad(3, wb.walked, wb.capped) == 1);
+
+	/* cycle A->A: the walk caps at UML_NT_TCE_DEPTH and the
+	 * snapshot record flags the second listing (dup = the
+	 * double-free shape). */
+	tce_reset();
+	tce_put(A, A, TCE_TC, 0x91, TCE_RUNX);
+	CHECK(uml_nt_tce_walk_bin(&rd, A, TCE_HS, TCE_HE, 0, &wb) == 0);
+	CHECK(wb.walked == UML_NT_TCE_DEPTH);
+	CHECK(wb.capped == 1);
+	memset(&snap, 0, sizeof(snap));
+	c = wb.ch[0];
+	CHECK(uml_nt_tce_record(&snap, &c) == -1); /* fresh */
+	CHECK(snap.n == 1);
+	for (i = 1; i < wb.walked; i++) {
+		c = wb.ch[i];
+		CHECK(uml_nt_tce_record(&snap, &c) == 0); /* dup at idx 0 */
+	}
+
+	/* cross-bin dup: a chunk may only be listed in ONE bin (its
+	 * size class fixes the bin) — a second listing anywhere is
+	 * the same dup shape. */
+	memset(&snap, 0, sizeof(snap));
+	c.va = A;
+	c.key = TCE_TC;
+	c.size = 0x91;
+	c.run = TCE_RUNX;
+	c.bin = 1;
+	c.depth = 0;
+	snap.ch[0] = c;
+	snap.n = 1;
+	c.bin = 3;
+	c.depth = 0;
+	CHECK(uml_nt_tce_record(&snap, &c) == 0);
+
+	/* find: the prev-park diff base (run-change attribution). */
+	CHECK(uml_nt_tce_find(&snap, A) == 0);
+	CHECK(uml_nt_tce_find(&snap, X) == -1);
+
+	/* the modal key = the learned tcache_key: glibc 2.34+ stores
+	 * a RANDOM per-boot value in e->key (older stores the tcache
+	 * ptr) — the majority vote names either; NULL keys never
+	 * vote (the pop marker / the missing store). */
+	memset(&snap, 0, sizeof(snap));
+	for (i = 0; i < 4; i++) {
+		snap.ch[i].va = A + (unsigned long long)i * 0x20;
+		snap.ch[i].key = (i == 3) ? 0xdeadbeefull : 0x1234ull;
+	}
+	snap.n = 4;
+	{
+		int best = 0;
+
+		CHECK(uml_nt_tce_modal_key(&snap, &best) == 0x1234ull);
+		CHECK(best == 3); /* 3 agreeing, the 0xdeadbeef minority */
+	}
+	memset(&snap, 0, sizeof(snap));
+	snap.ch[0].va = A;
+	snap.ch[0].key = 0;
+	snap.n = 1;
+	{
+		int best = 7;
+
+		CHECK(uml_nt_tce_modal_key(&snap, &best) == 0);
+		CHECK(best == 0); /* no non-NULL key carries a vote */
+	}
+
+	/* snapshot full: honest -2, no corruption of the record. */
+	memset(&snap, 0, sizeof(snap));
+	snap.n = UML_NT_TCE_MAX;
+	CHECK(uml_nt_tce_record(&snap, &c) == -2);
+	CHECK(snap.n == UML_NT_TCE_MAX);
+
+	/* the stale-key predicate: listed chunk with e->key != the
+	 * tcache ptr = glibc's dup-check blinded. */
+	CHECK(uml_nt_tce_key_stale(0, TCE_TC) == 1);
+	CHECK(uml_nt_tce_key_stale(0x67d01111ull, TCE_TC) == 1);
+	CHECK(uml_nt_tce_key_stale(TCE_TC, TCE_TC) == 0);
+
+	/* the head-re-entry predicate: new head ALREADY listed at the
+	 * previous park, and counts ROSE — a legit pop+re-push cycle
+	 * can never raise the count (the dup insert can: nothing was
+	 * popped). */
+	CHECK(uml_nt_tce_reentry_bad(1, 1, 3, 2) == 1); /* dup insert */
+	CHECK(uml_nt_tce_reentry_bad(1, 1, 2, 2) == 0); /* flat: legit */
+	CHECK(uml_nt_tce_reentry_bad(1, 1, 2, 3) == 0); /* net pops */
+	CHECK(uml_nt_tce_reentry_bad(1, 0, 3, 2) == 0); /* fresh head */
+	CHECK(uml_nt_tce_reentry_bad(0, 1, 3, 2) == 0); /* same head */
+
+	/* counts predicate: any walked/counts divergence at a quiescent
+	 * park is the tear, including the cap (a healthy bin holds
+	 * <= 7; the cap is 8). */
+	CHECK(uml_nt_tce_counts_bad(2, 3, 0) == 1);
+	CHECK(uml_nt_tce_counts_bad(4, 0, 0) == 1); /* NULL head */
+	CHECK(uml_nt_tce_counts_bad(0, 1, 0) == 1); /* count 0, listed */
+	CHECK(uml_nt_tce_counts_bad(8, 8, 1) == 1); /* cap always bad */
+	CHECK(uml_nt_tce_counts_bad(7, 7, 0) == 0);
 }

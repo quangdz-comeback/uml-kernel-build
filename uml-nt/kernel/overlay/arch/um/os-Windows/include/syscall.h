@@ -24,6 +24,7 @@
 #include <ntabi.h>
 #include <vma.h>
 #include <fault.h>
+#include <uaccess_walk.h>
 
 /* One guest process (stub side of the D10 protocol). Lives in the
  * kernel — the conn table is owned by stub_ctl.c (spawn/fork machinery). */
@@ -258,6 +259,30 @@ struct uml_nt_stub_conn {
 	unsigned long long posweep_va[4];
 	unsigned long long posweep_snap[4];
 	unsigned char posweep_armed[4];
+	/* K6 step 2 (M5.6a decision-tree step 2): the [tcekey]
+	 * syscall-park snapshot — the walked tcache chunks, bin
+	 * heads/counts and heap-piece run_offs of the PREVIOUS park,
+	 * the diff base for the STALE-KEY / DUP-CHUNK /
+	 * HEAD-REENTRY / COUNT-MISMATCH / [tcekey-run] flags. The
+	 * dedup ring (class, va) keeps a persistent torn state from
+	 * eating the 64-line budgets. kzalloc init = no prev
+	 * (ek_valid 0). */
+	struct uml_nt_tce_snap ek_prev;
+	unsigned short ek_prev_counts[64];
+	unsigned long long ek_prev_entries[64];
+	unsigned long long ek_want_key; /* the learned tcache_key (the
+	 * STALE-KEY comparator — glibc 2.34+ stores a RANDOM value in
+	 * e->key, so it is majority-voted from the walked chunks, not
+	 * assumed; 0 = not yet learned (>=2 agreeing chunks). */
+	unsigned long long ek_pv_start[UML_NT_TCE_PIECES];
+	unsigned long long ek_pv_off[UML_NT_TCE_PIECES];
+	int ek_pv_n;
+	int ek_pv_valid;
+	unsigned long long ek_parks;
+	unsigned long long ek_dedup_va[16];
+	unsigned char ek_dedup_cls[16];
+	int ek_dedup_head;
+	int ek_valid;
 	/* M5.6a TCACHE TRIP: set on the conn at its first fork seed —
 	 * the poison window opens post-fork; the serve hook then arms
 	 * the tcache struct page READ-ONLY (one live trip, re-armed

@@ -127,6 +127,120 @@ unsigned long long uml_nt_uacc_nr_enter(unsigned long long *slot,
 					unsigned long long nr);
 unsigned long long uml_nt_uacc_nr_switch(const unsigned long long *slot);
 
+/* K6 (M5.6a decision-tree step 2) — the [tcekey] syscall-park
+ * witness's PURE tcache-chain logic: the safe-linked reveal, the
+ * per-bin chain walk, the snapshot record with dup detect, and the
+ * three fire predicates. Unit-tested standalone (test_uaccess.c
+ * drives the REAL functions stub_ctl.c's snapshotter calls); this
+ * file stays log-free (stub_ctl.c owns os_info).
+ *
+ * glibc tcache contract (2.32+ safe-linking), as seen at a
+ * quiescent syscall park:
+ *   entries[i]  head of bin i's singly-linked list (chunk DATA va)
+ *   counts[i]   the list's length — tcache_get/put keep it equal
+ *               to the walked length at any park
+ *   e->next (chunk+0):  PROTECT_PTR(pos, ptr) = (pos>>12) ^ ptr,
+ *               pos = the member's own va; a NULL ptr stores
+ *               va>>12, which reveals to 0 = chain end
+ *   e->key  (chunk+8):  the tcache ptr while listed (tcache_put
+ *               writes it, tcache_get NULLs it at the pop) — a
+ *               LISTED chunk whose key != the tcache ptr is
+ *               glibc's dup-check BLINDED: a second free of that
+ *               chunk passes _int_free's walk and dup-inserts
+ *   the insert's 4 stores: next(1) key(2) entries[i](3) counts(4)
+ *               — the known tear LOSES one; a chain whose walk
+ *               ends early (broke next) under a higher count is
+ *               exactly the missing store #1 fingerprint. */
+#define UML_NT_TCE_DEPTH 8   /* walk cap per bin (a healthy bin holds <= 7) */
+#define UML_NT_TCE_MAX 128   /* chunks recorded per snapshot, all bins */
+#define UML_NT_TCE_PIECES 12 /* heap VMA pieces snapshot (run watch) */
+
+struct uml_nt_tce_chunk {
+	unsigned long long va;   /* the member's chunk-data va */
+	unsigned long long key;  /* qword at va+8 (e->key) */
+	unsigned long long size;  /* qword at va-8 (chunk size hdr) */
+	unsigned long long run;  /* backing run of the CURRENT view */
+	int bin, depth;
+};
+
+struct uml_nt_tce_bin {
+	int walked;   /* members recorded */
+	int capped;   /* hit UML_NT_TCE_DEPTH with a legal next */
+	int broke;    /* chain broke: unmapped read or illegal next */
+	unsigned long long broke_va;   /* member whose next broke */
+	unsigned long long broke_next;  /* the illegal DECODED next */
+	struct uml_nt_tce_chunk ch[UML_NT_TCE_DEPTH];
+};
+
+/* chunk-data reader: return <0 when [va-8, va+16) is unreadable
+ * (unmapped member); fills the qwords + the CURRENT backing run. */
+struct uml_nt_tce_rd {
+	int (*read)(void *ctx, unsigned long long va,
+		    unsigned long long *next_raw, unsigned long long *key,
+		    unsigned long long *size, unsigned long long *run);
+	void *ctx;
+};
+
+/* one snapshot's walked chunks — the dup-detect set and the next
+ * park's diff base (STALE-KEY/HEAD-REENTRY/RUN-CHANGE attribution). */
+struct uml_nt_tce_snap {
+	struct uml_nt_tce_chunk ch[UML_NT_TCE_MAX];
+	int n;
+};
+
+/* PROTECT_PTR inverse, keyed by the member's own va (map-053). */
+unsigned long long uml_nt_tce_reveal(unsigned long long raw,
+				     unsigned long long va);
+
+/* member gate: 16-aligned, top-16 clear, inside [heap_start,
+ * heap_end). */
+int uml_nt_tce_member_ok(unsigned long long va,
+			 unsigned long long heap_start,
+			 unsigned long long heap_end);
+
+/* Walk bin `bin` from `head`. Empty/illegal heads report walked=0
+ * with broke=1 (the caller's counts predicate flags the pair); a
+ * clean chain reports the recorded members and no break. */
+int uml_nt_tce_walk_bin(const struct uml_nt_tce_rd *rd,
+			unsigned long long head,
+			unsigned long long heap_start,
+			unsigned long long heap_end, int bin,
+			struct uml_nt_tce_bin *out);
+
+/* record one walked chunk; returns the EXISTING index when the va
+ * was already recorded this snapshot (dup — the double-free
+ * shape), -1 when recorded fresh, -2 when the snapshot is full. */
+int uml_nt_tce_record(struct uml_nt_tce_snap *s,
+		      const struct uml_nt_tce_chunk *ch);
+
+/* find va in a snapshot: index or -1 (the prev-park diff base). */
+int uml_nt_tce_find(const struct uml_nt_tce_snap *s,
+		    unsigned long long va);
+
+/* The (a) comparator's learned value: the MODAL key over the
+ * walked chunks (glibc 2.34+ stores a RANDOM per-boot tcache_key in
+ * e->key; older glibc stores the tcache ptr — the modal key names
+ * either scheme). NULL keys never vote (the pop marker / the
+ * missing key store). Returns the modal key; *best = its vote
+ * count (0 when no chunk carries a non-NULL key). */
+unsigned long long uml_nt_tce_modal_key(const struct uml_nt_tce_snap *s,
+					int *best);
+
+/* fire predicates (all unit-tested):
+ *   key_stale:   listed chunk with e->key != the tcache ptr
+ *   counts_bad:  counts[i] != walked length at a quiescent park
+ *                (capped always fires: a healthy bin holds <= 7
+ *                but the cap is 8)
+ *   reentry_bad: entries[i] changed to a va ALREADY listed at the
+ *                previous park while counts ROSE — a legit pop+
+ *                re-push cycle cannot raise the count; only a dup
+ *                insert (nothing was popped) can. */
+int uml_nt_tce_key_stale(unsigned long long key,
+			 unsigned long long want);
+int uml_nt_tce_counts_bad(unsigned int counts, int walked, int capped);
+int uml_nt_tce_reentry_bad(int head_changed, int head_in_prev,
+			   unsigned int counts, unsigned int prev_counts);
+
 /* Flat-view pointer for the byte at `va` after ensuring a kernel
  * WRITE to its page is safe: COW-shared runs are copied private
  * first (surgery + remap ops through the sink), read-only VMAs fault.
