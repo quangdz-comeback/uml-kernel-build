@@ -5890,18 +5890,37 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * plan's copy directive is the descriptor); kind 2 =
 		 * the brk re-home bulk copy (brk_rehome_copy_exec, the
 		 * conn's pending descriptor). On refusal the exec
-		 * already KILLed loud. */
+		 * already KILLed loud.
+		 *
+		 * DRAIN-POSITION RESTORE (the M3 boot regression, run
+		 * 37583666145: the child died re-applying its plan):
+		 * the exec's witness arms APPEND ops mid-drain
+		 * (cowtrap_arm_alloc -> sc_plan_add), and sc_plan_add
+		 * resets plan_next=0/plan_left=n_ops — decision-time
+		 * semantics (the syscall answer arms the stream from
+		 * 0). Mid-drain that restarts the stream at the
+		 * ALREADY-APPLIED ops (a double UNMAP/MAP chaos, the
+		 * stub died on an unowned exception). Snapshot the
+		 * position, let the arms append, then re-arm from the
+		 * CURRENT point: the plan's own remaining ops stream
+		 * first, the appended witness ops after them — all
+		 * before the guest resumes. */
 		if (c->copy_pend_kind != 0 &&
 		    uml_nt_fault_copy_due(&c->plan, c->plan_next)) {
 			int ckind = c->copy_pend_kind;
+			int ops_before = c->plan.n_ops;
+			int next_before = c->plan_next;
+			int rc;
 
 			c->copy_pend_kind = 0;
-			if (ckind == 1) {
-				if (fault_cowcopy_exec(c) < 0)
-					return -1;
-			} else {
-				if (brk_rehome_copy_exec(c) < 0)
-					return -1;
+			rc = ckind == 1 ? fault_cowcopy_exec(c) :
+					  brk_rehome_copy_exec(c);
+			if (rc < 0)
+				return -1;
+			if (c->plan.n_ops != ops_before) {
+				c->plan_next = next_before;
+				c->plan_left = c->plan.n_ops -
+					       next_before + 1;
 			}
 		}
 		if (c->plan_left > 1) {
