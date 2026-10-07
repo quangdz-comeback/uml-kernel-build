@@ -1486,8 +1486,11 @@ static void test_flatwr_helpers(void)
 	/* classifier: gen identity + run-granular table identity (all
 	 * backing offsets are run-aligned, so the table compare is the
 	 * run compare; a translate of -1 with an expected run = the
-	 * va no longer translates = stale too; gen==0 at capture = a
-	 * never-handed offset = stale by definition). */
+	 * va no longer translates = stale too; gen==0 at capture = the
+	 * run is outside the tracked pool — dlW proved those are the
+	 * boot-blob fills, so an unknown capture judges NOTHING on the
+	 * gen axis; a known capture dropping to 0 = the pool forgot
+	 * the run = stale). */
 	CHECK(uml_nt_flatwr_class(9, 9, 0x110000 + 0x123,
 				  0x110000 + 0x456) ==
 	      UML_NT_FLATWR_OK);        /* same run, intra-run drift ok */
@@ -1495,7 +1498,13 @@ static void test_flatwr_helpers(void)
 	      UML_NT_FLATWR_STALE_GEN); /* the run re-handed under the
 					 write */
 	CHECK(uml_nt_flatwr_class(0, 0, 0x110000, 0x110000) ==
-	      UML_NT_FLATWR_STALE_GEN); /* gen 0 at capture */
+	      UML_NT_FLATWR_OK);        /* untracked capture — can't
+					 judge gen (dlW boot noise) */
+	CHECK(uml_nt_flatwr_class(0, 10, 0x110000, 0x110000) ==
+	      UML_NT_FLATWR_OK);        /* capture-side unknown — still
+					 no gen verdict */
+	CHECK(uml_nt_flatwr_class(9, 0, 0x110000, 0x110000) ==
+	      UML_NT_FLATWR_STALE_GEN); /* the pool forgot the run */
 	CHECK(uml_nt_flatwr_class(9, 9, 0x220000, 0x110000) ==
 	      UML_NT_FLATWR_STALE_TBL); /* the table re-homed the va */
 	CHECK(uml_nt_flatwr_class(9, 9, -1, 0x110000) ==

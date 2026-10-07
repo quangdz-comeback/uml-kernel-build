@@ -943,7 +943,13 @@ int uml_nt_flatwr_class(unsigned long long gen_old,
 			unsigned long long gen_now,
 			long long tbl_now, long long tbl_expect)
 {
-	int g = (gen_old == 0) || (gen_now != gen_old);
+	/* gen 0 = the run is outside the tracked pool (boot-blob
+	 * fills, pre-pool-init exec mmaps — dlW fired 16 of these at
+	 * boot and ate the print budget before the tear window). An
+	 * unknown capture cannot judge staleness: only a KNOWN
+	 * capture whose run moved under the write is stale. A known
+	 * capture going to 0 (the pool forgot the run) still fires. */
+	int g = (gen_old != 0) && (gen_now != gen_old);
 	int t = 0;
 
 	if (tbl_expect >= 0) {
