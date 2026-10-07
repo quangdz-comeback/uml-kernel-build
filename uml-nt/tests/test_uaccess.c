@@ -93,6 +93,7 @@ static void test_uaw_helpers(void);
 static void test_uaw_nr_context(void);
 static void test_tce_helpers(void);
 static void test_cowrace_helpers(void);
+static void test_viewprobe_helpers(void);
 
 int main(void)
 {
@@ -228,6 +229,14 @@ int main(void)
 	 * gates, the verdict machine, the qword diff scan, the
 	 * mm-maps-run predicate (feature cowcopy-race-witness). */
 	test_cowrace_helpers();
+
+	/* K6 [viewprobe]: the stub-view-vs-table witness's pure
+	 * diff/classify logic — read-outcome classes, the
+	 * double-read confirm (raced vs stable-diverged), the ledger
+	 * view lookup + backing-offset arithmetic, the watched page
+	 * set builder, the rotation picker and the diverged-qword
+	 * attribution (feature viewprobe-witness). */
+	test_viewprobe_helpers();
 
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
@@ -1163,4 +1172,199 @@ static void test_cowrace_helpers(void)
 	CHECK(uml_nt_cowrace_maps_run(&mm, 3 * RUN) == 1);
 	CHECK(uml_nt_cowrace_maps_run(&mm, 4 * RUN) == 0);
 	CHECK(uml_nt_cowrace_maps_run(&mm, 0x7fffffff0000ull) == 0);
+}
+
+/* ---- K6 [viewprobe] (feature viewprobe-witness) ---------------------
+ * The pure diff/classify logic of the stub-view-vs-table witness.
+ * Context: dl26 convicted the tcache_put pair landing in the
+ * abandoned SOURCE run through a stale writable view, yet with
+ * 9a56286's complete release set + drain census live, 2 referees
+ * show the tear with 0 [viewswap] hits — the wrong view is
+ * invisible to a released-range census. The witness reads the
+ * watched qwords (the tcache struct page, every tcache-listed
+ * chunk, the last drained plan's PROTECT/MAP pages) through the
+ * STUB's current view (kernel ReadProcessMemory on the parked
+ * stub) AND through the TABLE's run (flat translate), and fires
+ * VIEW-DIVERGED on a stable mismatch — naming the backing the
+ * stub view actually maps (the 9a56286 view ledger gives base/
+ * len/prot/off -> run). The logic below is what a fire verdict
+ * rests on, so it is host-tested standalone. */
+static void test_viewprobe_helpers(void)
+{
+	static struct uml_nt_view vs[4];
+	struct uml_nt_fault_op ops[4];
+	unsigned long long chunks[6];
+	unsigned long long pages[16];
+	unsigned long long pick[8];
+	unsigned char a[512], b[512], a2[512], b2[512];
+	int n, nplan;
+
+	/* read-outcome classes: both readable = compare; either
+	 * side's read failure is its own class (never a guessed
+	 * comparison); both failed = the range is gone everywhere. */
+	CHECK(uml_nt_vp_classify(1, 1) == UML_NT_VP_CLS_CMP);
+	CHECK(uml_nt_vp_classify(0, 1) == UML_NT_VP_CLS_STUB_UNREAD);
+	CHECK(uml_nt_vp_classify(1, 0) == UML_NT_VP_CLS_TBL_UNREAD);
+	CHECK(uml_nt_vp_classify(0, 0) == UML_NT_VP_CLS_BOTH_UNREAD);
+
+	/* the double-read confirm: a REAL view divergence is STABLE
+	 * across both reads (the two sides map different backings),
+	 * while a shared-run writer racing between the stub read and
+	 * the table read moves a value between the rounds — never a
+	 * fire, always counted (census raced=). */
+	memset(a, 0x11, sizeof(a));
+	memset(b, 0x11, sizeof(b));
+	CHECK(uml_nt_vp_confirm(a, b, a, b, sizeof(a)) ==
+	      UML_NT_VP_OK);
+	memset(b, 0x22, sizeof(b));
+	CHECK(uml_nt_vp_confirm(a, b, a, b, sizeof(a)) ==
+	      UML_NT_VP_DIVERGED);            /* stable mismatch */
+	memcpy(b2, b, sizeof(b));            /* round 2: the writer
+					      * landed in BOTH sides
+					      * (same backing) */
+	memset(b, 0x11, sizeof(b));          /* round 1 read the old
+					      * bytes on the table
+					      * side — the race shape */
+	CHECK(uml_nt_vp_confirm(a, b, a2, b2, sizeof(a)) ==
+	      UML_NT_VP_RACED);
+	/* the raced verdict needs the SECOND reads to agree with each
+	 * other even when they differ from round 1 — only the
+	 * stable-across-both-reads mismatch is a divergence. */
+	memset(a, 1, sizeof(a));
+	memset(b, 2, sizeof(b));
+	memset(a2, 3, sizeof(a2));           /* stub side moved too */
+	memset(b2, 2, sizeof(b2));
+	CHECK(uml_nt_vp_confirm(a, b, a2, b2, sizeof(a)) ==
+	      UML_NT_VP_RACED);
+	memset(a2, 1, sizeof(a2));
+	CHECK(uml_nt_vp_confirm(a, b, a2, b2, sizeof(a)) ==
+	      UML_NT_VP_DIVERGED);
+
+	/* the ledger view lookup: containment is [va, va+len) — a va
+	 * in the gap between two views belongs to neither. */
+	memset(vs, 0, sizeof(vs));
+	vs[0].va = 0x1000; vs[0].len = 0x2000; vs[0].off = 0x30000;
+	vs[1].va = 0x8000; vs[1].len = 0x1000; vs[1].off = 0x50000;
+	CHECK(uml_nt_vp_view_find(vs, 2, 0xfff) == -1); /* below */
+	CHECK(uml_nt_vp_view_find(vs, 2, 0x1000) == 0);  /* base in */
+	CHECK(uml_nt_vp_view_find(vs, 2, 0x2fff) == 0);  /* last byte */
+	CHECK(uml_nt_vp_view_find(vs, 2, 0x3000) == -1); /* end excl */
+	CHECK(uml_nt_vp_view_find(vs, 2, 0x7fff) == -1); /* the gap */
+	CHECK(uml_nt_vp_view_find(vs, 2, 0x8000) == 1);
+	CHECK(uml_nt_vp_view_find(vs, 2, 0x8fff) == 1);
+	CHECK(uml_nt_vp_view_find(vs, 2, 0x9000) == -1);
+	CHECK(uml_nt_vp_view_find(vs, 0, 0x1000) == -1); /* empty */
+	CHECK(uml_nt_vp_view_find((void *)0, 2, 0x1000) == -1);
+
+	/* the backing arithmetic: the section offset a watched va
+	 * maps through a ledger view = view.off + (va - view.va);
+	 * the RUN is the 64K granule (physalloc.h). A wrong-backed
+	 * view names itself here — e.g. a view mapped at a stale
+	 * section offset (the ledger-vs-table check fires exactly
+	 * when this differs from the table's translate). */
+	CHECK(uml_nt_vp_view_off(&vs[0], 0x1000) == 0x30000);
+	CHECK(uml_nt_vp_view_off(&vs[0], 0x2ff8) == 0x31ff8);
+	CHECK(uml_nt_vp_view_off(&vs[0], 0x1800) == 0x30800);
+	CHECK((uml_nt_vp_view_off(&vs[0], 0x1fff) &
+	       ~(UML_NT_PHYS_RUN_SIZE - 1)) == 0x30000);
+
+	/* the watched page set: page(tcache) FIRST, then the drained
+	 * plan's PROTECT/MAP op pages (UNMAP releases nothing to
+	 * compare — view_swap_guard owns that census), then every
+	 * chunk page — deduped, cap honest (trunc = ret > max). */
+	memset(ops, 0, sizeof(ops));
+	ops[0].op = UML_NT_FOP_PROTECT; ops[0].va = 0x55000;
+	ops[0].len = 0x1000;
+	ops[1].op = UML_NT_FOP_MAP;     ops[1].va = 0x67000000;
+	ops[1].len = 0x10000; ops[1].off = 0x6c30000;
+	ops[2].op = UML_NT_FOP_UNMAP;   ops[2].va = 0x67010000;
+	ops[2].len = 0x10000;
+	ops[3].op = UML_NT_FOP_MAP;     ops[3].va = 0x67c40000;
+	ops[3].len = 0x10000; ops[3].off = 0x6c40000;
+	/* chunks: two share a page; one sits at a page boundary;
+	 * one lands on the tcache page (already page #0). */
+	chunks[0] = 0x67c3f980;
+	chunks[1] = 0x67c3fa80;          /* same page as chunks[0] */
+	chunks[2] = 0x67c40000;          /* own page */
+	chunks[3] = 0x67c50ff0;          /* page 0x67c50000 */
+	chunks[4] = 0x60;                /* inside the tcache page */
+	chunks[5] = 0x67c40810;          /* same page as chunks[2] */
+	n = uml_nt_vp_pageset(chunks, 6, 0x10, ops, 4, pages, 16,
+			      &nplan);
+	/* tcache page 0x0, plan PROTECT 0x55000, MAP 0x67000000,
+	 * MAP 0x67c40000 (3 plan pages), then chunk pages 0x67c3f000
+	 * and 0x67c50000 — everything else dedups (chunks[2]/[5]
+	 * share the MAP op's page, chunks[4] sits in the tcache
+	 * page, chunks[1] shares chunks[0]'s page). */
+	CHECK(n == 6);
+	CHECK(nplan == 3);
+	CHECK(pages[0] == 0x0);
+	CHECK(pages[1] == 0x55000);
+	CHECK(pages[2] == 0x67000000);
+	CHECK(pages[3] == 0x67c40000);
+	CHECK(pages[4] == 0x67c3f000);
+	CHECK(pages[5] == 0x67c50000);
+	/* chunk[5] 0x67c40810 shares page 0x67c40000 with the MAP
+	 * op — deduped into ONE entry (pages[3]). */
+	/* cap: 4-slot page array — first 4 kept, honest total. */
+	n = uml_nt_vp_pageset(chunks, 6, 0x10, ops, 4, pages, 4,
+			      &nplan);
+	CHECK(n > 4);
+	CHECK(nplan == 3);
+	CHECK(pages[0] == 0x0);
+	CHECK(pages[1] == 0x55000);
+
+	/* the rotation picker: a bounded window of chunk pages per
+	 * park, cursor carries across parks, wraps at the set end,
+	 * fewer than max yields what exists. */
+	{
+		unsigned long long six[6];
+		unsigned int cur = 0;
+		int i;
+
+		for (i = 0; i < 6; i++)
+			six[i] = 0x1000ull * (unsigned long long)i;
+		CHECK(uml_nt_vp_rr_pick(six, 6, &cur, pick, 4) == 4);
+		CHECK(pick[0] == 0 && pick[1] == 0x1000 &&
+		      pick[2] == 0x2000 && pick[3] == 0x3000);
+		CHECK(cur == 4);
+		CHECK(uml_nt_vp_rr_pick(six, 6, &cur, pick, 4) == 4);
+		CHECK(pick[0] == 0x4000 && pick[1] == 0x5000 &&
+		      pick[2] == 0x0000 && pick[3] == 0x1000);
+		CHECK(cur == 2);          /* wrapped */
+		CHECK(uml_nt_vp_rr_pick(six, 6, &cur, pick, 8) == 6);
+		CHECK(uml_nt_vp_rr_pick(six, 0, &cur, pick, 8) == 0);
+		CHECK(uml_nt_vp_rr_pick(six, 3, &cur, pick, 8) == 3);
+		CHECK(uml_nt_vp_rr_pick((void *)0, 3, &cur, pick, 8) == 0);
+	}
+
+	/* the diverged-qword attribution: is the differing qword a
+	 * listed chunk's e->next / e->key, a tcache struct field, a
+	 * drained plan op's page, or none of the watched set? */
+	chunks[0] = 0x67c3f980;
+	chunks[1] = 0x67c474f0;
+	CHECK(uml_nt_vp_attr(0x67c3f980, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_CHUNK_NEXT);
+	CHECK(uml_nt_vp_attr(0x67c3f988, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_CHUNK_KEY);
+	CHECK(uml_nt_vp_attr(0x67c474f0, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_CHUNK_NEXT);
+	CHECK(uml_nt_vp_attr(0x67c474f8, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_CHUNK_KEY);
+	CHECK(uml_nt_vp_attr(0x90, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_TCACHE);
+	CHECK(uml_nt_vp_attr(0x298, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_TCACHE);
+	CHECK(uml_nt_vp_attr(0x2a0, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_OTHER); /* end
+							  * exclusive */
+	CHECK(uml_nt_vp_attr(0x55000, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_PLANOP);
+	CHECK(uml_nt_vp_attr(0x67001234, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_PLANOP);
+	CHECK(uml_nt_vp_attr(0x67010000, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_OTHER); /* UNMAP
+							      * range */
+	CHECK(uml_nt_vp_attr(0x67c60000, chunks, 2, 0x10, 0x290,
+			     ops, 4) == UML_NT_VP_ATTR_OTHER);
 }

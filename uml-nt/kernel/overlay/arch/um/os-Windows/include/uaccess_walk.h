@@ -441,4 +441,95 @@ int uml_nt_cowrace_class(int refs_now, int n_mappers);
 int uml_nt_cowrace_maps_run(const struct uml_nt_mm *mm,
 			    unsigned long long src_off);
 
+/* ---- K6 [viewprobe] (M5.6a, feature viewprobe-witness) — the
+ * stub-view-vs-table witness's pure diff/classify logic. stub_ctl.c
+ * owns the reads (ReadProcessMemory on the parked stub + the flat
+ * translate), the budgets and every log line; this file stays
+ * log-free. See stub_ctl.c's block comment for the conviction
+ * context (dl26 + the two 9a56286 referees: the lost tcache_put
+ * pair lands in a backing the table does not own, invisible to a
+ * released-range census). Host-tested in test_uaccess.c
+ * (test_viewprobe_helpers). */
+
+/* the per-conn drain record's op-summary cap (syscall.h's
+ * vp_drain_ops): the [fork-sync] formation-window stream was 2
+ * ops; 16 covers every real repair/re-protect plan, with the
+ * honest trunc disclosure on the record's lines. */
+#define UML_NT_VP_DRAIN_OPS 16
+
+/* read-outcome classes: which sides of the comparison are readable.
+ * A read failure is never guessed at: either side's failure is its
+ * own class (a stub view missing over a table-owned range, or a
+ * stub view over a range the table no longer owns — the stray-view
+ * shape), and both failing is the gone-everywhere shape. */
+#define UML_NT_VP_CLS_OK          0 /* both readable, identical */
+#define UML_NT_VP_CLS_CMP          1 /* both readable — compare */
+#define UML_NT_VP_CLS_STUB_UNREAD  2 /* stub read failed, table ok */
+#define UML_NT_VP_CLS_TBL_UNREAD   3 /* table translate failed, stub ok */
+#define UML_NT_VP_CLS_BOTH_UNREAD  4 /* the range is gone everywhere */
+
+/* the double-read confirm verdict: a REAL view divergence is STABLE
+ * across both reads (the two sides map different backings —
+ * re-reading changes nothing), while a shared-run writer racing
+ * between the stub read and the table read moves bytes between
+ * the rounds (a raced pair is never a fire; the census counts it). */
+#define UML_NT_VP_OK        0
+#define UML_NT_VP_DIVERGED  1
+#define UML_NT_VP_RACED     2
+
+int uml_nt_vp_classify(int stub_ok, int tbl_ok);
+int uml_nt_vp_confirm(const unsigned char *stub1,
+		      const unsigned char *tbl1,
+		      const unsigned char *stub2,
+		      const unsigned char *tbl2,
+		      unsigned long long len);
+
+/* the 9a56286 view ledger lookup: the issued view containing `va`
+ * (containment [va, va+len) — a va between two views belongs to
+ * neither), or -1. Pure. */
+int uml_nt_vp_view_find(const struct uml_nt_view *vs, int n,
+			unsigned long long va);
+
+/* the section offset a watched va maps through a ledger view:
+ * view->off + (va - view->va) — the view's BACKING, run-granular
+ * (the 64K granule, physalloc.h). The ledger-vs-table check fires
+ * exactly when this differs from the table's own translate of the
+ * same va: a view mapped at a wrong/stale section offset names
+ * itself with zero stub reads. */
+unsigned long long uml_nt_vp_view_off(const struct uml_nt_view *v,
+				      unsigned long long va);
+
+/* the watched page set, in probe order: page(tva) FIRST, then the
+ * last drained plan's PROTECT/MAP op pages (UNMAP releases nothing
+ * to compare — the drain census owns that class), then every
+ * chunk's page — deduped. Writes at most `max` pages; returns the
+ * TOTAL distinct count found (a return > max is the honest trunc
+ * the caller discloses); *nplan = the plan-op page count. */
+int uml_nt_vp_pageset(const unsigned long long *chunks, int nchunks,
+		      unsigned long long tva,
+		      const struct uml_nt_fault_op *ops, int nops,
+		      unsigned long long *pages, int max, int *nplan);
+
+/* the rotation picker: `max` consecutive chunk pages starting at
+ * *cursor (wrapping), cursor advances by the picked count — the
+ * steady-state probe stays bounded while every watched page is
+ * covered within ceil(n/max) parks; escalation (the counts-mismatch
+ * fingerprint) bypasses the rotation with the FULL set. */
+int uml_nt_vp_rr_pick(const unsigned long long *pages, int npages,
+		      unsigned int *cursor, unsigned long long *out,
+		      int max);
+
+/* attribution classes for a diverged qword (the fire's naming):
+ * which watched item does the differing qword belong to? */
+#define UML_NT_VP_ATTR_OTHER      0
+#define UML_NT_VP_ATTR_CHUNK_NEXT 1 /* a listed chunk's e->next */
+#define UML_NT_VP_ATTR_CHUNK_KEY  2 /* a listed chunk's e->key */
+#define UML_NT_VP_ATTR_TCACHE     3 /* the tcache struct's fields */
+#define UML_NT_VP_ATTR_PLANOP     4 /* a drained plan op's range */
+
+int uml_nt_vp_attr(unsigned long long va,
+		   const unsigned long long *chunks, int nchunks,
+		   unsigned long long tva, unsigned long long tlen,
+		   const struct uml_nt_fault_op *ops, int nops);
+
 #endif /* __UM_OS_WINDOWS_UACCESS_WALK_H */

@@ -310,6 +310,42 @@ struct uml_nt_stub_conn {
 	 * page faults and names its rip. The poison write = a direct
 	 * store (bypasses every funnel); its rip = the hunt's end. */
 	int tctrip_want;
+	/* K6 [viewprobe] (M5.6a, feature viewprobe-witness): the
+	 * drain record — the plan streams that DRAINED since this
+	 * conn's previous syscall park ([fork-sync] re-protect/MAP
+	 * streams and fault-repair streams alike: count, whether any
+	 * carried PROTECT/MAP ops, whether the last was
+	 * retval-carrying, and up to UML_NT_VP_DRAIN_OPS op
+	 * summaries). The park pass and every VIEW-DIVERGED fire cite
+	 * it — the formation window's re-protect stream names itself.
+	 * Plus the probe state: the chunk-page rotation cursor and
+	 * the census counters. kzalloc init = clean/zero. */
+	int vp_drain_count;
+	int vp_drain_pm;      /* any drained stream carried P/M ops */
+	int vp_drain_retval;  /* the LAST drained stream was the
+			       * retval-carrying [fork-sync] class */
+	int vp_drain_nops;    /* ops recorded (<= UML_NT_VP_DRAIN_OPS) */
+	int vp_drain_total;   /* the last stream's real n_ops (trunc
+			       * disclosure) */
+	struct uml_nt_fault_op
+		vp_drain_ops[UML_NT_VP_DRAIN_OPS];
+	unsigned int vp_rr;   /* chunk-page rotation cursor */
+	unsigned long long vp_parks;
+	unsigned long long vp_probed;  /* pages read through the stub */
+	unsigned long long vp_expected; /* stub-unreadable pages that
+					  * VQ explains (NOACCESS guards,
+					  * released ranges) — never a
+					  * fire, always counted */
+	unsigned long long vp_raced;   /* raced double-reads (a
+				       * concurrent sharer — never a
+				       * fire, always counted) */
+	unsigned long long vp_divseen; /* divergence sightings incl.
+					* deduped repeats */
+	unsigned long long vp_unledgered; /* watched vas with NO ledger
+					   * view covering them */
+	unsigned long long vp_dedup_va[16];
+	unsigned char vp_dedup_cls[16];
+	int vp_dedup_head;
 	/* M5.4 c3 (048): destroy stamps DEAD before kfree; consumers
 	 * that reach a conn through a RETAINED pointer (the switch
 	 * hook's re-arm, the co-mapper census, the fork seed) refuse a

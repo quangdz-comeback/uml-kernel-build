@@ -880,3 +880,176 @@ int uml_nt_cowrace_maps_run(const struct uml_nt_mm *mm,
 	}
 	return 0;
 }
+
+/* ---- K6 [viewprobe] (M5.6a, feature viewprobe-witness) — the
+ * stub-view-vs-table witness's pure helpers. See uaccess_walk.h
+ * for the protocol; stub_ctl.c owns the reads, the budgets and
+ * every log line (this file stays log-free). Byte ops spelled out
+ * like the rest of this file: no <string.h>, it compiles
+ * freestanding in the kernel AND in the unit test. */
+int uml_nt_vp_classify(int stub_ok, int tbl_ok)
+{
+	if (stub_ok && tbl_ok)
+		return UML_NT_VP_CLS_CMP;
+	if (!stub_ok && tbl_ok)
+		return UML_NT_VP_CLS_STUB_UNREAD;
+	if (stub_ok && !tbl_ok)
+		return UML_NT_VP_CLS_TBL_UNREAD;
+	return UML_NT_VP_CLS_BOTH_UNREAD;
+}
+
+static int vp_bytes_eq(const unsigned char *a, const unsigned char *b,
+		       unsigned long long len)
+{
+	unsigned long long i;
+
+	for (i = 0; i < len; i++)
+		if (a[i] != b[i])
+			return 0;
+	return 1;
+}
+
+int uml_nt_vp_confirm(const unsigned char *stub1,
+		      const unsigned char *tbl1,
+		      const unsigned char *stub2,
+		      const unsigned char *tbl2,
+		      unsigned long long len)
+{
+	int s_stable = vp_bytes_eq(stub1, stub2, len);
+	int t_stable = vp_bytes_eq(tbl1, tbl2, len);
+
+	if (!s_stable || !t_stable)
+		return UML_NT_VP_RACED; /* a side moved between the
+					* reads: a concurrent
+					* writer, not a divergence */
+	if (!vp_bytes_eq(stub1, tbl1, len))
+		return UML_NT_VP_DIVERGED;
+	return UML_NT_VP_OK;
+}
+
+int uml_nt_vp_view_find(const struct uml_nt_view *vs, int n,
+			unsigned long long va)
+{
+	int i;
+
+	if (vs == (const struct uml_nt_view *)0)
+		return -1;
+	for (i = 0; i < n; i++) {
+		if (vs[i].len == 0)
+			continue;
+		if (va >= vs[i].va && va < vs[i].va + vs[i].len)
+			return i;
+	}
+	return -1;
+}
+
+unsigned long long uml_nt_vp_view_off(const struct uml_nt_view *v,
+				      unsigned long long va)
+{
+	return v->off + (va - v->va);
+}
+
+/* add one page to the set (first occurrence only); returns 1 when
+ * added, 0 when a duplicate, -1 when the array is full. */
+static int vp_page_add(unsigned long long *pages, int *n, int max,
+		       unsigned long long page)
+{
+	int i;
+
+	for (i = 0; i < *n; i++)
+		if (pages[i] == page)
+			return 0;
+	if (*n >= max)
+		return -1;
+	pages[(*n)++] = page;
+	return 1;
+}
+
+#define VP_PAGE(va) ((va) & ~0xfffull)
+
+int uml_nt_vp_pageset(const unsigned long long *chunks, int nchunks,
+		      unsigned long long tva,
+		      const struct uml_nt_fault_op *ops, int nops,
+		      unsigned long long *pages, int max, int *nplan)
+{
+	int n = 0, total = 0, i;
+
+	if (pages == (unsigned long long *)0 || max <= 0)
+		return 0;
+	if (nplan != (int *)0)
+		*nplan = 0;
+	/* page(tva) first — always probed every park. */
+	if (vp_page_add(pages, &n, max, VP_PAGE(tva)) != 0)
+		total++;
+	/* the drained plan's PROTECT/MAP op pages (UNMAP ranges are
+	 * released by construction — the drain census owns them). */
+	for (i = 0; i < nops; i++) {
+		int r;
+
+		if (ops[i].op != UML_NT_FOP_PROTECT &&
+		    ops[i].op != UML_NT_FOP_MAP)
+			continue;
+		if (ops[i].len == 0)
+			continue;
+		r = vp_page_add(pages, &n, max, VP_PAGE(ops[i].va));
+		if (r != 0 && nplan != (int *)0)
+			(*nplan)++;
+		if (r != 0)
+			total++;
+	}
+	/* every listed chunk's page. */
+	for (i = 0; i < nchunks; i++) {
+		if (chunks == (const unsigned long long *)0)
+			break;
+		if (vp_page_add(pages, &n, max, VP_PAGE(chunks[i])) != 0)
+			total++;
+	}
+	return total;
+}
+
+int uml_nt_vp_rr_pick(const unsigned long long *pages, int npages,
+		      unsigned int *cursor, unsigned long long *out,
+		      int max)
+{
+	int picked = 0, i;
+
+	if (pages == (const unsigned long long *)0 || npages <= 0 ||
+	    cursor == (unsigned int *)0 || out == (unsigned long long *)0 ||
+	    max <= 0)
+		return 0;
+	for (i = 0; i < npages && picked < max; i++) {
+		out[picked] = pages[(*cursor + (unsigned int)i) %
+				    (unsigned int)npages];
+		picked++;
+	}
+	*cursor = (*cursor + (unsigned int)picked) % (unsigned int)npages;
+	return picked;
+}
+
+int uml_nt_vp_attr(unsigned long long va,
+		   const unsigned long long *chunks, int nchunks,
+		   unsigned long long tva, unsigned long long tlen,
+		   const struct uml_nt_fault_op *ops, int nops)
+{
+	int i;
+
+	for (i = 0; i < nchunks; i++) {
+		if (chunks == (const unsigned long long *)0)
+			break;
+		if (va == chunks[i])
+			return UML_NT_VP_ATTR_CHUNK_NEXT;
+		if (va == chunks[i] + 8)
+			return UML_NT_VP_ATTR_CHUNK_KEY;
+	}
+	if (tlen != 0 && va >= tva && va < tva + tlen)
+		return UML_NT_VP_ATTR_TCACHE;
+	for (i = 0; i < nops; i++) {
+		if (ops[i].op != UML_NT_FOP_PROTECT &&
+		    ops[i].op != UML_NT_FOP_MAP)
+			continue;
+		if (ops[i].len != 0 && va >= ops[i].va &&
+		    va < ops[i].va + ops[i].len)
+			return UML_NT_VP_ATTR_PLANOP;
+	}
+	return UML_NT_VP_ATTR_OTHER;
+}

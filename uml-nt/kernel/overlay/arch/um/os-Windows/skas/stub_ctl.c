@@ -4248,6 +4248,640 @@ static void tcache_ekey_watch(struct uml_nt_stub_conn *c)
 	}
 }
 
+/* K6 [viewprobe] (M5.6a, feature viewprobe-witness) — the
+ * stub-view-vs-table witness. THE QUESTION: which backing does the
+ * stub's CURRENT view of the watched heap qwords actually map, and
+ * does it differ from the run the VMA table owns? dl26 convicted
+ * the tcache_put pair landing in the abandoned SOURCE run through
+ * a stale writable view, yet with 9a56286's complete release set +
+ * drain census live, TWO referees (37549243995, 37549271088) show
+ * the tear with 0 [viewswap] hits — the wrong view is invisible to
+ * a RELEASED-RANGE census. This witness reads the watched qwords
+ * BOTH ways at every syscall park of a watched heap mm (read-only:
+ * kernel ReadProcessMemory on the PARKED stub — no ss/TF, no DR,
+ * no page protects, nothing new at fault parks):
+ *   (a) through the STUB's current view (ReadProcessMemory;
+ *       VirtualQueryEx names the view's region when a fire needs
+ *       it), the backing identified via the 9a56286 view ledger
+ *       (view base/len/prot/off -> section offset -> run);
+ *   (b) through the TABLE's run (the flat translate);
+ *   (c) VIEW-DIVERGED fires on a STABLE mismatch (the double-read
+ *       confirm — a shared-run writer racing between the reads is
+ *       RACED, counted, never a fire): va, both values, the stub
+ *       view's region + ledger identity, the table run, the last
+ *       8 plan ops from the op ring, and nr/ret.
+ * The watched set: the tcache struct page, every tcache-listed
+ * chunk (own table-side walk — independent of [tcekey]'s print
+ * budgets, which die long before the ~86k fire), plus the pages
+ * of the last DRAINED plan stream's PROTECT/MAP ops. The LEDGER
+ * CHECK (pure bookkeeping, zero stub reads, full coverage every
+ * park) compares each watched va's LEDGER backing offset with the
+ * table's own translate — a view mapped at a wrong/stale section
+ * offset names itself without reading a byte, and a watched va
+ * with NO ledger view over it (yet readable through the stub) is
+ * the LEDGER-STRAY shape. Per-park cost is bounded (tcache page +
+ * drain pages + 4 rotation chunk pages); the tear's own
+ * counts-mismatch fingerprint (or any ledger anomaly) escalates
+ * to the FULL page set that park. The drain record (stamped at the
+ * plan-drain point in serve_conn) prints whether a re-protect/MAP
+ * stream drained since the previous park, with its ops — the run-B
+ * formation window showed exactly a 2-op [fork-sync] re-protect
+ * drain beside the copy of the ADJACENT run. Budgets are line-
+ * counted (64 per tag family); per-conn (class,va) dedup rings
+ * keep a persistent torn state from eating them. */
+#define VP_PAGE_SIZE 4096
+#define VP_PAGES_MAX 512
+#define VP_RR_MAX 4
+#define VP_UNL_MAX 64
+
+enum {
+	VP_DD_DIV = 1,    /* byte divergence stub-view vs table */
+	VP_DD_LEDGER = 2, /* ledger backing != table backing */
+	VP_DD_STRAY = 3,  /* readable through the stub, NO ledger view */
+	VP_DD_STUBUN = 4, /* stub view unreadable, table owns the page */
+	VP_DD_TBLUN = 5,  /* stub reads it, the table does not own it */
+};
+
+static int vp_div_budget = 64;    /* VIEW/LEDGER-DIVERGED lines */
+static int vp_unread_budget = 64; /* unread-view class lines */
+static int vp_drain_budget = 64;  /* [viewprobe-drain] lines */
+static int vp_armed_budget = 64;
+static int vp_census_budget = 64;
+static int vp_confirm_per_park;
+static unsigned char vp_stub_pg[VP_PAGE_SIZE];
+static unsigned char vp_tbl_pg[VP_PAGE_SIZE];
+static unsigned char vp_stub_pg2[VP_PAGE_SIZE];
+static unsigned char vp_tbl_pg2[VP_PAGE_SIZE];
+static struct uml_nt_tce_snap vp_snap;
+static unsigned long long vp_cvas[UML_NT_TCE_MAX];
+static unsigned long long vp_pages[VP_PAGES_MAX];
+static unsigned long long vp_unl[VP_UNL_MAX];
+static int vp_nunl;         /* watched vas with no ledger view */
+static unsigned long long vp_ctx_tva; /* the fire's attribution ctx */
+static int vp_ctx_nch;
+static int vp_ledger_hit;   /* any ledger anomaly this park */
+
+static int vp_dedup_seen(struct uml_nt_stub_conn *c, int cls,
+			 unsigned long long va)
+{
+	int i;
+
+	for (i = 0; i < 16; i++)
+		if (c->vp_dedup_cls[i] == (unsigned char)cls &&
+		    c->vp_dedup_va[i] == va)
+			return 1;
+	return 0;
+}
+
+static void vp_dedup_add(struct uml_nt_stub_conn *c, int cls,
+			 unsigned long long va)
+{
+	c->vp_dedup_cls[c->vp_dedup_head] = (unsigned char)cls;
+	c->vp_dedup_va[c->vp_dedup_head] = va;
+	c->vp_dedup_head = (c->vp_dedup_head + 1) & 15;
+}
+
+/* the fire's context tail: the last 8 plan ops from the op ring +
+ * the drain record — the op that installed/left the diverged view
+ * names itself here. Every line is budget-checked. */
+static void vp_fire_tail(struct uml_nt_stub_conn *c)
+{
+	int k;
+
+	for (k = 8; k >= 1 && vp_div_budget > 0; k--) {
+		int idx = c->op_log_n - k;
+		const unsigned long long *e;
+
+		if (idx < 0)
+			continue;
+		e = c->op_log[idx % 64];
+		vp_div_budget--;
+		os_info("[viewprobe]   op-ring -%d: o=%u p=0x%x "
+			"va=0x%llx l=0x%llx off=0x%llx\n", k,
+			(unsigned)e[0], (unsigned)e[1], e[2], e[3],
+			e[4]);
+	}
+	if (vp_div_budget > 0 && c->vp_drain_count > 0) {
+		vp_div_budget--;
+		os_info("[viewprobe]   drain-since-prev-park: %d "
+			"stream(s), last retval=%d nops=%d trunc=%d\n",
+			c->vp_drain_count, c->vp_drain_retval,
+			c->vp_drain_nops,
+			c->vp_drain_total - c->vp_drain_nops);
+	}
+}
+
+/* the VIEW-DIVERGED burst: the empirical naming of the wrong
+ * backing (stub view vs table run, both values, both identities). */
+static void vp_fire_diverged(struct uml_nt_stub_conn *c,
+			     struct uml_nt_mm *mm,
+			     unsigned long long pva,
+			     const unsigned long long *offs,
+			     const unsigned long long *sv,
+			     const unsigned long long *tv, int nd)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+	unsigned long long va = pva + offs[0], rbase = 0, rsize = 0;
+	unsigned prot = 0, state = 0, type = 0;
+	long long toff;
+	int vi, k;
+
+	c->vp_divseen++;
+	if (vp_div_budget <= 0 || vp_dedup_seen(c, VP_DD_DIV, pva))
+		return;
+	vp_dedup_add(c, VP_DD_DIV, pva);
+	memset(&mbi, 0, sizeof(mbi));
+	if (nt->VirtualQueryEx(c->proc, (void *)(uintptr_t)va,
+			       &mbi, sizeof(mbi)) != 0) {
+		rbase = (unsigned long long)(uintptr_t)mbi.BaseAddress;
+		rsize = (unsigned long long)mbi.RegionSize;
+		prot = mbi.Protect;
+		state = mbi.State;
+		type = mbi.Type;
+	}
+	vp_div_budget--;
+	os_info("[viewprobe] pid %lu VIEW-DIVERGED va=0x%llx "
+		"stub=0x%llx tbl=0x%llx page=0x%llx ndiff=%d "
+		"(park-nr=%llu nr=%llu ret=%lld rip=0x%llx) budget=%d\n",
+		(unsigned long)c->pid, va, sv[0], tv[0], pva, nd,
+		c->d->regs.rax, c->last_nr, c->last_ret,
+		c->d->regs.rip, vp_div_budget);
+	vp_div_budget--;
+	os_info("[viewprobe]   stub view: region=[0x%llx,+0x%llx) "
+		"prot=0x%x state=0x%x type=0x%x\n", rbase, rsize, prot,
+		state, type);
+	vi = uml_nt_vp_view_find(c->views, c->nviews, va);
+	if (vi >= 0) {
+		unsigned long long boff = uml_nt_vp_view_off(
+			&c->views[vi], va);
+
+		vp_div_budget--;
+		os_info("[viewprobe]   ledger: view #%d [va=0x%llx "
+			"len=0x%llx prot=0x%x off=0x%llx] -> backing "
+			"off=0x%llx run=0x%llx\n", vi,
+			c->views[vi].va, c->views[vi].len,
+			c->views[vi].prot, c->views[vi].off, boff,
+			boff & ~(unsigned long long)
+				(UML_NT_PHYS_RUN_SIZE - 1));
+	} else {
+		vp_div_budget--;
+		os_info("[viewprobe]   ledger: NO view covers va — "
+			"a mapping the view ledger does not own\n");
+	}
+	toff = uml_nt_vma_translate(mm, va, 8);
+	if (toff >= 0) {
+		vp_div_budget--;
+		os_info("[viewprobe]   table: off=0x%llx run=0x%llx\n",
+			(unsigned long long)toff,
+			(unsigned long long)toff &
+			~(unsigned long long)
+				(UML_NT_PHYS_RUN_SIZE - 1));
+	} else {
+		vp_div_budget--;
+		os_info("[viewprobe]   table: translate FAILED — "
+			"the VMA table does not own this va\n");
+	}
+	for (k = 0; k < nd && k < 4 && vp_div_budget > 0; k++) {
+		static const char *const names[] = {
+			"page", "chunk e->next", "chunk e->key",
+			"tcache field", "plan-op page"
+		};
+		int a = uml_nt_vp_attr(pva + offs[k], vp_cvas,
+				       vp_ctx_nch, vp_ctx_tva, 0x290,
+				       c->vp_drain_ops,
+				       c->vp_drain_nops);
+
+		vp_div_budget--;
+		os_info("[viewprobe]   diff +0x%llx: stub=0x%llx "
+			"tbl=0x%llx (%s)\n", offs[k], sv[k], tv[k],
+			names[a]);
+	}
+	if (nd > 4 && vp_div_budget > 0) {
+		vp_div_budget--;
+		os_info("[viewprobe]   +%d more differing qwords\n",
+			nd - 4);
+	}
+	vp_fire_tail(c);
+}
+
+/* the unread classes: a table-owned page the stub's view cannot
+ * read (missing/released/NOACCESS view), or a page the stub READS
+ * while the table owns nothing there (the stray-view shape — the
+ * census killed its released-range form; this catches it on the
+ * watched set). VQ explains the expected failures (guards,
+ * released regions) — those count, never print. */
+static void vp_fire_unread(struct uml_nt_stub_conn *c,
+			   struct uml_nt_mm *mm,
+			   unsigned long long pva, int stub_side)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+	int cls = stub_side ? VP_DD_STUBUN : VP_DD_TBLUN;
+
+	if (vp_dedup_seen(c, cls, pva))
+		return;
+	memset(&mbi, 0, sizeof(mbi));
+	if (stub_side &&
+	    nt->VirtualQueryEx(c->proc, (void *)(uintptr_t)pva,
+			       &mbi, sizeof(mbi)) != 0 &&
+	    (mbi.State != 0x1000 || mbi.Protect == 0x01)) {
+		c->vp_expected++; /* not committed / NOACCESS guard —
+				   * explained, never a fire */
+		return;
+	}
+	if (vp_unread_budget <= 0)
+		return;
+	vp_dedup_add(c, cls, pva);
+	vp_unread_budget--;
+	if (!stub_side)
+		(void)nt->VirtualQueryEx(c->proc,
+					 (void *)(uintptr_t)pva,
+					 &mbi, sizeof(mbi));
+	if (stub_side) {
+		os_info("[viewprobe] pid %lu STUB-UNREAD page=0x%llx — "
+			"the table owns the page but the stub's view "
+			"cannot read it; region=[0x%llx,+0x%llx) "
+			"prot=0x%x state=0x%x (park-nr=%llu nr=%llu "
+			"ret=%lld) budget=%d\n",
+			(unsigned long)c->pid, pva,
+			(unsigned long long)(uintptr_t)mbi.BaseAddress,
+			(unsigned long long)mbi.RegionSize,
+			mbi.Protect, mbi.State, c->d->regs.rax,
+			c->last_nr, c->last_ret, vp_unread_budget);
+	} else {
+		os_info("[viewprobe] pid %lu TBL-UNREAD page=0x%llx — "
+			"the stub still READS a page the VMA table does "
+			"not own (stray view); region=[0x%llx,+0x%llx) "
+			"prot=0x%x state=0x%x (park-nr=%llu nr=%llu "
+			"ret=%lld) budget=%d\n",
+			(unsigned long)c->pid, pva,
+			(unsigned long long)(uintptr_t)mbi.BaseAddress,
+			(unsigned long long)mbi.RegionSize,
+			mbi.Protect, mbi.State, c->d->regs.rax,
+			c->last_nr, c->last_ret, vp_unread_budget);
+	}
+	{
+		int vi = uml_nt_vp_view_find(c->views, c->nviews,
+					     pva);
+		long long toff = uml_nt_vma_translate(mm, pva,
+						      VP_PAGE_SIZE);
+
+		if (vi >= 0)
+			os_info("[viewprobe]   ledger view #%d "
+				"[va=0x%llx len=0x%llx prot=0x%x "
+				"off=0x%llx]; table translate %lld\n",
+				vi, c->views[vi].va,
+				c->views[vi].len, c->views[vi].prot,
+				c->views[vi].off, toff);
+	}
+}
+
+static int vp_read_stub(struct uml_nt_stub_conn *c,
+			unsigned long long pva, unsigned char *buf)
+{
+	SIZE_T got = 0;
+
+	if (nt->ReadProcessMemory(c->proc, (void *)(uintptr_t)pva,
+				   buf, VP_PAGE_SIZE, &got) == 0 ||
+	    got != VP_PAGE_SIZE)
+		return 0;
+	return 1;
+}
+
+static int vp_read_tbl(struct uml_nt_mm *mm, unsigned long long pva,
+		       unsigned char *buf)
+{
+	unsigned off;
+
+	for (off = 0; off < VP_PAGE_SIZE; off += 512) {
+		long long o = uml_nt_vma_translate(mm, pva + off, 512);
+
+		if (o < 0)
+			return 0;
+		memcpy(buf + off, (const void *)(uintptr_t)
+		       ((char *)uml_boot.physmem_base + o), 512);
+	}
+	return 1;
+}
+
+/* probe one watched page both ways and classify. */
+static void vp_probe_page(struct uml_nt_stub_conn *c,
+			  struct uml_nt_mm *mm,
+			  unsigned long long pva)
+{
+	unsigned long long offs[8], sv[8], tv[8];
+	int stub_ok, tbl_ok, cls, nd, k;
+
+	stub_ok = vp_read_stub(c, pva, vp_stub_pg);
+	tbl_ok = vp_read_tbl(mm, pva, vp_tbl_pg);
+	cls = uml_nt_vp_classify(stub_ok, tbl_ok);
+	switch (cls) {
+	case UML_NT_VP_CLS_CMP:
+		c->vp_probed++;
+		nd = uml_nt_cowrace_diff(vp_stub_pg, vp_tbl_pg,
+					 VP_PAGE_SIZE, offs, sv, tv, 8);
+		if (nd == 0)
+			break;
+		/* the double-read confirm: a real divergence is STABLE
+		 * (different backings), a shared-run writer racing
+		 * between the reads is RACED — counted, never fired. */
+		if (vp_confirm_per_park <= 0) {
+			c->vp_raced++;
+			break; /* next park re-sees a persistent state
+				* with a fresh confirm budget */
+		}
+		vp_confirm_per_park--;
+		stub_ok = vp_read_stub(c, pva, vp_stub_pg2);
+		tbl_ok = vp_read_tbl(mm, pva, vp_tbl_pg2);
+		if (!stub_ok || !tbl_ok) {
+			c->vp_raced++;
+			break;
+		}
+		if (uml_nt_vp_confirm(vp_stub_pg, vp_tbl_pg,
+				      vp_stub_pg2, vp_tbl_pg2,
+				      VP_PAGE_SIZE) ==
+		    UML_NT_VP_DIVERGED)
+			vp_fire_diverged(c, mm, pva, offs, sv, tv, nd);
+		else
+			c->vp_raced++;
+		break;
+	case UML_NT_VP_CLS_STUB_UNREAD:
+		vp_fire_unread(c, mm, pva, 1);
+		break;
+	case UML_NT_VP_CLS_TBL_UNREAD:
+		vp_fire_unread(c, mm, pva, 0);
+		break;
+	default:
+		break; /* gone everywhere: released by both sides */
+	}
+	/* the LEDGER-STRAY shape: a watched va with NO ledger view
+	 * whose page the stub READS fine — a mapping the ledger
+	 * does not own. */
+	for (k = 0; k < vp_nunl; k++) {
+		unsigned long long u = vp_unl[k];
+
+		if (u < pva || u >= pva + VP_PAGE_SIZE)
+			continue;
+		if (!stub_ok)
+			continue;
+		c->vp_divseen++;
+		if (vp_div_budget <= 0 ||
+		    vp_dedup_seen(c, VP_DD_STRAY, u))
+			continue;
+		vp_dedup_add(c, VP_DD_STRAY, u);
+		vp_div_budget--;
+		os_info("[viewprobe] pid %lu LEDGER-STRAY va=0x%llx — "
+			"readable through the stub, NO ledger view "
+			"covers it (park-nr=%llu nr=%llu ret=%lld) "
+			"budget=%d\n", (unsigned long)c->pid, u,
+			c->d->regs.rax, c->last_nr, c->last_ret,
+			vp_div_budget);
+		vp_fire_tail(c);
+	}
+}
+
+/* the pure bookkeeping check: the ledger view's backing offset vs
+ * the table's own translate of the same va. Zero stub reads. */
+static void vp_ledger_check(struct uml_nt_stub_conn *c,
+			     struct uml_nt_mm *mm,
+			     unsigned long long va)
+{
+	unsigned long long loff;
+	long long toff;
+	int vi;
+
+	vi = uml_nt_vp_view_find(c->views, c->nviews, va);
+	if (vi < 0) {
+		c->vp_unledgered++;
+		if (vp_nunl < VP_UNL_MAX)
+			vp_unl[vp_nunl++] = va;
+		return;
+	}
+	loff = uml_nt_vp_view_off(&c->views[vi], va);
+	toff = uml_nt_vma_translate(mm, va, 8);
+	if (toff >= 0 && loff == (unsigned long long)toff)
+		return;
+	vp_ledger_hit = 1;
+	c->vp_divseen++;
+	if (vp_div_budget <= 0 ||
+	    vp_dedup_seen(c, VP_DD_LEDGER, va))
+		return;
+	vp_dedup_add(c, VP_DD_LEDGER, va);
+	vp_div_budget--;
+	if (toff >= 0) {
+		os_info("[viewprobe] pid %lu LEDGER-DIVERGED va=0x%llx — "
+			"ledger view #%d [va=0x%llx len=0x%llx prot=0x%x "
+			"off=0x%llx] maps off=0x%llx (run 0x%llx) but "
+			"the table owns off=0x%llx (run 0x%llx) "
+			"(park-nr=%llu nr=%llu ret=%lld rip=0x%llx) "
+			"budget=%d\n",
+			(unsigned long)c->pid, va, vi,
+			c->views[vi].va, c->views[vi].len,
+			c->views[vi].prot, c->views[vi].off, loff,
+			loff & ~(unsigned long long)
+				(UML_NT_PHYS_RUN_SIZE - 1),
+			(unsigned long long)toff,
+			(unsigned long long)toff &
+			~(unsigned long long)
+				(UML_NT_PHYS_RUN_SIZE - 1),
+			c->d->regs.rax, c->last_nr, c->last_ret,
+			c->d->regs.rip, vp_div_budget);
+	} else {
+		os_info("[viewprobe] pid %lu LEDGER-DIVERGED va=0x%llx — "
+			"ledger view #%d [va=0x%llx len=0x%llx off=0x%llx] "
+			"holds it but the table translate FAILED "
+			"(park-nr=%llu nr=%llu ret=%lld rip=0x%llx) "
+			"budget=%d\n",
+			(unsigned long)c->pid, va, vi,
+			c->views[vi].va, c->views[vi].len,
+			c->views[vi].off, c->d->regs.rax, c->last_nr,
+			c->last_ret, c->d->regs.rip, vp_div_budget);
+	}
+	vp_fire_tail(c);
+}
+
+static void viewprobe_round(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_mm *mm = c->mm;
+	struct uml_nt_stub_data *d = c->d;
+	unsigned short counts[64];
+	unsigned long long entries[64];
+	struct uml_nt_tce_rd rd;
+	unsigned long long tva;
+	long long off;
+	int i, escalate = 0, nch, nplan = 0, npages, n_always, trunc = 0;
+
+	if (witness_off())
+		return;
+	if (!c->task_backed || mm == NULL || mm->heap_start == 0)
+		return;
+	if (c->proc == NULL)
+		return;
+	/* the same glibc shape gate as the tcache watches: the heap's
+	 * first chunk must be the tcache struct (size hdr 0x291). */
+	off = uml_nt_vma_translate(mm, mm->heap_start, 16);
+	if (off < 0)
+		return;
+	{
+		unsigned long long hdr = *(const unsigned long long *)
+			(const void *)((char *)uml_boot.physmem_base +
+				       off + 8);
+
+		if (hdr != 0x291)
+			return;
+	}
+	tva = mm->heap_start + 0x10;
+	off = uml_nt_vma_translate(mm, tva, 0x290);
+	if (off < 0)
+		return;
+	memcpy(counts, (const void *)(uintptr_t)
+	       ((char *)uml_boot.physmem_base + off), sizeof(counts));
+	memcpy(entries, (const void *)(uintptr_t)
+	       ((char *)uml_boot.physmem_base + off + 0x80),
+	       sizeof(entries));
+
+	c->vp_parks++;
+	vp_confirm_per_park = 16;
+	vp_nunl = 0;
+	vp_ledger_hit = 0;
+	if (c->vp_parks == 1 && vp_armed_budget > 0) {
+		vp_armed_budget--;
+		os_info("[viewprobe] armed pid %lu heap=[0x%llx,0x%llx) "
+			"tcache=0x%llx (park-nr=%llu nr=%llu ret=%lld)\n",
+			(unsigned long)c->pid, mm->heap_start,
+			mm->heap_end, tva, d->regs.rax, c->last_nr,
+			c->last_ret);
+	}
+
+	/* the walk: TABLE-side only, own snapshot — the watched chunk
+	 * set never depends on [tcekey]'s print budgets (which die
+	 * early; the tear forms at ~86k). The counts-mismatch
+	 * fingerprint escalates to the full page sweep this park. */
+	memset(&vp_snap, 0, sizeof(vp_snap));
+	rd.read = tce_read;
+	rd.ctx = mm;
+	for (i = 0; i < 64; i++) {
+		struct uml_nt_tce_bin wb;
+		unsigned int ncnt = counts[i];
+		unsigned long long ev = entries[i];
+		int d2;
+
+		if (ev == 0 && ncnt == 0)
+			continue;
+		uml_nt_tce_walk_bin(&rd, ev, mm->heap_start,
+				    mm->heap_end, i, &wb);
+		if (uml_nt_tce_counts_bad(ncnt, wb.walked, wb.capped))
+			escalate = 1;
+		for (d2 = 0; d2 < wb.walked; d2++)
+			(void)uml_nt_tce_record(&vp_snap, &wb.ch[d2]);
+	}
+	nch = vp_snap.n;
+	vp_ctx_tva = tva;
+	vp_ctx_nch = nch;
+	for (i = 0; i < nch; i++)
+		vp_cvas[i] = vp_snap.ch[i].va;
+
+	/* LEDGER CHECK: full coverage every park, zero stub reads —
+	 * the tcache struct, every listed chunk, the drained plan's
+	 * PROTECT/MAP op vas. */
+	vp_ledger_check(c, mm, tva);
+	for (i = 0; i < nch; i++)
+		vp_ledger_check(c, mm, vp_cvas[i]);
+	for (i = 0; i < c->vp_drain_nops && c->vp_drain_pm; i++) {
+		if (c->vp_drain_ops[i].op == UML_NT_FOP_PROTECT ||
+		    c->vp_drain_ops[i].op == UML_NT_FOP_MAP)
+			vp_ledger_check(c, mm, c->vp_drain_ops[i].va);
+	}
+
+	/* THE PAGE PROBE: through the stub's view vs the table's run. */
+	npages = uml_nt_vp_pageset(vp_cvas, nch, tva, c->vp_drain_ops,
+				   c->vp_drain_nops, vp_pages,
+				   VP_PAGES_MAX, &nplan);
+	if (npages > VP_PAGES_MAX) {
+		trunc = npages - VP_PAGES_MAX;
+		npages = VP_PAGES_MAX;
+	}
+	n_always = 1 + nplan;
+	if (escalate || vp_nunl > 0 || vp_ledger_hit) {
+		for (i = 0; i < npages; i++)
+			vp_probe_page(c, mm, vp_pages[i]);
+	} else {
+		unsigned long long pick[VP_RR_MAX];
+		int nrr, k;
+
+		for (i = 0; i < n_always && i < npages; i++)
+			vp_probe_page(c, mm, vp_pages[i]);
+		nrr = uml_nt_vp_rr_pick(
+			vp_pages + (n_always < npages ? n_always : npages),
+			npages > n_always ? npages - n_always : 0,
+			&c->vp_rr, pick, VP_RR_MAX);
+		for (k = 0; k < nrr; k++)
+			vp_probe_page(c, mm, pick[k]);
+	}
+
+	/* the drain record: whether a re-protect/MAP stream drained
+	 * since the previous park, and its ops. */
+	if (c->vp_drain_count > 0 && c->vp_drain_pm &&
+	    vp_drain_budget > 0) {
+		int k, o, shown = 0;
+
+		vp_drain_budget--;
+		os_info("[viewprobe-drain] pid %lu park sees %d drained "
+			"stream(s) since previous park (last retval=%d "
+			"nops=%d trunc=%d) park-nr=%llu nr=%llu "
+			"ret=%lld\n", (unsigned long)c->pid,
+			c->vp_drain_count, c->vp_drain_retval,
+			c->vp_drain_nops,
+			c->vp_drain_total - c->vp_drain_nops,
+			d->regs.rax, c->last_nr, c->last_ret);
+		for (o = 0; o < 3 && vp_drain_budget > 0; o++) {
+			char line[200];
+			int len = 0;
+
+			line[0] = 0;
+			for (k = 0; k < 3; k++) {
+				const struct uml_nt_fault_op *op;
+
+				if (shown >= c->vp_drain_nops)
+					break;
+				op = &c->vp_drain_ops[shown++];
+				len += snprintf(line + len,
+						sizeof(line) - (unsigned)len,
+						" o=%u p=0x%x va=0x%llx"
+						" l=0x%llx off=0x%llx",
+						op->op, op->prot, op->va,
+						op->len, op->off);
+				if (len < 0)
+					break;
+			}
+			if (len <= 0)
+				break;
+			vp_drain_budget--;
+			os_info("[viewprobe-drain]   ops:%s\n", line);
+		}
+	}
+	/* census every 4096 parks: the explicit zero (the witness
+	 * ran, nothing diverged, budgets alive). */
+	if ((c->vp_parks & 0xfffull) == 0 && vp_census_budget > 0) {
+		vp_census_budget--;
+		os_info("[viewprobe] census pid %lu parks=%llu "
+			"chunks=%d pages=%d trunc=%d probed=%llu "
+			"raced=%llu expected=%llu unledgered=%llu "
+			"divseen=%llu budget=%d unread=%d drain=%d "
+			"(park-nr=%llu nr=%llu ret=%lld)\n",
+			(unsigned long)c->pid, c->vp_parks, nch, npages,
+			trunc, c->vp_probed, c->vp_raced, c->vp_expected,
+			c->vp_unledgered, c->vp_divseen, vp_div_budget,
+			vp_unread_budget, vp_drain_budget, d->regs.rax,
+			c->last_nr, c->last_ret);
+	}
+	/* consume the drain record: the next window starts here. */
+	c->vp_drain_count = 0;
+	c->vp_drain_pm = 0;
+	c->vp_drain_retval = 0;
+	c->vp_drain_nops = 0;
+	c->vp_drain_total = 0;
+}
+
 static void claim_audit(void)
 {
 	static unsigned char claims[2048];
@@ -4398,6 +5032,11 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		/* K6 [cowrace]: the copy-vs-in-flight-store witness's
 		 * check pass — syscall parks only, same hook point. */
 		cowrace_round(c);
+		/* K6 [viewprobe]: the stub-view-vs-table witness —
+		 * syscall parks only, same hook point. Read-only
+		 * (ReadProcessMemory on the parked stub): no ss/TF,
+		 * no DR, no page protects, nothing at fault parks. */
+		viewprobe_round(c);
 	}
 
 	/* The all-faults resume watchdog: the previous fault's answer
@@ -4511,6 +5150,34 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			return 0;
 		}
 		c->plan_left = 0;
+		/* K6 [viewprobe]: the DRAIN RECORD — a stream drained
+		 * (every op applied). The park pass reports whether a
+		 * re-protect/MAP stream drained since the conn's
+		 * previous syscall park, with its ops (the run-B
+		 * formation window showed exactly a 2-op [fork-sync]
+		 * re-protect drain beside the COW copy of the
+		 * ADJACENT run). Bookkeeping only — no guest state. */
+		if (c->plan.n_ops > 0) {
+			int k;
+
+			c->vp_drain_count++;
+			c->vp_drain_retval = c->plan_has_retval;
+			c->vp_drain_total = c->plan.n_ops;
+			c->vp_drain_nops =
+				c->plan.n_ops > UML_NT_VP_DRAIN_OPS ?
+				UML_NT_VP_DRAIN_OPS : c->plan.n_ops;
+			memcpy(c->vp_drain_ops, c->plan.ops,
+			       sizeof(c->vp_drain_ops[0]) *
+			       (unsigned)c->vp_drain_nops);
+			for (k = 0; k < c->plan.n_ops; k++)
+				if (c->plan.ops[k].op ==
+					UML_NT_FOP_PROTECT ||
+				    c->plan.ops[k].op ==
+					UML_NT_FOP_MAP) {
+					c->vp_drain_pm = 1;
+					break;
+				}
+		}
 		/* K6 (cowcopy-race-class-fix): the swap's COMPLETION
 		 * guard — a plan that re-homed ranges must leave NO
 		 * mapping over them outside the issued-view ledger.
