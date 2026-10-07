@@ -2352,9 +2352,12 @@ int uml_nt_release_mapped_scan(long long off, int nruns)
 				continue;
 			/* ledger hit — confirm against the OS: the
 			 * region at the view base must still be a
-			 * mapping (anything but MEM_FREE; a NOACCESS
-			 * view still owns the section slot — a store
-			 * through it the moment it re-protects). */
+			 * mapping (anything but free; a NOACCESS view
+			 * still owns the section slot — a store
+			 * through it the moment it re-protects).
+			 * Raw constants per the file's convention
+			 * (freestanding, no windows.h): State
+			 * 0x10000 = MEM_FREE, 0x1000 = MEM_COMMIT. */
 			{
 				MEMORY_BASIC_INFORMATION mbi;
 				SIZE_T got;
@@ -2380,7 +2383,7 @@ int uml_nt_release_mapped_scan(long long off, int nruns)
 					}
 					return 1;
 				}
-				if (mbi.State != MEM_FREE) {
+				if (mbi.State != 0x10000 /* MEM_FREE */) {
 					if (holder_budget > 0) {
 						holder_budget--;
 						os_info("[release-gate] "
