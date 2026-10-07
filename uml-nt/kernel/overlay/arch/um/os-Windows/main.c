@@ -85,6 +85,15 @@ void nt_main(struct uml_boot_info *bi)
 	 * with the phys gen + the current table translate at write). */
 	uml_nt_flatwr_uacc_hook = uml_nt_flatwr_uacc_fixup;
 
+	/* K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 /
+	 * dlX 37579340518 — the RETIRE-LOST verdict): the RELEASE GATE
+	 * — a block that reached refs==0 must not go back to the
+	 * backend while ANY stub view (view ledger, VirtualQueryEx
+	 * confirmed) still maps it. The refusal is loud and the park
+	 * rides; see physalloc.h and stub_ctl.c
+	 * uml_nt_release_mapped_scan. */
+	uml_nt_phys_mapped_probe = uml_nt_release_mapped_scan;
+
 	linux_main(uml_boot.argc, uml_boot.argv, uml_boot.envp);
 
 	/* linux_main runs start_uml() → start_kernel() → (M1) panic

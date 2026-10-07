@@ -183,6 +183,13 @@ void uml_nt_kheap_sync(const struct uml_nt_kheap_piece *pcs, int n);
  * ("alloc over a live run", the heap-trasher family). Log-only. */
 void uml_nt_alloc_alias_scan(long long off, int nruns);
 
+/* stub_ctl.c (M5.6a, feature cowcopy-race-class-fix): the RELEASE
+ * GATE probe's kernel answer (pinned by main.c into
+ * uml_nt_phys_mapped_probe, physalloc.h) — 1 while any live conn's
+ * view LEDGER (VirtualQueryEx-confirmed) still maps [off, off+
+ * nruns*RUN); a release that answers 1 refuses loud. */
+int uml_nt_release_mapped_scan(long long off, int nruns);
+
 /* skas/uaccess.c (M5.6a [deadwrite], lead 115): arm the destroy-path
  * writeback witness. While armed, EVERY translate-then-write (raw_
  * copy_to_user / clear_user / futex atomics) landing in the dying

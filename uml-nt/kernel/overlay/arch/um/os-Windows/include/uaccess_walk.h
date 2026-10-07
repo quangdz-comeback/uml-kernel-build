@@ -473,6 +473,15 @@ int uml_nt_cowrace_class(int refs_now, int n_mappers);
 int uml_nt_cowrace_maps_run(const struct uml_nt_mm *mm,
 			    unsigned long long src_off);
 
+/* K6 (M5.6a, feature cowcopy-race-class-fix, dlW/dlX RETIRE-LOST):
+ * the release gate's backing-intersection predicate — 1 when the
+ * stub view [view_off, view_off+view_len) maps any byte of the run
+ * range [run_off, run_off+nruns*RUN), 0 otherwise (adjacency is
+ * not coverage). Pure logic, host-tested in test_uaccess.c. */
+int uml_nt_view_maps_span(unsigned long long view_off,
+			  unsigned long long view_len,
+			  long long run_off, int nruns);
+
 /* ---- K6 [viewprobe] (M5.6a, feature viewprobe-witness) — the
  * stub-view-vs-table witness's pure diff/classify logic. stub_ctl.c
  * owns the reads (ReadProcessMemory on the parked stub + the flat

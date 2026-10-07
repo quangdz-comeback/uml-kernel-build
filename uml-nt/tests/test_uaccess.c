@@ -95,6 +95,7 @@ static void test_tce_helpers(void);
 static void test_cowrace_helpers(void);
 static void test_viewprobe_helpers(void);
 static void test_flatwr_helpers(void);
+static void test_view_maps_span(void);
 
 int main(void)
 {
@@ -245,6 +246,14 @@ int main(void)
 	 * gen) captured at translate time with the phys gen and the
 	 * CURRENT table translate at write time. */
 	test_flatwr_helpers();
+
+	/* K6 (feature cowcopy-race-class-fix, dlW/dlX RETIRE-LOST): the
+	 * release gate's backing-intersection predicate — a stub view
+	 * [off, off+len) maps the run range iff the two intersect;
+	 * adjacency is NOT coverage (the fault-path COW's pre/post
+	 * pieces back the old span's OTHER runs — they must not hold
+	 * the dead block's release). */
+	test_view_maps_span();
 
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
@@ -1535,4 +1544,40 @@ static void test_flatwr_helpers(void)
 				 &cursor, &rec) == 0);
 	CHECK(count == UML_NT_FLATWR_N);
 	CHECK(ring[0].off == 0xdead000);
+}
+
+/* K6 (feature cowcopy-race-class-fix, dlW 37576991123 / dlX
+ * 37579340518): the release gate's backing-intersection predicate —
+ * the stub view [off, off+len) maps the run range [run, run+nruns*
+ * RUN) iff the two byte ranges INTERSECT. Pure logic; the drain-side
+ * census covers VA ranges, this covers BACKING identity (a view may
+ * map an abandoned backing from anywhere in the VA space). */
+static void test_view_maps_span(void)
+{
+	/* exact containment: the view IS the run */
+	CHECK(uml_nt_view_maps_span(0x300000, RUN, 0x300000, 1) == 1);
+	/* a multi-run block with the view covering exactly it */
+	CHECK(uml_nt_view_maps_span(0x300000, 4 * RUN, 0x300000, 4) == 1);
+	/* the view is bigger, the run inside it (a whole-span view over
+	 * one of its runs — the brk heap view) */
+	CHECK(uml_nt_view_maps_span(0x300000, 8 * RUN, 0x340000, 1) == 1);
+	/* partial overlaps on either side */
+	CHECK(uml_nt_view_maps_span(0x300000, 2 * RUN, 0x310000, 1) == 1);
+	CHECK(uml_nt_view_maps_span(0x308000, RUN, 0x310000, 1) == 1);
+	/* adjacency is NOT coverage: the fault-path COW's pre piece
+	 * ends where the source run begins — it backs the old span's
+	 * OTHER runs and must not hold the dead block's release */
+	CHECK(uml_nt_view_maps_span(0x300000, RUN, 0x310000, 1) == 0);
+	CHECK(uml_nt_view_maps_span(0x310000, RUN, 0x300000, 1) == 0);
+	/* far apart */
+	CHECK(uml_nt_view_maps_span(0x300000, RUN, 0x900000, 1) == 0);
+	/* the run range's END boundary is exclusive */
+	CHECK(uml_nt_view_maps_span(0x310000, RUN, 0x300000, 1) == 0);
+	CHECK(uml_nt_view_maps_span(0x30fff8, 8, 0x310000, 1) == 0);
+	CHECK(uml_nt_view_maps_span(0x30fff8, 16, 0x310000, 1) == 1);
+	/* bad shapes: never covered (fail-safe: a bogus view cannot
+	 * hold a release) */
+	CHECK(uml_nt_view_maps_span(0, 0, 0x300000, 1) == 0);
+	CHECK(uml_nt_view_maps_span(0x300000, RUN, -1, 1) == 0);
+	CHECK(uml_nt_view_maps_span(0x300000, RUN, 0x300000, 0) == 0);
 }

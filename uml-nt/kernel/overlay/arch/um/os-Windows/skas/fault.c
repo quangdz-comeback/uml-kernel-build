@@ -688,3 +688,37 @@ int uml_nt_fault_augment_release_set(struct uml_nt_fault_plan *plan,
 	return inserted;
 }
 
+/* K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 / dlX
+ * 37579340518 — the RETIRE-LOST verdict): the deferred-copy
+ * decision. The fault-path COW copy AND the brk re-home bulk copy
+ * (stub_ctl.c's conn descriptor, kind 2) run at the teardown/re-map
+ * boundary of their own plan's drain (see fault.h's block comment):
+ * NOT while release ops still stream — every release of the source's
+ * views must have applied before the snapshot is taken. The caller
+ * owns the "a copy is pending" gate (serve_conn's drain hook:
+ * copy_pend_kind != 0 — the brk plan carries no plan-level copy
+ * directive); this predicate answers only WHEN: due once the next
+ * op to issue is not a release (the re-MAP phase begins — the
+ * plan's release ops all precede its re-MAPs, uml_nt_fault_augment_
+ * release_set's insertion order) or at drain end (the fallback).
+ * Pure logic, host-tested in test_mm.c (test_copy_due). */
+int uml_nt_fault_copy_due(const struct uml_nt_fault_plan *plan,
+			  int plan_next)
+{
+	if (plan == (const struct uml_nt_fault_plan *)0 ||
+	    plan->n_ops == 0)
+		return 0;
+	if (plan_next >= plan->n_ops)
+		return 1;  /* every op issued/applied — the drain-end
+			    * fallback (a copy plan with no re-MAPs is
+			    * degenerate, but the copy must still run
+			    * before the guest resumes) */
+	if (plan->ops[plan_next].op == UML_NT_FOP_UNMAP)
+		return 0;  /* a release is still queued at this index:
+			    * the source view teardown is not done */
+	return 1;     /* the re-MAP phase begins: every release has
+		       * applied (the plan's op stream confirms one op
+		       * per round-trip) — copy NOW, before any new
+		       * view of the source's range issues */
+}
+

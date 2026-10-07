@@ -48,6 +48,30 @@ struct uml_nt_stub_conn {
 	/* plan runner: ops stream one round-trip each */
 	struct uml_nt_fault_plan plan;
 	int plan_next, plan_left;
+	/* K6 (M5.6a, cowcopy-race-class-fix, dlW 37576991123 / dlX
+	 * 37579340518 — the RETIRE-LOST verdict): the DEFERRED COPY
+	 * descriptor. Every cowcopy/re-home copy the kernel owns —
+	 * the fault-path COW repair (kind 1: the plan's copy
+	 * directive is the descriptor) and the brk re-home bulk copy
+	 * (kind 2: src/dst/len/va/gens below) — is DEFERRED to the
+	 * teardown/re-map boundary of ITS OWN plan's drain (fault.c
+	 * uml_nt_fault_copy_due decides when; stub_ctl.c
+	 * deferred_copy_exec is the how): the copy runs after every
+	 * release op of the plan applied (the conn's view of the
+	 * source is torn down — no window in which the table says
+	 * dst while the conn's view still maps src at copy time,
+	 * and late stores ride into the live backing instead of
+	 * retiring lost) and before the first re-MAP issues (the
+	 * new views cannot race the snapshot). Set at the decision
+	 * round (fault round / sys_brk); consumed once at the drain
+	 * boundary. kzalloc init = 0/none. */
+	int copy_pend_kind; /* 0 = none, 1 = fault COW, 2 = brk re-home */
+	unsigned long long copy_pend_src;
+	unsigned long long copy_pend_dst;
+	unsigned long long copy_pend_len; /* 0 = none */
+	unsigned long long copy_pend_va;  /* fault: the fault va base; brk: heap_start */
+	unsigned long long copy_pend_gsrc; /* gens captured at the decision */
+	unsigned long long copy_pend_gdst;
 	/* K6 (M5.6a, cowcopy-race-class-fix): the per-conn VIEW LEDGER
 	 * — every stub view this conn's op stream has issued (recorded
 	 * at MAP issue in stub_ctl.c issue_plan_op, retired at UNMAP

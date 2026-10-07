@@ -17,6 +17,11 @@ uml_nt_phys_event_fn uml_nt_phys_event = (uml_nt_phys_event_fn)0;
 uml_nt_alloc_alias_fn uml_nt_alloc_alias_probe =
 	(uml_nt_alloc_alias_fn)0;
 
+/* K6 (M5.6a, cowcopy-race-class-fix): the RELEASE GATE probe
+ * (physalloc.h) — NULL in unit tests, pinned by main.c. */
+uml_nt_phys_mapped_fn uml_nt_phys_mapped_probe =
+	(uml_nt_phys_mapped_fn)0;
+
 /* [zero] hook — pinned by main.c (the flat view), NULL in unit
  * tests (they mock the backend and own no physmem). */
 uml_nt_phys_zero_fn uml_nt_phys_zero_hook = (uml_nt_phys_zero_fn)0;
@@ -153,12 +158,39 @@ int uml_nt_phys_ref(struct uml_nt_phys *p, long long off)
 }
 
 /* D22: backend hand-back + table clear, shared by the immediate
- * drop (untagged owner) and the quarantine release (settle/spill). */
-static void block_release(struct uml_nt_phys *p, int o, const void *owner)
+ * drop (untagged owner), the quarantine release (settle/spill).
+ * K6 (M5.6a, cowcopy-race-class-fix, dlW 37576991123 / dlX
+ * 37579340518 — the RETIRE-LOST verdict): the RELEASE GATE. A block
+ * may go back to the backend only when NO stub view still maps it —
+ * not merely when refs/gen allow it. A mapping over a refs==0 run is
+ * a view of a backing no table owns (the dl26 conviction class: the
+ * conn's stale writable view serving stores into the abandoned
+ * source); handing the block back would let the backend re-hand it
+ * under that mapping — the free-while-mapped alias, with the pool's
+ * handout ZEROING wiping whatever the stale view still serves. On a
+ * gate refusal: the "release-refused" event fires (loud, budgeted at
+ * the logger) and the block is NOT released — the park rides (the
+ * owner's next settle retries), or the immediate path holds the
+ * block dead in the table (never re-handed — a loud leak is safe,
+ * a recycle under a live mapping is the alias). Returns 0 released,
+ * -1 refused. */
+static int block_release(struct uml_nt_phys *p, int o, const void *owner)
 {
 	int n = p->span_len[o];
 	int k;
 
+	if (n <= 0)
+		return 0;
+	if (uml_nt_phys_mapped_probe != (uml_nt_phys_mapped_fn)0 &&
+	    uml_nt_phys_mapped_probe(
+		    (long long)o * UML_NT_PHYS_RUN_SIZE, n) == 1) {
+		if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
+			uml_nt_phys_event("release-refused",
+					  (long long)o *
+						UML_NT_PHYS_RUN_SIZE,
+					  n, 0, owner);
+		return -1;
+	}
 	uml_nt_phys_backend_free(p->pages[o], n);
 	if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
 		uml_nt_phys_event("free",
@@ -176,25 +208,37 @@ static void block_release(struct uml_nt_phys *p, int o, const void *owner)
 		 * D12 pieces) — the false-positive class referee
 		 * 37109883909 caught. */
 	}
+	return 0;
 }
 
 /* D22 quarantine: park a fully-dropped block for its owner's settle.
  * Ring full = spill the OLDEST entry (bounded memory; a degenerate
- * alias window, loud through the hook). */
-static void block_park(struct uml_nt_phys *p, int o, const void *owner)
+ * alias window, loud through the hook). K6: the spill goes through
+ * the RELEASE GATE too — spilling a still-mapped block would re-hand
+ * it under the mapping; on refusal the NEW arrival is held dead in
+ * the table (loud leak, never the alias). Returns 0 parked, -1
+ * refused (the caller holds the block dead). */
+static int block_park(struct uml_nt_phys *p, int o, const void *owner)
 {
 	int n = p->span_len[o];
 	int k;
 
 	if (p->npark == UML_NT_PHYS_PARK_MAX) {
+		if (block_release(p,
+				  p->park[0].off >> UML_NT_PHYS_RUN_SHIFT,
+				  p->park[0].owner) < 0) {
+			if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
+				uml_nt_phys_event("park-refused",
+						  (long long)o *
+						UML_NT_PHYS_RUN_SIZE,
+						  n, 0, owner);
+			return -1;
+		}
 		if (uml_nt_phys_event != (uml_nt_phys_event_fn)0)
 			uml_nt_phys_event("park-spill",
 					  p->park[0].off,
 					  p->park[0].nruns, 0,
 					  p->park[0].owner);
-		block_release(p,
-			      p->park[0].off >> UML_NT_PHYS_RUN_SHIFT,
-			      p->park[0].owner);
 		for (k = 1; k < p->npark; k++)
 			p->park[k - 1] = p->park[k];
 		p->npark--;
@@ -207,6 +251,7 @@ static void block_park(struct uml_nt_phys *p, int o, const void *owner)
 		uml_nt_phys_event("park",
 				  (long long)o * UML_NT_PHYS_RUN_SIZE,
 				  n, 0, owner);
+	return 0;
 }
 
 /* Drop one run to 0 and release its block when the LAST run of the
@@ -245,10 +290,20 @@ int uml_nt_phys_unref_for(struct uml_nt_phys *p, long long off,
 		if (p->refs[o + k] != 0)
 			return 0; /* block still referenced — keep it */
 	}
-	if (conn != (const void *)0)
-		block_park(p, o, conn);
-	else
-		block_release(p, o, (const void *)0);
+	if (conn != (const void *)0) {
+		/* K6: a park refusal (ring full + the spill's release
+		 * gate-refused) holds the block dead in the table —
+		 * refs==0, span bookkeeping intact, never re-handed
+		 * (the buddy never saw it back). Loud through the
+		 * hook; never the alias. */
+		(void)block_park(p, o, conn);
+	} else {
+		/* K6: the gate refuses the immediate hand-back too —
+		 * the block stays out of the backend (the same held-
+		 * dead state; no park, no retry: nothing outside a
+		 * dispatch can have pending plan ops). */
+		(void)block_release(p, o, (const void *)0);
+	}
 	return 0;
 }
 
@@ -263,12 +318,18 @@ void uml_nt_phys_settle(struct uml_nt_phys *p, const void *owner)
 
 	/* block_release keys off the OWNER run index; parks store byte
 	 * offsets. Matching entries release in park order; the array
-	 * compacts and the loop re-examines the shifted slot. */
+	 * compacts and the loop re-examines the shifted slot. K6: a
+	 * RELEASE GATE refusal keeps the park (the mapping is still
+	 * live) — the next settle retries; a refused release never
+	 * skips past a later entry (the loop re-examines the slot). */
 	for (i = 0; i < p->npark; i++) {
 		if (p->park[i].owner != owner)
 			continue;
-		block_release(p, p->park[i].off >> UML_NT_PHYS_RUN_SHIFT,
-			      owner);
+		if (block_release(p, p->park[i].off >> UML_NT_PHYS_RUN_SHIFT,
+				  owner) < 0)
+			continue; /* the park RIDES (no compaction): the
+				   * for's i++ walks past it — the next
+				   * settle retries */
 		for (k = i + 1; k < p->npark; k++)
 			p->park[k - 1] = p->park[k];
 		p->npark--;

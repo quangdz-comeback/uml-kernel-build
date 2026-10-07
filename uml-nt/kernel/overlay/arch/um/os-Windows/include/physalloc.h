@@ -166,6 +166,16 @@ unsigned long long uml_nt_phys_gen(struct uml_nt_phys *p, long long off);
  *   "park-spill"    — the quarantine ring overflowed; the OLDEST
  *                     parked block released early (bounded memory —
  *                     a degenerate alias window, loud)
+ *   "release-refused" — the RELEASE GATE (K6 cowcopy-race-class-fix)
+ *                     refused a backend hand-back: a stub view still
+ *                     maps the block (the dl26/dlW/dlX stale-view
+ *                     class). The park rides; the next settle
+ *                     retries. Never a silent recycle.
+ *   "park-refused"   — the ring overflowed AND the spill's release
+ *                     was gate-refused: the NEW arrival is held dead
+ *                     in the table (never re-handed; a loud leak is
+ *                     safe, a recycle under a live mapping is the
+ *                     alias)
  *   "free"          — a block returned to the backend (at settle/
  *                     spill/untagged-drop time; off = base)
  *   "unref-refused" — an unref on a 0-ref run: an unbalanced claim
@@ -193,6 +203,30 @@ extern uml_nt_phys_event_fn uml_nt_phys_event;
  * main.c. */
 typedef void (*uml_nt_alloc_alias_fn)(long long off, int nruns);
 extern uml_nt_alloc_alias_fn uml_nt_alloc_alias_probe;
+
+/* K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 / dlX
+ * 37579340518 — the RETIRE-LOST verdict): the RELEASE GATE probe.
+ * A block that reached refs==0 must not go back to the backend
+ * (release → recycle) while ANY stub view still maps it: a mapping
+ * over a table-less run is exactly the dl26/dlW/dlX conviction class
+ * (a store through it lands in a backing nobody owns — the lost
+ * tcache_put pair — and the run then retires as a "dead backing"
+ * with the store unaccounted). The pure layer consults the probe at
+ * the ONE backend hand-back choke point (block_release: the
+ * immediate drop, the settle, the park spill); 1 = a live mapping
+ * covers [off, off+nruns*RUN) → the release REFUSES loud (the
+ * "release-refused" event) and the park rides (the owner's next
+ * settle retries — a leaked block is safe, a recycled-under-mapping
+ * block is the free-while-mapped alias). 0 = nothing maps it.
+ * The kernel's answer (stub_ctl.c uml_nt_release_mapped_scan) walks
+ * 9a56286's per-conn view LEDGERS (backing-identity intersection,
+ * uaccess_walk.c uml_nt_view_maps_span) and CONFIRMS each candidate
+ * with VirtualQueryEx — a dead conn's views die with its process,
+ * so a ledger entry whose region is gone must not hold a release.
+ * NULL in the Linux CI unit test (the mock backend owns the
+ * semantics; test_mm.c test_release_gate drives the refusal). */
+typedef int (*uml_nt_phys_mapped_fn)(long long off, int nruns);
+extern uml_nt_phys_mapped_fn uml_nt_phys_mapped_probe;
 
 /* Handout zeroing (M5.6a, the zero-page contract): guest RAM is one
  * pagefile-backed NT section and recycled runs carry the last

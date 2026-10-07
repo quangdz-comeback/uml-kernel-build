@@ -926,6 +926,30 @@ int uml_nt_cowrace_maps_run(const struct uml_nt_mm *mm,
 	return 0;
 }
 
+/* K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 / dlX
+ * 37579340518 — the RETIRE-LOST verdict): the release gate's
+ * backing-intersection predicate. A stub view [off, off+len) maps
+ * the run range [run_off, run_off + nruns*RUN) iff the two byte
+ * ranges intersect. The drain-side census (view_swap_guard) walks
+ * released VA ranges; this walks BACKING identity — a view may map
+ * an abandoned backing from anywhere in the VA space, and the
+ * fault-path COW's pre/post pieces (which back the old span's OTHER
+ * runs, ending exactly where the source run begins) must NOT hold
+ * the dead block's release. Pure logic, host-tested in
+ * test_uaccess.c (test_view_maps_span). */
+int uml_nt_view_maps_span(unsigned long long view_off,
+			  unsigned long long view_len,
+			  long long run_off, int nruns)
+{
+	unsigned long long rlo, rhi;
+
+	if (run_off < 0 || nruns <= 0 || view_len == 0)
+		return 0;
+	rlo = (unsigned long long)run_off;
+	rhi = rlo + (unsigned long long)nruns * UML_NT_PHYS_RUN_SIZE;
+	return view_off < rhi && rlo < view_off + view_len;
+}
+
 /* ---- K6 [flatwr] (M5.6a, feature flatwrite-retire-witness) — the
  * kernel-flat-write staleness witness's pure helpers. See
  * uaccess_walk.h for the protocol; stub_ctl.c owns the ring, the

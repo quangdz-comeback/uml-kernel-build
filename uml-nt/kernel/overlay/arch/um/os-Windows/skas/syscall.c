@@ -265,14 +265,18 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 			return mm->brk;
 		}
 		/* WRITER-HUNT (M5.6a): the re-home is a bulk fill of
-		 * old_len bytes into the fresh span — both ends must
-		 * stay inside their own allocated blocks. On a check
-		 * failure keep the old brk (Linux failure semantics,
-		 * same shape as the exhausted path above) — the log
-		 * names the side that crossed. */
+		 * old_len bytes into the fresh span — the WRITE side
+		 * (fresh, refs>0 by the table) must stay inside its
+		 * own allocated block at the decision. The READ side's
+		 * check moved with the copy (below): deferred, the
+		 * src legitimately parks/0-refs mid-drain after its
+		 * unref — a refs-based check there would false-kill
+		 * the legal drop; the src's liveness proof at the
+		 * copy is its GEN. On a check failure keep the old
+		 * brk (Linux failure semantics, same shape as the
+		 * exhausted path above) — the log names the side that
+		 * crossed. */
 		if (uml_nt_phys_block_check(c->ph, (long long)new_off,
-					    old_len) < 0 ||
-		    uml_nt_phys_block_check(c->ph, (long long)old_off,
 					    old_len) < 0) {
 			os_info("[fillguard] brk re-home old=0x%llx "
 				"new=0x%llx len=%llu: block check "
@@ -280,43 +284,40 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 				new_off, old_len, mm->brk);
 			return mm->brk;
 		}
-		/* K6 [flatwr] (feature flatwrite-retire-witness): the
-		 * re-home copy is a bulk kernel flat write of guest
-		 * content — capture both ends' gens at the decision; at
-		 * write time the table must STILL translate the heap va
-		 * to the old span (the swap applies after the copy) and
-		 * both gens must be intact. Bookkeeping only. */
+		/* K6 (M5.6a, feature cowcopy-race-class-fix, dlW
+		 * 37576991123 / dlX 37579340518 — the RETIRE-LOST
+		 * verdict): the re-home COPY is DEFERRED to the
+		 * teardown/re-map boundary of the op stream queued
+		 * below (stub_ctl.c brk_rehome_copy_exec, conn kind
+		 * 2) — the class fix's view-swap serialization: the
+		 * old view's UNMAP applies first, the copy rides AFTER
+		 * it and BEFORE the new MAP issues, so no window
+		 * exists in which the table says the new span while
+		 * the guest's writable view still maps the old one,
+		 * and stores landing in the old span during the
+		 * release phase are INCLUDED in the copy (they ride
+		 * into the live backing instead of retiring lost with
+		 * the abandoned source — the 16-fires/run chain where
+		 * each src is the previous arm's dst). The [flatwr]
+		 * BRK_FILL captures and the [cowrace] arm move with
+		 * the copy (t0 = the snapshot the live backing was
+		 * actually built from). The gens captured HERE are
+		 * the src's liveness proof at the deferred copy: a
+		 * gen move under the drain means the src re-handed —
+		 * the exec refuses loud, never a zeroed-heap resume. */
 		{
-			unsigned long long gs = (unsigned long long)
+			c->copy_pend_kind = 2;
+			c->copy_pend_src = old_off;
+			c->copy_pend_dst = new_off;
+			c->copy_pend_len = old_len;
+			c->copy_pend_va = mm->heap_start;
+			c->copy_pend_gsrc = (unsigned long long)
 				uml_nt_phys_gen(c->ph,
 						(long long)old_off);
-			unsigned long long gd = (unsigned long long)
+			c->copy_pend_gdst = (unsigned long long)
 				uml_nt_phys_gen(c->ph,
 						(long long)new_off);
-
-			uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_BRK_FILL,
-					    mm->heap_start, old_len, old_off,
-					    gs, (long long)old_off);
-			uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_BRK_FILL,
-					    mm->heap_start, old_len, new_off,
-					    gd, (long long)old_off);
 		}
-		uml_nt_copy_verify((char *)uml_boot.physmem_base + new_off,
-				   (const char *)uml_boot.physmem_base +
-								   old_off,
-				   old_len, "brk-rehome-fill");
-		/* 098 δ: the re-home reads the OLD heap runs (possibly
-		 * cowwatch-armed: the sharers' data) and writes the
-		 * fresh span — census both ends. */
-		uml_nt_cowwatch_touch(old_off, old_len, "brk-rehome-src");
-		uml_nt_cowwatch_touch(new_off, old_len, "brk-rehome-dst");
-		/* K6 [cowrace]: the copy-vs-in-flight-store witness's
-		 * arm at the re-home (feature cowcopy-race-witness) —
-		 * the t0 hash both ends share + the RUNNING sharers of
-		 * the old span; the check pass runs at the next
-		 * syscall parks. */
-		uml_nt_cowrace_arm(c, old_off, new_off, old_len,
-				   mm->heap_start, "brk-rehome");
 
 		if (uml_nt_vma_del(mm, mm->heap_start, old_end) < 0 ||
 		    uml_nt_vma_add_gen(mm, mm->heap_start, new_end,
@@ -331,6 +332,13 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 					   (unsigned long long)
 					   uml_nt_phys_gen(c->ph,
 							   old_off));
+			/* K6: the deferred-copy arm dies with the
+			 * re-home it described — no op stream will
+			 * ever drain it, and a stale arm would fire on
+			 * a LATER plan's drain with a freed dst (the
+			 * exec's dst block check would then KILL a
+			 * healthy conn). */
+			c->copy_pend_kind = 0;
 			for (i = 0; i < nruns; i++)
 				uml_nt_phys_unref(c->ph,
 						  (long long)new_off +

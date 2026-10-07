@@ -755,8 +755,13 @@ static int cowrace_arm_budget = 128;
 static int cowrace_fire_budget = 32;
 static int cowrace_shared_budget = 16;
 static int cowrace_ret_budget = 16;
-static int cowrace_retlost_budget = 16; /* RETIRE-LOST fires (the
-	* release-time src-vs-t0 diff — dlV's blind spot) */
+static int cowrace_retlost_budget = 64; /* RETIRE-LOST fires (the
+	* release-time src-vs-t0 diff — dlV's blind spot). K6
+	* (cowcopy-race-class-fix): raised 16→64 — the verdict runs
+	* measured 16 fires/referee BUDGET-CAPPED, so the true
+	* population was invisible; the fix's acceptance is 0
+	* RETIRE-LOST on heap, and a wide-open budget is the only
+	* way "0" is evidence rather than truncation. */
 static int cowrace_arm_said, cowrace_hash_said;
 
 /* Live conns whose mm maps the run at src_off (the vma backing span
@@ -2278,6 +2283,128 @@ void uml_nt_alloc_alias_scan(long long off, int nruns)
 			}
 		}
 	}
+}
+
+/* K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 / dlX
+ * 37579340518 — the RETIRE-LOST verdict): the RELEASE GATE's answer
+ * (pinned by main.c into uml_nt_phys_mapped_probe). "Does ANY stub
+ * view still map [off, off+nruns*RUN)?" — a release that answers yes
+ * REFUSES: recycling a section range a view still covers is exactly
+ * the verdict's class (a guest store lands in the abandoned source
+ * after the copy, the run retires as a "dead backing", and the
+ * recycled run re-hands those bytes to the next tenant — the lost
+ * tcache_put pair, 16 RETIRE-LOST fires per referee run).
+ *
+ * Instruments, both, per the class fix: (1) 9a56286's per-conn view
+ * LEDGERS (every MAP op issued is tracked; backing-identity
+ * intersection via uml_nt_view_maps_span — adjacency is not
+ * coverage, a pre/post-COW neighbour piece must not hold a
+ * release); (2) VirtualQueryEx CONFIRMS each ledger hit on the
+ * owning stub's own process handle — the OS is the ground truth for
+ * whether a store can still land (a dead conn's views die with its
+ * process, and a ledger entry whose region is gone — released, or
+ * the process died between the ledger walk and the query — must not
+ * hold a release forever; the query returning an error still
+ * REFUSES: fail-safe, a leaked block is safe, a recycled-under-
+ * mapping block is the corruption). The walk mirrors the alias
+ * census: the pump owns the one vCPU thread, so the task list
+ * cannot mutate under it. Log-capped: the refusal itself is the
+ * physalloc "release-refused" event; this names the HOLDER (once
+ * per budget) so a referee decode sees whose view held the block.
+ */
+int uml_nt_release_mapped_scan(long long off, int nruns)
+{
+	static int holder_budget = 16;
+	struct task_struct *p;
+	unsigned long long lo = (unsigned long long)off;
+	unsigned long long span = (unsigned long long)nruns *
+				  UML_NT_PHYS_RUN_SIZE;
+
+	if (off < 0 || nruns <= 0)
+		return 0;
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		int wi;
+
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL || !pc->alive ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			/* no live stub process = no mapping can hold a
+			 * release (the views die with the process; the
+			 * destroy path retires the ledger beside them).
+			 * A conn mid-destroy (alive==0, dead_magic not
+			 * yet stamped — its proc handle is already
+			 * closed, the probe could not query it) must
+			 * never fail-safe-refuse its OWN teardown drops:
+			 * that would hold every dying mm's blocks dead
+			 * (a leak, not a safety win — nothing can store
+			 * through a terminated process). */
+			continue;
+		for (wi = 0; wi < pc->nviews; wi++) {
+			const struct uml_nt_view *v = &pc->views[wi];
+
+			if (v->len == 0)
+				continue;
+			if (!uml_nt_view_maps_span(v->off, v->len,
+						   lo, nruns))
+				continue;
+			/* ledger hit — confirm against the OS: the
+			 * region at the view base must still be a
+			 * mapping (anything but MEM_FREE; a NOACCESS
+			 * view still owns the section slot — a store
+			 * through it the moment it re-protects). */
+			{
+				MEMORY_BASIC_INFORMATION mbi;
+				SIZE_T got;
+
+				memset(&mbi, 0, sizeof(mbi));
+				got = nt->VirtualQueryEx(pc->proc,
+						(void *)(uintptr_t)v->va,
+						&mbi, sizeof(mbi));
+				if (got == 0) {
+					/* query failed: fail-safe —
+					 * treat as mapped, refuse. */
+					if (holder_budget > 0) {
+						holder_budget--;
+						os_info("[release-gate] "
+							"off=0x%llx+%d: "
+							"pid %d view "
+							"[0x%llx,+0x%llx) "
+							"maps it, query "
+							"FAILED — "
+							"refusing\n",
+							off, nruns, p->pid,
+							v->va, v->len);
+					}
+					return 1;
+				}
+				if (mbi.State != MEM_FREE) {
+					if (holder_budget > 0) {
+						holder_budget--;
+						os_info("[release-gate] "
+							"off=0x%llx+%d: "
+							"pid %d view "
+							"[0x%llx,+0x%llx) "
+							"-> section "
+							"0x%llx still "
+							"maps it — "
+							"refusing\n",
+							off, nruns, p->pid,
+							v->va, v->len,
+							v->off);
+					}
+					return 1;
+				}
+				/* ledger entry whose region is gone
+				 * (released already / stale) — the OS
+				 * says no store can land; it does not
+				 * hold this release. */
+			}
+		}
+	}
+	return 0;
 }
 
 /* ---- [binwatch]/[mmdup] (M5.6a, referee 37144114627) --------
@@ -5321,6 +5448,263 @@ static void claim_audit(void)
 		}
 }
 
+/* K6 (M5.6a, cowcopy-race-class-fix, dlW 37576991123 / dlX
+ * 37579340518 — the RETIRE-LOST verdict): the DEFERRED fault-path
+ * COW copy. Runs at the teardown/re-map boundary of its own plan's
+ * drain (uml_nt_fault_copy_due decided WHEN; the PROTDONE branch of
+ * serve_conn calls this) — every release op has applied, so the
+ * conn's view of the source is torn down and no store of the conn
+ * can race the snapshot; no re-MAP has issued yet, so no new view
+ * of the source's range exists either. Stores that landed in the
+ * source during the release phase (the verdict's class: 16
+ * RETIRE-LOST fires per referee run, budget-capped, the tcache-heap
+ * chain where each fire's src is the previous arm's dst) are
+ * INCLUDED in this copy — they ride into the live backing instead
+ * of retiring with the abandoned source as "dead backing" bytes.
+ * The source's liveness proof at this later point is the GEN
+ * (captured at translate time in uml_nt_mm_fault), not refs: the
+ * remaining sharer may legitimately have dropped the last claim
+ * mid-drain (the block parks, its bytes intact), but a RE-HAND
+ * moves the gen and the fresh handout ZEROES the run — copying
+ * that would write foreign bytes into the live backing. Kill loud
+ * on a gen move (never guess, never a silent zeroed-heap resume);
+ * kill loud on a dst block-check failure (the direct-write class).
+ * Everything else is the original copy block, moved verbatim: the
+ * [flatwr] translate-time checks (the site's semantics are
+ * unchanged — the copy IS the write they guard, whenever it runs),
+ * copy_verify, the cowwatch touches, the [cowcopy] provenance line
+ * and the witness arms (cowwatch/cowtrap/cowrace — the cowrace ARM's
+ * t0 hash is now the content at the DEFERRED copy, which is the
+ * point: the witness's RETIRE-LOST diff must compare the release
+ * against the snapshot the live backing was actually built from). */
+static int fault_cowcopy_exec(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	unsigned long long gen_now;
+
+	if (c->plan.copy_src_off == 0 || c->plan.copy_dst_off == 0)
+		return 0;
+	/* the write side must stay inside its own block (the
+	 * direct-write tripwire — unchanged from the fault-round
+	 * form). The READ side's proof is the gen below instead:
+	 * a parked source run reads refs==0 and the old block
+	 * check would false-kill exactly the legal mid-drain
+	 * drop (the D22 park preserves the bytes). */
+	if (uml_nt_phys_block_check(c->ph, (long long)
+				    c->plan.copy_dst_off,
+				    UML_NT_PHYS_RUN_SIZE) < 0) {
+		os_info("[fillguard] COW run copy src=0x%llx "
+			"dst=0x%llx: dst block check failed — "
+			"killing\n", c->plan.copy_src_off,
+			c->plan.copy_dst_off);
+		d->action = UML_STUB_ACTION_KILL;
+		d->err = 1;
+		return -1;
+	}
+	gen_now = (unsigned long long)uml_nt_phys_gen(c->ph,
+		(long long)c->plan.copy_src_off);
+	if (gen_now != c->plan.cap_gen_src) {
+		os_info("[fillguard] COW run copy src=0x%llx "
+			"dst=0x%llx: source re-handed under the "
+			"drain (gen 0x%llx -> 0x%llx, refs=%d) — its "
+			"bytes are a new life's, the t0 snapshot is "
+			"gone; KILLING (never a zeroed-heap "
+			"resume)\n", c->plan.copy_src_off,
+			c->plan.copy_dst_off, c->plan.cap_gen_src,
+			gen_now, uml_nt_phys_refs(c->ph,
+				(long long)c->plan.copy_src_off));
+		d->action = UML_STUB_ACTION_KILL;
+		d->err = 1;
+		return -1;
+	}
+	/* K6 [flatwr]: the copy is a kernel flat write of guest
+	 * content — compare the (run, gen) captured at TRANSLATE time
+	 * (uml_nt_mm_fault stamped them beside the copy directive)
+	 * with the phys gen AND the current table translate AT WRITE
+	 * TIME. src = the read side (a re-handed src fed the copy
+	 * foreign bytes); dst = the write side (post-split the table
+	 * must translate the fault va to the dst run). Bookkeeping
+	 * only. */
+	uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_COWCOPY_SRC,
+			    d->fault_addr, UML_NT_PHYS_RUN_SIZE,
+			    c->plan.copy_src_off,
+			    c->plan.cap_gen_src, -1);
+	uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_COWCOPY_DST,
+			    d->fault_addr, UML_NT_PHYS_RUN_SIZE,
+			    c->plan.copy_dst_off,
+			    c->plan.cap_gen_dst,
+			    (long long)(c->plan.copy_dst_off +
+				(d->fault_addr &
+				 (UML_NT_PHYS_RUN_SIZE - 1))));
+	uml_nt_copy_verify(uml_boot.physmem_base + c->plan.copy_dst_off,
+			   uml_boot.physmem_base + c->plan.copy_src_off,
+			   UML_NT_PHYS_RUN_SIZE, "cow-repair");
+	uml_nt_cowwatch_touch((unsigned long long)c->plan.copy_src_off,
+			      UML_NT_PHYS_RUN_SIZE, "cow-copy-src");
+	uml_nt_cowwatch_touch((unsigned long long)c->plan.copy_dst_off,
+			      UML_NT_PHYS_RUN_SIZE, "cow-copy-dst");
+	/* WRITER-HUNT (M5.6a) provenance ledger, generation grade: run
+	 * 36979286356's tcache content at abort = bytes a [cowcopy]
+	 * generation copied in — run IDs alone can't see a wrong-
+	 * CONTENT source. Refs on both ends + the source run's
+	 * tail-16 fp: the abort-time poison sample matches its
+	 * generating copy by fp. */
+	{
+		const unsigned char *fp =
+			(const unsigned char *)
+			((char *)uml_boot.physmem_base +
+			 c->plan.copy_src_off +
+			 UML_NT_PHYS_RUN_SIZE - 16);
+		char hex[49];
+		int hi;
+
+		for (hi = 0; hi < 16; hi++)
+			snprintf(hex + hi * 3, sizeof(hex) - hi * 3,
+				 "%02x ", fp[hi]);
+		os_info("[cowcopy] pid %lu src=0x%llx (refs=%d) "
+			"dst=0x%llx (refs=%d) fp=%s (deferred: copied "
+			"after the release ops applied)\n",
+			(unsigned long)c->pid, c->plan.copy_src_off,
+			uml_nt_phys_refs(c->ph,
+				(long long)c->plan.copy_src_off),
+			c->plan.copy_dst_off,
+			uml_nt_phys_refs(c->ph,
+				(long long)c->plan.copy_dst_off),
+			hex);
+		/* cowwatch arm: a SHARED src run = the poison target
+		 * class (the writer writes after the copy — see the
+		 * cowwatch block comment). Owner VA unknown at this
+		 * site (0) — the post-clone sweep arms with the real
+		 * one. */
+		if (uml_nt_phys_refs(c->ph,
+		    (long long)c->plan.copy_src_off) >= 2)
+			uml_nt_cowwatch_arm(c->plan.copy_src_off, 0,
+					    (unsigned long)c->pid);
+		/* WRITER-HUNT (M5.6a, run 37078256773): the DST side
+		 * goes PRIVATE (refs=1) here with writable views and
+		 * NO watcher — arm the dst at birth so the flat scan
+		 * names the round truthfully (full rationale in the
+		 * original block; unchanged). The dst maps the SAME
+		 * VA range the faulting write hit — base = its run. */
+		{
+			unsigned long long dvbase =
+				d->fault_addr &
+				~(unsigned long long)
+				(UML_NT_PHYS_RUN_SIZE - 1);
+
+			uml_nt_cowwatch_arm(c->plan.copy_dst_off,
+					    dvbase, (unsigned long)c->pid);
+			uml_nt_cowtrap_arm_alloc(c, dvbase,
+						 UML_NT_PHYS_RUN_SIZE,
+						 c->plan.copy_dst_off);
+			/* K6 [cowrace]: the copy-vs-in-flight-store
+			 * witness's arm — the t0 hash + the RUNNING
+			 * sharers of the source, recorded AT the copy
+			 * (which is now the deferred copy: the
+			 * RETIRE-LOST diff judges the release against
+			 * the snapshot the live backing was built
+			 * from). Read-only; the check pass runs at
+			 * the next syscall parks. */
+			uml_nt_cowrace_arm(c, c->plan.copy_src_off,
+					   c->plan.copy_dst_off,
+					   UML_NT_PHYS_RUN_SIZE, dvbase,
+					   "cowcopy");
+		}
+	}
+	return 0;
+}
+
+/* K6 (cowcopy-race-class-fix): the DEFERRED brk re-home copy —
+ * kind 2 of the deferred-copy class (sys_brk arms the conn
+ * descriptor at its decision round; the drain hook above calls
+ * this at the same teardown/re-map boundary as the fault form).
+ * Same serialization contract, same refusal laws: the dst block
+ * check stays (the fresh span is refs>0 by the table), the src's
+ * liveness proof is the GEN captured at the decision (the old
+ * span legitimately parked/0-refs after its unref — a refs-based
+ * check would false-kill the legal drop), a gen move means the
+ * src re-handed under the drain — KILL loud, never a zeroed-heap
+ * resume. The [flatwr] BRK_FILL sites keep their translate-time
+ * contract; the table expectation INVERTS with the deferral: at
+ * write time the table must translate the heap va to the NEW
+ * span (the vma swap applied at the decision; the copy rides the
+ * drain). cowwatch touches + the cowrace arm (the RETIRE-LOST
+ * acceptance witness) move with the copy — the t0 hash is the
+ * content at the deferred copy, the snapshot the live backing
+ * was actually built from. */
+static int brk_rehome_copy_exec(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	unsigned long long src = c->copy_pend_src;
+	unsigned long long dst = c->copy_pend_dst;
+	unsigned long long len = c->copy_pend_len;
+	unsigned long long gen_now;
+
+	if (len == 0)
+		return 0;
+	if (uml_nt_phys_block_check(c->ph, (long long)dst,
+				    len) < 0) {
+		os_info("[fillguard] brk re-home deferred copy "
+			"src=0x%llx dst=0x%llx len=0x%llx: dst block "
+			"check failed — killing\n", src, dst, len);
+		d->action = UML_STUB_ACTION_KILL;
+		d->err = 1;
+		return -1;
+	}
+	gen_now = (unsigned long long)uml_nt_phys_gen(c->ph,
+		(long long)src);
+	if (gen_now != c->copy_pend_gsrc) {
+		os_info("[fillguard] brk re-home deferred copy "
+			"src=0x%llx dst=0x%llx len=0x%llx: source "
+			"re-handed under the drain (gen 0x%llx -> "
+			"0x%llx) — its bytes are a new life's, the "
+			"t0 snapshot is gone; KILLING (never a "
+			"zeroed-heap resume)\n", src, dst, len,
+			c->copy_pend_gsrc, gen_now);
+		d->action = UML_STUB_ACTION_KILL;
+		d->err = 1;
+		return -1;
+	}
+	/* K6 [flatwr] (BRK_FILL): gen-only on the src read side; the
+	 * dst write side must ALSO agree with the CURRENT table —
+	 * the heap va translates to the NEW span now (the swap
+	 * applied at the decision; pre-fix the copy preceded the
+	 * swap, so the expectation was the old span). */
+	uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_BRK_FILL,
+			    c->copy_pend_va, len, src,
+			    c->copy_pend_gsrc, -1);
+	uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_BRK_FILL,
+			    c->copy_pend_va, len, dst,
+			    c->copy_pend_gdst, (long long)dst);
+	uml_nt_copy_verify((char *)uml_boot.physmem_base + dst,
+			   (const char *)uml_boot.physmem_base + src,
+			   len, "brk-rehome-fill");
+	/* 098 δ: the re-home reads the OLD heap runs (possibly
+	 * cowwatch-armed: the sharers' data) and writes the fresh
+	 * span — census both ends. */
+	uml_nt_cowwatch_touch(src, len, "brk-rehome-src");
+	uml_nt_cowwatch_touch(dst, len, "brk-rehome-dst");
+	/* K6 [cowrace]: the copy-vs-in-flight-store witness's arm at
+	 * the re-home — t0 hash both ends share + the RUNNING sharers
+	 * of the old span, recorded AT the (deferred) copy; the
+	 * check pass runs at the next syscall parks. */
+	uml_nt_cowrace_arm(c, src, dst, len, c->copy_pend_va,
+			   "brk-rehome");
+	{
+		static int brkcopy_said = 16;
+
+		if (brkcopy_said > 0) {
+			brkcopy_said--;
+			os_info("[brkrehome] pid %lu deferred copy "
+				"src=0x%llx dst=0x%llx len=0x%llx — "
+				"after the release op applied, before "
+				"the re-MAP issues\n",
+				(unsigned long)c->pid, src, dst, len);
+		}
+	}
+	return 0;
+}
+
 static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
@@ -5489,6 +5873,33 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					(unsigned long)c->pid, c->rp_va, tbl);
 			rp_pd_done:
 			d->viewprobe_got = 0;
+		}
+		/* K6 (cowcopy-race-class-fix, dlW/dlX RETIRE-LOST): the
+		 * DEFERRED copies. Due when the next op to issue is
+		 * NOT a release (every release op of the plan has
+		 * applied — the source view teardown is done) or when
+		 * the plan is exhausted (the drain-end fallback). Must
+		 * run BEFORE the next op issues: the re-MAP phase would
+		 * install a view of the source's range while the new
+		 * backing still holds t0-only bytes, and the mapcanary
+		 * plant for a writable MAP writes into dst. Kind 1 =
+		 * the fault-path COW repair (fault_cowcopy_exec, the
+		 * plan's copy directive is the descriptor); kind 2 =
+		 * the brk re-home bulk copy (brk_rehome_copy_exec, the
+		 * conn's pending descriptor). On refusal the exec
+		 * already KILLed loud. */
+		if (c->copy_pend_kind != 0 &&
+		    uml_nt_fault_copy_due(&c->plan, c->plan_next)) {
+			int ckind = c->copy_pend_kind;
+
+			c->copy_pend_kind = 0;
+			if (ckind == 1) {
+				if (fault_cowcopy_exec(c) < 0)
+					return -1;
+			} else {
+				if (brk_rehome_copy_exec(c) < 0)
+					return -1;
+			}
 		}
 		if (c->plan_left > 1) {
 			c->plan_left--;
@@ -6084,154 +6495,28 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		os_info("[stubtest] FAULT pid %lu addr=0x%llx type=%u -> "
 			"%d op(s)\n", (unsigned long)c->pid, d->fault_addr,
 			d->fault_type, c->plan.n_ops);
-		/* COW copy directive: the kernel owns the physmem
-		 * content — memcpy the run through its own flat view
-		 * before the stub maps the new one. WRITER-HUNT
-		 * (M5.6a): a run copy whose either end leaves its
-		 * block is the direct-write class — kill loud instead
-		 * of writing foreign bytes. */
+		/* K6 (cowcopy-race-class-fix, dlW 37576991123 / dlX
+		 * 37579340518 — the RETIRE-LOST verdict): the COW copy
+		 * directive is DEFERRED, not executed here. The verdict
+		 * proved guest stores land in the COPY SOURCE between
+		 * the copy and the view swap (16 RETIRE-LOST fires per
+		 * referee, budget-capped, each fire's src the previous
+		 * arm's dst), and the copy ran at THIS round — before
+		 * op 0 (the source view's release) even streams, the
+		 * widest possible window. The copy now runs at the
+		 * teardown/re-map boundary of this same plan's drain
+		 * (fault_cowcopy_exec below, uml_nt_fault_copy_due):
+		 * after every release op applied (the conn's view of
+		 * the source is torn down — the snapshot is taken from
+		 * a source the conn can no longer store to) and
+		 * before the first re-MAP issues (no new view can race
+		 * it). Stores that landed in the source during the
+		 * release phase are then INCLUDED in the copy — they
+		 * ride into the live backing instead of retiring with
+		 * the abandoned source. */
 		if (c->plan.copy_src_off != 0 ||
-		    c->plan.copy_dst_off != 0) {
-			if (uml_nt_phys_block_check(c->ph,
-					c->plan.copy_dst_off,
-					UML_NT_PHYS_RUN_SIZE) < 0 ||
-			    uml_nt_phys_block_check(c->ph,
-					c->plan.copy_src_off,
-					UML_NT_PHYS_RUN_SIZE) < 0) {
-				os_info("[fillguard] COW run copy "
-					"src=0x%llx dst=0x%llx: block "
-					"check failed — killing\n",
-					c->plan.copy_src_off,
-					c->plan.copy_dst_off);
-				d->action = UML_STUB_ACTION_KILL;
-				d->err = 1;
-				return -1;
-			}
-			/* K6 [flatwr]: the copy is a kernel flat write of guest
-		 * content — compare the (run, gen) captured at
-		 * TRANSLATE time (uml_nt_mm_fault stamped them beside
-		 * the copy directive) with the phys gen AND the current
-		 * table translate AT WRITE TIME. src = the read side (a
-		 * re-handed src fed the copy foreign bytes); dst = the
-		 * write side (post-split the table must translate the
-		 * fault va to the dst run). Bookkeeping only. */
-		uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_COWCOPY_SRC,
-				    d->fault_addr, UML_NT_PHYS_RUN_SIZE,
-				    c->plan.copy_src_off,
-				    c->plan.cap_gen_src, -1);
-		uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_COWCOPY_DST,
-				    d->fault_addr, UML_NT_PHYS_RUN_SIZE,
-				    c->plan.copy_dst_off,
-				    c->plan.cap_gen_dst,
-				    (long long)(c->plan.copy_dst_off +
-					(d->fault_addr &
-					 (UML_NT_PHYS_RUN_SIZE - 1))));
-		uml_nt_copy_verify(uml_boot.physmem_base +
-					   c->plan.copy_dst_off,
-					   uml_boot.physmem_base +
-					   c->plan.copy_src_off,
-					   UML_NT_PHYS_RUN_SIZE,
-					   "cow-repair");
-			uml_nt_cowwatch_touch(
-				(unsigned long long)
-				c->plan.copy_src_off,
-				UML_NT_PHYS_RUN_SIZE, "cow-copy-src");
-			uml_nt_cowwatch_touch(
-				(unsigned long long)
-				c->plan.copy_dst_off,
-				UML_NT_PHYS_RUN_SIZE, "cow-copy-dst");
-		/* WRITER-HUNT (M5.6a) provenance ledger: the run-copy
-		 * traffic is small and the fire dumps name their run —
-		 * this line maps a poisoned run back to the copy (and
-		 * its SOURCE run) that produced its generation. */
-		/* WRITER-HUNT (M5.6a) provenance ledger, generation
-		 * grade: run 36979286356's tcache content at abort =
-		 * bytes a [cowcopy] generation copied in — run IDs
-		 * alone can't see a wrong-CONTENT source (the fill
-		 * fence checks refs>0 + block bounds, not identity).
-		 * Refs on both ends + the source run's tail-16 fp: the
-		 * abort-time poison sample matches its generating
-		 * copy by fp. */
-		{
-			const unsigned char *fp =
-				(const unsigned char *)
-				((char *)uml_boot.physmem_base +
-				 c->plan.copy_src_off +
-				 UML_NT_PHYS_RUN_SIZE - 16);
-			char hex[49];
-			int hi;
-
-			for (hi = 0; hi < 16; hi++)
-				snprintf(hex + hi * 3,
-					 sizeof(hex) - hi * 3,
-					 "%02x ", fp[hi]);
-			os_info("[cowcopy] pid %lu src=0x%llx (refs=%d) "
-				"dst=0x%llx (refs=%d) fp=%s\n",
-				(unsigned long)c->pid,
-				c->plan.copy_src_off,
-				uml_nt_phys_refs(c->ph,
-					(long long)c->plan.copy_src_off),
-				c->plan.copy_dst_off,
-				uml_nt_phys_refs(c->ph,
-					(long long)c->plan.copy_dst_off),
-				hex);
-			/* cowwatch arm: a SHARED src run = the poison
-			 * target class (the writer writes after the
-			 * copy — see the cowwatch block comment).
-			 * Owner VA unknown at this site (0) — the
-			 * post-clone sweep arms with the real one. */
-			if (uml_nt_phys_refs(c->ph,
-			    (long long)c->plan.copy_src_off) >= 2)
-				uml_nt_cowwatch_arm(
-					c->plan.copy_src_off, 0,
-					(unsigned long)c->pid);
-			/* WRITER-HUNT (M5.6a, run 37078256773): the
-			 * DST side goes PRIVATE (refs=1) here with
-			 * writable views and NO watcher — the
-			 * alloc-arm slots on the old span retired
-			 * with the split's UNMAP+MAP, and the
-			 * cowwatch only re-arms at the next fork.
-			 * The poison {fd=0x1a,bk=0x8000} landed in
-			 * exactly that window (dst run 0xee0000,
-			 * private from its cowcopy at line 19941 to
-			 * the next fork's arms at 20754 — ~800 lines
-			 * unwatched) and the first-see then named the
-			 * WRONG round. Arm the dst at birth: the
-			 * flat scan from now on names the round
-			 * truthfully, and every page one-shot-traps
-			 * (a private run repairs by PROTECT, no
-			 * copy) so a stub-view writer dies with
-			 * live rip. The dst maps the SAME VA range
-			 * the faulting write hit — base = its run. */
-			{
-				unsigned long long dvbase =
-					d->fault_addr &
-					~(unsigned long long)
-					(UML_NT_PHYS_RUN_SIZE - 1);
-
-				uml_nt_cowwatch_arm(
-					c->plan.copy_dst_off,
-					dvbase,
-					(unsigned long)c->pid);
-				uml_nt_cowtrap_arm_alloc(c,
-					dvbase,
-					UML_NT_PHYS_RUN_SIZE,
-					c->plan.copy_dst_off);
-				/* K6 [cowrace]: the copy-vs-in-flight-
-				 * store witness's arm — the recording
-				 * the brief mandates AT the copy (t0
-				 * hash + the RUNNING sharers of the
-				 * source). Read-only, no guest-visible
-				 * state; the check pass runs at the
-				 * next syscall parks. */
-				uml_nt_cowrace_arm(c,
-					c->plan.copy_src_off,
-					c->plan.copy_dst_off,
-					UML_NT_PHYS_RUN_SIZE,
-					dvbase, "cowcopy");
-			}
-		}
-		}
+		    c->plan.copy_dst_off != 0)
+			c->copy_pend_kind = 1;
 		stack_window_reassert(c);
 		/* K6 (cowcopy-race-class-fix): the COMPLETE per-view
 		 * release set + stream arming before op 0 issues — a

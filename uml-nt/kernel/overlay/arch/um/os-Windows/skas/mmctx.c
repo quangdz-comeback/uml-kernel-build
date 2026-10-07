@@ -223,6 +223,14 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 				"run alias(es) — double-claim witness\n",
 				id->pid, na);
 	}
+	/* K6 (M5.6a, feature cowcopy-race-class-fix): the RELEASE GATE
+	 * probe (uml_nt_release_mapped_scan) walks view LEDGERS — the
+	 * process is terminated and its handle closed above, so this
+	 * conn's views are GONE; retire the ledger BEFORE the drops
+	 * (a ledgered-but-dead conn would otherwise fail-safe-refuse
+	 * its own teardown drops and hold every dying mm's block
+	 * dead — a leak, not a safety win). */
+	c->nviews = 0;
 	uml_nt_mm_drop_for(c->mm, c->ph, c);
 	uml_nt_phys_settle(c->ph, c);
 	kfree(c->mm);

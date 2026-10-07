@@ -2163,6 +2163,198 @@ static void test_release_set(void)
 	      0);
 }
 
+/* ---- K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 /
+ * dlX 37579340518 — the RETIRE-LOST verdict): the deferred-copy
+ * decision + the serialization precondition + the release gate.
+ *
+ * The verdict: guest stores land in the COPY SOURCE after the copy
+ * and before or while the conn's stub view is swapped to the new
+ * backing; the source is then released as a dead backing. The class
+ * fix: the fault-path COW copy runs AFTER the plan's releases applied
+ * (the source view is torn down before the copy is taken — no store
+ * of the conn can then race the snapshot), and a block may not go
+ * back to the backend while a stub view still maps it. */
+
+/* The deferred-copy decision (pure): a PENDING copy (the caller's
+ * gate — serve_conn's copy_pend_kind, kind 1 the fault-path COW
+ * directive, kind 2 the brk re-home descriptor whose plan carries
+ * no plan-level directive) runs when the re-MAP phase begins — the
+ * next op to issue is NOT a release, or the plan is exhausted (the
+ * drain-end fallback). Never due for a NULL/empty plan (no drain
+ * rounds would carry the hook). */
+static void test_copy_due(void)
+{
+	struct uml_nt_fault_plan plan;
+
+	memset(&plan, 0, sizeof(plan));
+	/* NULL plan: never due */
+	CHECK(uml_nt_fault_copy_due((void *)0, 0) == 0);
+	CHECK(uml_nt_fault_copy_due((void *)0, 5) == 0);
+	/* empty plan: no drain rounds carry the hook */
+	CHECK(uml_nt_fault_copy_due(&plan, 0) == 0);
+
+	/* the brk shape (no plan-level directive — the conn
+	 * descriptor owns the copy): not due while the release op
+	 * still streams, due the moment the re-MAP begins */
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	plan.ops[1].op = UML_NT_FOP_MAP;
+	plan.n_ops = 2;
+	CHECK(uml_nt_fault_copy_due(&plan, 0) == 0);
+	CHECK(uml_nt_fault_copy_due(&plan, 1) == 1);
+	/* plan exhausted (every op applied): the drain-end fallback */
+	CHECK(uml_nt_fault_copy_due(&plan, 2) == 1);
+	CHECK(uml_nt_fault_copy_due(&plan, 99) == 1);
+
+	/* the augmented fault plan: chained releases (the per-view
+	 * release set inserts UNMAPs behind the triggering one)
+	 * delay the copy until every one of them applied */
+	memset(&plan, 0, sizeof(plan));
+	plan.copy_src_off = 0x100000;
+	plan.copy_dst_off = 0x200000;
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	plan.ops[1].op = UML_NT_FOP_UNMAP;   /* the augment's release */
+	plan.ops[2].op = UML_NT_FOP_MAP;
+	plan.n_ops = 3;
+	CHECK(uml_nt_fault_copy_due(&plan, 0) == 0);
+	CHECK(uml_nt_fault_copy_due(&plan, 1) == 0);
+	CHECK(uml_nt_fault_copy_due(&plan, 2) == 1);
+	CHECK(uml_nt_fault_copy_due(&plan, 3) == 1);
+}
+
+/* The serialization precondition, driven through the REAL
+ * uml_nt_mm_fault: every release op precedes every re-MAP op in a
+ * COW plan, so "the first MAP is about to issue" (the deferred
+ * copy's trigger) PROVES the source view teardown completed — there
+ * must be no window in which the table says dst while the conn's
+ * view still maps src once the copy has been taken. */
+static void test_swap_serial(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	struct uml_nt_fault_plan plan;
+	int i, first_map = -1, last_unmap = -1;
+
+	fixture(&ph, &mm);
+	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + RUN + 0x8000,
+			      UML_NT_FAULT_WRITE, &plan) == 0);
+	CHECK(!plan.kill && plan.n_ops >= 3);
+	for (i = 0; i < plan.n_ops; i++) {
+		if (plan.ops[i].op == UML_NT_FOP_UNMAP)
+			last_unmap = i;
+		if (plan.ops[i].op == UML_NT_FOP_MAP &&
+		    first_map < 0)
+			first_map = i;
+	}
+	CHECK(first_map == 1 && last_unmap == 0);
+	/* the copy directive is exactly the re-home the plan performs
+	 * (the src the releases abandon, the dst the middle MAP
+	 * installs) */
+	CHECK(plan.copy_src_off == fix_r1);
+	CHECK(plan.copy_dst_off == fix_r0 + 2 * RUN);
+	CHECK(plan.ops[2].off == plan.copy_dst_off);
+	/* copy-due is FALSE at every release index and TRUE at the
+	 * first re-MAP index — the deferred copy fires exactly at the
+	 * teardown/re-map boundary */
+	CHECK(uml_nt_fault_copy_due(&plan, 0) == 0);
+	CHECK(uml_nt_fault_copy_due(&plan, 1) == 1);
+}
+
+/* The RELEASE GATE (pure physalloc, mocked probe + event hook): a
+ * block dropped to 0 must NOT go back to the backend while a stub
+ * view still maps it — the release refuses LOUD (the event) and the
+ * park RIDES (the owner's next settle retries). Never a silent
+ * recycle under a live mapping. */
+static unsigned long long gate_off_seen;
+static int gate_nruns_seen, gate_ret;
+static char gate_kinds[8][32];
+static int gate_event_n;
+
+static int gate_probe(long long off, int nruns)
+{
+	gate_off_seen = (unsigned long long)off;
+	gate_nruns_seen = nruns;
+	return gate_ret;
+}
+
+static void gate_event(const char *kind, long long off, int nruns,
+		       int refs, const void *owner)
+{
+	(void)off;
+	(void)nruns;
+	(void)refs;
+	(void)owner;
+	if (gate_event_n < 8) {
+		snprintf(gate_kinds[gate_event_n],
+			 sizeof(gate_kinds[0]), "%s", kind);
+		gate_event_n++;
+	}
+}
+
+static void test_release_gate(void)
+{
+	struct uml_nt_phys p;
+	unsigned long long r, r2;
+	static int connA;
+	int ev;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&p, 32 * RUN) == 0);
+
+	/* --- the immediate path (untagged drop, no pending ops can
+	 * exist): the gate consults, refuses, and the block stays OUT
+	 * of the backend — never re-handed under the mapping --- */
+	r = uml_nt_phys_alloc(&p);
+	CHECK((long long)r >= 0);
+	uml_nt_phys_mapped_probe = gate_probe;
+	uml_nt_phys_event = gate_event;
+	gate_ret = 1;
+	gate_event_n = 0;
+	CHECK(uml_nt_phys_unref(&p, r) == 0);
+	/* the gate was consulted with the block's own geometry */
+	CHECK(gate_off_seen == r && gate_nruns_seen == 1);
+	/* NOT freed to the backend (the buddy never saw it back) */
+	CHECK(uml_nt_phys_refs(&p, r) == 0);
+	CHECK(mock_taken[(int)((r - MOCK_BASE) / RUN)] == 1);
+	/* the refusal is loud: the event fired */
+	for (ev = 0; ev < gate_event_n; ev++)
+		if (strcmp(gate_kinds[ev], "release-refused") == 0)
+			break;
+	CHECK(ev < gate_event_n);
+	/* and the backend cannot re-hand it (the mock still holds the
+	 * run taken) */
+	CHECK((unsigned long long)uml_nt_phys_alloc(&p) ==
+	      r + RUN);
+
+	/* --- the quarantine path: the drop under a tagged conn parks;
+	 * the settle REFUSES while mapped (the park rides) and
+	 * releases once the mapper is gone --- */
+	r2 = uml_nt_phys_alloc(&p);
+	CHECK((long long)r2 >= 0);
+	uml_nt_phys_set_drop_owner(&p, &connA);
+	CHECK(uml_nt_phys_unref_for(&p, r2, &connA) == 0);
+	CHECK(uml_nt_phys_parked(&p) == 1);
+	gate_ret = 1;
+	gate_event_n = 0;
+	uml_nt_phys_settle(&p, &connA);
+	CHECK(uml_nt_phys_parked(&p) == 1);  /* refused: still parked */
+	CHECK(mock_taken[(int)((r2 - MOCK_BASE) / RUN)] == 1);
+	for (ev = 0; ev < gate_event_n; ev++)
+		if (strcmp(gate_kinds[ev], "release-refused") == 0)
+			break;
+	CHECK(ev < gate_event_n);
+	/* the mapper released: the retry succeeds, the block returns
+	 * exactly once */
+	gate_ret = 0;
+	uml_nt_phys_settle(&p, &connA);
+	CHECK(uml_nt_phys_parked(&p) == 0);
+	CHECK(mock_taken[(int)((r2 - MOCK_BASE) / RUN)] == 0);
+
+	/* --- with no probe pinned the behavior is the pre-gate one
+	 * (NULL in unit tests is the neutral default) --- */
+	uml_nt_phys_mapped_probe = (int (*)(long long, int))0;
+	uml_nt_phys_event = (void (*)(const char *, long long, int,
+				      int, const void *))0;
+}
 
 int main(void)
 {
@@ -2187,6 +2379,9 @@ int main(void)
 	test_fork_storm();
 	test_swap_window();
 	test_release_set();
+	test_copy_due();
+	test_swap_serial();
+	test_release_gate();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);

@@ -342,4 +342,45 @@ int uml_nt_view_region_covered(const struct uml_nt_view *vs, int n,
 int uml_nt_fault_augment_release_set(struct uml_nt_fault_plan *plan,
 				     const struct uml_nt_view *vs, int n);
 
+/* ---- K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 /
+ * dlX 37579340518 — the RETIRE-LOST verdict): the view-swap
+ * serialization ----
+ *
+ * The verdict (library/hunt-findings.md, flatwrite-retire-witness):
+ * candidate (c) carries the lost pair — guest stores land in the
+ * COPY SOURCE after the copy and before or while the conn's stub
+ * view is swapped to the new backing, and the source is then
+ * released as a dead backing (16 RETIRE-LOST fires per referee run,
+ * budget-capped, on the tcache-heap runs; each fire's src is the
+ * previous arm's dst; copy byte-exact at t0; gen intact; refs=0 at
+ * release). Candidate (b) is excluded ([flatwr] 0 records at all 11
+ * kernel flat-write sites).
+ *
+ * The class fix: the fault-path COW copy is DEFERRED to the
+ * teardown/re-map boundary of its own plan's drain — the copy runs
+ * after EVERY release op of the plan applied (the conn's view of
+ * the source is torn down) and before the first re-MAP issues (so
+ * the new views cannot race the snapshot), in the SAME drain that
+ * published the new backing in the table. There is then no window
+ * in which the table says dst while the conn's view still maps src
+ * at copy time: the snapshot the new backing is built from is taken
+ * from a source the conn can no longer store to. Stores that landed
+ * in the source during the release phase are included in the copy
+ * (transported into the live backing), and the release gate
+ * (physalloc.c uml_nt_phys_mapped_probe) refuses to hand a block
+ * back to the backend while any stub view still maps it. */
+
+/*
+ * The deferred-copy decision (pure): 1 when a pending copy (the
+ * caller's gate — serve_conn's copy_pend_kind: the fault-path COW
+ * repair's plan directive, or the brk re-home's conn descriptor)
+ * must execute NOW — the op at plan_next is NOT a release (the
+ * re-MAP phase begins, every UNMAP has applied), or plan_next is
+ * past the plan's end (the drain-end fallback). 0 while releases
+ * still stream, and always 0 for a NULL plan or an empty one (no
+ * drain rounds would carry the hook anyway).
+ */
+int uml_nt_fault_copy_due(const struct uml_nt_fault_plan *plan,
+			  int plan_next);
+
 #endif /* __UM_OS_WINDOWS_FAULT_H */
