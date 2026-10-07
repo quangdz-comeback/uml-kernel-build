@@ -323,10 +323,19 @@ char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
  * NEXT SYSCALL PARKS (the witness placement rule) the src range is
  * re-hashed: src != t0 with the lifecycle gates intact means a
  * store landed in the SOURCE after the copy — a lost update. */
-#define UML_NT_COWRACE_N       16  /* watch ring (kernel side owns it) */
-#define UML_NT_COWRACE_CHECKS  4   /* syscall-park checks per arm: the
-				    * lost store lands within a park or
-				    * two of the copy — the fire window */
+#define UML_NT_COWRACE_N       64  /* watch ring (kernel side owns it) —
+				    * widened 16->64 (dlV: 129 arms under a
+				    * 16-slot ring evicted most watches before
+				    * any check could land) */
+#define UML_NT_COWRACE_CHECKS  4   /* syscall-park HASH checks per arm for
+				    * non-watched sources and big spans */
+#define UML_NT_COWRACE_CHECKS_LONG 32 /* hash checks for watched-heap
+				    * sources of <= 2 runs: the lost store
+				    * can land several parks after the copy
+				    * (dlV's t0-window expiry was silent) */
+#define UML_NT_COWRACE_LONG_LEN (2 * UML_NT_PHYS_RUN_SIZE) /* the len
+				    * ceiling for the long window (the
+				    * 512MB hash budget stays bounded) */
 #define UML_NT_COWRACE_PIDS    4   /* RUNNING sharers recorded per arm */
 #define UML_NT_COWRACE_DIFFS   4   /* differing qwords reported per fire */
 
@@ -347,6 +356,14 @@ char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 				   * remaining owner wrote on after
 				   * re-privatizing — benign, the
 				   * decode correlates it */
+#define UML_NT_COWRACE_RETIRE_LOST 6 /* RETIRE-LOST (feature
+				   * flatwrite-retire-witness): src != t0
+				   * AT RELEASE (refs==0, gen intact) — a
+				   * store landed in the abandoned source
+				   * between the copy and its release and
+				   * retired silently as "dead backing"
+				   * (dlV's blind spot: all 16 retires
+				   * went out with no content check) */
 
 /* One armed copy watch. `ph` is kernel-side only (the table the
  * gates read); host tests leave it NULL and never reach it. */
@@ -364,7 +381,15 @@ struct uml_nt_cowrace_watch {
 	unsigned long run_pids[UML_NT_COWRACE_PIDS]; /* RUNNING sharers
 						 * of the src run */
 	int n_run, n_park, n_samm, trunc;
-	unsigned char checks;        /* checks left (spend) */
+	unsigned char checks;        /* hash checks left in the window */
+	unsigned char watched;       /* the arm's src belongs to a watched
+				      * glibc heap (the 0x291 shape): long
+				      * window + eviction preference */
+	unsigned char quiet;         /* the hash window is spent: the
+				       * lifecycle gate keeps running at
+				       * every park until the run retires
+				       * (the RETIRE-LOST diff decides
+				       * lost store vs dead backing) */
 	unsigned char armed;
 };
 
@@ -383,8 +408,11 @@ int uml_nt_cowrace_run_state(unsigned long long req,
  * the SAME src refreshes in place (checks reset, dst/h0/pids
  * updated — the src content may have changed between copies, so h0
  * is always the caller's fresh hash); a free slot is taken; a full
- * ring evicts by *cursor (round-robin, the cowwatch pattern).
- * Returns the slot index. */
+ * ring evicts KEEPING watched-heap sources (the first non-watched
+ * watch from the cursor; only an all-watched ring falls back to
+ * the cursor slot). `watched` also widens the hash window: a
+ * watched src of <= UML_NT_COWRACE_LONG_LEN gets
+ * UML_NT_COWRACE_CHECKS_LONG parks. Returns the slot index. */
 int uml_nt_cowrace_slot_arm(struct uml_nt_cowrace_watch *w, int n,
 			    unsigned int *cursor,
 			    unsigned long long src_off,
@@ -395,7 +423,8 @@ int uml_nt_cowrace_slot_arm(struct uml_nt_cowrace_watch *w, int n,
 			    unsigned long long h0,
 			    unsigned long pid,
 			    const unsigned long *run_pids, int n_run,
-			    int n_park, int n_samm, int trunc);
+			    int n_park, int n_samm, int trunc,
+			    int watched);
 
 /* One check pass over a watch. gate: the run's LIFECYCLE retires
  * before any byte comparison — a re-handed (gen moved) or released
@@ -410,10 +439,13 @@ int uml_nt_cowrace_verdict(const struct uml_nt_cowrace_watch *w,
 			   unsigned long long h_src,
 			   unsigned long long h_dst);
 
-/* Spend one check: 0 while the watch stays armed, and the watch
- * disarms itself when the last check is spent (silent expiry —
- * the fire/retire paths print, the routine expiry does not). -1
- * when not armed (the round skips it). */
+/* Spend one hash check: 0 while the watch stays armed. When the
+ * last check is spent the watch goes QUIET (no more per-park
+ * hashing) but STAYS ARMED — the lifecycle gate runs at every
+ * syscall park until the run retires (refs==0 / gen move), where
+ * the RETIRE-LOST diff decides lost store vs dead backing. The
+ * hash window closing is silent; the fire/retire paths print.
+ * -1 when not armed (the round skips it). */
 int uml_nt_cowrace_spend(struct uml_nt_cowrace_watch *w);
 
 /* Scan two byte ranges qword-wise: returns the TOTAL count of
@@ -531,5 +563,95 @@ int uml_nt_vp_attr(unsigned long long va,
 		   const unsigned long long *chunks, int nchunks,
 		   unsigned long long tva, unsigned long long tlen,
 		   const struct uml_nt_fault_op *ops, int nops);
+
+/* ---- K6 [flatwr] (M5.6a, feature flatwrite-retire-witness) ----
+ * The kernel-flat-write staleness witness's PURE logic. Context
+ * (dlV 37553645227 + 139a): the lost tcache_put pair reaches a
+ * backing NO park-visible view shows; surviving candidate (b) is a
+ * kernel-side flat write of guest content through a translation
+ * OLDER than the current table — the store lands in an abandoned
+ * source run (the dl26 content shape). Protocol: every kernel flat
+ * -write site of guest content captures the (run, gen) at
+ * TRANSLATE time, and at WRITE time compares the phys gen of the
+ * offset being written AND the CURRENT table translate of the
+ * guest va — a mismatch is recorded into a small ring AT the site
+ * (bookkeeping only, no hashing/printing at fault parks) and
+ * printed at the next syscall park. stub_ctl.c owns the ring, the
+ * reads and every log line; this file stays log-free. Host-tested
+ * in test_uaccess.c (test_flatwr_helpers). */
+
+/* the record ring (kernel side owns it) */
+#define UML_NT_FLATWR_N 32
+
+/* what the write sites are (the site label of a record) */
+#define UML_NT_FLATWR_SITE_COWCOPY_SRC 0  /* fault-path COW copy: src read */
+#define UML_NT_FLATWR_SITE_COWCOPY_DST 1  /* fault-path COW copy: dst write */
+#define UML_NT_FLATWR_SITE_UACC_FIXUP  2  /* the walker's inline fixup copy */
+#define UML_NT_FLATWR_SITE_BRK_FILL     3  /* brk re-home span copy */
+#define UML_NT_FLATWR_SITE_MMAP_FILL    4  /* mmap fill: memset + file read */
+#define UML_NT_FLATWR_SITE_MMAP_SWEEP   5  /* the syscall sweep patch */
+#define UML_NT_FLATWR_SITE_MC_PLANT     6  /* mapcanary nonce plant */
+#define UML_NT_FLATWR_SITE_MC_RESTORE   7  /* mapcanary pushback (round-trip
+					    * window: op issue -> PROT_DONE) */
+#define UML_NT_FLATWR_SITE_TCTRIP_EMU   8  /* the tctrip emulated struct store */
+#define UML_NT_FLATWR_SITE_FORK_EAGER   9  /* fork eager seed copy (either end) */
+#define UML_NT_FLATWR_SITE_FORK_ZERO   10  /* fork below-rsp residue zeroing */
+
+/* staleness classes */
+#define UML_NT_FLATWR_OK          0
+#define UML_NT_FLATWR_STALE_GEN   1 /* the run re-handed between capture and
+				     * write (or gen==0 at capture: a
+				     * never-handed offset) */
+#define UML_NT_FLATWR_STALE_TBL   2 /* the va translates elsewhere (or not at
+				     * all) at write time — the write went
+				     * through a stale translation */
+#define UML_NT_FLATWR_STALE_BOTH  3
+
+struct uml_nt_flatwr_rec {
+	unsigned char site;  /* UML_NT_FLATWR_SITE_* */
+	unsigned char what;   /* UML_NT_FLATWR_STALE_* */
+	unsigned long long va;  /* the guest va the write belongs to (0 =
+				 * gen-only site) */
+	unsigned long long len;
+	unsigned long long off;      /* the byte offset written (captured run) */
+	unsigned long long gen_old; /* phys gen at capture */
+	unsigned long long gen_now; /* phys gen at write */
+	unsigned long long tbl_old; /* the run the table was expected to
+				     * translate va to (run-aligned) */
+	unsigned long long tbl_new; /* the run the table translates va to at
+				     * write time (~0ull = untranslatable) */
+	unsigned long pid;
+	unsigned long long nr, ret;
+};
+
+/* The classifier: gen identity (gen_now == gen_old, both nonzero)
+ * + run-granular table identity (all backing offsets are
+ * run-aligned, so the table compare is the RUN compare; a translate
+ * of -1 with an expected run is stale; tbl_expect < 0 = no table
+ * check requested). */
+int uml_nt_flatwr_class(unsigned long long gen_old,
+			unsigned long long gen_now,
+			long long tbl_now, long long tbl_expect);
+
+/* Ring insert (append while free, overwrite by cursor when full —
+ * the newest record wins; the park printer drains the ring).
+ * Returns the slot index written. */
+int uml_nt_flatwr_push(struct uml_nt_flatwr_rec *r, int n, int *count,
+		       unsigned int *cursor,
+		       const struct uml_nt_flatwr_rec *rec);
+
+/* The uacc walker's inline fixup copy is a kernel flat write of
+ * guest content INSIDE this pure file — the [flatwr] check runs
+ * through this hook (pinned by the kernel like physalloc's
+ * zero/alias hooks; NULL in the host unit tests). The hook owns
+ * both ends: src (read) and dst (write). */
+typedef void (*uml_nt_flatwr_uacc_fn)(const struct uml_nt_mm *mm,
+				      struct uml_nt_phys *ph,
+				      unsigned long long va,
+				      unsigned long long src_off,
+				      unsigned long long gen_src,
+				      unsigned long long dst_off,
+				      unsigned long long gen_dst);
+extern uml_nt_flatwr_uacc_fn uml_nt_flatwr_uacc_hook;
 
 #endif /* __UM_OS_WINDOWS_UACCESS_WALK_H */

@@ -513,12 +513,24 @@ static int uml_nt_tctrip_emulate(struct uml_nt_stub_conn *c,
 	off = uml_nt_vma_translate(c->mm, dst, size);
 	if (off < 0)
 		return 0;
-	if (size == 2)
-		*(unsigned short *)((char *)uml_boot.physmem_base + off) =
-			(unsigned short)val;
-	else
-		*(unsigned long long *)((char *)uml_boot.physmem_base +
-					off) = val;
+	/* K6 [flatwr]: the emulated struct store is a kernel flat
+	 * write of guest content — capture the (run, gen) at the
+	 * translate, compare at the write. */
+	{
+		unsigned long long cap = (unsigned long long)
+			uml_nt_phys_gen(c->ph, off);
+
+		uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_TCTRIP_EMU,
+				    dst, size, (unsigned long long)off,
+				    cap, off);
+		if (size == 2)
+			*(unsigned short *)((char *)
+				uml_boot.physmem_base + off) =
+				(unsigned short)val;
+		else
+			*(unsigned long long *)((char *)
+				uml_boot.physmem_base + off) = val;
+	}
 	d->regs.rip += len;
 	tctrip_emulated++;
 	if (badval && tctrip_loud_budget > 0) {
@@ -726,10 +738,14 @@ void uml_nt_cowwatch_touch(unsigned long long off, unsigned long long len,
  *   re-privatized and wrote on — the benign class, decode
  *   correlates). Reports the differing qword offsets + both values
  *   + the arm-time RUNNING sharers.
- * Budgets: ring 16 (UML_NT_COWRACE_N), UML_NT_COWRACE_CHECKS
- * syscall parks per arm (the lost store lands within a park or two
- * of the copy), 512MB hashed bytes, 128 arm lines, 32 LOST fires,
- * 16 SHARED-WRITE fires, 16 retire notes — one-shots per watch. */
+ * Budgets: ring 64 (UML_NT_COWRACE_N, widened from 16 — dlV ran
+ * 129 arms under a 16-slot ring: most watches were evicted before
+ * any check landed), hash window 4 parks for non-watched sources
+ * and big spans, 32 for watched-heap sources of <= 2 runs (dlV's
+ * 4-park t0-window expiry was a silent hole; a quiet watch stays
+ * armed, gate-only, until the run retires), 512MB hashed bytes,
+ * 128 arm lines, 32 LOST fires, 16 SHARED-WRITE fires, 16 retire
+ * notes, 16 RETIRE-LOST fires — one-shots per watch. */
 #define UML_NT_COWRACE_HASH_BUDGET (512ull * 1024 * 1024)
 static struct uml_nt_cowrace_watch cowrace_w[UML_NT_COWRACE_N];
 static unsigned int cowrace_cursor;
@@ -739,6 +755,8 @@ static int cowrace_arm_budget = 128;
 static int cowrace_fire_budget = 32;
 static int cowrace_shared_budget = 16;
 static int cowrace_ret_budget = 16;
+static int cowrace_retlost_budget = 16; /* RETIRE-LOST fires (the
+	* release-time src-vs-t0 diff — dlV's blind spot) */
 static int cowrace_arm_said, cowrace_hash_said;
 
 /* Live conns whose mm maps the run at src_off (the vma backing span
@@ -775,7 +793,7 @@ void uml_nt_cowrace_arm(struct uml_nt_stub_conn *c,
 			const char *what)
 {
 	unsigned long run_pids[UML_NT_COWRACE_PIDS];
-	int n_run = 0, n_park = 0, n_samm = 0, trunc = 0;
+	int n_run = 0, n_park = 0, n_samm = 0, trunc = 0, watched = 0;
 	struct task_struct *p;
 	unsigned long long h0;
 	int slot, i;
@@ -791,6 +809,20 @@ void uml_nt_cowrace_arm(struct uml_nt_stub_conn *c,
 				cowrace_arms);
 		}
 		return;
+	}
+	/* K6 widening (feature flatwrite-retire-witness): the
+	 * watched-heap gate — the same 0x291 glibc shape as
+	 * tcache_ekey_watch/viewprobe. Watched sources get the LONG
+	 * hash window and the eviction preference; cheap (one
+	 * translate + one qword read) and it rides the existing arm. */
+	if (c->mm != NULL && c->mm->heap_start != 0) {
+		long long ho = uml_nt_vma_translate(c->mm,
+			c->mm->heap_start, 16);
+
+		if (ho >= 0 &&
+		    *(const unsigned long long *)(const void *)
+		    ((char *)uml_boot.physmem_base + ho + 8) == 0x291)
+			watched = 1;
 	}
 	/* The t0 both ends share at the copy: uml_nt_copy_verify
 	 * just memcpy'd AND memcmp'd src==dst over [0, len). */
@@ -847,18 +879,18 @@ void uml_nt_cowrace_arm(struct uml_nt_stub_conn *c,
 						       (long long)src_off),
 				       h0, (unsigned long)c->pid,
 				       run_pids, n_run, n_park, n_samm,
-				       trunc);
+				       trunc, watched);
 	cowrace_w[slot].ph = c->ph;
 	cowrace_arms++;
 	if (cowrace_arm_budget > 0) {
 		cowrace_arm_budget--;
 		os_info("[cowrace] arm %s src=0x%llx dst=0x%llx "
 			"len=0x%llx va=0x%llx pid=%lu running=%d "
-			"[%lu %lu %lu %lu] parked=%d samm=%d "
+			"[%lu %lu %lu %lu] parked=%d samm=%d w=%d "
 			"h0=0x%llx\n", what, src_off, dst_off, len,
 			va_base, (unsigned long)c->pid, n_run,
 			run_pids[0], run_pids[1], run_pids[2],
-			run_pids[3], n_park, n_samm, h0);
+			run_pids[3], n_park, n_samm, watched, h0);
 	} else if (!cowrace_arm_said) {
 		cowrace_arm_said = 1;
 		os_info("[cowrace] arm prints exhausted (%llu arms "
@@ -868,8 +900,11 @@ void uml_nt_cowrace_arm(struct uml_nt_stub_conn *c,
 }
 
 /* The check pass — SYSCALL PARKS ONLY (the placement rule). For
- * every armed watch: lifecycle gates first (cheap), then the src
- * hash; a divergence fires once and retires the watch. */
+ * every armed watch: lifecycle gates first (cheap, EVERY park —
+ * even quiet ones: a watch whose hash window closed stays armed
+ * until the run retires, where the RETIRE-LOST diff decides lost
+ * store vs dead backing), then the src hash while the window is
+ * open; a divergence fires once and retires the watch. */
 static void cowrace_round(struct uml_nt_stub_conn *c)
 {
 	int i;
@@ -901,6 +936,9 @@ static void cowrace_round(struct uml_nt_stub_conn *c)
 					    (long long)w->src_off);
 		v = uml_nt_cowrace_gate(w, gen_now, refs_now);
 		if (v == 0) {
+			if (w->quiet)
+				continue; /* window spent: gate-only
+					   * until the lifecycle ends */
 			hsrc = uml_nt_uacc_fnv1a64(
 				(const void *)((char *)
 					uml_boot.physmem_base +
@@ -925,20 +963,109 @@ static void cowrace_round(struct uml_nt_stub_conn *c)
 		}
 		/* fire or retire: one-shot. */
 		w->armed = 0;
-		if (v == UML_NT_COWRACE_RECYCLE ||
-		    v == UML_NT_COWRACE_RELEASE) {
+		if (v == UML_NT_COWRACE_RECYCLE) {
 			if (cowrace_ret_budget > 0) {
 				cowrace_ret_budget--;
 				os_info("[cowrace] retire src=0x%llx "
-					"(%s: gen 0x%llx->0x%llx refs=%d) "
-					"— %s\n", w->src_off,
-					v == UML_NT_COWRACE_RECYCLE ?
-					"recycled" : "released",
-					w->gen_src, gen_now, refs_now,
-					v == UML_NT_COWRACE_RECYCLE ?
-					"a new generation's bytes, not a "
-					"lost update" :
-					"dead backing");
+					"(recycled: gen 0x%llx->0x%llx "
+					"refs=%d) — a new generation's "
+					"bytes, not a lost update "
+					"(content wiped at handout)\n",
+					w->src_off, w->gen_src, gen_now,
+					refs_now);
+			}
+			continue;
+		}
+		if (v == UML_NT_COWRACE_RELEASE) {
+			/* K6 RETIRE-LOST (feature
+			 * flatwrite-retire-witness): the dlV blind
+			 * spot — all 16 retires went out as "dead
+			 * backing" with NO content check, while a
+			 * store landing in the source between the
+			 * copy and its release retires silently. The
+			 * pool zeroes at HANDOUT, not release
+			 * (physalloc.c), so a released run with its
+			 * gen intact still holds its last-life bytes:
+			 * diff the src against the arm t0 BEFORE
+			 * declaring it dead. src != t0 = a store
+			 * landed in the abandoned source after the
+			 * copy — the lost pair retired as a dead
+			 * backing. */
+			hsrc = uml_nt_uacc_fnv1a64(
+				(const void *)((char *)
+					uml_boot.physmem_base +
+					w->src_off),
+				(unsigned long)w->len);
+			cowrace_hashed += w->len;
+			if (hsrc != w->h0) {
+				hdst = uml_nt_uacc_fnv1a64(
+					(const void *)((char *)
+						uml_boot.physmem_base +
+						w->dst_off),
+					(unsigned long)w->len);
+				cowrace_hashed += w->len;
+				if (cowrace_retlost_budget > 0) {
+					cowrace_retlost_budget--;
+					os_info("[cowrace] RETIRE-LOST "
+						"src=0x%llx dst=0x%llx "
+						"va=0x%llx len=0x%llx "
+						"arm-pid=%lu refs=%d — "
+						"h0=0x%llx hsrc=0x%llx "
+						"hdst=0x%llx (dst %s)\n",
+						w->src_off, w->dst_off,
+						w->va_base, w->len,
+						(unsigned long)w->pid,
+						refs_now, w->h0, hsrc,
+						hdst,
+						hdst == w->h0 ?
+						"untouched" :
+						"moved too");
+					os_info("[cowrace]   released "
+						"(refs=0, gen 0x%llx "
+						"intact) with content != "
+						"t0 — a store landed in "
+						"the abandoned source "
+						"between the copy and "
+						"the release\n", gen_now);
+					nd = uml_nt_cowrace_diff(
+						(const unsigned char *)
+						uml_boot.physmem_base +
+						w->src_off,
+						(const unsigned char *)
+						uml_boot.physmem_base +
+						w->dst_off,
+						w->len, offs, sv, dv,
+						UML_NT_COWRACE_DIFFS);
+					for (k = 0; k < nd &&
+					     k < UML_NT_COWRACE_DIFFS; k++)
+						os_info("[cowrace]   diff "
+							"+0x%llx "
+							"src=0x%016llx "
+							"dst=0x%016llx\n",
+							offs[k], sv[k],
+							dv[k]);
+					if (nd > UML_NT_COWRACE_DIFFS)
+						os_info("[cowrace]   +%d "
+							"more differing "
+							"qwords\n",
+							nd -
+							UML_NT_COWRACE_DIFFS);
+					os_info("[cowrace]   found at park "
+						"pid=%lu nr=%llu ret=%lld "
+						"rip=0x%llx\n",
+						(unsigned long)c->pid,
+						c->last_nr, c->last_ret,
+						c->d->regs.rip);
+				}
+				continue;
+			}
+			if (cowrace_ret_budget > 0) {
+				cowrace_ret_budget--;
+				os_info("[cowrace] retire src=0x%llx "
+					"(released: gen 0x%llx->0x%llx "
+					"refs=%d) — dead backing, src==t0 "
+					"(diff checked)\n", w->src_off,
+					w->gen_src, gen_now, refs_now);
 			}
 			continue;
 		}
@@ -990,6 +1117,188 @@ static void cowrace_round(struct uml_nt_stub_conn *c)
 			w->run_pids[3], w->n_park,
 			mpids[0], mpids[1], mpids[2], mpids[3]);
 	}
+}
+
+/* ---- K6 [flatwr] (M5.6a, feature flatwrite-retire-witness) -------
+ * The kernel-flat-write staleness witness — candidate (b) of the
+ * 139a dead-end: the lost tcache_put pair reaches a backing NO
+ * park-visible view shows, and the surviving NON-VIEW candidate is
+ * a kernel-side flat write of guest content through a translation
+ * OLDER than the current table (the store lands in the abandoned
+ * source run — the dl26 content shape, run 0x4090000 refs=1).
+ * Every flat-write site of guest content captures the (run, gen)
+ * at TRANSLATE time; uml_nt_flatwr_check compares the phys gen of
+ * the offset being written AND the CURRENT table translate of the
+ * guest va (run-granular — every backing offset is run-aligned) at
+ * WRITE time. A mismatch is recorded into the ring AT the site
+ * (bookkeeping only: no hashing, no printing at fault parks) and
+ * printed at the next syscall park (flatwr_report, beside
+ * claim_audit — the placement rule). Read-only witness: no ss/TF,
+ * no DR, no page protects, no guest-visible state.
+ *
+ * Sites covered (capture at the translate, compare at the write):
+ *  - the fault-path COW copy, src read + dst write (caps stamped
+ *    in uml_nt_mm_fault's plan; checked in serve_conn's copy
+ *    block before the memcpy);
+ *  - the uacc walker's inline fixup copy (uml_nt_flatwr_uacc_
+ *    fixup, pinned as the uaccess_walk.h hook — the walker stays
+ *    pure/log-free);
+ *  - the brk re-home span copy (sys_brk);
+ *  - the mmap fill (memset + the file read) and the mmap sweep
+ *    patch (syscall.c — post-write compare: a blocking file read
+ *    or kvmalloc can sleep mid-piece);
+ *  - the mapcanary plant -> RESTORE (the round-trip window: op
+ *    issue -> PROT_DONE, the highest-risk gap of the set);
+ *  - the tctrip emulated tcache-struct store;
+ *  - the fork eager copies (both fork paths) + the below-rsp
+ *    residue zeros.
+ * Enumerated and EXCLUDED (rg-verified, no capture needed): the
+ * D15 uacc funnel itself (its own generation contract:
+ * uacc_gen_stale + the write_ptr re-check); the exec-time writers
+ * (binfmt ELF segments/stack, os_pwrite_file's memfd fills — a
+ * fresh PRIVATE mm, no fork sharers, refs=1, single thread); the
+ * pool zeroing (uml_nt_phys_zero_flat: handout-time, refs==0 by
+ * construction); the entry-blob staging (infrastructure bytes, not
+ * guest VAs); and the FP/sigframe pushback (no flat physmem
+ * write: the frame writes ride the guarded walker, the xstate
+ * rides the stub descriptor page, and the adfc650 pull-push
+ * contract owns the staleness class). */
+static struct uml_nt_flatwr_rec flatwr_ring[UML_NT_FLATWR_N];
+static int flatwr_count;
+static unsigned int flatwr_cursor;
+static int flatwr_budget = 16; /* park prints, one-shot exhaustion */
+static int flatwr_said;
+static const char *const flatwr_sites[] = {
+	"cowcopy-src", "cowcopy-dst", "uacc-fixup", "brk-fill",
+	"mmap-fill", "mmap-sweep", "mc-plant", "mc-restore",
+	"tctrip-emu", "fork-eager", "fork-zero",
+};
+#define FLATWR_SITES_N ((int)(sizeof(flatwr_sites) / \
+			      sizeof(flatwr_sites[0])))
+
+/* The site core (no conn needed — the uacc hook has none: the
+ * record carries pid=0 and the live nr, the decode correlates the
+ * round from the surrounding [uawrite]/[uacc-fixup] lines). */
+static void flatwr_core(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			unsigned long pid, unsigned long long nr,
+			unsigned long long ret, int site,
+			unsigned long long va, unsigned long long len,
+			unsigned long long off,
+			unsigned long long gen_old,
+			long long tbl_expect)
+{
+	unsigned long long gen_now, tbl_old = 0, tbl_new = ~0ull;
+	long long tbl_now = -1;
+	struct uml_nt_flatwr_rec rec;
+	int what;
+
+	if (ph == NULL)
+		return;
+	gen_now = (unsigned long long)uml_nt_phys_gen(ph,
+						      (long long)off);
+	if (mm != NULL && va != 0 && tbl_expect >= 0)
+		tbl_now = uml_nt_vma_translate(mm, va, 1);
+	what = uml_nt_flatwr_class(gen_old, gen_now,
+				   tbl_expect >= 0 ? tbl_now : -1,
+				   tbl_expect);
+	if (what == UML_NT_FLATWR_OK)
+		return;
+	if (tbl_expect >= 0)
+		tbl_old = (unsigned long long)tbl_expect &
+			~(unsigned long long)
+			(UML_NT_PHYS_RUN_SIZE - 1);
+	if (tbl_expect >= 0 && tbl_now >= 0)
+		tbl_new = (unsigned long long)tbl_now &
+			~(unsigned long long)
+			(UML_NT_PHYS_RUN_SIZE - 1);
+	rec.site = (unsigned char)site;
+	rec.what = (unsigned char)what;
+	rec.va = va;
+	rec.len = len;
+	rec.off = off;
+	rec.gen_old = gen_old;
+	rec.gen_now = gen_now;
+	rec.tbl_old = tbl_old;
+	rec.tbl_new = tbl_new;
+	rec.pid = pid;
+	rec.nr = nr;
+	rec.ret = ret;
+	(void)uml_nt_flatwr_push(flatwr_ring, UML_NT_FLATWR_N,
+				 &flatwr_count, &flatwr_cursor, &rec);
+}
+
+void uml_nt_flatwr_check(struct uml_nt_stub_conn *c, int site,
+			 unsigned long long va,
+			 unsigned long long len,
+			 unsigned long long off,
+			 unsigned long long gen_old,
+			 long long tbl_expect)
+{
+	if (c == NULL)
+		return;
+	flatwr_core(c->mm, c->ph, (unsigned long)c->pid, c->last_nr,
+		    c->last_ret, site, va, len, off, gen_old,
+		    tbl_expect);
+}
+
+/* The uacc walker's inline fixup copy (both ends, gen-only — the
+ * dst is a fresh alloc the table has not claimed yet, the src still
+ * backs the va pre-split; the funnel's own gen contract owns the
+ * claim side). */
+void uml_nt_flatwr_uacc_fixup(const struct uml_nt_mm *mm,
+			      struct uml_nt_phys *ph,
+			      unsigned long long va,
+			      unsigned long long src_off,
+			      unsigned long long gen_src,
+			      unsigned long long dst_off,
+			      unsigned long long gen_dst)
+{
+	unsigned long long nr = uml_nt_uacc_nr_current();
+
+	flatwr_core((struct uml_nt_mm *)mm, ph, 0, nr, 0,
+		    UML_NT_FLATWR_SITE_UACC_FIXUP, va,
+		    UML_NT_PHYS_RUN_SIZE, src_off, gen_src, -1);
+	flatwr_core((struct uml_nt_mm *)mm, ph, 0, nr, 0,
+		    UML_NT_FLATWR_SITE_UACC_FIXUP, va,
+		    UML_NT_PHYS_RUN_SIZE, dst_off, gen_dst, -1);
+}
+
+/* The park printer — syscall parks ONLY. Drains the ring. */
+void uml_nt_flatwr_report(struct uml_nt_stub_conn *c)
+{
+	int i;
+
+	if (flatwr_count <= 0)
+		return;
+	for (i = 0; i < flatwr_count && i < UML_NT_FLATWR_N; i++) {
+		struct uml_nt_flatwr_rec *r = &flatwr_ring[i];
+
+		if (flatwr_budget <= 0) {
+			if (!flatwr_said) {
+				flatwr_said = 1;
+				os_info("[flatwr] print budget exhausted "
+					"— records continue to be "
+					"collected\n");
+			}
+			break;
+		}
+		flatwr_budget--;
+		os_info("[flatwr] %s site=%s pid=%lu va=0x%llx "
+			"len=0x%llx off=0x%llx gen=0x%llx->0x%llx "
+			"tbl=0x%llx->0x%llx nr=%llu ret=%lld\n",
+			r->what == UML_NT_FLATWR_STALE_GEN ?
+			"STALE-GEN" :
+			r->what == UML_NT_FLATWR_STALE_TBL ?
+			"STALE-TBL" : "STALE-BOTH",
+			flatwr_sites[r->site % FLATWR_SITES_N],
+			(unsigned long)r->pid, r->va, r->len, r->off,
+			r->gen_old, r->gen_now, r->tbl_old, r->tbl_new,
+			r->nr, r->ret);
+	}
+	/* the park saw the ring; the next window starts here */
+	flatwr_count = 0;
+	flatwr_cursor = 0;
+	(void)c;
 }
 
 static char stub_path[512];
@@ -1202,6 +1511,21 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 				c->mc_orig = *qp;
 				c->mc_want = 0x4d43414e41525900ull /* "MCANARY" */
 					     ^ op->va ^ (op->off << 1);
+				/* K6 [flatwr]: the plant is a kernel flat
+				 * write of guest content (a transient
+				 * nonce over the view's tail-8); the
+				 * RESTORE below spans a stub round-trip —
+				 * capture the (gen, va) here so the
+				 * restore can prove it writes the SAME
+				 * backing the table still owns. */
+				c->mc_gen = (unsigned long long)
+					uml_nt_phys_gen(c->ph,
+							(long long)plant);
+				c->mc_va = op->va + op->len - 8;
+				uml_nt_flatwr_check(c,
+					UML_NT_FLATWR_SITE_MC_PLANT,
+					c->mc_va, 8, plant, c->mc_gen,
+					(long long)plant);
 				*qp = c->mc_want;
 				c->mc_active = 1;
 				d->mapcanary = c->mc_want;
@@ -4819,8 +5143,15 @@ static void viewprobe_round(struct uml_nt_stub_conn *c)
 	}
 
 	/* the drain record: whether a re-protect/MAP stream drained
-	 * since the previous park, and its ops. */
+	 * since the previous park, and its ops. K6 fix (feature
+	 * flatwrite-retire-witness): print only for streams of 2+
+	 * ops — dlV's budget died at line 14131 on the recurring
+	 * 1-op re-protect shape, and the late-window streams (the
+	 * 2-op [fork-sync] re-homes, the multi-op COW split plans —
+	 * the formation window's shape) never got a line. The record
+	 * itself still collects EVERY drained stream. */
 	if (c->vp_drain_count > 0 && c->vp_drain_pm &&
+	    c->vp_drain_nops >= 2 &&
 	    vp_drain_budget > 0) {
 		int k, o, shown = 0;
 
@@ -5032,6 +5363,11 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		/* K6 [cowrace]: the copy-vs-in-flight-store witness's
 		 * check pass — syscall parks only, same hook point. */
 		cowrace_round(c);
+		/* K6 [flatwr]: the kernel-flat-write staleness
+		 * witness's ring — syscall parks only, same hook point.
+		 * Read-only: the site records are bookkeeping at existing
+		 * flat-write sites, nothing at fault parks. */
+		uml_nt_flatwr_report(c);
 		/* K6 [viewprobe]: the stub-view-vs-table witness —
 		 * syscall parks only, same hook point. Read-only
 		 * (ReadProcessMemory on the parked stub): no ss/TF,
@@ -5090,6 +5426,16 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					(unsigned long)c->pid, d->map_va,
 					c->mc_off, c->mc_want,
 					d->mapcanary_got);
+			/* K6 [flatwr]: the pushback writes the ORIGINAL
+			 * guest qword back flat-side — and the op
+			 * round-trip (issue -> stub MAP apply ->
+			 * PROTDONE) is the widest window of the set: a
+			 * re-handed run or a re-homed va means the
+			 * restore wrote through a stale translation. */
+			uml_nt_flatwr_check(c,
+				UML_NT_FLATWR_SITE_MC_RESTORE,
+				c->mc_va, 8, c->mc_off, c->mc_gen,
+				(long long)c->mc_off);
 			*(unsigned long long *)
 				((char *)uml_boot.physmem_base + c->mc_off) =
 				c->mc_orig;
@@ -5761,7 +6107,26 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				d->err = 1;
 				return -1;
 			}
-			uml_nt_copy_verify(uml_boot.physmem_base +
+			/* K6 [flatwr]: the copy is a kernel flat write of guest
+		 * content — compare the (run, gen) captured at
+		 * TRANSLATE time (uml_nt_mm_fault stamped them beside
+		 * the copy directive) with the phys gen AND the current
+		 * table translate AT WRITE TIME. src = the read side (a
+		 * re-handed src fed the copy foreign bytes); dst = the
+		 * write side (post-split the table must translate the
+		 * fault va to the dst run). Bookkeeping only. */
+		uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_COWCOPY_SRC,
+				    d->fault_addr, UML_NT_PHYS_RUN_SIZE,
+				    c->plan.copy_src_off,
+				    c->plan.cap_gen_src, -1);
+		uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_COWCOPY_DST,
+				    d->fault_addr, UML_NT_PHYS_RUN_SIZE,
+				    c->plan.copy_dst_off,
+				    c->plan.cap_gen_dst,
+				    (long long)(c->plan.copy_dst_off +
+					(d->fault_addr &
+					 (UML_NT_PHYS_RUN_SIZE - 1))));
+		uml_nt_copy_verify(uml_boot.physmem_base +
 					   c->plan.copy_dst_off,
 					   uml_boot.physmem_base +
 					   c->plan.copy_src_off,
@@ -5982,9 +6347,31 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 			d->err = 1;
 			return;
 		}
-		uml_nt_copy_verify(uml_boot.physmem_base + cv->run_off,
+		/* K6 [flatwr]: the eager copy is a kernel flat write of
+		 * guest content — capture both ends' gens at the
+		 * translate, gen-only compare at the write (the child
+		 * table is fresh this round; the dst run is born here). */
+		{
+			unsigned long long egs = (unsigned long long)
+				uml_nt_phys_gen(c->ph,
+						(long long)pv->run_off);
+			unsigned long long egd = (unsigned long long)
+				uml_nt_phys_gen(c->ph,
+						(long long)cv->run_off);
+
+			uml_nt_copy_verify(uml_boot.physmem_base +
+					   cv->run_off,
 				   uml_boot.physmem_base + pv->run_off,
 				   cv->end - cv->start, "poc-eager");
+			uml_nt_flatwr_check(c,
+				UML_NT_FLATWR_SITE_FORK_EAGER, 0,
+				cv->end - cv->start, pv->run_off, egs,
+				-1);
+			uml_nt_flatwr_check(c,
+				UML_NT_FLATWR_SITE_FORK_EAGER, 0,
+				cv->end - cv->start, cv->run_off, egd,
+				-1);
+		}
 		uml_nt_cowwatch_touch((unsigned long long)pv->run_off,
 				      cv->end - cv->start,
 				      "poc-eager-src");
@@ -6023,8 +6410,22 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 						"block — skipped\n",
 						sv->run_off, zlen);
 				else {
+					/* K6 [flatwr]: gen-only capture/
+					 * compare around the residue
+					 * zero (a kernel flat write of
+					 * guest stack content). */
+					unsigned long long zgs =
+						(unsigned long long)
+						uml_nt_phys_gen(c->ph,
+							(long long)
+							sv->run_off);
+
 					memset(uml_boot.physmem_base +
 					       sv->run_off, 0, zlen);
+					uml_nt_flatwr_check(c,
+						UML_NT_FLATWR_SITE_FORK_ZERO,
+						0, zlen, sv->run_off,
+						zgs, -1);
 					uml_nt_cowwatch_touch(
 						(unsigned long long)
 						sv->run_off, zlen,
@@ -6597,9 +6998,32 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 			uml_nt_fork_disarm();
 			return -ENOMEM;
 		}
-		uml_nt_copy_verify(uml_boot.physmem_base + cv->run_off,
+		/* K6 [flatwr]: the eager copy is a kernel flat write of
+		 * guest content — capture both ends' gens at the
+		 * translate, gen-only compare at the write (the child
+		 * table was cloned this round; the dst run is born
+		 * here). */
+		{
+			unsigned long long egs = (unsigned long long)
+				uml_nt_phys_gen(parent->ph,
+						(long long)pv->run_off);
+			unsigned long long egd = (unsigned long long)
+				uml_nt_phys_gen(parent->ph,
+						(long long)cv->run_off);
+
+			uml_nt_copy_verify(uml_boot.physmem_base +
+					   cv->run_off,
 				   uml_boot.physmem_base + pv->run_off,
 				   cv->end - cv->start, "seed-eager");
+			uml_nt_flatwr_check(parent,
+				UML_NT_FLATWR_SITE_FORK_EAGER, 0,
+				cv->end - cv->start, pv->run_off, egs,
+				-1);
+			uml_nt_flatwr_check(parent,
+				UML_NT_FLATWR_SITE_FORK_EAGER, 0,
+				cv->end - cv->start, cv->run_off, egd,
+				-1);
+		}
 		uml_nt_cowwatch_touch((unsigned long long)pv->run_off,
 				      cv->end - cv->start,
 				      "seed-eager-src");
@@ -6668,8 +7092,19 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 					"the block — skipped\n",
 					sv->run_off, zlen);
 			else {
+				/* K6 [flatwr]: gen-only capture/compare
+				 * around the residue zero (a kernel
+				 * flat write of guest stack content). */
+				unsigned long long zgs =
+					(unsigned long long)
+					uml_nt_phys_gen(child->ph,
+						(long long)sv->run_off);
+
 				memset(uml_boot.physmem_base +
 				       sv->run_off, 0, zlen);
+				uml_nt_flatwr_check(parent,
+					UML_NT_FLATWR_SITE_FORK_ZERO,
+					0, zlen, sv->run_off, zgs, -1);
 				uml_nt_cowwatch_touch(
 					(unsigned long long)sv->run_off,
 					zlen, "seed-residue-zero");

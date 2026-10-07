@@ -267,8 +267,26 @@ char *uml_nt_uacc_write_ptr(const struct uml_nt_mm *mm, char *base,
 	if (new_run == (unsigned long long)-1)
 		return (char *)0;
 	/* The content copy is INLINE (kernel flat view): fresh run gets
-	 * the shared run's bytes, then the caller's write lands on it. */
-	uacc_bcopy(base + new_run, base + old_run, UACC_RUN);
+	 * the shared run's bytes, then the caller's write lands on it.
+	 * K6 [flatwr]: this is a kernel flat write of guest content —
+	 * capture the (run, gen) of both ends at the translate and let
+	 * the pinned hook compare them with the phys gen + the current
+	 * table translate at write time (NULL in the unit tests). */
+	{
+		unsigned long long cap_gs = (unsigned long long)
+			uml_nt_phys_gen(uacc_sink.ph,
+					(long long)old_run);
+		unsigned long long cap_gd = (unsigned long long)
+			uml_nt_phys_gen(uacc_sink.ph,
+					(long long)new_run);
+
+		uacc_bcopy(base + new_run, base + old_run, UACC_RUN);
+		if (uml_nt_flatwr_uacc_hook !=
+		    (uml_nt_flatwr_uacc_fn)0)
+			uml_nt_flatwr_uacc_hook(mm, uacc_sink.ph, va,
+						old_run, cap_gs,
+						new_run, cap_gd);
+	}
 	uml_nt_uacc_fixups++; /* the conn layer logs the delta */
 	/* M5.4 c3 (map 057): record the fixup's coordinates for the
 	 * conn layer's delta log — this file is PURE (no os_info; the
@@ -739,7 +757,8 @@ int uml_nt_cowrace_slot_arm(struct uml_nt_cowrace_watch *w, int n,
 			    unsigned long long h0,
 			    unsigned long pid,
 			    const unsigned long *run_pids, int n_run,
-			    int n_park, int n_samm, int trunc)
+			    int n_park, int n_samm, int trunc,
+			    int watched)
 {
 	int i, slot = -1, free_i = -1;
 
@@ -757,11 +776,25 @@ int uml_nt_cowrace_slot_arm(struct uml_nt_cowrace_watch *w, int n,
 		if (free_i >= 0) {
 			slot = free_i;
 		} else {
-			/* full ring: evict by cursor (cowwatch pattern)
-			 * — the advance happens ONLY on a real evict,
-			 * never on a refresh or a free-slot fill. */
-			slot = (int)*cursor;
-			*cursor = (*cursor + 1) % (unsigned int)n;
+			/* full ring: keep WATCHED-heap sources (the
+			 * tear's shape) — evict the first non-watched
+			 * watch from the cursor, only an all-watched
+			 * ring falls back to the cursor slot. The
+			 * advance happens ONLY on a real evict, never
+			 * on a refresh or a free-slot fill. */
+			slot = -1;
+			for (i = 0; i < n; i++) {
+				int cand = (int)((*cursor + (unsigned)i) %
+						 (unsigned)n);
+
+				if (!w[cand].watched) {
+					slot = cand;
+					break;
+				}
+			}
+			if (slot < 0)
+				slot = (int)*cursor;
+			*cursor = (*cursor + 1) % (unsigned)n;
 		}
 	}
 	w[slot].src_off = src_off;
@@ -779,7 +812,14 @@ int uml_nt_cowrace_slot_arm(struct uml_nt_cowrace_watch *w, int n,
 	w[slot].n_park = n_park;
 	w[slot].n_samm = n_samm;
 	w[slot].trunc = trunc;
-	w[slot].checks = UML_NT_COWRACE_CHECKS;
+	w[slot].watched = (unsigned char)(watched ? 1 : 0);
+	/* the hash window: watched glibc-heap sources of <= 2 runs get
+	 * the LONG window (the store can land several parks after the
+	 * copy — dlV's 4-park expiry was a silent hole); big spans and
+	 * non-watched arms keep the tight window (the hash budget). */
+	w[slot].checks = (watched && len <= UML_NT_COWRACE_LONG_LEN) ?
+		UML_NT_COWRACE_CHECKS_LONG : UML_NT_COWRACE_CHECKS;
+	w[slot].quiet = 0;
 	w[slot].armed = 1;
 	return slot;
 }
@@ -818,8 +858,13 @@ int uml_nt_cowrace_spend(struct uml_nt_cowrace_watch *w)
 	if (w->checks > 0)
 		w->checks--;
 	if (w->checks == 0)
-		w->armed = 0; /* routine expiry: silent (the
-			       * fire/retire paths print) */
+		w->quiet = 1; /* the hash window closes — the watch
+			       * STAYS ARMED: the lifecycle gate runs
+			       * at every park until the run retires
+			       * (refs==0 / gen move), where the
+			       * RETIRE-LOST diff decides lost store vs
+			       * dead backing. Silent here: the
+			       * fire/retire paths print. */
 	return 0;
 }
 
@@ -879,6 +924,70 @@ int uml_nt_cowrace_maps_run(const struct uml_nt_mm *mm,
 			return 1;
 	}
 	return 0;
+}
+
+/* ---- K6 [flatwr] (M5.6a, feature flatwrite-retire-witness) — the
+ * kernel-flat-write staleness witness's pure helpers. See
+ * uaccess_walk.h for the protocol; stub_ctl.c owns the ring, the
+ * reads and every log line (this file stays log-free). Byte ops
+ * spelled out like the rest of this file: no <string.h>, it
+ * compiles freestanding in the kernel AND in the unit test. */
+
+/* the uacc walker's inline fixup-copy hook (uaccess_walk.h): NULL
+ * in the host unit tests, pinned by the kernel before linux_main
+ * (the physalloc zero/alias-hook pattern). */
+uml_nt_flatwr_uacc_fn uml_nt_flatwr_uacc_hook =
+	(uml_nt_flatwr_uacc_fn)0;
+
+int uml_nt_flatwr_class(unsigned long long gen_old,
+			unsigned long long gen_now,
+			long long tbl_now, long long tbl_expect)
+{
+	int g = (gen_old == 0) || (gen_now != gen_old);
+	int t = 0;
+
+	if (tbl_expect >= 0) {
+		if (tbl_now < 0)
+			t = 1; /* the va no longer translates at all */
+		else if (((unsigned long long)tbl_now &
+			  ~(unsigned long long)(UML_NT_PHYS_RUN_SIZE - 1)) !=
+			 ((unsigned long long)tbl_expect &
+			  ~(unsigned long long)(UML_NT_PHYS_RUN_SIZE - 1)))
+			t = 1; /* the table re-homed the va to another
+				* run — the write went through the
+				* captured (stale) translation */
+	}
+	if (g && t)
+		return UML_NT_FLATWR_STALE_BOTH;
+	if (g)
+		return UML_NT_FLATWR_STALE_GEN;
+	if (t)
+		return UML_NT_FLATWR_STALE_TBL;
+	return UML_NT_FLATWR_OK;
+}
+
+int uml_nt_flatwr_push(struct uml_nt_flatwr_rec *r, int n, int *count,
+		       unsigned int *cursor,
+		       const struct uml_nt_flatwr_rec *rec)
+{
+	int slot;
+
+	if (r == (struct uml_nt_flatwr_rec *)0 || n <= 0 ||
+	    count == (int *)0 || cursor == (unsigned int *)0 ||
+	    rec == (const struct uml_nt_flatwr_rec *)0)
+		return -1;
+	if (*count < n) {
+		slot = *count;
+		(*count)++;
+	} else {
+		/* full: overwrite by cursor — the newest record wins
+		 * (the park printer drains the ring every park, so
+		 * this only trips on a many-site burst). */
+		slot = (int)*cursor;
+		*cursor = (*cursor + 1) % (unsigned)n;
+	}
+	r[slot] = *rec;
+	return slot;
 }
 
 /* ---- K6 [viewprobe] (M5.6a, feature viewprobe-witness) — the

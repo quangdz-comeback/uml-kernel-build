@@ -125,9 +125,16 @@ struct uml_nt_fault_plan {
 	struct uml_nt_fault_op ops[UML_NT_FAULT_MAX_OPS];
 	/* COW copy directive (integration: kernel memcpy through its
 	 * own flat view, 64K run, BEFORE the ops reach the stub).
-	 * copy_src_off == 0 && copy_dst_off == 0 = none. */
+	 * copy_src_off == 0 && copy_dst_off == 0 = none.
+	 * K6 [flatwr] (feature flatwrite-retire-witness): the (run,
+	 * gen) pair captured at TRANSLATE time — the serve_conn copy
+	 * site compares them with the phys gen and the CURRENT table
+	 * translate at WRITE time (a mismatch = the copy wrote through
+	 * a translation older than the table). */
 	unsigned long long copy_src_off;
 	unsigned long long copy_dst_off;
+	unsigned long long cap_gen_src;
+	unsigned long long cap_gen_dst;
 };
 
 /*

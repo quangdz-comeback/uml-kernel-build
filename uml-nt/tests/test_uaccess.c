@@ -94,6 +94,7 @@ static void test_uaw_nr_context(void);
 static void test_tce_helpers(void);
 static void test_cowrace_helpers(void);
 static void test_viewprobe_helpers(void);
+static void test_flatwr_helpers(void);
 
 int main(void)
 {
@@ -237,6 +238,13 @@ int main(void)
 	 * set builder, the rotation picker and the diverged-qword
 	 * attribution (feature viewprobe-witness). */
 	test_viewprobe_helpers();
+
+	/* K6 [flatwr] (feature flatwrite-retire-witness): the kernel
+	 * flat-write staleness classifier + record ring — every
+	 * kernel-side flat write of guest content compares the (run,
+	 * gen) captured at translate time with the phys gen and the
+	 * CURRENT table translate at write time. */
+	test_flatwr_helpers();
 
 	if (fails) {
 		printf("test_uaccess: %d failure(s)\n", fails);
@@ -1028,7 +1036,7 @@ static void test_cowrace_helpers(void)
 	 * full ring evicts by cursor. */
 	i = uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 				    0x110000, 0x220000, RUN, RAM, 9, 0xaaaa,
-				    100, pids, 2, 1, 0, 0);
+				    100, pids, 2, 1, 0, 0, 0);
 	CHECK(i == 0);
 	CHECK(w[0].armed == 1);
 	CHECK(w[0].checks == UML_NT_COWRACE_CHECKS);
@@ -1038,7 +1046,7 @@ static void test_cowrace_helpers(void)
 	CHECK(w[0].h0 == 0xaaaa && w[0].dst_off == 0x220000);
 	i = uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 				    0x330000, 0x440000, RUN, RAM + RUN, 4,
-				    0xbbbb, 200, pids, 0, 3, 0, 0);
+				    0xbbbb, 200, pids, 0, 3, 0, 0, 0);
 	CHECK(i == 1);
 	/* spend two checks on slot 0, then re-arm the same src: the
 	 * refresh resets checks and updates dst without moving. */
@@ -1047,7 +1055,7 @@ static void test_cowrace_helpers(void)
 	CHECK(uml_nt_cowrace_spend(&w[0]) == 0);
 	i = uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 				    0x110000, 0x550000, RUN, RAM, 9, 0xcccc,
-				    100, pids, 1, 2, 1, 1);
+				    100, pids, 1, 2, 1, 1, 0);
 	CHECK(i == 0);
 	CHECK(w[0].checks == UML_NT_COWRACE_CHECKS);
 	CHECK(w[0].dst_off == 0x550000);
@@ -1059,37 +1067,119 @@ static void test_cowrace_helpers(void)
 	 * neighbours keep theirs. */
 	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 				      0x660000, 0x1, RUN, RAM, 1, 0, 3,
-				      pids, 0, 0, 0, 0);
+				      pids, 0, 0, 0, 0, 0);
 	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 				      0x770000, 0x1, RUN, RAM, 1, 0, 4,
-				      pids, 0, 0, 0, 0);
+				      pids, 0, 0, 0, 0, 0);
 	for (i = 4; i < UML_NT_COWRACE_N; i++) {
 		unsigned long long s = 0x1000000ull +
 			(unsigned long long)i * 0x100000ull;
 
 		CHECK(uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 					      s, 0x1, RUN, RAM, 1, 0,
-					      3 + i, pids, 0, 0, 0, 0) == i);
+					      3 + i, pids, 0, 0, 0, 0,
+					      0) == i);
 	}
 	for (i = 0; i < UML_NT_COWRACE_N; i++)
 		CHECK(w[i].armed == 1);
 	/* full: the next distinct src evicts slot 0 (cursor 0). */
 	i = uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 				     0x880000, 0x1, RUN, RAM, 1, 0, 5,
-				     pids, 0, 0, 0, 0);
+				     pids, 0, 0, 0, 0, 0);
 	CHECK(i == 0);
 	CHECK(w[0].src_off == 0x880000);
 	CHECK(w[1].src_off == 0x330000); /* neighbour kept */
 
-	/* spend to expiry: armed clears, further spends refused. */
+	/* spend to expiry: the HASH WINDOW closes (quiet=1) but the
+	 * watch STAYS ARMED — the lifecycle gate keeps running at
+	 * every park until the run retires, where the RETIRE-LOST
+	 * diff (src vs the arm t0 at refs==0, gen intact) decides
+	 * lost store vs dead backing (dlV's 16 silent retires were
+	 * the blind spot). Further spends still return 0 (armed). */
 	memset(w, 0, sizeof(w));
 	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 				      0x110000, 0x220000, RUN, RAM, 9, 0,
-				      100, pids, 0, 0, 0, 0);
+				      100, pids, 0, 0, 0, 0, 0);
 	for (i = 0; i < UML_NT_COWRACE_CHECKS; i++)
 		CHECK(uml_nt_cowrace_spend(&w[0]) == 0);
-	CHECK(w[0].armed == 0);
-	CHECK(uml_nt_cowrace_spend(&w[0]) == -1);
+	CHECK(w[0].quiet == 1);
+	CHECK(w[0].armed == 1);
+	CHECK(uml_nt_cowrace_spend(&w[0]) == 0); /* still armed */
+
+	/* the watched-heap LONG window (feature flatwrite-retire-
+	 * witness): arms of WATCHED glibc heaps (the 0x291 shape,
+	 * len <= 2 runs) hash for 32 parks, not 4 — the store that
+	 * lands late past the old window still fires; big spans
+	 * (brk re-homes) and non-watched arms keep the 4-park window
+	 * (the 512MB hash budget stays bounded). */
+	memset(w, 0, sizeof(w));
+	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				      0x110000, 0x220000, RUN, RAM, 9, 0,
+				      100, pids, 0, 0, 0, 0, 1);
+	CHECK(w[0].watched == 1);
+	CHECK(w[0].checks == UML_NT_COWRACE_CHECKS_LONG);
+	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				      0x330000, 0x440000, 4 * RUN, RAM, 9,
+				      0, 100, pids, 0, 0, 0, 0, 1);
+	CHECK(w[1].checks == UML_NT_COWRACE_CHECKS); /* span > 2 runs */
+	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				      0x550000, 0x660000, RUN, RAM, 9, 0,
+				      100, pids, 0, 0, 0, 0, 0);
+	CHECK(w[2].checks == UML_NT_COWRACE_CHECKS); /* not watched */
+	/* a re-arm of the same src refreshes the window AND clears
+	 * the quiet state. */
+	for (i = 0; i < UML_NT_COWRACE_CHECKS_LONG; i++)
+		(void)uml_nt_cowrace_spend(&w[0]);
+	CHECK(w[0].quiet == 1);
+	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
+				      0x110000, 0x770000, RUN, RAM, 9, 0,
+				      100, pids, 0, 0, 0, 0, 1);
+	CHECK(w[0].quiet == 0);
+	CHECK(w[0].checks == UML_NT_COWRACE_CHECKS_LONG);
+	CHECK(w[0].dst_off == 0x770000);
+
+	/* eviction preference: a full ring keeps WATCHED sources —
+	 * the victim is the first NON-watched watch from the cursor,
+	 * even when the cursor sits on a watched slot; only an
+	 * all-watched ring falls back to the cursor slot. (n=4: the
+	 * pure helper takes the ring size.) */
+	memset(w, 0, sizeof(w));
+	cursor = 0;
+	CHECK(uml_nt_cowrace_slot_arm(w, 4, &cursor, 0x100000, 0x1,
+				      RUN, RAM, 1, 0, 7, pids, 0, 0, 0, 0,
+				      0) == 0);
+	(void)uml_nt_cowrace_slot_arm(w, 4, &cursor, 0x200000, 0x1,
+				      RUN, RAM, 1, 0, 7, pids, 0, 0, 0, 0, 0);
+	(void)uml_nt_cowrace_slot_arm(w, 4, &cursor, 0x300000, 0x1,
+				      RUN, RAM, 1, 0, 7, pids, 0, 0, 0, 0, 1);
+	(void)uml_nt_cowrace_slot_arm(w, 4, &cursor, 0x400000, 0x1,
+				      RUN, RAM, 1, 0, 7, pids, 0, 0, 0, 0, 0);
+	for (i = 0; i < 4; i++)
+		CHECK(w[i].armed == 1);
+	cursor = 2; /* sits on the watched slot 2 */
+	CHECK(uml_nt_cowrace_slot_arm(w, 4, &cursor, 0x500000, 0x1,
+				      RUN, RAM, 1, 0, 7, pids, 0, 0, 0, 0,
+				      1) == 3);
+	CHECK(w[2].src_off == 0x300000 && w[2].watched == 1);
+	CHECK(w[3].src_off == 0x500000);
+	/* slot 3 is watched now too: the next victim is slot 0. */
+	CHECK(uml_nt_cowrace_slot_arm(w, 4, &cursor, 0x600000, 0x1,
+				      RUN, RAM, 1, 0, 7, pids, 0, 0, 0, 0,
+				      1) == 0);
+	CHECK(w[1].src_off == 0x200000); /* the last non-watched kept */
+	/* next: slot 0 is watched, slot 1 is the non-watched victim. */
+	CHECK(uml_nt_cowrace_slot_arm(w, 4, &cursor, 0x700000, 0x1,
+				      RUN, RAM, 1, 0, 7, pids, 0, 0, 0, 0,
+				      1) == 1);
+	/* all four watched: the cursor slot itself goes. */
+	{
+		int c_before = (int)cursor;
+
+		CHECK(uml_nt_cowrace_slot_arm(w, 4, &cursor, 0x800000,
+					      0x1, RUN, RAM, 1, 0, 7,
+					      pids, 0, 0, 0, 0, 1) ==
+		      c_before);
+	}
 
 	/* gates: the run's lifecycle retires the watch BEFORE any
 	 * hash comparison — a recycled (gen moved) or released
@@ -1097,7 +1187,7 @@ static void test_cowrace_helpers(void)
 	memset(w, 0, sizeof(w));
 	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 				      0x110000, 0x220000, RUN, RAM, 9, 0,
-				      100, pids, 0, 0, 0, 0);
+				      100, pids, 0, 0, 0, 0, 0);
 	CHECK(uml_nt_cowrace_gate(&w[0], 9, 1) == 0);   /* intact */
 	CHECK(uml_nt_cowrace_gate(&w[0], 10, 1) == UML_NT_COWRACE_RECYCLE);
 	CHECK(uml_nt_cowrace_gate(&w[0], 9, 0) == UML_NT_COWRACE_RELEASE);
@@ -1119,7 +1209,7 @@ static void test_cowrace_helpers(void)
 	memset(w, 0, sizeof(w));
 	(void)uml_nt_cowrace_slot_arm(w, UML_NT_COWRACE_N, &cursor,
 				      0x110000, 0x220000, RUN, RAM, 9, 0xaaaa,
-				      100, pids, 0, 0, 0, 0);
+				      100, pids, 0, 0, 0, 0, 0);
 	CHECK(uml_nt_cowrace_verdict(&w[0], 0xaaaa, 0xaaaa) ==
 	      UML_NT_COWRACE_QUIET);  /* nothing moved */
 	CHECK(uml_nt_cowrace_verdict(&w[0], 0x1111, 0xaaaa) ==
@@ -1367,4 +1457,73 @@ static void test_viewprobe_helpers(void)
 							      * range */
 	CHECK(uml_nt_vp_attr(0x67c60000, chunks, 2, 0x10, 0x290,
 			     ops, 4) == UML_NT_VP_ATTR_OTHER);
+}
+
+/* ---- K6 [flatwr] (feature flatwrite-retire-witness) ---------------
+ * The pure staleness classifier + record ring of the kernel-flat-
+ * write witness. Context (dlV 37553645227): the lost tcache_put
+ * pair reaches a backing NO park-visible view shows — the
+ * surviving non-view candidates are (b) a kernel-side flat write
+ * through a translation older than the current table (the store
+ * lands in an abandoned/foreign run) and (c) a store landing in a
+ * copy source between the copy and its release. (b)'s witness:
+ * every kernel flat-write site of guest content captures the
+ * (run, gen) at translate time and compares the phys gen AND the
+ * current table translate at write time — a mismatch is tagged
+ * STALE-GEN (run re-handed between capture and write) or
+ * STALE-TBL (the va translates elsewhere now), recorded into a
+ * small ring at the site, printed at the next syscall park. */
+static void test_flatwr_helpers(void)
+{
+	static struct uml_nt_flatwr_rec ring[UML_NT_FLATWR_N];
+	struct uml_nt_flatwr_rec rec;
+	unsigned int cursor = 0;
+	int count = 0;
+	int i;
+
+	memset(ring, 0, sizeof(ring));
+
+	/* classifier: gen identity + run-granular table identity (all
+	 * backing offsets are run-aligned, so the table compare is the
+	 * run compare; a translate of -1 with an expected run = the
+	 * va no longer translates = stale too; gen==0 at capture = a
+	 * never-handed offset = stale by definition). */
+	CHECK(uml_nt_flatwr_class(9, 9, 0x110000 + 0x123,
+				  0x110000 + 0x456) ==
+	      UML_NT_FLATWR_OK);        /* same run, intra-run drift ok */
+	CHECK(uml_nt_flatwr_class(9, 10, 0x110000, 0x110000) ==
+	      UML_NT_FLATWR_STALE_GEN); /* the run re-handed under the
+					 write */
+	CHECK(uml_nt_flatwr_class(0, 0, 0x110000, 0x110000) ==
+	      UML_NT_FLATWR_STALE_GEN); /* gen 0 at capture */
+	CHECK(uml_nt_flatwr_class(9, 9, 0x220000, 0x110000) ==
+	      UML_NT_FLATWR_STALE_TBL); /* the table re-homed the va */
+	CHECK(uml_nt_flatwr_class(9, 9, -1, 0x110000) ==
+	      UML_NT_FLATWR_STALE_TBL); /* the va untranslatable now */
+	CHECK(uml_nt_flatwr_class(9, 9, -1, -1) ==
+	      UML_NT_FLATWR_OK);        /* no table check requested */
+	CHECK(uml_nt_flatwr_class(9, 10, 0x220000, 0x110000) ==
+	      UML_NT_FLATWR_STALE_BOTH);
+
+	/* the ring: records append in order, the count caps at n, a
+	 * full ring overwrites by cursor (the newest record wins). */
+	memset(&rec, 0, sizeof(rec));
+	rec.site = UML_NT_FLATWR_SITE_COWCOPY_DST;
+	rec.what = UML_NT_FLATWR_STALE_GEN;
+	rec.va = 0x67c90000;
+	rec.len = RUN;
+	rec.off = 0x409000;
+	for (i = 0; i < UML_NT_FLATWR_N; i++) {
+		rec.off = 0x1000ull * (unsigned)(i + 1);
+		CHECK(uml_nt_flatwr_push(ring, UML_NT_FLATWR_N, &count,
+					 &cursor, &rec) == i);
+	}
+	CHECK(count == UML_NT_FLATWR_N);
+	CHECK(ring[UML_NT_FLATWR_N - 1].off ==
+	      0x1000ull * UML_NT_FLATWR_N);
+	rec.off = 0xdead000;
+	CHECK(uml_nt_flatwr_push(ring, UML_NT_FLATWR_N, &count,
+				 &cursor, &rec) == 0);
+	CHECK(count == UML_NT_FLATWR_N);
+	CHECK(ring[0].off == 0xdead000);
 }

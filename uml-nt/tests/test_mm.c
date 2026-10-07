@@ -762,6 +762,16 @@ static void test_fault(void)
 	CHECK(plan.ops[2].off == fix_r0 + 2 * RUN);
 	CHECK(plan.copy_src_off == fix_r1 &&
 	      plan.copy_dst_off == fix_r0 + 2 * RUN);
+	/* K6 [flatwr] (feature flatwrite-retire-witness): the copy
+	 * directive carries the (run, gen) captured at TRANSLATE
+	 * time — the serve_conn copy site compares them with the phys
+	 * gen and the current table translate at WRITE time (a
+	 * mismatch = the copy wrote through a translation older than
+	 * the table). */
+	CHECK(plan.cap_gen_src == (unsigned long long)
+	      uml_nt_phys_gen(&ph, (long long)fix_r1));
+	CHECK(plan.cap_gen_dst == (unsigned long long)
+	      uml_nt_phys_gen(&ph, (long long)(fix_r0 + 2 * RUN)));
 	/* mm surgery visible: pre stays shared+COW, middle private */
 	CHECK(mm.nvma == 2);
 	CHECK(mm.vma[0].run_off == (unsigned long long)fix_r0 &&
@@ -850,6 +860,8 @@ static void test_fault(void)
 	CHECK(!plan.kill && plan.n_ops == 1 &&
 	      plan.ops[0].prot == UML_NT_PAGE_READONLY);
 	CHECK(plan.copy_src_off == 0 && plan.copy_dst_off == 0);
+	/* K6 [flatwr]: no copy directive, no capture. */
+	CHECK(plan.cap_gen_src == 0 && plan.cap_gen_dst == 0);
 
 	/* unknown access class: kill */
 	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + 0x800, 5u, &plan) == -1);

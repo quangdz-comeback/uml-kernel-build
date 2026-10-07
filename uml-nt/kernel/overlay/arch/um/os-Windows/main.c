@@ -15,6 +15,7 @@
 #include <ntabi.h>
 #include <os.h>
 #include <vma.h>
+#include <uaccess_walk.h>
 #include "boot-info.h"
 #include "internal.h"
 
@@ -76,6 +77,13 @@ void nt_main(struct uml_boot_info *bi)
 	/* M5.6a (the zero-page contract): every phys handout leaves
 	 * the allocator zeroed — see physalloc.h. */
 	uml_nt_phys_zero_hook = uml_nt_phys_zero_flat;
+
+	/* K6 [flatwr] (feature flatwrite-retire-witness): the uacc
+	 * walker's inline fixup copy is a kernel flat write of guest
+	 * content inside a pure file — the staleness check runs through
+	 * this hook (capture the (run, gen) at the translate, compare
+	 * with the phys gen + the current table translate at write). */
+	uml_nt_flatwr_uacc_hook = uml_nt_flatwr_uacc_fixup;
 
 	linux_main(uml_boot.argc, uml_boot.argv, uml_boot.envp);
 

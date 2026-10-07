@@ -116,6 +116,22 @@ void uml_nt_phys_zero_flat(long long off, int nruns);
 void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 			   int refs, const void *owner);
 
+/* stub_ctl.c (K6 [flatwr], M5.6a feature flatwrite-retire-witness):
+ * the uacc walker's inline fixup-copy hook implementation — pinned
+ * as uml_nt_flatwr_uacc_hook in nt_main (the physalloc zero/alias
+ * hook pattern; the hook extern itself is in uaccess_walk.h).
+ * Captures both ends' (run, gen) at the translate and compares them
+ * with the phys gen + the current table translate at write time. */
+struct uml_nt_mm;
+struct uml_nt_phys;
+void uml_nt_flatwr_uacc_fixup(const struct uml_nt_mm *mm,
+			      struct uml_nt_phys *ph,
+			      unsigned long long va,
+			      unsigned long long src_off,
+			      unsigned long long gen_src,
+			      unsigned long long dst_off,
+			      unsigned long long gen_dst);
+
 /* process.c (R17 DIAG): dump the vmalloc-band ledger ring — the
  * last n os_map_memory/os_unmap_memory window ops. Callers: the
  * flat-view tripwires in os_unmap_memory and the sweep mark-buffer

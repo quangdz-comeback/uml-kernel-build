@@ -280,6 +280,27 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 				new_off, old_len, mm->brk);
 			return mm->brk;
 		}
+		/* K6 [flatwr] (feature flatwrite-retire-witness): the
+		 * re-home copy is a bulk kernel flat write of guest
+		 * content — capture both ends' gens at the decision; at
+		 * write time the table must STILL translate the heap va
+		 * to the old span (the swap applies after the copy) and
+		 * both gens must be intact. Bookkeeping only. */
+		{
+			unsigned long long gs = (unsigned long long)
+				uml_nt_phys_gen(c->ph,
+						(long long)old_off);
+			unsigned long long gd = (unsigned long long)
+				uml_nt_phys_gen(c->ph,
+						(long long)new_off);
+
+			uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_BRK_FILL,
+					    mm->heap_start, old_len, old_off,
+					    gs, (long long)old_off);
+			uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_BRK_FILL,
+					    mm->heap_start, old_len, new_off,
+					    gd, (long long)old_off);
+		}
 		uml_nt_copy_verify((char *)uml_boot.physmem_base + new_off,
 				   (const char *)uml_boot.physmem_base +
 								   old_off,
@@ -785,24 +806,40 @@ static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
 		 * the last one missing. A fill touching a cowwatch-armed
 		 * run (arm-on-fire heap runs included) now names itself;
 		 * census silence on a poisoned armed run then EXCLUDES
-		 * the fill class too. Log-only. */
-		uml_nt_cowwatch_touch(dst, piece - cur, "mmap-fill");
-		memset((char *)uml_boot.physmem_base + dst, 0,
-		       piece - cur);
-		if (!zero && f != NULL) {
-			want = off + (cur - map_start);
-			avail = (want < fsize) ? fsize - want : 0;
-			n = (piece - cur < avail) ? piece - cur : avail;
-			if (n > 0) {
-				pos = (loff_t)want;
-				if (kernel_read(f,
-					(char *)uml_boot.physmem_base + dst,
-					n, &pos) != (ssize_t)n) {
-					os_info("[syscall] mmap fill "
-						"0x%llx: short read\n", cur);
-					return -1;
+		 * the fill class too. Log-only.
+		 * K6 [flatwr]: capture the (run, gen) at the piece
+		 * translate — the memset and the (blocking) file read
+		 * below are the writes, the compare after them proves
+		 * they landed in the same backing the table still owns. */
+		{
+			unsigned long long fg = (unsigned long long)
+				uml_nt_phys_gen(c->ph, (long long)dst);
+
+			uml_nt_cowwatch_touch(dst, piece - cur,
+					      "mmap-fill");
+			memset((char *)uml_boot.physmem_base + dst, 0,
+			       piece - cur);
+			if (!zero && f != NULL) {
+				want = off + (cur - map_start);
+				avail = (want < fsize) ? fsize - want : 0;
+				n = (piece - cur < avail) ? piece - cur
+							  : avail;
+				if (n > 0) {
+					pos = (loff_t)want;
+					if (kernel_read(f,
+						(char *)uml_boot.physmem_base
+							+ dst,
+						n, &pos) != (ssize_t)n) {
+						os_info("[syscall] mmap fill "
+							"0x%llx: short "
+							"read\n", cur);
+						return -1;
+					}
 				}
 			}
+			uml_nt_flatwr_check(c,
+				UML_NT_FLATWR_SITE_MMAP_FILL, cur,
+				piece - cur, dst, fg, (long long)dst);
 		}
 		cur = piece;
 	}
@@ -843,12 +880,25 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 				"failed (%llu bytes)\n", cur, piece - cur);
 			return -1;
 		}
-		total += uml_nt_patch_syscalls(
-			(char *)uml_boot.physmem_base + off, piece - cur,
-			0, (void *)(uintptr_t)mk);
-		/* 098 δ: the sweep PATCHES guest code in place — a
-		 * cowwatch-armed run touched here is the writer. */
-		uml_nt_cowwatch_touch(off, piece - cur, "sweep-patch");
+		/* K6 [flatwr]: the sweep PATCHES guest code in place — a
+		 * kernel flat write of guest content; kvmalloc can sleep
+		 * mid-piece, so capture the (run, gen) at the translate
+		 * and prove the patch landed in the same backing after. */
+		{
+			unsigned long long sg = (unsigned long long)
+				uml_nt_phys_gen(c->ph, (long long)off);
+
+			total += uml_nt_patch_syscalls(
+				(char *)uml_boot.physmem_base + off,
+				piece - cur, 0, (void *)(uintptr_t)mk);
+			/* 098 δ: the sweep PATCHES guest code in place —
+			 * a cowwatch-armed run touched here is the writer. */
+			uml_nt_cowwatch_touch(off, piece - cur,
+					      "sweep-patch");
+			uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_MMAP_SWEEP,
+					    cur, piece - cur, off, sg,
+					    (long long)off);
+		}
 		kvfree((void *)(uintptr_t)mk);
 		cur = piece;
 	}

@@ -75,6 +75,13 @@ struct uml_nt_stub_conn {
 	 * mapcanary_got and flat-restores the saved qword. */
 	unsigned long long mc_want, mc_off, mc_orig;
 	int mc_active;
+	/* K6 [flatwr] (feature flatwrite-retire-witness): the mapcanary
+	 * plant→restore spans a stub round-trip (op issue → PROT_DONE) —
+	 * the HIGHEST-risk flat-write window of the set. mc_gen/mc_va
+	 * carry the (gen, va) captured at the plant; the restore
+	 * compares them (a re-handed run or a re-homed va = the restore
+	 * wrote through a stale translation). */
+	unsigned long long mc_gen, mc_va;
 	/* binwatch (M5.6a, referee 37144114627): cached main_arena VA
 	 * discovered once by heap scan (0 = not yet); the per-round
 	 * arena-bin walk validates the glibc double-link invariant and
@@ -544,6 +551,26 @@ void uml_nt_cowrace_arm(struct uml_nt_stub_conn *c,
 			unsigned long long len,
 			unsigned long long va_base,
 			const char *what);
+
+/* K6 [flatwr] (M5.6a, feature flatwrite-retire-witness): the kernel
+ * flat-write staleness witness — candidate (b) of the 139a dead-end
+ * (a kernel-side flat write of guest content through a translation
+ * OLDER than the current table: the store lands in an abandoned
+ * source run, the dl26 content shape). uml_nt_flatwr_check is the
+ * SITE hook: `off`/`gen_old` are the (run, gen) captured at
+ * TRANSLATE time; the check compares them with the phys gen AND the
+ * CURRENT table translate of `va` (run-granular; tbl_expect < 0 or
+ * va == 0 = gen-only) AT WRITE TIME and records a mismatch into a
+ * small ring — bookkeeping only, never printed at the site.
+ * uml_nt_flatwr_report runs at syscall parks only (the placement
+ * rule) and drains the ring. */
+void uml_nt_flatwr_check(struct uml_nt_stub_conn *c, int site,
+			 unsigned long long va,
+			 unsigned long long len,
+			 unsigned long long off,
+			 unsigned long long gen_old,
+			 long long tbl_expect);
+void uml_nt_flatwr_report(struct uml_nt_stub_conn *c);
 
 /* [cowtrap] alloc-side arm (the closing slice): READ-ONLY the first
  * page of a freshly allocated multi-run anon span / re-homed heap so

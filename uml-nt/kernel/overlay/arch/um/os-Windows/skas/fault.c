@@ -111,6 +111,8 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	plan->n_ops = 0;
 	plan->copy_src_off = 0;
 	plan->copy_dst_off = 0;
+	plan->cap_gen_src = 0;
+	plan->cap_gen_dst = 0;
 
 	/* The sub-run PROT_NONE guard (M4 slice 5): ANY access inside
 	 * one is a guest bug the guard exists to catch — real SIGSEGV
@@ -215,6 +217,14 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 
 		plan->copy_src_off = old_run;
 		plan->copy_dst_off = new_run;
+		/* K6 [flatwr]: the gens captured at translate time (the
+		 * src still claims this mm; the dst is fresh from the
+		 * alloc) — the serve_conn copy site compares them at
+		 * write time. */
+		plan->cap_gen_src = (unsigned long long)
+			uml_nt_phys_gen(ph, (long long)old_run);
+		plan->cap_gen_dst = (unsigned long long)
+			uml_nt_phys_gen(ph, (long long)new_run);
 
 		rc = uml_nt_vma_cow_split(mm, ph, vma, page, new_run);
 		if (rc < 0) {
@@ -257,6 +267,8 @@ kill:
 	plan->n_ops = 0;
 	plan->copy_src_off = 0;
 	plan->copy_dst_off = 0;
+	plan->cap_gen_src = 0;
+	plan->cap_gen_dst = 0;
 	return -1;
 }
 
@@ -349,6 +361,8 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	plan->n_ops = 0;
 	plan->copy_src_off = 0;
 	plan->copy_dst_off = 0;
+	plan->cap_gen_src = 0;
+	plan->cap_gen_dst = 0;
 
 	if (mm->nvma > UML_NT_FAULT_MAX_OPS ||
 	    mm->nvma + mm->nguard > UML_NT_FAULT_MAX_OPS)
