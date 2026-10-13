@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # apply.sh — materialize the uml-nt overlay + patch series onto a fetched
-# v6.18.37 tree (from `fetch.sh extract`). Never modifies the repo: the
+# v6.18.56 tree (from `fetch.sh extract`). Never modifies the repo: the
 # tree lives in the cache outside git (HANDOFF hard-rule 1).
 #
 # Why overlay+patches instead of a forked tree: kernel patches stay a

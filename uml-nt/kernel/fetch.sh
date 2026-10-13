@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uml-nt — fetch pinned Linux source (v6.18.37) on the fly. NEVER commit source.
+# uml-nt — fetch pinned Linux source (v6.18.56) on the fly. NEVER commit source.
 #
 # Why: HANDOFF hard-rule 1 forbids committing/pre-downloading Linux source into
 # the repo; this script is the single sanctioned entry point to obtain it:
@@ -12,17 +12,17 @@
 #
 # Pin facts (verified 2026-09-29):
 #   - torvalds/linux does NOT carry sublevel tags: raw.githubusercontent.com/
-#     torvalds/linux/v6.18.37 and the matching codeload tarball return 404.
+#     torvalds/linux/v6.18.56 and the matching codeload tarball return 404.
 #     HANDOFF's documented fallback therefore becomes primary:
-#       * per-file fetches  -> cgit stable ?h=v6.18.37
+#       * per-file fetches  -> cgit stable ?h=v6.18.56
 #       * tarball           -> kernel.org pub/linux/kernel/v6.x CDN, checksum
 #         cross-checked against the official sha256sums.asc of that directory.
 set -euo pipefail
 
-readonly LINUX_VERSION="6.18.37"
+readonly LINUX_VERSION="6.18.56"
 readonly TARBALL="linux-${LINUX_VERSION}.tar.xz"
 # sha256 from kernel.org pub/linux/kernel/v6.x/sha256sums.asc (official sums).
-readonly PIN_SHA256_DEFAULT="a83cd200e6646db52866b8309e9137b9e9048b613cbda10ced2b811aae125255"
+readonly PIN_SHA256_DEFAULT="4633bbda2ab95eaf2a7af4041236451d6759c72e6946265531af4b3aacefbf89"
 # Test hook only (tests/test_fetch.sh overrides it for fixture tarballs).
 PIN_SHA256="${UML_NT_PIN_SHA256:-$PIN_SHA256_DEFAULT}"
 
@@ -62,8 +62,8 @@ verify_tree() { # <dir> — cheap content pin: Makefile version fields
     return 1
   fi
   fields="$(awk '/^(VERSION|PATCHLEVEL|SUBLEVEL) =/ {printf "%s ", $3}' "$dir/Makefile")"
-  if [[ "$fields" != "6 18 37 " ]]; then
-    err "Makefile version fields '$fields' != pinned 6 18 37"
+  if [[ "$fields" != "6 18 56 " ]]; then
+    err "Makefile version fields '$fields' != pinned 6 18 56"
     return 1
   fi
   if [[ ! -d "$dir/arch/um" ]]; then

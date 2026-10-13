@@ -14,15 +14,15 @@ fail() { printf 'FAIL- %s\n' "$1"; exit 1; }
 # --- fixture: a tiny tarball whose tree passes verify_tree ---------------
 make_fixture_tree() { # <dir>
   mkdir -p "$1/arch/um"
-  printf 'VERSION = 6\nPATCHLEVEL = 18\nSUBLEVEL = 37\nNAME = test\n' > "$1/Makefile"
+  printf 'VERSION = 6\nPATCHLEVEL = 18\nSUBLEVEL = 56\nNAME = test\n' > "$1/Makefile"
   printf 'obj-y += x.o\n' > "$1/arch/um/Makefile"
 }
 make_fixture_tarball() { # <out.tar.xz> — prints its sha256
   local stage="$TMP/stage-fix"
   rm -rf "$stage"
-  mkdir -p "$stage/linux-6.18.37"
-  make_fixture_tree "$stage/linux-6.18.37"
-  tar -cJf "$1" -C "$stage" linux-6.18.37
+  mkdir -p "$stage/linux-6.18.56"
+  make_fixture_tree "$stage/linux-6.18.56"
+  tar -cJf "$1" -C "$stage" linux-6.18.56
   sha256sum "$1" | awk '{print $1}'
 }
 FIXTURE="$TMP/fixture.tar.xz"
@@ -37,13 +37,13 @@ export UML_NT_PIN_SHA256="$FIXTURE_SHA"
 source "$FETCH"
 
 # 1. Pin is baked in and immutable via readonly version.
-[[ "$LINUX_VERSION" == "6.18.37" ]] || fail "LINUX_VERSION pin"
-ok "LINUX_VERSION pinned to 6.18.37"
+[[ "$LINUX_VERSION" == "6.18.56" ]] || fail "LINUX_VERSION pin"
+ok "LINUX_VERSION pinned to 6.18.56"
 
 # 2. file_url substitutes path into the cgit-stable template.
-[[ "$(file_url "arch/um/Makefile")" == *"plain/arch/um/Makefile?h=v6.18.37"* ]] \
+[[ "$(file_url "arch/um/Makefile")" == *"plain/arch/um/Makefile?h=v6.18.56"* ]] \
   || fail "file_url template"
-ok "file_url substitutes path, pinned h=v6.18.37"
+ok "file_url substitutes path, pinned h=v6.18.56"
 
 # 3. verify_sha256 accept/reject.
 printf 'hi' > "$TMP/f"
@@ -59,7 +59,7 @@ ok "verify_sha256 rejects mismatch"
 make_fixture_tree "$TMP/tree"
 verify_tree "$TMP/tree" || fail "verify_tree accepts pinned tree"
 ok "verify_tree accepts pinned tree"
-sed -i 's/SUBLEVEL = 37/SUBLEVEL = 38/' "$TMP/tree/Makefile"
+sed -i 's/SUBLEVEL = 56/SUBLEVEL = 38/' "$TMP/tree/Makefile"
 if verify_tree "$TMP/tree" 2>/dev/null; then
   fail "verify_tree must reject wrong sublevel"
 fi

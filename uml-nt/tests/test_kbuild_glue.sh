@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kbuild glue test (M1.4): on a pristine fetched+extracted v6.18.37 tree,
+# Kbuild glue test (M1.4): on a pristine fetched+extracted v6.18.56 tree,
 # apply.sh must land the overlay + patch series, uml_nt_defconfig must
 # resolve CONFIG_OS_WINDOWS=y, and Kbuild must compile the os-Windows
 # objects through the normal descent (dir Makefiles read, ccflags applied).

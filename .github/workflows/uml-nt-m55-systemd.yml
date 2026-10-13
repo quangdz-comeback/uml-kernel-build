@@ -59,7 +59,7 @@ jobs:
           restore-keys: |
             uml-nt-ccache-${{ runner.os }}-
 
-      - name: Fetch pinned v6.18.37 + apply uml-nt overlay
+      - name: Fetch pinned v6.18.56 + apply uml-nt overlay
         run: |
           TREE=$(bash uml-nt/kernel/fetch.sh extract)
           bash uml-nt/kernel/apply.sh "$TREE"
