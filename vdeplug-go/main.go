@@ -200,23 +200,30 @@ func (f *fleet) runInstance(ln transport.Listener, release func()) {
 		// DHCP at the frame layer (netstack sheds limited-broadcast
 		// DISCOVERs before the transport demuxer would see them). A
 		// promoted hub seeds the pool with the lease table the dead hub
-		// gossiped, so guests keep their addresses.
+		// gossiped, so guests keep their addresses. The pool never grows
+		// past the addresses the subnet still owns — leasing beyond the
+		// broadcast edge hands guests addresses nothing will answer.
 		if start := net.ParseIP(cfg.DHCPStart); start != nil && cfg.DHCPStart != "" {
-			leasePool = dhcp.NewPool(start, 256)
-			f.mu.Lock()
-			seed := f.leases
-			f.leases = nil
-			f.mu.Unlock()
-			if len(seed) > 0 {
-				leasePool.Restore(seed)
-				logf("%s: promoted to hub, %d leases inherited", descr, len(seed))
+			size := dhcp.UsableLeases(cfg.Network, start, 256)
+			if size == 0 {
+				logf("%s: dhcp_start %s is outside %s; running without DHCP", descr, cfg.DHCPStart, cfg.Network)
+			} else {
+				leasePool = dhcp.NewPool(start, size)
+				f.mu.Lock()
+				seed := f.leases
+				f.leases = nil
+				f.mu.Unlock()
+				if len(seed) > 0 {
+					leasePool.Restore(seed)
+					logf("%s: promoted to hub, %d leases inherited", descr, len(seed))
+				}
+				dhcpSrv = dhcp.New(dhcp.Options{
+					Network:    cfg.Network,
+					GatewayIP:  cfg.Gateway,
+					Nameserver: cfg.Nameserver,
+					MTU:        cfg.MTU,
+				}, leasePool, vdeMAC)
 			}
-			dhcpSrv = dhcp.New(dhcp.Options{
-				Network:    cfg.Network,
-				GatewayIP:  cfg.Gateway,
-				Nameserver: cfg.Nameserver,
-				MTU:        cfg.MTU,
-			}, leasePool, vdeMAC)
 		}
 
 		upl = uplinkSink{ep: ep, dhcp: dhcpSrv, sw: sw, own: ownAddrs(cfg)}

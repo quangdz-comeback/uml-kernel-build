@@ -52,6 +52,45 @@ func NewPool(start net.IP, size int) *Pool {
 	return p
 }
 
+// leaseAddr is the pool address at offset off. The arithmetic happens on
+// the whole 32-bit address: adding to the last octet alone wraps .255
+// back to .0 of the same subnet, so a pool long enough would hand the
+// same address to two MACs (and lease the broadcast address).
+func (p *Pool) leaseAddr(off int) [4]byte {
+	var addr [4]byte
+	binary.BigEndian.PutUint32(addr[:], binary.BigEndian.Uint32(p.base[:])+uint32(off))
+	return addr
+}
+
+// UsableLeases caps a pool seeded at start by what the subnet can still
+// give out: every address from start up to (but excluding) the broadcast
+// address, at most max. A result of 0 means there is no sensible pool
+// here — start unset, not IPv4, or sitting outside network — and the
+// caller should run without DHCP instead of leasing addresses guests
+// can never reach.
+func UsableLeases(network string, start net.IP, max int) int {
+	start4 := start.To4()
+	if start4 == nil {
+		return 0
+	}
+	_, subnet, err := net.ParseCIDR(network)
+	if err != nil {
+		return 0
+	}
+	netAddr := binary.BigEndian.Uint32(subnet.IP.To4())
+	mask := binary.BigEndian.Uint32(subnet.Mask)
+	broadcast := netAddr | ^mask
+	first := binary.BigEndian.Uint32(start4)
+	if first < netAddr || first >= broadcast {
+		return 0
+	}
+	n := int(broadcast - first)
+	if n > max {
+		n = max
+	}
+	return n
+}
+
 // GetOrAssign returns the stable lease for a MAC, assigning the next free
 // address in the pool. Fully occupied pools return an error (the C binary
 // just ran out of its 20 BOOTP clients; same semantics, no surprises).
@@ -66,9 +105,7 @@ func (p *Pool) GetOrAssign(mac net.HardwareAddr) (net.IP, error) {
 	if p.next >= p.size {
 		return nil, fmt.Errorf("dhcp pool exhausted (%d leases)", p.size)
 	}
-	var ip [4]byte
-	copy(ip[:], p.base[:])
-	ip[3] += byte(p.next)
+	ip := p.leaseAddr(p.next)
 	p.next++
 	p.assigned[key] = ip
 	p.order = append(p.order, key)
@@ -83,9 +120,7 @@ func (p *Pool) Restore(leases map[[6]byte][4]byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for off := 0; off < p.size; off++ {
-		var ip [4]byte
-		copy(ip[:], p.base[:])
-		ip[3] += byte(off)
+		ip := p.leaseAddr(off)
 		for mac, a := range leases {
 			if a != ip {
 				continue
