@@ -1,9 +1,14 @@
 #cloud-config
 # UML base image — NoCloud user-data
 # cloud-init applies these on first boot, then disables itself (semper)
+# chpasswd format: 'users' list (the old 'list' key is deprecated since
+# cloud-init 22.3 and warns on 26.x; verified against the image's
+# cloud-init 26.1 — cc_set_passwords.py lifecycle.deprecate)
 disable_root: false
 ssh_pwauth: true
 chpasswd:
   expire: false
-  list: |
-    root:root
+  users:
+    - name: root
+      password: root
+      type: text
