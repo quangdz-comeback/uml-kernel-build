@@ -3,6 +3,10 @@ package dhcp
 import (
 	"net"
 	"testing"
+
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
 // macFor mints distinct client MACs so pool tests never collide.
@@ -104,5 +108,88 @@ func TestUsableLeases(t *testing.T) {
 		if got != c.want {
 			t.Errorf("UsableLeases(%q, %v, %d) = %d, want %d", c.network, c.start, c.max, got, c.want)
 		}
+	}
+}
+
+// testServer wires a small server against the classic 10.0.2.0/24 setup.
+func testServer(t *testing.T) *Server {
+	t.Helper()
+	pool := NewPool(net.ParseIP("10.0.2.15"), 20)
+	srvMAC, _ := net.ParseMAC("52:54:00:00:00:01")
+	return New(Options{
+		Network:    "10.0.2.0/24",
+		GatewayIP:  "10.0.2.2",
+		Nameserver: "10.0.2.3",
+	}, pool, tcpip.LinkAddress(srvMAC))
+}
+
+func discover(t *testing.T, clientMAC [6]byte, broadcast bool) []byte {
+	t.Helper()
+	req, err := dhcpv4.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDiscover))
+	req.ClientHWAddr = net.HardwareAddr(clientMAC[:])
+	if broadcast {
+		req.SetBroadcast()
+	} else {
+		req.SetUnicast()
+	}
+	return req.ToBytes()
+}
+
+// RFC 2131 §4.1: a client that did not set the BROADCAST flag gets its
+// reply unicast to its hardware address at the offered address — the
+// reply must not go out as an all-ones broadcast.
+func TestReplyUnicastWhenClientOmitsBroadcastFlag(t *testing.T) {
+	srv := testServer(t)
+	clientMAC := [6]byte{0x52, 0x54, 0x00, 0xaa, 0x00, 0x07}
+
+	frame := srv.HandlePacket(discover(t, clientMAC, false), clientMAC)
+	if frame == nil {
+		t.Fatal("no reply to DISCOVER")
+	}
+	eth := header.Ethernet(frame)
+	if got := eth.DestinationAddress().String(); got != "52:54:00:aa:00:07" {
+		t.Fatalf("reply L2 destination = %s, want the client MAC", got)
+	}
+	ipH := header.IPv4(frame[header.EthernetMinimumSize:])
+	if got := ipH.DestinationAddress().String(); got != "10.0.2.15" {
+		t.Fatalf("reply IP destination = %s, want the offered 10.0.2.15", got)
+	}
+	udp := header.UDP(ipH.Payload())
+	if got := udp.DestinationPort(); got != 68 {
+		t.Fatalf("reply UDP destination port = %d, want 68", got)
+	}
+	payload, err := dhcpv4.FromBytes(udp.Payload())
+	if err != nil {
+		t.Fatalf("reply payload does not parse: %v", err)
+	}
+	if payload.MessageType() != dhcpv4.MessageTypeOffer {
+		t.Fatalf("reply type = %s, want OFFER", payload.MessageType())
+	}
+	if got := payload.YourIPAddr.String(); got != "10.0.2.15" {
+		t.Fatalf("reply yiaddr = %s, want 10.0.2.15", got)
+	}
+}
+
+// The mirror case: a client that set the BROADCAST flag keeps getting
+// the broadcast reply.
+func TestReplyBroadcastWhenClientSetsBroadcastFlag(t *testing.T) {
+	srv := testServer(t)
+	clientMAC := [6]byte{0x52, 0x54, 0x00, 0xaa, 0x00, 0x08}
+
+	frame := srv.HandlePacket(discover(t, clientMAC, true), clientMAC)
+	if frame == nil {
+		t.Fatal("no reply to DISCOVER")
+	}
+	eth := header.Ethernet(frame)
+	if got := eth.DestinationAddress().String(); got != "ff:ff:ff:ff:ff:ff" {
+		t.Fatalf("reply L2 destination = %s, want broadcast", got)
+	}
+	ipH := header.IPv4(frame[header.EthernetMinimumSize:])
+	if got := ipH.DestinationAddress().String(); got != "255.255.255.255" {
+		t.Fatalf("reply IP destination = %s, want 255.255.255.255", got)
 	}
 }
