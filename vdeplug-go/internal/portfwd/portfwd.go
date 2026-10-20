@@ -26,42 +26,70 @@ import (
 )
 
 // Start launches one host listener per rule (TCP listeners + UDP relays).
-// It returns immediately; services run until the process exits.
+// It returns immediately; services run until the process exits. A rule
+// that cannot be set up fails the whole call, and every listener opened
+// for earlier rules is closed again — a half-mapped port set is worse
+// than a clean failure.
 func Start(s *stack.Stack, cfg *config.Config, fallbackIP net.IP) (*Server, error) {
 	rules, err := cfg.ParsePorts()
 	if err != nil {
 		return nil, fmt.Errorf("ports: %w", err)
 	}
 	srv := &Server{}
+	var opened []io.Closer
+	abort := func(cause error) (*Server, error) {
+		for _, l := range opened {
+			l.Close()
+		}
+		return nil, cause
+	}
 	for _, r := range rules {
 		guestIP := r.GuestIP
 		if guestIP == "" {
+			if fallbackIP.To4() == nil {
+				return abort(fmt.Errorf("ports: rule %s:%d follows the fallback guest, but no fallback is known (dhcp_start unset?)",
+					r.HostIP, r.HostPort))
+			}
 			guestIP = fallbackIP.String()
 		}
 		if r.LastOctet > 0 {
 			ip4 := fallbackIP.To4()
 			if ip4 == nil {
-				return nil, fmt.Errorf("ports: fallback %s not IPv4", fallbackIP)
+				return abort(fmt.Errorf("ports: fallback %s not IPv4", fallbackIP))
 			}
 			ip := make(net.IP, 4)
 			copy(ip, ip4)
 			ip[3] = byte(r.LastOctet)
 			guestIP = ip.String()
 		}
+		if net.ParseIP(guestIP).To4() == nil {
+			// Pinned rules can still carry a non-IPv4 address here, and a
+			// nil fallback renders as "<nil>" — either would panic the
+			// relay goroutines on their first byte.
+			return abort(fmt.Errorf("ports: guest address %q is not a usable IPv4 address", guestIP))
+		}
 		hostAddr := net.JoinHostPort(r.HostIP, strconv.Itoa(int(r.HostPort)))
 		if r.UDP {
 			udpAddr, err := net.ResolveUDPAddr("udp", hostAddr)
 			if err != nil {
-				return nil, fmt.Errorf("listen %s: %w", hostAddr, err)
+				return abort(fmt.Errorf("listen %s: %w", hostAddr, err))
 			}
+			conn, err := net.ListenUDP("udp", udpAddr)
+			if err != nil {
+				// Bound here rather than in the relay goroutine: a port
+				// clash must surface from Start, not die silently.
+				return abort(fmt.Errorf("listen %s: %w", hostAddr, err))
+			}
+			opened = append(opened, conn)
 			srv.wg.Add(1)
-			go srv.serveUDP(s, udpAddr, guestIP, r.GuestPort)
+			go srv.serveUDP(s, conn, guestIP, r.GuestPort)
 			continue
 		}
 		ln, err := net.Listen("tcp", hostAddr)
 		if err != nil {
-			return nil, fmt.Errorf("listen %s: %w", hostAddr, err)
+			return abort(fmt.Errorf("listen %s: %w", hostAddr, err))
 		}
+		opened = append(opened, ln)
 		srv.wg.Add(1)
 		go srv.serveTCP(s, ln, guestIP, r.GuestPort)
 	}
@@ -107,15 +135,13 @@ func pipe(a, b net.Conn) {
 	<-done
 }
 
-// serveUDP relays host datagrams into the guest. Each remote host sender
-// gets its own netstack socket so guest replies return to the right peer;
-// idle paths die after udpIdle.
-func (s *Server) serveUDP(sck *stack.Stack, hostAddr *net.UDPAddr, guestIP string, guestPort uint16) {
+// serveUDP relays host datagrams into the guest. host arrives already
+// bound (Start owns the bind so clashes fail loudly). Each remote host
+// sender gets its own netstack socket so guest replies return to the
+// right peer; idle paths die after udpIdle.
+func (s *Server) serveUDP(sck *stack.Stack, host *net.UDPConn, guestIP string, guestPort uint16) {
 	defer s.wg.Done()
-	host, err := net.ListenUDP("udp", hostAddr)
-	if err != nil {
-		return
-	}
+	defer host.Close()
 	guest4 := net.ParseIP(guestIP).To4()
 	dst := tcpip.FullAddress{
 		Addr: tcpip.AddrFrom4([4]byte{guest4[0], guest4[1], guest4[2], guest4[3]}),
@@ -128,11 +154,19 @@ func (s *Server) serveUDP(sck *stack.Stack, hostAddr *net.UDPAddr, guestIP strin
 	}
 	var mu sync.Mutex
 	var paths []*path
+	stopped := make(chan struct{})
+	defer close(stopped) // the reaper must not outlive the host socket
 
 	// Reaper for idle paths.
 	go func() {
+		tick := time.NewTicker(time.Minute)
+		defer tick.Stop()
 		for {
-			time.Sleep(time.Minute)
+			select {
+			case <-stopped:
+				return
+			case <-tick.C:
+			}
 			mu.Lock()
 			keep := paths[:0]
 			for _, p := range paths {
