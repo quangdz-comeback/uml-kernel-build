@@ -44,7 +44,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
-func logf(f string, a ...any)  { fmt.Fprintf(os.Stderr, "[vde_plug-go] "+f+"\n", a...) }
+func logf(f string, a ...any) { fmt.Fprintf(os.Stderr, "[vde_plug-go] "+f+"\n", a...) }
 func fatalf(f string, a ...any) {
 	fmt.Fprintf(os.Stderr, "[vde_plug-go] fatal: "+f+"\n", a...)
 	os.Exit(1)
@@ -75,7 +75,15 @@ func main() {
 		logf("uplink %q", cfg.Uplink)
 	}
 
-	ep := link.New(fd, link.FrameMax-18, vdeMAC)
+	// A configured MTU only applies to the link when it can carry an IP
+	// datagram: below the IPv4 minimum wedges every stack, above what a
+	// frame fits after Ethernet truncates. Out-of-range keeps the full
+	// frame size.
+	mtu := uint32(link.FrameMax - 18)
+	if cfg.MTU >= 68 && uint32(cfg.MTU) <= mtu {
+		mtu = uint32(cfg.MTU)
+	}
+	ep := link.New(fd, mtu, vdeMAC)
 	sw := vswitch.New()
 
 	sockPath := resolveSwitchSocket(cfg, filepath.Dir(self))
@@ -557,7 +565,8 @@ func peerReader(sw *vswitch.Switch, port vswitch.Port, conn transport.Conn) {
 	}
 }
 
-func waitShutdown(theNAT *nat.NAT, sw *vswitch.Switch, leasePool *dhcp.Pool, rxErr <-chan error, txErr <-chan error) {	sigs := make(chan os.Signal, 2)
+func waitShutdown(theNAT *nat.NAT, sw *vswitch.Switch, leasePool *dhcp.Pool, rxErr <-chan error, txErr <-chan error) {
+	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
 loop:
 	for {
@@ -680,10 +689,14 @@ func dumpStats(n *nat.NAT, sw *vswitch.Switch, pool *dhcp.Pool) {
 }
 
 func parseArgs(argv []string) (descr string, fd int, vnl string) {
+	fd = -1 // no seqpacket://, or a garbled one, must trip the caller's
+	// fd<0 check — fd 0 would silently read stdin as the link
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
 		if rest, ok := strings.CutPrefix(arg, "seqpacket://"); ok {
-			fd, _ = strconv.Atoi(rest)
+			if n, err := strconv.Atoi(rest); err == nil {
+				fd = n
+			}
 			continue
 		}
 		if rest, ok := strings.CutPrefix(arg, "--descr"); ok {

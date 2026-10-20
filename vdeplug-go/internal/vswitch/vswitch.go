@@ -66,11 +66,11 @@ type port struct {
 
 // Switch is the learning switch core.
 type Switch struct {
-	mu     sync.Mutex
-	macs   map[string]macEntry
-	ports  map[Port]*port
-	drops  atomic.Uint64 // frames shed under backpressure
-	peers  int           // connected peer wires; 0 = every send can inline
+	mu    sync.Mutex
+	macs  map[string]macEntry
+	ports map[Port]*port
+	drops atomic.Uint64 // frames shed under backpressure
+	peers int           // connected peer wires; 0 = every send can inline
 }
 
 type macEntry struct {

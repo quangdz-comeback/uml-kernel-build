@@ -188,9 +188,6 @@ func spawnGuest(t *testing.T, dir, name, sockPath string, id byte) *guest {
 		t.Fatal(err)
 	}
 	hub, wire := pair[0], pair[1]
-	if err != nil {
-		t.Fatal(err)
-	}
 	wireFile := os.NewFile(uintptr(wire), "wire")
 	logs := &syncBuffer{}
 	cmd := exec.Command(bin, "--descr", name, "seqpacket://3", "slirp://")
