@@ -40,6 +40,7 @@ import (
 	"uml-kernel-build/vdeplug-go/internal/tap"
 	"uml-kernel-build/vdeplug-go/internal/transport"
 	"uml-kernel-build/vdeplug-go/internal/vswitch"
+	"uml-kernel-build/vdeplug-go/internal/wgup"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
@@ -189,9 +190,10 @@ func (f *fleet) runInstance(ln transport.Listener, release func()) {
 		}()
 		fmt.Fprintf(os.Stderr, "[vde_plug-go] %s: tap uplink %s\n", descr, dev.Name())
 
-	default: // slirp
-		if cfg.Uplink != "slirp" && cfg.Uplink != "" {
-			fatalf("unknown uplink %q (want slirp | tap[:NAME] | none)", cfg.Uplink)
+	default: // slirp — and wireguard, which layers a tunnel on top of it
+		isWG := cfg.Uplink == "wireguard"
+		if !isWG && cfg.Uplink != "slirp" && cfg.Uplink != "" {
+			fatalf("unknown uplink %q (want slirp | wireguard | tap[:NAME] | none)", cfg.Uplink)
 		}
 		var err error
 		theNAT, err = nat.New(ep, nat.Options{
@@ -234,8 +236,47 @@ func (f *fleet) runInstance(ln transport.Listener, release func()) {
 			}
 		}
 
-		upl = uplinkSink{ep: ep, dhcp: dhcpSrv, sw: sw, own: ownAddrs(cfg)}
-		shutdownUplink = theNAT.Close
+		var wgTunnel *wgup.Tunnel
+		if isWG {
+			mode := wgup.ModeSwitch
+			if !cfg.SwitchEnabled() {
+				mode = wgup.ModeStandalone
+			}
+			confPath, err := wgup.ResolvePath(cfg.WireguardConfPath)
+			if err != nil {
+				fatalf("wireguard: %v", err)
+			}
+			conf, err := wgup.Load(confPath)
+			if err != nil {
+				fatalf("wireguard: %v", err)
+			}
+			wgTunnel, err = wgup.Attach(theNAT.Stack, theNAT.NIC(), conf, mode, theNAT.AddRoute, logf)
+			if err != nil {
+				// A tunnel that will not attach is logged and skipped, not
+				// fatal: the instance keeps its plain-NAT networking and
+				// the reason is on stderr for the operator.
+				logf("wireguard: attach failed, continuing without the tunnel: %v", err)
+				wgTunnel = nil
+			}
+			if wgTunnel != nil && mode == wgup.ModeSwitch {
+				subs := make([]tcpip.Subnet, 0, len(conf.AllowedIPs))
+				for _, a := range conf.AllowedIPs {
+					subs = append(subs, wgup.Subnet(a))
+				}
+				theNAT.SetTunnelSubnets(subs)
+			}
+		}
+
+		icmpRelay := nat.NewICMPRelay(vdeMAC, func(frame []byte) {
+			sw.Forward(vswitch.Uplink, frame)
+		}, logf)
+		upl = uplinkSink{ep: ep, dhcp: dhcpSrv, sw: sw, own: ownAddrs(cfg), icmp: icmpRelay}
+		shutdownUplink = func() {
+			if wgTunnel != nil {
+				wgTunnel.Close()
+			}
+			theNAT.Close()
+		}
 		// Netstack TX pump: pops packets netstack emits and switches them.
 		go func() { txErr <- ep.Start() }()
 		fmt.Fprintf(os.Stderr, "[vde_plug-go] %s: slirp nat on %s gw %s dns %s\n",
@@ -592,15 +633,17 @@ loop:
 }
 
 // uplinkSink sends switched frames into netstack, except frames the
-// netstack must not see: DHCP requests (answered at the frame layer) and
-// ARP requests for addresses we don't own. With spoofing enabled,
-// netstack's ARP responder claims EVERY requested address, hijacking
-// guest-to-guest resolution on the switch — the real owner must answer.
+// netstack must not see: DHCP requests (answered at the frame layer), ARP
+// requests for addresses we don't own (with spoofing enabled, netstack's
+// ARP responder claims EVERY requested address, hijacking guest-to-guest
+// resolution on the switch — the real owner must answer), and public ICMP
+// echo requests (relayed through the host socket like libslirp does).
 type uplinkSink struct {
 	ep   *link.EtherEndpoint
 	dhcp *dhcp.Server
 	sw   *vswitch.Switch
 	own  map[[4]byte]bool // netstack's addresses on the segment
+	icmp *nat.ICMPRelay   // nil-safe: echo relay for public pings
 }
 
 func (u uplinkSink) SendFrame(frame []byte) error {
@@ -609,6 +652,9 @@ func (u uplinkSink) SendFrame(frame []byte) error {
 			u.sw.Forward(vswitch.Uplink, reply) // flood to the guest port
 			return nil
 		}
+	}
+	if u.icmp.HandleFrame(frame, u.own) {
+		return nil // relayed: the reply comes back via the relay
 	}
 	if !arpForOwnAddr(frame, u.own) {
 		return nil // foreign ARP request: shed, the owner answers via the switch
