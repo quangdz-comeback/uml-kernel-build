@@ -28,10 +28,10 @@ type Forward struct {
 
 // Config mirrors the C vde_plug's config.yaml keys.
 type Config struct {
-	IPv4       bool `yaml:"ipv4"`
-	IPv6       bool `yaml:"ipv6"`
-	Switch     *bool  `yaml:"switch"` // nil = default true
-	Socket     string `yaml:"socket"`
+	IPv4   bool   `yaml:"ipv4"`
+	IPv6   bool   `yaml:"ipv6"`
+	Switch *bool  `yaml:"switch"` // nil = default true
+	Socket string `yaml:"socket"`
 	// SocketFileLocation overrides `socket:` and names the switch socket:
 	// a unix file path, or host:port for a remote raw TCP socket.
 	SocketFileLocation string `yaml:"socket_file_location"`

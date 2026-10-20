@@ -68,7 +68,11 @@ func BindOrConnect(path string, mode uint32) (*Listener, *Conn, error) {
 		return nil, &Conn{fd: connFD2}, nil
 	}
 	unix.Close(connFD2)
-	_ = os.Remove(path)
+	// Unlink only an actual (stale) socket file: a config pointing
+	// socket: at a regular file must not delete anyone's data.
+	if info, statErr := os.Stat(path); statErr == nil && info.Mode()&os.ModeSocket != 0 {
+		_ = os.Remove(path)
+	}
 
 	hubFD, err := unix.Socket(unix.AF_UNIX, unix.SOCK_SEQPACKET, 0)
 	if err != nil {

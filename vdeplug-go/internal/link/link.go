@@ -214,10 +214,3 @@ func (e *EtherEndpoint) RecvFrame(buf []byte) (int, error) {
 		return n, err
 	}
 }
-
-func linkClosed(err error) error {
-	if err == nil {
-		return fmt.Errorf("link closed by peer")
-	}
-	return fmt.Errorf("link closed: %w", err)
-}

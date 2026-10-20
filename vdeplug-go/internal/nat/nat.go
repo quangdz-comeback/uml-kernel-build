@@ -87,8 +87,13 @@ func New(ep *link.EtherEndpoint, opts Options) (*NAT, error) {
 	// The gateway address answers ARP/ICMP/TCP on the segment. The DNS
 	// address is a second local address so 10.0.2.3:53 reaches us too.
 	for _, addr := range []string{opts.GatewayIP, opts.Nameserver} {
-		ip := net.ParseIP(addr)
-		a4 := tcpip.AddrFrom4([4]byte{ip[12], ip[13], ip[14], ip[15]})
+		ip4 := net.ParseIP(addr).To4()
+		if ip4 == nil {
+			// A malformed gateway/nameserver in config.yaml must fail with
+			// a readable message, not a nil-index panic deep in setup.
+			return nil, fmt.Errorf("nat: %q is not a valid IPv4 address", addr)
+		}
+		a4 := tcpip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3]})
 		if err := s.AddProtocolAddress(nicID, tcpip.ProtocolAddress{
 			Protocol:          ipv4.ProtocolNumber,
 			AddressWithPrefix: a4.WithPrefix(),
