@@ -48,6 +48,11 @@ type Config struct {
 	PortFwd bool     `yaml:"portfwd"`
 	Ports   []string `yaml:"ports"`
 
+	// WireguardConfPath names the wg-quick .conf for `uplink: wireguard`;
+	// empty means the first *.conf (sorted by name) in
+	// $PWD/.config/wireguard.
+	WireguardConfPath string `yaml:"wireguard_conf_path"`
+
 	Batch int `yaml:"batch"`
 }
 

@@ -6,6 +6,7 @@ require (
 	github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae
 	golang.org/x/net v0.61.0
 	golang.org/x/sys v0.49.0
+	golang.zx2c4.com/wireguard v0.0.0-20261006164505-2631ce99a06f
 	gopkg.in/yaml.v3 v3.0.1
 	gvisor.dev/gvisor v0.0.0-20260914202337-72a26d4d63f4
 )
@@ -15,6 +16,8 @@ require (
 	github.com/josharian/native v1.1.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.14 // indirect
 	github.com/u-root/uio v0.0.0-20230220225925-ffce2a382923 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc // indirect
 	golang.org/x/time v0.15.0 // indirect
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 )

@@ -41,6 +41,13 @@ const (
 	udpIdle     = 30 * time.Second
 )
 
+// debugf logs NAT internals when VDE_DEBUG is set.
+func (n *NAT) debugf(f string, a ...any) {
+	if os.Getenv("VDE_DEBUG") != "" {
+		log.Printf("[vde_plug-go] nat: "+f, a...)
+	}
+}
+
 // Options for building the NAT stack.
 type Options struct {
 	GatewayIP  string // 10.0.2.2
@@ -59,6 +66,40 @@ type NAT struct {
 	localAddrs map[string]bool // our addresses on the segment (v4+v6)
 	dnsAddrs   map[string]bool // addresses serving DNS proxy
 	wg         sync.WaitGroup
+
+	// TunnelSubnets, when set (switch-mode wireguard), sends forwarder
+	// flows for matching destinations through this stack instead of host
+	// sockets — they leave the tunnel NIC sourced from the tunnel address.
+	tunnelMu      sync.Mutex
+	TunnelSubnets []tcpip.Subnet
+}
+
+// NIC is the guest-facing NIC id.
+func (n *NAT) NIC() tcpip.NICID { return nicID }
+
+// AddRoute appends one route to the running stack's table.
+func (n *NAT) AddRoute(r tcpip.Route) {
+	n.Stack.SetRouteTable(append(n.Stack.GetRouteTable(), r))
+}
+
+// SetTunnelSubnets installs the destinations the wireguard tunnel covers.
+func (n *NAT) SetTunnelSubnets(subs []tcpip.Subnet) {
+	n.tunnelMu.Lock()
+	defer n.tunnelMu.Unlock()
+	n.TunnelSubnets = subs
+}
+
+// dialsTunnel reports whether a destination leaves through the tunnel
+// rather than a host socket.
+func (n *NAT) dialsTunnel(dst tcpip.Address) bool {
+	n.tunnelMu.Lock()
+	defer n.tunnelMu.Unlock()
+	for _, s := range n.TunnelSubnets {
+		if s.Contains(dst) {
+			return true
+		}
+	}
+	return false
 }
 
 // New builds the netstack stack and attaches ep as the Ethernet device.
@@ -70,6 +111,14 @@ func New(ep *link.EtherEndpoint, opts Options) (*NAT, error) {
 
 	if err := s.CreateNIC(nicID, ep); err != nil {
 		return nil, fmt.Errorf("CreateNIC: %s", err)
+	}
+	// Duplicate address detection off: this segment has no other v6
+	// speaker to answer DAD probes, so addresses would sit TENTATIVE
+	// forever and the gateway would stay deaf to Neighbor Solicitations.
+	if ep6, _ := s.GetNetworkEndpoint(nicID, ipv6.ProtocolNumber); ep6 != nil {
+		if dad, ok := ep6.(interface{ SetDADConfigurations(stack.DADConfigurations) }); ok {
+			dad.SetDADConfigurations(stack.DADConfigurations{DupAddrDetectTransmits: 0})
+		}
 	}
 	// The guest's frames carry its own MAC and 10.0.2.15 source; without
 	// these the stack treats them as spoofed/foreign and sheds them.
@@ -131,8 +180,14 @@ func New(ep *link.EtherEndpoint, opts Options) (*NAT, error) {
 			}
 		}
 		routes = append(routes, tcpip.Route{
-			Destination: tcpip.AddrFrom16(as16(net.ParseIP("fec0::"))).WithPrefix().Subnet(),
-			NIC:         nicID,
+			// fec0::/64, the whole guest link — WithPrefix() alone would
+			// make this a point subnet (/128) and strand every other
+			// guest address.
+			Destination: tcpip.AddressWithPrefix{
+				Address:   tcpip.AddrFrom16(as16(net.ParseIP("fec0::"))),
+				PrefixLen: 64,
+			}.Subnet(),
+			NIC: nicID,
 		})
 	}
 	s.SetRouteTable(routes)
@@ -174,14 +229,35 @@ func as16(ip net.IP) [16]byte {
 
 func (n *NAT) tcpHandler(r *tcp.ForwarderRequest) {
 	id := r.ID()
+	n.debugf("tcp fwd: dst=%s:%d", id.LocalAddress, id.LocalPort)
 	// The guest's destination is the LOCAL side of the 4-tuple: one of our
-	// own addresses (gateway/DNS) maps to host loopback, everything else is
-	// dialed literally (internet-bound v4/v6 NAT).
+	// own addresses (gateway/DNS) maps to host loopback, tunnel-covered
+	// destinations dial back through this stack (switch-mode wireguard
+	// egress — the flow leaves with the tunnel address as source), and
+	// everything else is dialed literally on the host.
 	dst := id.LocalAddress.String()
-	if n.localAddrs[dst] {
+	var hostConn net.Conn
+	var err error
+	switch {
+	case n.localAddrs[dst]:
 		dst = "127.0.0.1"
+		hostConn, err = net.Dial("tcp", net.JoinHostPort(dst, strconv.Itoa(int(id.LocalPort))))
+	case n.dialsTunnel(id.LocalAddress):
+		proto := ipv4.ProtocolNumber
+		if id.LocalAddress.Len() == 16 {
+			proto = ipv6.ProtocolNumber
+		}
+		n.debugf("tunnel dial %s:%d", id.LocalAddress, id.LocalPort)
+		hostConn, err = gonet.DialTCP(n.Stack, tcpip.FullAddress{
+			Addr: id.LocalAddress,
+			Port: id.LocalPort,
+		}, proto)
+		if err != nil {
+			n.debugf("tunnel dial failed: %s", err)
+		}
+	default:
+		hostConn, err = net.Dial("tcp", net.JoinHostPort(dst, strconv.Itoa(int(id.LocalPort))))
 	}
-	hostConn, err := net.Dial("tcp", net.JoinHostPort(dst, strconv.Itoa(int(id.LocalPort))))
 	if err != nil {
 		r.Complete(true) // RST: connection-refused semantics
 		return
@@ -249,6 +325,24 @@ func (n *NAT) dialUDP(dstIP string, dstPort uint16) net.Conn {
 	}
 	if n.localAddrs[dstIP] {
 		dstIP = "127.0.0.1"
+	}
+	// Tunnel-covered destinations dial through this stack: the flow leaves
+	// the tunnel NIC with the tunnel address as source (switch-mode wg).
+	dst := tcpip.AddrFrom16(as16(net.ParseIP(dstIP)))
+	if t4 := dst.To4(); t4.Len() == 4 {
+		dst = t4
+	}
+	if n.dialsTunnel(dst) {
+		var laddr *tcpip.FullAddress
+		var proto tcpip.NetworkProtocolNumber = ipv6.ProtocolNumber
+		if dst.Len() == 4 {
+			proto = ipv4.ProtocolNumber
+		}
+		c, err := gonet.DialUDP(n.Stack, laddr, &tcpip.FullAddress{Addr: dst, Port: dstPort}, proto)
+		if err != nil {
+			return nil
+		}
+		return c
 	}
 	c, err := net.Dial("udp", net.JoinHostPort(dstIP, strconv.Itoa(int(dstPort))))
 	if err != nil {
