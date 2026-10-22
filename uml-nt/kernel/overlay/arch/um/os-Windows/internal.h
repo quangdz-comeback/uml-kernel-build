@@ -60,6 +60,16 @@ void uml_nt_net_rx_ready(int fd);
  * enabled (the userspace() wake path). */
 void uml_nt_sigio_flush(void);
 
+/* console.c (M5.6a slice A, D19 pending-only console input): the
+ * stdin reader thread is edge-capture only (con_ring push + SetEvent
+ * on this wake event); the vCPU drains the ring into the tty flip
+ * buffer at the safe points — the userspace() wait multiplex listens
+ * on uml_nt_console_wake_event() (NULL when stdin is absent), and
+ * unblock_signals() flushes on uml_nt_console_pending(). */
+HANDLE uml_nt_console_wake_event(void);
+int uml_nt_console_pending(void);
+void uml_nt_console_flush(void);
+
 /* start_up.c (M5.1c.3 diagnosis): which aux thread is running — set
  * at thread entry, printed by the crash reporter. */
 extern const char *uml_nt_thread_role;

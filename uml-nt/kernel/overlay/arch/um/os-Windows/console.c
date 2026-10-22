@@ -19,11 +19,25 @@
  *     once it registers (CON_PRINTBUFFER replays the early log; the
  *     kernel's own "console=tty0" default binds it);
  *   - input: a dedicated NT thread blocks in NtReadFile on
- *     boot.stdio_in (boot-info v3) and feeds the port's flip buffer —
- *     the deliver_alarm() pattern (a host thread calling straight
- *     into kernel context). A closed/invalid stdin parks the thread
- *     after one log line; input loss is loud, never silent.
+ *     boot.stdio_in (boot-info v3) and feeds the port's flip buffer.
+ *     A closed/invalid stdin parks the thread after one log line;
+ *     input loss is loud, never silent.
  *
+ * M5.6a slice A (to-shelley 141-A — the D19 violation, referee
+ * co-factor): the reader thread ran tty_insert_flip_string() itself
+ * — kernel context CONCURRENT with the vCPU, zero exclusion on the
+ * port/flip/n_tty state on the UP build (the 5cb22f8 S4c2 class,
+ * console edition; the referee's login feed keeps stdin open, so
+ * the thread was live inside every CI boot's tear window). The
+ * reader is now EDGE-CAPTURE ONLY, the timer's pending-only pattern
+ * (5cb22f8): NtReadFile -> push the bytes into a lock-free SPSC
+ * ring (con_ring.c) -> SetEvent the wake multiplex. The vCPU drains
+ * the ring into the tty core at the safe points — the userspace()
+ * wait wake (skas/process.c) and the unblock_signals flush
+ * (signal.c). No kernel code runs on the reader thread, and every
+ * console input path now enters through the one vCPU-side door
+ * (which also closes the queued console-termios input work — the
+ * steer 108/123 job#2 shape).
  * HANDOFF §4.1 #13: NtWriteFile to the same console handle from two
  * threads races output — every write funnels through
  * nt_console_write() (util.c), serialized by a spinlock at that
@@ -39,6 +53,7 @@
 #include <ntabi.h>
 #include <os.h>
 #include "console_status.h"
+#include "con_ring.h"
 #include "internal.h"
 
 /* ---- tty driver -------------------------------------------------------- */
@@ -97,6 +112,45 @@ static struct console nt_cons = {
 };
 
 /* ---- stdin reader (the input half) -------------------------------------- */
+/* The edge-capture handoff: the ring + the wake event. g_con_live
+ * gates the vCPU-side flush until the tty port exists (a feed byte
+ * landing before late_initcall completes must not touch an uninit
+ * port). */
+static struct uml_nt_con_ring g_con_ring;
+static HANDLE g_con_wake;
+static int g_con_live;
+
+HANDLE uml_nt_console_wake_event(void)
+{
+	return g_con_wake;
+}
+
+int uml_nt_console_pending(void)
+{
+	return g_con_live && uml_nt_con_ring_pending(&g_con_ring);
+}
+
+/* vCPU-side drain (D19): move every queued byte into the port's
+ * flip buffer on the kernel thread, then one flip push. Called
+ * from the userspace() wait wake (skas/process.c) and the
+ * unblock_signals flush (signal.c) — the same safe points the
+ * pending-only timer alarm flushes at. */
+void uml_nt_console_flush(void)
+{
+	unsigned char buf[256];
+	unsigned int n, total = 0;
+
+	if (!g_con_live)
+		return;
+	while ((n = uml_nt_con_ring_pop(&g_con_ring, buf,
+					sizeof(buf))) != 0) {
+		tty_insert_flip_string(&g_port, buf, n);
+		total += n;
+	}
+	if (total != 0)
+		tty_flip_buffer_push(&g_port);
+}
+
 static unsigned long __attribute__((ms_abi)) nt_con_reader(void *arg)
 {
 	static unsigned char buf[512];
@@ -146,8 +200,26 @@ static unsigned long __attribute__((ms_abi)) nt_con_reader(void *arg)
 				"%08x)", s);
 			return 0;
 		}
-		tty_insert_flip_string(&g_port, buf, iosb.Information);
-		tty_flip_buffer_push(&g_port);
+		/* D19 edge-capture (M5.6a slice A): NO tty calls on
+		 * this thread — stage the bytes, then wake the vCPU.
+		 * A short push means the ring filled (a stalled vCPU
+		 * with a fed stdin); the loss is loud, never silent. */
+		{
+			unsigned int want = (unsigned int)iosb.Information;
+			unsigned int put =
+				uml_nt_con_ring_push(&g_con_ring, buf, want);
+			static unsigned int drop_said;
+
+			if (put < want && drop_said < 8) {
+				drop_said++;
+				os_info("console: input ring FULL — "
+					"dropped %u byte(s) (total %u); "
+					"the vCPU drain is stalled\n",
+					want - put, g_con_ring.drops);
+			}
+		}
+		if (g_con_wake != NULL)
+			nt->NtSetEvent(g_con_wake, NULL);
 	}
 	return 0;
 }
@@ -202,8 +274,19 @@ static int __init nt_con_init(void)
 	       uml_boot.stdio_in != NULL ? "attached" : "absent");
 
 	if (uml_boot.stdio_in != NULL) {
-		/* Handle leaked deliberately: the reader lives for the
-		 * UML run (os_timer_create pattern). */
+		/* The wake event + ring exist BEFORE the reader can
+		 * produce (single-threaded init; the vCPU wait and the
+		 * flush read them only after g_con_live). Handle
+		 * leaked deliberately: the reader lives for the UML
+		 * run (os_timer_create pattern). */
+		uml_nt_con_ring_init(&g_con_ring);
+		g_con_wake = nt->CreateEventW(NULL, 0 /*auto-reset*/, 0,
+					      NULL);
+		if (g_con_wake == NULL)
+			os_info("console: wake event creation failed — "
+				"stdin input flushes only at signal "
+				"unblocks\n");
+		g_con_live = 1;
 		nt->CreateThread(NULL, 0, nt_con_reader, NULL, 0, &tid);
 	}
 	return 0;

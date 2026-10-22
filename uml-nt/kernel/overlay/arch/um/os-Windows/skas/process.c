@@ -485,32 +485,43 @@ void userspace(struct uml_pt_regs *regs)
 		 * keeps a dead/hung stub loud instead of a silent
 		 * boot hang (M1.9 lesson). */
 		for (;;) {
-			HANDLE waits[2];
+			HANDLE waits[3], hnet, hcon;
 			ULONG w, code;
-			LARGE_INTEGER to;
+			int nwait = 1, idx_net = -1, idx_con = -1;
 
 			waits[0] = c->evt_in;
-			waits[1] = uml_nt_net_wake_event();
-			if (waits[1] != NULL) {
-				w = nt->WaitForMultipleObjects(2, waits, 0,
-							       1000);
-			} else {
-				/* No wake event (creation failed): the
-				 * old plain wait — 1s timeout, no RX
-				 * wake (loud at creation site). */
-				to.QuadPart = -10000000LL; /* 1s */
-				w = nt->NtWaitForSingleObject(c->evt_in, 0,
-							      &to) ==
-				    UML_NT_STATUS_TIMEOUT ?
-					    258u : 0;
+			hnet = uml_nt_net_wake_event();
+			hcon = uml_nt_console_wake_event();
+			if (hnet != NULL) {
+				idx_net = nwait;
+				waits[nwait++] = hnet;
 			}
+			/* M5.6a slice A: the console input wake — the
+			 * stdin reader thread edge-captures into the
+			 * ring and SetEvents; the drain (tty feed)
+			 * runs on THIS thread (D19). Absent stdin
+			 * (closed/parked) leaves the event NULL and
+			 * the wait is the old shape. */
+			if (hcon != NULL) {
+				idx_con = nwait;
+				waits[nwait++] = hcon;
+			}
+			w = nt->WaitForMultipleObjects(nwait, waits, 0,
+						       1000);
 			if (w == 0)
 				break; /* stub trap ready */
-			if (w == 1) {
+			if (idx_net >= 0 && w == (ULONG)idx_net) {
 				/* A frame was staged: run the SIGIO
 				 * machinery (registry flush → the net
 				 * IRQ) on THIS thread, then re-wait. */
 				uml_nt_sigio_flush();
+				continue;
+			}
+			if (idx_con >= 0 && w == (ULONG)idx_con) {
+				/* Console input staged: drain the
+				 * edge-capture ring into the tty core
+				 * on THIS thread, then re-wait. */
+				uml_nt_console_flush();
 				continue;
 			}
 			if (w == 258u /*WAIT_TIMEOUT*/) {

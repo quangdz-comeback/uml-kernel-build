@@ -14,5 +14,6 @@ CC="${CC:-clang}"
 
 "$CC" -O1 -Wall -Wextra -Werror \
 	-I"$OS_DIR/include" \
-	-o "$TMP/test" "$HERE/test_console.c" "$OS_DIR/console_status.c"
+	-o "$TMP/test" "$HERE/test_console.c" "$OS_DIR/console_status.c" \
+	"$OS_DIR/con_ring.c"
 "$TMP/test"

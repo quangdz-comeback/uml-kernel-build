@@ -124,6 +124,15 @@ void unblock_signals(void)
 
 	save_pending = signals_pending;
 	signals_pending = 0;
+
+	/* M5.6a slice A (D19 console): the stdin reader thread only
+	 * edge-captures into the console ring now; the tty feed runs
+	 * HERE, on the vCPU, at the same flush point as the pending
+	 * alarm — before the no-signals early-out so input never
+	 * waits on an unrelated signal. */
+	if (uml_nt_console_pending())
+		uml_nt_console_flush();
+
 	if (save_pending == 0)
 		goto out;
 
