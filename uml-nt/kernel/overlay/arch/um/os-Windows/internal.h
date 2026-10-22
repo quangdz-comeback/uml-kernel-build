@@ -192,18 +192,26 @@ void uml_nt_kheap_sync(const struct uml_nt_kheap_piece *pcs, int n);
  * before touching dst, so a kernel-flat trap inside memcpy names the
  * funnel by contract — not by heuristic stack slots. caller is the
  * copy_verify callsite (__builtin_return_address there). */
-#define UML_NT_FLATCOPY_N 8
+#define UML_NT_FLATCOPY_N 64
 struct uml_nt_flatcopy_rec {
 	unsigned long long dst, src, len;
 	unsigned long long caller;
 	const char *what;
 	unsigned int active;
+	unsigned int tick; /* flatcopy_cursor at begin — age order */
 };
 void uml_nt_flatcopy_begin(char *dst, const char *src,
 			   unsigned long long len, const char *what,
 			   unsigned long long caller);
 void uml_nt_flatcopy_end(void);
 int uml_nt_flatcopy_snapshot(struct uml_nt_flatcopy_rec *out);
+/* Newest-first records whose dst range overlaps [flat_lo,flat_hi) —
+ * the replay-lost fire's revert hunt: [kheap] only watches armed
+ * pieces, so a copy_verify landing on an un-watched run is visible
+ * only here. Returns the count filled (<= max). */
+int uml_nt_flatcopy_covering(unsigned long long flat_lo,
+			     unsigned long long flat_hi,
+			     struct uml_nt_flatcopy_rec *out, int max);
 
 /* stub_ctl.c (M5.6a [alloc-alias], map 121): the physalloc handout
  * probe — scan every live conn's VMAs into the freshly claimed

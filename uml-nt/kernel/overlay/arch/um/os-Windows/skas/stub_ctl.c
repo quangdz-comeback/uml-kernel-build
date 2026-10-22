@@ -3461,6 +3461,61 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 				}
 			}
 		}
+	{
+		/* Revert hunt (M5.6a, F1/F2 referees): the page
+		 * reverted byte-exact to the arm snapshot with no
+		 * [kheap] catch on the run — the watch never armed
+		 * it, so the flatcopy ring is the only copy ledger.
+		 * Name any recent copy_verify whose dst covers the
+		 * fire page, then read the qword through the STUB's
+		 * view right now: guest-still-sees-want = the kernel
+		 * table/flat is the twin; guest-sees-before = a true
+		 * physical revert. */
+		unsigned long long pflat =
+			(unsigned long long)(uintptr_t)
+			uml_boot.physmem_base +
+			(unsigned long long)(voff & ~0xfffll);
+		struct uml_nt_flatcopy_rec hits[4];
+		int nh = uml_nt_flatcopy_covering(pflat,
+						  pflat + 0x1000,
+						  hits, 4);
+		int hi;
+
+		for (hi = 0; hi < nh; hi++)
+			os_info("[replay-lost]   REVERT CANDIDATE: "
+				"%s caller=0x%llx dst=0x%llx "
+				"src=0x%llx len=%llu tick=%u\n",
+				hits[hi].what, hits[hi].caller,
+				hits[hi].dst, hits[hi].src,
+				hits[hi].len, hits[hi].tick);
+		if (nh == 0)
+			os_info("[replay-lost]   no ring copy covers "
+				"the page — not a copy_verify rewrite\n");
+		{
+			unsigned long long sv = 0;
+			SIZE_T svg = 0;
+
+			if (c->proc != NULL &&
+			    nt->ReadProcessMemory(c->proc,
+						  (void *)(uintptr_t)c->rp_va,
+						  &sv, 8, &svg) != 0 &&
+			    svg == 8)
+				os_info("[replay-lost]   verify-instant "
+					"STUB view reads 0x%llx (table "
+					"0x%llx, want 0x%llx) — %s\n",
+					sv, now, c->rp_want,
+					sv == c->rp_want ?
+					"GUEST STILL SEES THE STORE — "
+					"the table/flat is the twin" :
+					sv == now ?
+					"guest lost it too — TRUE "
+					"PHYSICAL REVERT" :
+					"A THIRD VALUE — live churn");
+			else
+				os_info("[replay-lost]   verify-instant "
+					"stub view UNREADABLE\n");
+		}
+	}
 	}
 }
 

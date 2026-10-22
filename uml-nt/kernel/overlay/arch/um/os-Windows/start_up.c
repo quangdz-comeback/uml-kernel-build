@@ -421,6 +421,7 @@ void uml_nt_flatcopy_begin(char *dst, const char *src,
 	flatcopy_ring[i].caller = caller;
 	flatcopy_ring[i].what = what;
 	flatcopy_ring[i].active = 1;
+	flatcopy_ring[i].tick = flatcopy_cursor;
 	flatcopy_active = (int)i;
 }
 
@@ -437,6 +438,27 @@ int uml_nt_flatcopy_snapshot(struct uml_nt_flatcopy_rec *out)
 		return 0;
 	*out = flatcopy_ring[flatcopy_active];
 	return out->active != 0;
+}
+
+int uml_nt_flatcopy_covering(unsigned long long flat_lo,
+			     unsigned long long flat_hi,
+			     struct uml_nt_flatcopy_rec *out, int max)
+{
+	int n = 0;
+	unsigned int k;
+
+	/* Walk newest-first: cursor is the next slot to overwrite. */
+	for (k = 0; k < UML_NT_FLATCOPY_N && n < max; k++) {
+		unsigned int i = (flatcopy_cursor - 1 - k) %
+				 UML_NT_FLATCOPY_N;
+		const struct uml_nt_flatcopy_rec *r = &flatcopy_ring[i];
+
+		if (r->dst == 0 || r->dst + r->len <= flat_lo ||
+		    r->dst >= flat_hi)
+			continue;
+		out[n++] = *r;
+	}
+	return n;
 }
 
 /* [kheap] VEH tail: a kernel-flat write inside an armed heap
