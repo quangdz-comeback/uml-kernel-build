@@ -45,6 +45,8 @@ struct uml_nt_stub_conn {
 	ULONG pid;
 	int alive;
 	ULONG exit_code;
+	/* [ss-stray] rows consumed from d->ss_stray_n (stub_nt.h v14) */
+	unsigned int ss_stray_seen;
 	/* plan runner: ops stream one round-trip each */
 	struct uml_nt_fault_plan plan;
 	int plan_next, plan_left;

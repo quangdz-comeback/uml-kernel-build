@@ -362,6 +362,26 @@ Memdrop analog: run phys unref-to-0 + settle → MEM_DECOMMIT trong flat view
 high-water mark. Kế thừa: patches/uml-memdrop-on-free.patch (PAGE_REPORTING
 + MADV_REMOVE, thời Termux).
 
+## D27 (2026-10-22, Droid — M5.6a K7 slice D, referees 39798056175/39809900440)
+EFLAGS.TF là instrument MỘT-SHOT của stub replay, không phải trạng thái
+guest và không bao giờ thuộc kernel. Chỉ fs_trampoline_fault_tf được bật
+TF, sau khi context restore xong; mọi đường capture/restore khác PHẢI mask
+TF. Một #DB không bao giờ là lý do để stub chết.
+- Bệnh: trap context trong replay window mang TF vào gp_from_context →
+  pt_regs/sigframe/verbatim push; một resume sau đó trả TF về guest khi
+  ss_page đã hết epoch. #DB lạc rơi qua report_unowned (0x8-class im lặng)
+  → CONTINUE_SEARCH → stub exit 0x80000004, last cmd=4.
+- FIX: ss_model.h là pure contract dùng chung stub/kernel/test: capture
+  flags và resume flags đều xóa TF; classifier nhận đúng DR_HIT / HOP /
+  POST_STORE / STRAY. STRAY phải clear TF + ss_page, ghi ledger ss_stray
+  (kernel in [ss-stray]) và CONTINUE_EXECUTION — CẤM CONTINUE_SEARCH.
+- Arm epoch thuộc TỪNG fault round: replay_check_arm vào là ss_page=0 và
+  ss_rearm_ro=0; decoder refuse hoặc replay verdict budget cạn thì không
+  arm. tctrip re-arm chỉ tồn tại khi ss_page của chính round đó live.
+- Trampoline TF không được chạm guest stack (SysV red zone / rsp chưa
+  commit): pushfq/popfq chạy trên private slot, rsp swap ra/và; nhãn
+  fs_tramp_tf_end là hop-window bound duy nhất, không hardcode byte count.
+
 ## D26 (2026-10-22, Shelley — to-shelley 144, dl139b "deferred copy outlives its drain")
 Mọi plan mang copy directive: copy PHẢI chạy TRƯỚC khi re-MAP đầu tiên
 của VA bị ảnh hưởng áp — hoặc INLINE tại quyết định khi src refs==1

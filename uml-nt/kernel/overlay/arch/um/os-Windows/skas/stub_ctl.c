@@ -43,6 +43,7 @@
 #include <elf.h>
 #include <stub-panic.h>
 #include <stub_nt.h>
+#include <ss_model.h>
 
 #include <os.h>
 #include <syscall.h>
@@ -494,10 +495,10 @@ static int uml_nt_tctrip_emulate(struct uml_nt_stub_conn *c,
 				d->regs.rsi, d->regs.rdi, d->regs.r8,
 				d->regs.r9, d->regs.r10, d->regs.r11);
 		}
-		/* The chunk-data case: repair writable, and have the
-		 * stub's post-store #DB put the tripwire back (v12) —
-		 * the hole is this one store, not the whole round. */
-		d->ss_rearm_ro = tctrip_page;
+		/* The chunk-data case: repair writable; replay_check_arm
+		 * ties the stub's post-store re-arm of the tripwire to
+		 * THIS round's ss_page, so a refused decode cannot leak
+		 * the re-arm into a later resume. */
 		return 0; /* the writer is named above */
 	}
 	if (dst != d->fault_addr) {
@@ -3009,6 +3010,11 @@ static void cross_stub_census(struct uml_nt_stub_conn *self,
  * the target's BEFORE content. Pure x86 prefix decode for the two
  * glibc-metadata forms (mov r64->m64, mov imm32->m64) — the register
  * file order matches the hardware encoding (rax=0..r15=15). */
+/* The [replay-check] verdict budget — shared by the arm: an
+ * instrument whose verdicts are spent must not keep single-stepping
+ * the guest (ss_model.h, slice D). */
+static int rp_budget = 16;
+
 static void replay_check_arm(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
@@ -3020,6 +3026,13 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	unsigned long long *rf = &d->regs.rax;
 
 	c->rp_active = 0;
+	/* The arm epoch is THIS round's: a fault the decoder refuses
+	 * below arms nothing, and neither the previous round's page
+	 * nor its tctrip re-arm may ride into this resume (slice D:
+	 * the stale arm put TF on a resume whose store was never this
+	 * one). */
+	d->ss_page = 0;
+	d->ss_rearm_ro = 0;
 	if (d->fault_type != 1 || mm == NULL ||
 	    mm->heap_start == 0 ||
 	    d->fault_addr < mm->heap_start ||
@@ -3099,11 +3112,16 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	 * TF; the post-store #DB re-arms the page NOACCESS so the
 	 * NEXT writer (the replay proves itself first) is caught by
 	 * the re-armed cowtrap slot below. */
-	if (witness_off()) {
-		d->ss_page = 0;
-		d->ss_rearm_ro = 0;
-	} else {
-		d->ss_page = d->fault_addr & ~0xfffull;
+	if (!witness_off()) {
+		d->ss_page = uml_nt_ss_arm_page(1, rp_budget,
+						d->fault_addr);
+		/* tctrip's unknown-encoding store asked for the tripwire
+		 * back after this one replay (v12); keep that only with a
+		 * live arm. */
+		if (d->ss_page != 0 && tctrip_conn == c &&
+		    d->fault_addr >= tctrip_page &&
+		    d->fault_addr < tctrip_page + UML_NT_FAULT_PAGE_SIZE)
+			d->ss_rearm_ro = tctrip_page;
 	}
 	d->ss_va = d->fault_addr;
 	d->ss_got = ~0ull;
@@ -3131,7 +3149,6 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 /* [replay-check] verdict at the next syscall park. */
 static void replay_check_verify(struct uml_nt_stub_conn *c)
 {
-	static int rp_budget = 16;
 	unsigned long long now, vrun = 0;
 	long long voff;
 
@@ -3439,6 +3456,55 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 	}
 }
 
+/* [ss-stray] (M5.6a K7 slice D, stub_nt.h v14): the stub's #DB
+ * ledger. Every row the stub recorded since the last park is printed
+ * — kind 0 is a #DB the replay window did not admit (the stub used
+ * to die 0x80000004 on it: referees 39798056175/39809900440), kind 1
+ * is a trap whose context carried EFLAGS.TF (the source the kernel
+ * would have inherited TF from — masked at the capture now). The
+ * flags/dr6 columns name the class: TF live = a TF the resume carried
+ * in; Dr6.BS alone = a single-step whose TF the dispatcher already
+ * dropped; neither = an int1-class trap out of guest code. */
+static void ss_stray_watch(struct uml_nt_stub_conn *c)
+{
+	static int stray_budget = 48;
+	struct uml_nt_stub_data *d = c->d;
+	unsigned int n = d->ss_stray_n, i, first;
+
+	if (n == c->ss_stray_seen)
+		return;
+	first = n - c->ss_stray_seen > 8 ? n - 8 : c->ss_stray_seen;
+	if (first != c->ss_stray_seen && stray_budget > 0) {
+		stray_budget--;
+		os_info("[ss-stray] pid %lu: %u event(s) overran the "
+			"ring\n", (unsigned long)c->pid,
+			first - c->ss_stray_seen);
+	}
+	for (i = first; i != n; i++) {
+		const unsigned long long *r = d->ss_stray[i & 7u];
+		unsigned long long fl = r[1], dr6 = r[2];
+
+		if (stray_budget-- <= 0)
+			break;
+		os_info("[ss-stray] pid %lu #%u %s: rip=0x%llx rsp=0x%llx "
+			"eflags=0x%llx dr6=0x%llx ss_page=0x%llx "
+			"tramp_target=0x%llx cmd=%llu resume_rip=0x%llx "
+			"code=0x%llx — %s\n",
+			(unsigned long)c->pid, i,
+			(r[6] & 0xffffffffull) == 1 ?
+			"TF LIVE AT A TRAP" : "STRAY #DB",
+			r[0], r[7], fl, dr6, r[3], r[4], r[5] & 0xff,
+			r[5] >> 8, r[6] >> 32,
+			(fl & UML_NT_EFLAGS_TF) ?
+			"the context carries TF: a resume brought it in" :
+			(dr6 & 0x4000ull) ?
+			"Dr6.BS: a single-step whose TF is already gone" :
+			(dr6 & 0xfull) ?
+			"Dr6.B0-3: a watchpoint hit outside the filter" :
+			"no TF, no BS: an int1-class trap out of guest code");
+	}
+	c->ss_stray_seen = n;
+}
 static void tcache_watch(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_mm *mm = c->mm;
@@ -5903,6 +5969,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * conn's tcache BEFORE serving this round; poison seen here
 	 * was produced up to the previous round (last_nr names it). */
 	tcache_watch(c);
+	ss_stray_watch(c);
 
 	if (d->cmd == UML_STUB_CMD_SYSCALL) {
 		claim_audit();

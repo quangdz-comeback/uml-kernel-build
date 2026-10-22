@@ -53,6 +53,7 @@
 #include <io.h>
 
 #include "../kernel/overlay/arch/um/include/shared/stub_nt.h"
+#include "../kernel/overlay/arch/um/include/shared/ss_model.h"
 /* fault.h drags vma.h (kernel-side); the one constant the stub
  * needs is pinned here — keep in sync with fault.h. */
 #define UML_NT_FAULT_WATCHPT 0x10u
@@ -82,7 +83,13 @@ static int gp_from_context(const CONTEXT *c, struct uml_nt_gp_regs *g)
 	g->rsi = c->Rsi; g->rdi = c->Rdi;
 	g->r8 = c->R8;  g->r9 = c->R9;  g->r10 = c->R10; g->r11 = c->R11;
 	g->r12 = c->R12; g->r13 = c->R13; g->r14 = c->R14; g->r15 = c->R15;
-	g->rip = c->Rip; g->rflags = c->EFlags;
+	g->rip = c->Rip;
+	/* TF is the stub's replay instrument, never the guest's: a trap
+	 * context captured inside the window (a fault-class exception
+	 * at the replayed store) must not hand it to the kernel —
+	 * pt_regs, the sigframe and the verbatim push would carry it
+	 * back into a resume with nothing armed (ss_model.h). */
+	g->rflags = uml_nt_ss_capture_flags(c->EFlags);
 	return 0;
 }
 
@@ -98,7 +105,9 @@ static void gp_to_context(CONTEXT *c, const struct uml_nt_gp_regs *g)
 	c->Rsp = g->rsp; c->Rbp = g->rbp; c->Rsi = g->rsi; c->Rdi = g->rdi;
 	c->R8 = g->r8; c->R9 = g->r9; c->R10 = g->r10; c->R11 = g->r11;
 	c->R12 = g->r12; c->R13 = g->r13; c->R14 = g->r14; c->R15 = g->r15;
-	c->EFlags = (DWORD)g->rflags;
+	/* No restored context carries TF: the replay trampoline raises
+	 * it itself, after this restore (ss_model.h). */
+	c->EFlags = (DWORD)uml_nt_ss_resume_flags(g->rflags);
 	c->Rip = g->rip;
 }
 
@@ -198,19 +207,36 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
  * TF rises right before the jump — a TF in the VEH context would
  * #DB on wrfsbase, inside the trampoline, before the guest store.
  * With TF set here, the first guest instruction (the replayed
- * store) executes and the #DB lands AFTER it: the handler re-arms
- * the page NOACCESS, so the NEXT writer (the reverter, if any) is
- * caught by the kernel's cowtrap. */
+ * store) executes and the #DB lands AFTER it (ss_model.h: the hops
+ * inside this body and at the store's door re-raise TF; the
+ * post-store step reads the landing back).
+ *
+ * The flag flip needs a stack (popfq is the only way to raise TF),
+ * and the guest's is NOT available: [rsp-8] is the SysV red zone a
+ * leaf function keeps live locals in, and the S4c2a death above
+ * shows an rsp with nothing committed below it. So the pushfq/popfq
+ * pair runs on a two-qword private slot — rsp is swapped out and
+ * back around it. The TF trap after popfq lands after the rsp
+ * restore (the next instruction), with the guest stack live again.
+ * fs_tramp_tf_end bounds the body for the VEH's hop window. */
+static volatile unsigned long long fs_tramp_rsp;
+static volatile unsigned long long fs_tramp_tfslot[2];
+extern const unsigned char fs_tramp_tf_end[];
 __attribute__((naked)) static void fs_trampoline_fault_tf(void)
 {
 	__asm__ volatile (
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
-		"movq	fs_save_r11(%rip), %r11\n\t"
+		"movq	%rsp, fs_tramp_rsp(%rip)\n\t"
+		"leaq	fs_tramp_tfslot+8(%rip), %rsp\n\t"
 		"pushfq\n\t"
 		"orq	$0x100, (%rsp)\n\t"
 		"popfq\n\t"
+		"movq	fs_tramp_rsp(%rip), %rsp\n\t"
+		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
+		".globl fs_tramp_tf_end\n"
+		"fs_tramp_tf_end:\n\t"
 	);
 }
 
@@ -428,6 +454,47 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 			  &wrote, NULL);
 }
 
+/* A guest VA the VEH may read without faulting itself: committed and
+ * not NOACCESS/GUARD. A nested AV inside this handler has no owner —
+ * the process dies 0xC0000005 (referee 37205147552: a leaked viewprobe
+ * address read through a NOACCESS page). Every guest read the handler
+ * performs on its own behalf goes through this first. */
+static int veh_readable(unsigned long long va)
+{
+	MEMORY_BASIC_INFORMATION mb;
+
+	if (va == 0 ||
+	    VirtualQuery((void *)(uintptr_t)va, &mb, sizeof(mb)) !=
+		    sizeof(mb))
+		return 0;
+	if (mb.State != MEM_COMMIT)
+		return 0;
+	if (mb.Protect & (PAGE_NOACCESS | PAGE_GUARD))
+		return 0;
+	return va + 8 <= (uintptr_t)mb.BaseAddress + mb.RegionSize;
+}
+
+/* The stray #DB ledger (stub_nt.h v14): the event the kernel prints
+ * as [ss-stray]. Ring of 8; n moves last so a parked-stub reader sees
+ * complete rows. kind 0 = stray #DB, 1 = TF captured at a trap. */
+static void ss_stray_record(const CONTEXT *c, unsigned long long dr6,
+			    unsigned int kind, unsigned int code)
+{
+	unsigned int i = d->ss_stray_n & 7u;
+
+	d->ss_stray[i][0] = (unsigned long long)c->Rip;
+	d->ss_stray[i][1] = (unsigned long long)c->EFlags;
+	d->ss_stray[i][2] = dr6;
+	d->ss_stray[i][3] = d->ss_page;
+	d->ss_stray[i][4] = fs_tramp_target;
+	d->ss_stray[i][5] = (unsigned long long)d->cmd |
+		((unsigned long long)d->resume_rip << 8);
+	d->ss_stray[i][6] = (unsigned long long)kind |
+		((unsigned long long)code << 32);
+	d->ss_stray[i][7] = (unsigned long long)c->Rsp;
+	MemoryBarrier();
+	d->ss_stray_n++;
+}
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	EXCEPTION_RECORD *er = ep->ExceptionRecord;
@@ -438,109 +505,115 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	unsigned long long watch_va = 0;
 	int verbatim;
 
-	/* v13 DR watchpoint (the tcache entries[] tear-hunt): a write
-	 * hit lands AFTER the store — c->Rip is the NEXT instruction.
-	 * The landed qword discriminates: 0 or heap-shaped = legit
-	 * tcache_put/get churn (silent continue, no round-trip);
-	 * anything else = the tear — report it down the FAULT flow
-	 * with fault_type = UML_NT_FAULT_WATCHPT. Runs BEFORE the
-	 * ss_page #DB branch (a TF #DB has Dr6.Bn clear). */
-	if (er->ExceptionCode == STATUS_SINGLE_STEP &&
-	    (c->Dr6 & 0xf) != 0) {
-		int slot = (c->Dr6 & 1) ? 0 : (c->Dr6 & 2) ? 1 :
-			   (c->Dr6 & 4) ? 2 : 3;
-		unsigned long long v, slot_va;
+	/* The #DB owner (ss_model.h, M5.6a K7 slice D): every
+	 * STATUS_SINGLE_STEP is classified first and NO verdict is
+	 * fatal — the unowned path below never sees a #DB again.
+	 * Referees 39798056175/39809900440: a #DB nothing armed fell
+	 * through to CONTINUE_SEARCH and the stub died 0x80000004 with
+	 * not a line (report_unowned's 0xC filter is silent on the 0x8
+	 * class). The window admits exactly three rips: the TF
+	 * trampoline body, the store's door, one instruction past the
+	 * store. Anything else is a stray: TF off, the arm abandoned,
+	 * the event recorded for the kernel's [ss-stray], continue.
+	 *
+	 * v13 DR watchpoint (the tcache entries[] tear-hunt) runs
+	 * first: a write hit lands AFTER the store — c->Rip is the
+	 * NEXT instruction. The landed qword discriminates: 0 or
+	 * heap-shaped = legit tcache_put/get churn (silent continue,
+	 * no round-trip); anything else = the tear — report it down
+	 * the FAULT flow with fault_type = UML_NT_FAULT_WATCHPT. */
+	if (er->ExceptionCode == STATUS_SINGLE_STEP) {
+		unsigned long long tf_lo = (unsigned long long)(uintptr_t)
+			&fs_trampoline_fault_tf;
+		unsigned long long tf_hi = (unsigned long long)(uintptr_t)
+			fs_tramp_tf_end;
+		unsigned long long dr6 = c->Dr6;
+		int cls = uml_nt_ss_classify(dr6, d->ss_page, c->Rip,
+					     fs_tramp_target, tf_lo, tf_hi);
 
-		guest_read_site = 3;
-		slot_va = d->dr_watch[slot];
-		v = *(volatile unsigned long long *)
-			(uintptr_t)slot_va;
-		guest_read_site = 0;
-		/* Legit churn: 0, a heap-shaped pointer, or the
-		 * empty-bin self-link — slot-0x10 (an fd slot) /
-		 * slot-0x18 (a bk slot) = the bin head address
-		 * itself. Bin-head slots (dr_watch[2..3], armed at
-		 * arena discovery) legitimately take the head value
-		 * on every bin clear; without this they'd storm. */
-		if (v == 0 ||
-		    (v >= d->dr_heap_lo && v < d->dr_heap_hi) ||
-		    v == slot_va - 0x10 || v == slot_va - 0x18) {
+		if (cls == UML_NT_SS_DR_HIT) {
+			int slot = (dr6 & 1) ? 0 : (dr6 & 2) ? 1 :
+				   (dr6 & 4) ? 2 : 3;
+			unsigned long long v = 0, slot_va;
+
+			slot_va = d->dr_watch[slot];
+			if (veh_readable(slot_va)) {
+				guest_read_site = 3;
+				v = *(volatile unsigned long long *)
+					(uintptr_t)slot_va;
+				guest_read_site = 0;
+			}
 			c->Dr6 = 0;
-			if (d->ss_page == 0 ||
-			    ((unsigned long long)c->Rip -
-			     fs_tramp_target) > 16)
-				return EXCEPTION_CONTINUE_EXECUTION;
-			/* dl10 (37279719927): a fault-repaired store
-			 * INTO a watched slot (a4364e8 put slots on the
-			 * bin heads = the arena page = exactly what the
-			 * fs_tramp replay crosses) fires ONE #DB that
-			 * is both the DR hit and the replay's
-			 * post-store step. Taking the early return
-			 * here consumes it: the readback/re-arm below
-			 * never runs and ss_page stays armed on a
-			 * stale fault. Fall through into the replay
-			 * branch (is_watch stays 0) so the bookkeeping
-			 * completes — but only when rip sits at the
-			 * trampoline store or just past it (the real
-			 * interleave); a random watched-slot write
-			 * elsewhere keeps the old early return. */
-		} else {
-			is_watch = 1;
-			watch_va = d->dr_watch[slot];
-			c->Dr6 = 0;
+			/* Legit churn: 0, a heap-shaped pointer, or the
+			 * empty-bin self-link — slot-0x10 (an fd slot) /
+			 * slot-0x18 (a bk slot) = the bin head address
+			 * itself. Bin-head slots (dr_watch[2..3], armed
+			 * at arena discovery) legitimately take the head
+			 * value on every bin clear; without this they'd
+			 * storm. */
+			if (v == 0 ||
+			    (v >= d->dr_heap_lo && v < d->dr_heap_hi) ||
+			    v == slot_va - 0x10 || v == slot_va - 0x18) {
+				if (d->ss_page == 0)
+					return EXCEPTION_CONTINUE_EXECUTION;
+				/* dl10 (37279719927): a fault-repaired
+				 * store INTO a watched slot fires ONE #DB
+				 * that is both the DR hit and the replay's
+				 * post-store step; consuming it here left
+				 * ss_page armed on a stale fault.
+				 * Reclassify without the DR bits: a hop or
+				 * the post-store step completes the
+				 * replay below; a watched-slot write
+				 * elsewhere keeps the old early return
+				 * (the arm stays, no census storm). */
+				cls = uml_nt_ss_classify(0, d->ss_page,
+							 c->Rip,
+							 fs_tramp_target,
+							 tf_lo, tf_hi);
+				if (cls == UML_NT_SS_STRAY)
+					return EXCEPTION_CONTINUE_EXECUTION;
+			} else {
+				is_watch = 1;
+				watch_va = slot_va;
+				cls = 0; /* the report flow below */
+			}
 		}
-		/* fall through into the common report flow */
-	}
-
-	/* Replay single-step (stub_nt.h v10): the repaired store just
-	 * executed; re-arm its page NOACCESS so the NEXT writer faults
-	 * into the kernel's cowtrap. Pure stub-local: no publish. */
-	if (er->ExceptionCode == STATUS_SINGLE_STEP && !is_watch &&
-	    d->ss_page != 0) {
-		/* The trampoline's popfq raises TF one instruction early:
-		 * the first #DB lands after the trampoline's JUMP, with
-		 * the store not yet executed (rip == fs_tramp_target).
-		 * Re-arming there loops forever (NOACCESS -> fault ->
-		 * repair -> TF -> #DB-after-jmp -> ... — referee
-		 * 37201007185 died in exactly that loop). Keep TF and
-		 * let the store run; the NEXT #DB (rip past the store)
-		 * is the real one. */
-		if ((unsigned long long)c->Rip == fs_tramp_target ||
-		    ((unsigned long long)c->Rip >=
-				(unsigned long long)(uintptr_t)
-					&fs_trampoline_fault_tf &&
-		     (unsigned long long)c->Rip <
-				(unsigned long long)(uintptr_t)
-					&fs_trampoline_fault_tf + 32)) {
-			/* Mid-trampoline or at the store's door. TF does
-			 * NOT survive the exception return (local wine
-			 * probe: the #DB-after-jmp's context return
-			 * drops TF — the store then ran untraced);
-			 * re-raise it at every hop until the store has
-			 * executed. */
+		if (cls == UML_NT_SS_HOP) {
+			/* The trampoline's popfq raises TF one instruction
+			 * early: the first #DB lands after the trampoline's
+			 * JUMP, with the store not yet executed (rip ==
+			 * fs_tramp_target). Re-arming there loops forever
+			 * (referee 37201007185 died in exactly that loop).
+			 * A context that already carried TF #DBs inside
+			 * the trampoline body too. TF does NOT survive the
+			 * exception return (local wine probe) — re-raise
+			 * it at every hop until the store has executed. */
 			c->EFlags |= (DWORD)0x100;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
-		{
+		if (cls == UML_NT_SS_POST_STORE) {
 			/* The store JUST executed — read its target
-			 * through THIS view (the page is writable: the
-			 * store just ran — the read cannot fault).
-			 * The kernel compares against the VMA table's
-			 * run: a match-less pair is the wrong-backed
-			 * twin at the qword. NO page re-arm here: the
-			 * NOACCESS rode the next store into a second
-			 * arm whose repair died mid-PROT_DONE
+			 * through THIS view. The kernel compares against
+			 * the VMA table's run: a match-less pair is the
+			 * wrong-backed twin at the qword. NO page re-arm
+			 * here: the NOACCESS rode the next store into a
+			 * second arm whose repair died mid-PROT_DONE
 			 * (referees 37205147552/37207228247) — the
-			 * reverter-catch half is dropped, the
-			 * readback alone settles the twin. */
+			 * reverter-catch half is dropped, the readback
+			 * alone settles the twin. Every guest read is
+			 * guarded: a nested AV inside this handler is the
+			 * 0xC0000005 death. */
 			MEMORY_BASIC_INFORMATION mbi;
 
-			guest_read_site = 2;
-			d->ss_got = *(volatile unsigned long long *)
-				(uintptr_t)d->ss_va;
-			d->ss_flat = *(volatile unsigned long long *)
-				(flat_view + d->ss_flatoff);
-			guest_read_site = 0;
+			if (veh_readable(d->ss_va)) {
+				guest_read_site = 2;
+				d->ss_got = *(volatile unsigned long long *)
+					(uintptr_t)d->ss_va;
+				guest_read_site = 0;
+			}
+			if (d->ss_flatoff + 8 <= d->ram_size)
+				d->ss_flat = *(volatile unsigned long long *)
+					(flat_view + d->ss_flatoff);
 			{
 				/* Dump every MEM_MAPPED region in the
 				 * guest span — the kernel diffs this
@@ -634,10 +707,24 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 				c->Rip = (DWORD64)(uintptr_t)
 					&fs_trampoline_fault;
 			}
+			return EXCEPTION_CONTINUE_EXECUTION;
 		}
-		return EXCEPTION_CONTINUE_EXECUTION;
+		if (cls == UML_NT_SS_STRAY) {
+			/* Nothing armed, or a rip the window does not
+			 * admit (the ntdll dispatcher after an AV inside
+			 * the window, the plain trampoline body, a far
+			 * jump). Was: CONTINUE_SEARCH — the silent
+			 * 0x80000004 death. Now: TF off, the arm (if any)
+			 * abandoned — its state is unknown; the kernel's
+			 * verify reads ss_got == ~0 ("the #DB never
+			 * fired") — recorded, continue. */
+			ss_stray_record(c, dr6, 0, (unsigned int)er->ExceptionCode);
+			c->EFlags &= ~(DWORD)0x100;
+			d->ss_page = 0;
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
+		/* is_watch: fall through into the common report flow */
 	}
-
 	if (!is_syscall && !is_fault) {
 		report_unowned(er, c);
 		return EXCEPTION_CONTINUE_SEARCH;
@@ -663,6 +750,10 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		d->xstate_flags |= UML_STUB_XS_CAPTURED;
 	}
 
+	/* A trap with TF live is the leak's source (ss_model.h): the
+	 * capture below masks it; the ledger names the path. */
+	if (c->EFlags & UML_NT_EFLAGS_TF)
+		ss_stray_record(c, c->Dr6, 1, (unsigned int)er->ExceptionCode);
 	gp_from_context(c, &d->regs);
 
 	/* D18 fast path: an fs-prefixed guest access that faults below
@@ -814,7 +905,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		if (d->fs_base != 0 && have_fsgsbase) {
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = target;
-			fs_tramp_eflags = c->EFlags;
+			fs_tramp_eflags = uml_nt_ss_resume_flags(c->EFlags);
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_sys;
 		} else {
 			c->Rip = (DWORD64)target;

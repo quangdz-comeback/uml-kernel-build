@@ -321,6 +321,22 @@ struct uml_nt_stub_data {
 	 * the witness observes, never alters). */
 	unsigned long long dr_watch[4];
 	unsigned long long dr_heap_lo, dr_heap_hi;
+	/* -- v14: the stray #DB ledger (M5.6a K7 slice D) --------------
+	 * A #DB the replay window does not admit — nothing armed, or a
+	 * rip neither inside the TF trampoline, at the store's door, nor
+	 * one instruction past the store — used to fall through to the
+	 * VEH's unowned path and kill the stub (0x80000004, silent:
+	 * referees 39798056175/39809900440). Now the stub drops TF,
+	 * abandons the arm, records the event here and continues; the
+	 * kernel prints [ss-stray] when ss_stray_n moves (the rows name
+	 * the path: rip, eflags, dr6, ss_page, the trampoline target,
+	 * kind | code<<32). kind 0 = the stray #DB itself; kind 1 = a
+	 * trap captured with EFLAGS.TF live (the leak's source: the
+	 * kernel never sees that TF any more, this row names where it
+	 * would have come from). ss_model.h is the classifier. */
+	u32_nt ss_stray_n;
+	u32_nt _pad_ss_stray;
+	unsigned long long ss_stray[8][8];
 };
 
 #endif /* __UML_STUB_NT_H */

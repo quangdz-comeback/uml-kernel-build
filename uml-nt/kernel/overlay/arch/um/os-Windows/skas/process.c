@@ -39,6 +39,7 @@
 #include <user.h>
 #include <stub-panic.h>
 #include <stub_nt.h>
+#include <ss_model.h>
 #include <syscall.h>
 #include <bench.h>
 #include <os.h>
@@ -188,7 +189,9 @@ static void conn_pull_regs(struct uml_pt_regs *regs,
 	REGS_R14(regs->gp) = g->r14;
 	REGS_R15(regs->gp) = g->r15;
 	REGS_IP(regs->gp) = g->rip;
-	REGS_EFLAGS(regs->gp) = g->rflags;
+	/* TF is the stub's replay instrument (ss_model.h): the guest
+	 * never owns it, pt_regs never carries it. */
+	REGS_EFLAGS(regs->gp) = uml_nt_ss_capture_flags(g->rflags);
 	regs->is_user = 1;
 	if (cmd == UML_STUB_CMD_SYSCALL) {
 		UPT_SYSCALL_NR(regs) = (long)g->rax; /* the trap's nr */
@@ -438,7 +441,7 @@ void uml_nt_signal_check(struct uml_nt_stub_conn *c)
 		g->r14 = REGS_R14(regs->gp);
 		g->r15 = REGS_R15(regs->gp);
 		g->rip = REGS_IP(regs->gp);
-		g->rflags = REGS_EFLAGS(regs->gp);
+		g->rflags = uml_nt_ss_resume_flags(REGS_EFLAGS(regs->gp));
 		d->xstate_flags |= UML_STUB_XS_VERBATIM;
 	}
 	c->push_verbatim = 0;
