@@ -51,9 +51,11 @@ struct uml_nt_stub_conn {
 	/* K6 (M5.6a, cowcopy-race-class-fix, dlW 37576991123 / dlX
 	 * 37579340518 — the RETIRE-LOST verdict): the DEFERRED COPY
 	 * descriptor. Every cowcopy/re-home copy the kernel owns —
-	 * the fault-path COW repair (kind 1: the plan's copy
-	 * directive is the descriptor) and the brk re-home bulk copy
-	 * (kind 2: src/dst/len/va/gens below) — is DEFERRED to the
+	 * the fault-path COW repair (kind 1: D26 — the plan's copy
+	 * directive is SNAPSHOTTED here at the arm; the plan struct
+	 * is scratch a superseding mm_fault wipes) and the brk
+	 * re-home bulk copy (kind 2: src/dst/len/va/gens below) —
+	 * is DEFERRED to the
 	 * teardown/re-map boundary of ITS OWN plan's drain (fault.c
 	 * uml_nt_fault_copy_due decides when; stub_ctl.c
 	 * deferred_copy_exec is the how): the copy runs after every
@@ -558,6 +560,15 @@ void uml_nt_cowtrap_pending(struct uml_nt_stub_conn *c);
  * the stranding class itself; the D22/D25 invariant is never left
  * to chance). */
 int uml_nt_view_release_complete(struct uml_nt_stub_conn *c);
+
+/* D26 (to-shelley 144): the single deferred-copy execution entry —
+ * clears copy_pend_kind first, then dispatches on it (1 = the fault
+ * COW repair, 2 = the brk re-home). Called by the drain hook, the
+ * MAP-hold gate, the drain-end orphan fail-safe, and INLINE at the
+ * decision when the src had no sharer (refs<=1). `when` tags the
+ * provenance line ("inline"/"deferred"/"maphold"/"orphan"/"double").
+ * Returns 0, or -1 with the conn already KILLed loud. */
+int uml_nt_copy_pend_exec(struct uml_nt_stub_conn *c, const char *when);
 
 /* K6 [cowrace] (M5.6a, feature cowcopy-race-witness): the copy-vs-
  * in-flight-store witness's ARM — called at every run copy+re-home

@@ -113,6 +113,7 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	plan->copy_dst_off = 0;
 	plan->cap_gen_src = 0;
 	plan->cap_gen_dst = 0;
+	plan->copy_src_refs = 0;
 
 	/* The sub-run PROT_NONE guard (M4 slice 5): ANY access inside
 	 * one is a guest bug the guard exists to catch — real SIGSEGV
@@ -225,6 +226,12 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			uml_nt_phys_gen(ph, (long long)old_run);
 		plan->cap_gen_dst = (unsigned long long)
 			uml_nt_phys_gen(ph, (long long)new_run);
+		/* D26: snapshot the PRE-SPLIT refs — the split below
+		 * unrefs the caller's own claim, so anyone asking
+		 * afterwards sees one less than the sharing degree
+		 * the copy mode needs. */
+		plan->copy_src_refs = (unsigned int)
+			uml_nt_phys_refs(ph, (long long)old_run);
 
 		rc = uml_nt_vma_cow_split(mm, ph, vma, page, new_run);
 		if (rc < 0) {
@@ -269,6 +276,7 @@ kill:
 	plan->copy_dst_off = 0;
 	plan->cap_gen_src = 0;
 	plan->cap_gen_dst = 0;
+	plan->copy_src_refs = 0;
 	return -1;
 }
 
@@ -363,6 +371,7 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	plan->copy_dst_off = 0;
 	plan->cap_gen_src = 0;
 	plan->cap_gen_dst = 0;
+	plan->copy_src_refs = 0;
 
 	if (mm->nvma > UML_NT_FAULT_MAX_OPS ||
 	    mm->nvma + mm->nguard > UML_NT_FAULT_MAX_OPS)
@@ -750,5 +759,19 @@ int uml_nt_fault_copy_due(const struct uml_nt_fault_plan *plan,
 		       * applied (the plan's op stream confirms one op
 		       * per round-trip) — copy NOW, before any new
 		       * view of the source's range issues */
+}
+
+int uml_nt_fault_copy_mode(unsigned int src_refs)
+{
+	return src_refs >= 2 ? 2 : 1;
+}
+
+int uml_nt_fault_map_covers(const struct uml_nt_fault_op *op,
+			    unsigned long long va,
+			    unsigned long long len)
+{
+	if (op == 0 || op->op != UML_NT_FOP_MAP || len == 0)
+		return 0;
+	return op->va < va + len && va < op->va + op->len;
 }
 

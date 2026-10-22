@@ -135,6 +135,10 @@ struct uml_nt_fault_plan {
 	unsigned long long copy_dst_off;
 	unsigned long long cap_gen_src;
 	unsigned long long cap_gen_dst;
+	/* D26: the src run's refs AT THE DECISION, before the split
+	 * unrefs its own claim — the copy-mode input the dispatch must
+	 * not have to re-derive mid-drain. 0 = no copy directive. */
+	unsigned int copy_src_refs;
 };
 
 /*
@@ -414,5 +418,24 @@ int uml_nt_fault_plan_left_at_trap(const struct uml_nt_fault_plan *plan,
  */
 int uml_nt_fault_copy_due(const struct uml_nt_fault_plan *plan,
 			  int plan_next);
+
+/* D26 (to-shelley 144): a plan that carries a copy directive must
+ * run the copy BEFORE the first re-MAP of the dst VA streams. The
+ * mode comes from the src run's refs at the decision:
+ *   1 (refs <= 1) — no sharer: no release-store window can exist,
+ *     the copy runs INLINE at the decision/arm, before any op;
+ *   2 (refs >= 2) — shared: defer to the release/MAP boundary (the
+ *     due hook), and the dst-covering MAP stays out of the stream
+ *     until the copy has run (the MAP-hold gate enforces that
+ *     structurally, the [copypend-maphold] witness reports it).
+ */
+int uml_nt_fault_copy_mode(unsigned int src_refs);
+
+/* D26 MAP-hold predicate: 1 iff `op` is a MAP whose VA range
+ * intersects the pending copy's [va, va+len) — such an op must never
+ * issue while the copy is still pending. */
+int uml_nt_fault_map_covers(const struct uml_nt_fault_op *op,
+			    unsigned long long va,
+			    unsigned long long len);
 
 #endif /* __UM_OS_WINDOWS_FAULT_H */

@@ -224,6 +224,7 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 		unsigned long long old_end = mm->heap_end;
 		unsigned long long old_off, old_len, new_off, new_end;
 		long long nruns, i;
+		int old_max_refs = 0;
 
 		if (hv == NULL || hv->start != mm->heap_start ||
 		    hv->end != old_end) {
@@ -315,6 +316,27 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 		 * gen move under the drain means the src re-handed —
 		 * the exec refuses loud, never a zeroed-heap resume. */
 		{
+			long long orun;
+
+			/* D26 (to-shelley 144): the sharing degree of the
+			 * OLD span at the decision — the copy-mode input.
+			 * refs<=1 on every run = no sharer: no release-store
+			 * window can exist, the copy runs INLINE below,
+			 * before any op streams. refs>=2 keeps the K6
+			 * deferral (the due hook + the MAP-hold gate).
+			 * Measured BEFORE the unref loop below drops the
+			 * caller's own claims. */
+			for (orun = 0;
+			     orun < (long long)(old_len /
+						UML_NT_PHYS_RUN_SIZE);
+			     orun++) {
+				int r = uml_nt_phys_refs(c->ph,
+					(long long)old_off +
+					orun * UML_NT_PHYS_RUN_SIZE);
+
+				if (r > old_max_refs)
+					old_max_refs = r;
+			}
 			c->copy_pend_kind = 2;
 			c->copy_pend_src = old_off;
 			c->copy_pend_dst = new_off;
@@ -401,6 +423,13 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 		uml_nt_cowtrap_arm_oldtail(c, mm->heap_start, old_end,
 					   new_off);
 		mm->heap_end = new_end;
+		/* D26: no sharer at the decision — the copy runs
+		 * INLINE, now, before the queued view swap streams.
+		 * A refusal already KILLed loud via d->action (the
+		 * conn dies at the resume; the return value is moot). */
+		if (uml_nt_fault_copy_mode((unsigned int)
+		    old_max_refs) == 1)
+			(void)uml_nt_copy_pend_exec(c, "inline");
 	}
 	mm->brk = a[0];
 	return a[0];

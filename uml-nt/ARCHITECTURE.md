@@ -362,6 +362,31 @@ Memdrop analog: run phys unref-to-0 + settle → MEM_DECOMMIT trong flat view
 high-water mark. Kế thừa: patches/uml-memdrop-on-free.patch (PAGE_REPORTING
 + MADV_REMOVE, thời Termux).
 
+## D26 (2026-10-22, Shelley — to-shelley 144, dl139b "deferred copy outlives its drain")
+Mọi plan mang copy directive: copy PHẢI chạy TRƯỚC khi re-MAP đầu tiên
+của VA bị ảnh hưởng áp — hoặc INLINE tại quyết định khi src refs==1
+(không sharer ⇒ không cửa sổ release-store, copy chạy NGAY trước mọi
+op), hoặc giữ MAP lại (deferred chỉ khi refs>=2 — MAP không được issue
+tới khi copy đã chạy; VA giữ unmapped, guest re-fault sau). Descriptor
+copy_pend KHÔNG BAO GIỜ sống sót qua drain đã áp MAP của nó.
+- Bệnh (dl139b): descriptor kind-1 sống TRONG plan struct
+  (c->plan.copy_src_off) — mm_fault của fault kế (MID-DRAIN supersede)
+  ghi đè mất; copy chạy ~172 park MUỘN vào guest đã resume
+  (referee 39791542482 va=0x67cf0000: dst armed, [cowcopy] chưa chạy,
+  tcchunk-head đọc toàn zero).
+- FIX: (1) snapshot directive vào conn descriptor ngay tại arm
+  (copy_pend_{src,dst,len,va,gsrc,gdst}); (2) plan->copy_src_refs ghi
+  refs PRE-SPLIT tại quyết định; (3) refs<=1 → copy inline tại arm
+  (brk là user sống; fault path refs<=1 không tới copy plan — nhánh
+  inline ở dispatch là guard census-lie); (4) refs>=2 → defer + gate
+  copy_pend_gate() chặn mọi op MAP phủ VA-range của copy ở MỌI điểm
+  issue (drain / fault prime / trap prime) — copy chạy trước, MAP sau;
+  (5) fail-safe [copypend-orphan] tại drain-end (LOUD + copy ngay
+  trước resume, phải 0 fire) + [copypend-maphold] (gate bắt) +
+  [copypend-double] (arm chồng arm — impossible post-fix) +
+  [copydue] plan-shape mỗi pass còn pend (định lượng nếu còn trễ).
+- Mọi exec đi qua MỘT entry: uml_nt_copy_pend_exec (clear kind trước,
+  dispatch theo kind, tag provenance inline/deferred/maphold/orphan).
 ## D25 (2026-10-03, Shelley — từ witness 452/452 copy_process+0x883)
 Invariant không gian flat: POOL OBJECT KERNEL và POOL RUN GUEST PHẢI
 DISJOINT tuyệt đối. Bệnh: kmalloc-class của kernel (list_head +0x478,

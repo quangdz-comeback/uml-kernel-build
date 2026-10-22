@@ -2358,6 +2358,56 @@ static void test_copy_due(void)
 	CHECK(uml_nt_fault_copy_due(&plan, 3) == 1);
 }
 
+static void test_copy_mode(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	struct uml_nt_fault_plan plan;
+
+	/* the D26 ruling: no sharer at the decision (refs<=1) = copy
+	 * INLINE before any op streams; refs>=2 = defer, and the
+	 * dst-covering MAP is held out of the stream until the copy
+	 * has run */
+	CHECK(uml_nt_fault_copy_mode(0) == 1);
+	CHECK(uml_nt_fault_copy_mode(1) == 1);
+	CHECK(uml_nt_fault_copy_mode(2) == 2);
+	CHECK(uml_nt_fault_copy_mode(7) == 2);
+
+	/* driven through the REAL fault: the decision snapshots the
+	 * src refs BEFORE the split unrefs (the mode input the
+	 * dispatch must not have to re-derive mid-drain) */
+	fixture(&ph, &mm);
+	CHECK(uml_nt_mm_fault(&mm, &ph, RAM + RUN + 0x8000,
+			      UML_NT_FAULT_WRITE, &plan) == 0);
+	CHECK(!plan.kill && plan.copy_src_off != 0);
+	CHECK(plan.copy_src_refs >= 2);
+	CHECK(plan.copy_src_refs ==
+	      (unsigned int)uml_nt_phys_refs(&ph, plan.copy_src_off) + 1);
+	CHECK(uml_nt_fault_copy_mode(plan.copy_src_refs) == 2);
+}
+
+/* D26 MAP-hold predicate: an op "covers" a pending copy iff it is a
+ * MAP intersecting the copy's VA range — the drain must never issue
+ * such an op while the copy is still pending. */
+static void test_map_covers(void)
+{
+	struct uml_nt_fault_op op;
+
+	memset(&op, 0, sizeof(op));
+	op.op = UML_NT_FOP_MAP;
+	op.va = 0x10000;
+	op.len = 0x10000;
+	CHECK(uml_nt_fault_map_covers(&op, 0x10000, 0x10000) == 1);
+	CHECK(uml_nt_fault_map_covers(&op, 0x18000, 0x8000) == 1);
+	CHECK(uml_nt_fault_map_covers(&op, 0x8000, 0x8001) == 1);
+	CHECK(uml_nt_fault_map_covers(&op, 0x20000, 0x10000) == 0);
+	CHECK(uml_nt_fault_map_covers(&op, 0x0, 0x10000) == 0);
+	op.op = UML_NT_FOP_UNMAP;
+	CHECK(uml_nt_fault_map_covers(&op, 0x10000, 0x10000) == 0);
+	op.op = UML_NT_FOP_MAP;
+	CHECK(uml_nt_fault_map_covers(&op, 0x10000, 0) == 0);
+	CHECK(uml_nt_fault_map_covers((void *)0, 0x10000, 0x10000) == 0);
+}
 /* The serialization precondition, driven through the REAL
  * uml_nt_mm_fault: every release op precedes every re-MAP op in a
  * COW plan, so "the first MAP is about to issue" (the deferred
@@ -2518,6 +2568,8 @@ int main(void)
 	test_release_set();
 	test_mid_drain_merge();
 	test_copy_due();
+	test_copy_mode();
+	test_map_covers();
 	test_swap_serial();
 	test_release_gate();
 

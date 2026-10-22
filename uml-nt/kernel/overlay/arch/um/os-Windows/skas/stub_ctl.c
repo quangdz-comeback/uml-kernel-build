@@ -1820,6 +1820,11 @@ static int view_swap_guard(struct uml_nt_stub_conn *c)
 	return 0;
 }
 
+/* D26 MAP-hold gate (defined beside the deferred-copy execs) —
+ * forward decl for the pump-side export below. */
+static int copy_pend_gate(struct uml_nt_stub_conn *c,
+			  const struct uml_nt_fault_op *op);
+
 /* Publish one plan op into the stub slot (d->action operands) and
  * advance the runner. Exported for the pump-side signal delivery
  * (process.c): a sigframe write that COW-fixed-up a shared run
@@ -1827,7 +1832,12 @@ static int view_swap_guard(struct uml_nt_stub_conn *c)
 void uml_nt_plan_issue_op(struct uml_nt_stub_conn *c,
 			  const struct uml_nt_fault_op *op)
 {
-	issue_plan_op(c, op);
+	/* D26: the MAP-hold gate covers the pump-side issue too — a
+	 * sigframe fixup MAP must not cover a pending copy's range
+	 * before the copy ran. On a refusal the conn is already
+	 * KILLed loud; publishing nothing is the dead-conn shape. */
+	if (copy_pend_gate(c, op) == 0)
+		issue_plan_op(c, op);
 }
 
 /* M5.4 c3: dump the first n bytes at a guest VA through the mm's VMA
@@ -5576,12 +5586,13 @@ static void claim_audit(void)
  * t0 hash is now the content at the DEFERRED copy, which is the
  * point: the witness's RETIRE-LOST diff must compare the release
  * against the snapshot the live backing was actually built from). */
-static int fault_cowcopy_exec(struct uml_nt_stub_conn *c)
+static int fault_cowcopy_exec(struct uml_nt_stub_conn *c,
+			      const char *when)
 {
 	struct uml_nt_stub_data *d = c->d;
 	unsigned long long gen_now;
 
-	if (c->plan.copy_src_off == 0 || c->plan.copy_dst_off == 0)
+	if (c->copy_pend_src == 0 || c->copy_pend_dst == 0)
 		return 0;
 	/* the write side must stay inside its own block (the
 	 * direct-write tripwire — unchanged from the fault-round
@@ -5590,28 +5601,28 @@ static int fault_cowcopy_exec(struct uml_nt_stub_conn *c)
 	 * check would false-kill exactly the legal mid-drain
 	 * drop (the D22 park preserves the bytes). */
 	if (uml_nt_phys_block_check(c->ph, (long long)
-				    c->plan.copy_dst_off,
+				    c->copy_pend_dst,
 				    UML_NT_PHYS_RUN_SIZE) < 0) {
 		os_info("[fillguard] COW run copy src=0x%llx "
 			"dst=0x%llx: dst block check failed — "
-			"killing\n", c->plan.copy_src_off,
-			c->plan.copy_dst_off);
+			"killing\n", c->copy_pend_src,
+			c->copy_pend_dst);
 		d->action = UML_STUB_ACTION_KILL;
 		d->err = 1;
 		return -1;
 	}
 	gen_now = (unsigned long long)uml_nt_phys_gen(c->ph,
-		(long long)c->plan.copy_src_off);
-	if (gen_now != c->plan.cap_gen_src) {
+		(long long)c->copy_pend_src);
+	if (gen_now != c->copy_pend_gsrc) {
 		os_info("[fillguard] COW run copy src=0x%llx "
 			"dst=0x%llx: source re-handed under the "
 			"drain (gen 0x%llx -> 0x%llx, refs=%d) — its "
 			"bytes are a new life's, the t0 snapshot is "
 			"gone; KILLING (never a zeroed-heap "
-			"resume)\n", c->plan.copy_src_off,
-			c->plan.copy_dst_off, c->plan.cap_gen_src,
+			"resume)\n", c->copy_pend_src,
+			c->copy_pend_dst, c->copy_pend_gsrc,
 			gen_now, uml_nt_phys_refs(c->ph,
-				(long long)c->plan.copy_src_off));
+				(long long)c->copy_pend_src));
 		d->action = UML_STUB_ACTION_KILL;
 		d->err = 1;
 		return -1;
@@ -5626,21 +5637,21 @@ static int fault_cowcopy_exec(struct uml_nt_stub_conn *c)
 	 * only. */
 	uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_COWCOPY_SRC,
 			    d->fault_addr, UML_NT_PHYS_RUN_SIZE,
-			    c->plan.copy_src_off,
-			    c->plan.cap_gen_src, -1);
+			    c->copy_pend_src,
+			    c->copy_pend_gsrc, -1);
 	uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_COWCOPY_DST,
 			    d->fault_addr, UML_NT_PHYS_RUN_SIZE,
-			    c->plan.copy_dst_off,
-			    c->plan.cap_gen_dst,
-			    (long long)(c->plan.copy_dst_off +
+			    c->copy_pend_dst,
+			    c->copy_pend_gdst,
+			    (long long)(c->copy_pend_dst +
 				(d->fault_addr &
 				 (UML_NT_PHYS_RUN_SIZE - 1))));
-	uml_nt_copy_verify(uml_boot.physmem_base + c->plan.copy_dst_off,
-			   uml_boot.physmem_base + c->plan.copy_src_off,
+	uml_nt_copy_verify(uml_boot.physmem_base + c->copy_pend_dst,
+			   uml_boot.physmem_base + c->copy_pend_src,
 			   UML_NT_PHYS_RUN_SIZE, "cow-repair");
-	uml_nt_cowwatch_touch((unsigned long long)c->plan.copy_src_off,
+	uml_nt_cowwatch_touch((unsigned long long)c->copy_pend_src,
 			      UML_NT_PHYS_RUN_SIZE, "cow-copy-src");
-	uml_nt_cowwatch_touch((unsigned long long)c->plan.copy_dst_off,
+	uml_nt_cowwatch_touch((unsigned long long)c->copy_pend_dst,
 			      UML_NT_PHYS_RUN_SIZE, "cow-copy-dst");
 	/* WRITER-HUNT (M5.6a) provenance ledger, generation grade: run
 	 * 36979286356's tcache content at abort = bytes a [cowcopy]
@@ -5652,7 +5663,7 @@ static int fault_cowcopy_exec(struct uml_nt_stub_conn *c)
 		const unsigned char *fp =
 			(const unsigned char *)
 			((char *)uml_boot.physmem_base +
-			 c->plan.copy_src_off +
+			 c->copy_pend_src +
 			 UML_NT_PHYS_RUN_SIZE - 16);
 		char hex[49];
 		int hi;
@@ -5661,23 +5672,22 @@ static int fault_cowcopy_exec(struct uml_nt_stub_conn *c)
 			snprintf(hex + hi * 3, sizeof(hex) - hi * 3,
 				 "%02x ", fp[hi]);
 		os_info("[cowcopy] pid %lu src=0x%llx (refs=%d) "
-			"dst=0x%llx (refs=%d) fp=%s (deferred: copied "
-			"after the release ops applied)\n",
-			(unsigned long)c->pid, c->plan.copy_src_off,
+			"dst=0x%llx (refs=%d) fp=%s (%s)\n",
+			(unsigned long)c->pid, c->copy_pend_src,
 			uml_nt_phys_refs(c->ph,
-				(long long)c->plan.copy_src_off),
-			c->plan.copy_dst_off,
+				(long long)c->copy_pend_src),
+			c->copy_pend_dst,
 			uml_nt_phys_refs(c->ph,
-				(long long)c->plan.copy_dst_off),
-			hex);
+				(long long)c->copy_pend_dst),
+			hex, when);
 		/* cowwatch arm: a SHARED src run = the poison target
 		 * class (the writer writes after the copy — see the
 		 * cowwatch block comment). Owner VA unknown at this
 		 * site (0) — the post-clone sweep arms with the real
 		 * one. */
 		if (uml_nt_phys_refs(c->ph,
-		    (long long)c->plan.copy_src_off) >= 2)
-			uml_nt_cowwatch_arm(c->plan.copy_src_off, 0,
+		    (long long)c->copy_pend_src) >= 2)
+			uml_nt_cowwatch_arm(c->copy_pend_src, 0,
 					    (unsigned long)c->pid);
 		/* WRITER-HUNT (M5.6a, run 37078256773): the DST side
 		 * goes PRIVATE (refs=1) here with writable views and
@@ -5686,16 +5696,13 @@ static int fault_cowcopy_exec(struct uml_nt_stub_conn *c)
 		 * original block; unchanged). The dst maps the SAME
 		 * VA range the faulting write hit — base = its run. */
 		{
-			unsigned long long dvbase =
-				d->fault_addr &
-				~(unsigned long long)
-				(UML_NT_PHYS_RUN_SIZE - 1);
+			unsigned long long dvbase = c->copy_pend_va;
 
-			uml_nt_cowwatch_arm(c->plan.copy_dst_off,
+			uml_nt_cowwatch_arm(c->copy_pend_dst,
 					    dvbase, (unsigned long)c->pid);
 			uml_nt_cowtrap_arm_alloc(c, dvbase,
 						 UML_NT_PHYS_RUN_SIZE,
-						 c->plan.copy_dst_off);
+						 c->copy_pend_dst);
 			/* K6 [cowrace]: the copy-vs-in-flight-store
 			 * witness's arm — the t0 hash + the RUNNING
 			 * sharers of the source, recorded AT the copy
@@ -5704,8 +5711,8 @@ static int fault_cowcopy_exec(struct uml_nt_stub_conn *c)
 			 * the snapshot the live backing was built
 			 * from). Read-only; the check pass runs at
 			 * the next syscall parks. */
-			uml_nt_cowrace_arm(c, c->plan.copy_src_off,
-					   c->plan.copy_dst_off,
+			uml_nt_cowrace_arm(c, c->copy_pend_src,
+					   c->copy_pend_dst,
 					   UML_NT_PHYS_RUN_SIZE, dvbase,
 					   "cowcopy");
 		}
@@ -5731,7 +5738,8 @@ static int fault_cowcopy_exec(struct uml_nt_stub_conn *c)
  * acceptance witness) move with the copy — the t0 hash is the
  * content at the deferred copy, the snapshot the live backing
  * was actually built from. */
-static int brk_rehome_copy_exec(struct uml_nt_stub_conn *c)
+static int brk_rehome_copy_exec(struct uml_nt_stub_conn *c,
+				const char *when)
 {
 	struct uml_nt_stub_data *d = c->d;
 	unsigned long long src = c->copy_pend_src;
@@ -5794,12 +5802,70 @@ static int brk_rehome_copy_exec(struct uml_nt_stub_conn *c)
 
 		if (brkcopy_said > 0) {
 			brkcopy_said--;
-			os_info("[brkrehome] pid %lu deferred copy "
+			os_info("[brkrehome] pid %lu %s copy "
 				"src=0x%llx dst=0x%llx len=0x%llx — "
-				"after the release op applied, before "
-				"the re-MAP issues\n",
-				(unsigned long)c->pid, src, dst, len);
+				"before the re-MAP issues\n",
+				(unsigned long)c->pid, when, src, dst,
+				len);
 		}
+	}
+	return 0;
+}
+
+/* D26 (to-shelley 144): every deferred-copy execution goes through
+ * this ONE entry — the drain hook, the MAP-hold gate, the drain-end
+ * orphan fail-safe and the inline decisions (fault dispatch / brk
+ * arm with refs==1) all call here. kind is cleared first: a KILL
+ * inside the exec must not leave a half-armed descriptor behind,
+ * and the descriptor never survives its exec. `when` tags the
+ * provenance line: "inline" (no sharer at the decision), "deferred"
+ * (the due hook), "maphold" (the gate fired), "orphan" (the
+ * drain-end fail-safe — a bug, loud). */
+int uml_nt_copy_pend_exec(struct uml_nt_stub_conn *c, const char *when)
+{
+	int kind = c->copy_pend_kind;
+
+	if (kind == 0)
+		return 0;
+	c->copy_pend_kind = 0;
+	if (kind == 1)
+		return fault_cowcopy_exec(c, when);
+	return brk_rehome_copy_exec(c, when);
+}
+
+/* D26 MAP-hold gate: NEVER issue a MAP that covers a pending copy's
+ * VA range — the copy runs first, right here. The due hook is the
+ * primary trigger; this is the structural backstop: a plan whose op
+ * order the hook misread (an augment, a merge) cannot install a view
+ * over the dst while it still holds the fresh alloc's zeros. The
+ * exec's witness arms append ops (sc_plan_add) — restore the drain
+ * position the append disturbed (the 7496f70 class). Returns -1 when
+ * the exec KILLed. */
+static int copy_pend_gate(struct uml_nt_stub_conn *c,
+			  const struct uml_nt_fault_op *op)
+{
+	static int maphold_budget = 8;
+	int ops_before, next_before;
+
+	if (c->copy_pend_kind == 0 ||
+	    !uml_nt_fault_map_covers(op, c->copy_pend_va,
+				     c->copy_pend_len))
+		return 0;
+	if (maphold_budget > 0) {
+		maphold_budget--;
+		os_info("[copypend-maphold] pid %lu MAP 0x%llx+0x%llx "
+			"held by pending copy kind=%d va=0x%llx — the "
+			"copy runs first\n",
+			(unsigned long)c->pid, op->va, op->len,
+			c->copy_pend_kind, c->copy_pend_va);
+	}
+	ops_before = c->plan.n_ops;
+	next_before = c->plan_next;
+	if (uml_nt_copy_pend_exec(c, "maphold") < 0)
+		return -1;
+	if (c->plan.n_ops != ops_before) {
+		c->plan_next = next_before;
+		c->plan_left = c->plan.n_ops - next_before + 1;
 	}
 	return 0;
 }
@@ -5982,11 +6048,12 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * install a view of the source's range while the new
 		 * backing still holds t0-only bytes, and the mapcanary
 		 * plant for a writable MAP writes into dst. Kind 1 =
-		 * the fault-path COW repair (fault_cowcopy_exec, the
-		 * plan's copy directive is the descriptor); kind 2 =
-		 * the brk re-home bulk copy (brk_rehome_copy_exec, the
-		 * conn's pending descriptor). On refusal the exec
-		 * already KILLed loud.
+		 * the fault-path COW repair (fault_cowcopy_exec —
+		 * D26: the plan's directive is SNAPSHOTTED into the
+		 * conn descriptor at arm; the plan struct is scratch
+		 * a superseding mm_fault overwrites); kind 2 = the brk
+		 * re-home bulk copy (brk_rehome_copy_exec). On refusal
+		 * the exec already KILLed loud.
 		 *
 		 * DRAIN-POSITION RESTORE (the M3 boot regression, run
 		 * 37583666145: the child died re-applying its plan):
@@ -6001,17 +6068,33 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * CURRENT point: the plan's own remaining ops stream
 		 * first, the appended witness ops after them — all
 		 * before the guest resumes. */
+		if (c->copy_pend_kind != 0) {
+			static int shape_budget = 8;
+
+			/* D26 plan-shape witness: every drain pass
+			 * that still carries a pending copy logs the
+			 * stream shape — if a copy still runs late
+			 * after the gate, this quantifies by how
+			 * much. Budget-capped; bookkeeping only. */
+			if (shape_budget > 0) {
+				shape_budget--;
+				os_info("[copydue] pid %lu pass: n=%d "
+					"next=%d nextop=%d left=%d "
+					"kind=%d\n",
+					(unsigned long)c->pid,
+					c->plan.n_ops, c->plan_next,
+					c->plan_next < c->plan.n_ops ?
+					(int)c->plan.ops[c->plan_next].op :
+					-1,
+					c->plan_left, c->copy_pend_kind);
+			}
+		}
 		if (c->copy_pend_kind != 0 &&
 		    uml_nt_fault_copy_due(&c->plan, c->plan_next)) {
-			int ckind = c->copy_pend_kind;
 			int ops_before = c->plan.n_ops;
 			int next_before = c->plan_next;
-			int rc;
 
-			c->copy_pend_kind = 0;
-			rc = ckind == 1 ? fault_cowcopy_exec(c) :
-					  brk_rehome_copy_exec(c);
-			if (rc < 0)
+			if (uml_nt_copy_pend_exec(c, "deferred") < 0)
 				return -1;
 			if (c->plan.n_ops != ops_before) {
 				c->plan_next = next_before;
@@ -6020,9 +6103,52 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			}
 		}
 		if (c->plan_left > 1) {
+			if (copy_pend_gate(c,
+					   &c->plan.ops[c->plan_next]) < 0)
+				return -1;
 			c->plan_left--;
 			issue_plan_op(c, &c->plan.ops[c->plan_next]);
 			return 0;
+		}
+		/* D26 orphan fail-safe + witness: the descriptor must
+		 * NEVER survive the drain that applied its MAP — if
+		 * one is still armed here every gate missed (a bug;
+		 * LOUD). Copy NOW, before the resume republish, and
+		 * stream the ops the exec's witness arms appended
+		 * instead of ending the drain. map-applied=1 in the
+		 * log names the class the ruling forbids. */
+		if (c->copy_pend_kind != 0) {
+			static int orphan_budget = 8;
+			int oi, covered = 0;
+			int ops_before = c->plan.n_ops;
+
+			for (oi = 0; oi < c->plan.n_ops; oi++)
+				if (uml_nt_fault_map_covers(
+				    &c->plan.ops[oi], c->copy_pend_va,
+				    c->copy_pend_len))
+					covered = 1;
+			if (orphan_budget > 0) {
+				orphan_budget--;
+				os_info("[copypend-orphan] pid %lu "
+					"kind=%d n=%d map-applied=%d "
+					"— the descriptor outlived its "
+					"drain; copy at drain end, "
+					"before the resume\n",
+					(unsigned long)c->pid,
+					c->copy_pend_kind, c->plan.n_ops,
+					covered);
+			}
+			if (uml_nt_copy_pend_exec(c, "orphan") < 0)
+				return -1;
+			if (c->plan.n_ops != ops_before) {
+				c->plan_next = ops_before;
+				c->plan_left = c->plan.n_ops -
+					       ops_before + 1;
+				c->plan_left--;
+				issue_plan_op(c,
+					      &c->plan.ops[c->plan_next]);
+				return 0;
+			}
 		}
 		c->plan_left = 0;
 		/* K6 [viewprobe]: the DRAIN RECORD — a stream drained
@@ -6656,8 +6782,60 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * ride into the live backing instead of retiring with
 		 * the abandoned source. */
 		if (c->plan.copy_src_off != 0 ||
-		    c->plan.copy_dst_off != 0)
+		    c->plan.copy_dst_off != 0) {
+			/* D26 (to-shelley 144): snapshot the copy
+			 * directive into the conn descriptor NOW. The
+			 * plan struct is scratch — a superseding
+			 * mm_fault (the MID-DRAIN case above) wipes
+			 * it, and a descriptor living in the plan
+			 * dies with it (dl139b: the deferred copy
+			 * outlived its drain and ran ~172 parks late
+			 * into a guest that had already resumed). */
+			if (c->copy_pend_kind != 0) {
+				static int double_budget = 4;
+
+				/* impossible post-D26: a pending copy
+				 * always drains before the guest
+				 * resumes, and a fault needs a
+				 * running guest. LOUD; exec the OLD
+				 * copy first — overwriting its
+				 * descriptor would orphan it. */
+				if (double_budget > 0) {
+					double_budget--;
+					os_info("[copypend-double] pid %lu"
+						" new copy armed over "
+						"kind=%d va=0x%llx — exec "
+						"old first\n",
+						(unsigned long)c->pid,
+						c->copy_pend_kind,
+						c->copy_pend_va);
+				}
+				if (uml_nt_copy_pend_exec(c, "double") < 0)
+					return -1;
+			}
+			c->copy_pend_src = c->plan.copy_src_off;
+			c->copy_pend_dst = c->plan.copy_dst_off;
+			c->copy_pend_gsrc = c->plan.cap_gen_src;
+			c->copy_pend_gdst = c->plan.cap_gen_dst;
+			c->copy_pend_len = UML_NT_PHYS_RUN_SIZE;
+			c->copy_pend_va = d->fault_addr &
+				~(unsigned long long)
+				(UML_NT_PHYS_RUN_SIZE - 1);
 			c->copy_pend_kind = 1;
+			if (uml_nt_fault_copy_mode(
+			    c->plan.copy_src_refs) == 1) {
+				/* no sharer at the decision — no
+				 * release-store window can exist:
+				 * copy INLINE at the arm, before any
+				 * op streams. (The fault path routes
+				 * refs<=1 away from the copy plan at
+				 * fault.c, so this is the census-lie
+				 * guard; the brk path is the live
+				 * inline user.) */
+				if (uml_nt_copy_pend_exec(c, "inline") < 0)
+					return -1;
+			}
+		}
 		stack_window_reassert(c);
 		/* K6 (cowcopy-race-class-fix): the COMPLETE per-view
 		 * release set + stream arming before op 0 issues — a
@@ -6668,6 +6846,8 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * drain census below. */
 		if (uml_nt_view_release_complete(c) < 0)
 			return -1; /* release_complete already KILLed */
+		if (copy_pend_gate(c, &c->plan.ops[0]) < 0)
+			return -1;
 		issue_plan_op(c, &c->plan.ops[0]);
 		return 0;
 	}
@@ -6712,6 +6892,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		c->plan.n_ops = 0;
 		c->plan.copy_src_off = 0;
 		c->plan.copy_dst_off = 0;
+		c->plan.copy_src_refs = 0;
 		c->plan_next = 0;
 		c->plan_left = 0;
 	}
@@ -6746,8 +6927,11 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * AT plan_next. */
 	if (uml_nt_view_release_complete(c) < 0)
 		return -1; /* release_complete already KILLed */
-	if (c->plan_left > 0)
+	if (c->plan_left > 0) {
+		if (copy_pend_gate(c, &c->plan.ops[c->plan_next]) < 0)
+			return -1;
 		issue_plan_op(c, &c->plan.ops[c->plan_next]);
+	}
 	return 0;
 	}
 }
