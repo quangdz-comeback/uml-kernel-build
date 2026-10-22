@@ -381,6 +381,11 @@ TF. Một #DB không bao giờ là lý do để stub chết.
 - Trampoline TF không được chạm guest stack (SysV red zone / rsp chưa
   commit): pushfq/popfq chạy trên private slot, rsp swap ra/và; nhãn
   fs_tramp_tf_end là hop-window bound duy nhất, không hardcode byte count.
+- #DB của v13 DR watchpoint là một FAULT REPORT, không phải exception
+  unowned: khi watched slot mang giá trị xấu, is_watch phải đi tiếp vào
+  fault flow (fault_type=WATCHPT). Nếu gate unowned thiếu is_watch,
+  Windows giết stub bằng 0x80000004 trước khi kernel thấy tear. Fast
+  path TLS/fs-prefixed cũng trả context với TF đã mask.
 
 ## D26 (2026-10-22, Shelley — to-shelley 144, dl139b "deferred copy outlives its drain")
 Mọi plan mang copy directive: copy PHẢI chạy TRƯỚC khi re-MAP đầu tiên

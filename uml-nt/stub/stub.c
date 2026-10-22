@@ -725,7 +725,12 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		}
 		/* is_watch: fall through into the common report flow */
 	}
-	if (!is_syscall && !is_fault) {
+	/* A v13 watchpoint report arrives as STATUS_SINGLE_STEP, not an
+	 * access fault. It must take the FAULT flow below (fault_type =
+	 * WATCHPT); treating it as unowned returns CONTINUE_SEARCH and
+	 * Windows kills the process with 0x80000004 before the kernel
+	 * sees the tear. */
+	if (!is_syscall && !is_fault && !is_watch) {
 		report_unowned(er, c);
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
@@ -783,6 +788,8 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			fs_tramp_base = d->fs_base;
 			fs_save_r11 = c->R11;
 			fs_tramp_target = c->Rip;
+			c->EFlags = (DWORD)uml_nt_ss_resume_flags(
+				(unsigned long long)c->EFlags);
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
