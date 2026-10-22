@@ -187,6 +187,24 @@ struct uml_nt_kheap_piece {
 };
 void uml_nt_kheap_sync(const struct uml_nt_kheap_piece *pcs, int n);
 
+/* The [kheap] copy-owner ledger (M5.6a, referee 39791542482 line
+ * ~89663): uml_nt_copy_verify registers the live bulk flat memcpy
+ * before touching dst, so a kernel-flat trap inside memcpy names the
+ * funnel by contract — not by heuristic stack slots. caller is the
+ * copy_verify callsite (__builtin_return_address there). */
+#define UML_NT_FLATCOPY_N 8
+struct uml_nt_flatcopy_rec {
+	unsigned long long dst, src, len;
+	unsigned long long caller;
+	const char *what;
+	unsigned int active;
+};
+void uml_nt_flatcopy_begin(char *dst, const char *src,
+			   unsigned long long len, const char *what,
+			   unsigned long long caller);
+void uml_nt_flatcopy_end(void);
+int uml_nt_flatcopy_snapshot(struct uml_nt_flatcopy_rec *out);
+
 /* stub_ctl.c (M5.6a [alloc-alias], map 121): the physalloc handout
  * probe — scan every live conn's VMAs into the freshly claimed
  * [off, off+nruns*RUN) range; a hit names the stale translation

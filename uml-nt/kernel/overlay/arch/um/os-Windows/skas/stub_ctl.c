@@ -559,7 +559,10 @@ int uml_nt_copy_verify(char *dst, const char *src, unsigned long long len,
 {
 	unsigned long long i;
 
+	uml_nt_flatcopy_begin(dst, src, len, what,
+			      (unsigned long long)__builtin_return_address(0));
 	memcpy(dst, src, len);
+	uml_nt_flatcopy_end();
 	if (memcmp(dst, src, len) == 0)
 		return 0;
 	for (i = 0; i + 8 <= len; i++)
@@ -3257,9 +3260,14 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 				"the fault page (%s)\n",
 				c->d->ss_viewbase, c->d->ss_vtype,
 				c->d->ss_vrsize,
-				c->d->ss_vtype == 0x40000ull ?
+				/* WinNT.h: MEM_PRIVATE=0x20000,
+				 * MEM_MAPPED=0x40000 (a healthy section
+				 * view), MEM_IMAGE=0x1000000. An earlier
+				 * cut had the first two swapped and named
+				 * every good view the disease. */
+				c->d->ss_vtype == 0x20000ull ?
 				"MEM_PRIVATE — NOT THE PHYSMEM SECTION!" :
-				c->d->ss_vtype == 0x4000000ull ?
+				c->d->ss_vtype == 0x40000ull ?
 				"MEM_MAPPED — a section view" :
 				c->d->ss_vtype == 0x1000000ull ?
 				"MEM_IMAGE" : "?");

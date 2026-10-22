@@ -402,6 +402,43 @@ void uml_nt_kheap_sync(const struct uml_nt_kheap_piece *pcs, int np)
 	}
 }
 
+/* Kernel conn dispatch is serialized and copy_verify does not nest:
+ * one live record is the contract; the ring keeps recent context for
+ * postmortems while flatcopy_active names the copy under the VEH. */
+static struct uml_nt_flatcopy_rec flatcopy_ring[UML_NT_FLATCOPY_N];
+static unsigned int flatcopy_cursor;
+static int flatcopy_active = -1;
+
+void uml_nt_flatcopy_begin(char *dst, const char *src,
+			   unsigned long long len, const char *what,
+			   unsigned long long caller)
+{
+	unsigned int i = flatcopy_cursor++ % UML_NT_FLATCOPY_N;
+
+	flatcopy_ring[i].dst = (unsigned long long)(uintptr_t)dst;
+	flatcopy_ring[i].src = (unsigned long long)(uintptr_t)src;
+	flatcopy_ring[i].len = len;
+	flatcopy_ring[i].caller = caller;
+	flatcopy_ring[i].what = what;
+	flatcopy_ring[i].active = 1;
+	flatcopy_active = (int)i;
+}
+
+void uml_nt_flatcopy_end(void)
+{
+	if (flatcopy_active >= 0)
+		flatcopy_ring[flatcopy_active].active = 0;
+	flatcopy_active = -1;
+}
+
+int uml_nt_flatcopy_snapshot(struct uml_nt_flatcopy_rec *out)
+{
+	if (flatcopy_active < 0 || out == NULL)
+		return 0;
+	*out = flatcopy_ring[flatcopy_active];
+	return out->active != 0;
+}
+
 /* [kheap] VEH tail: a kernel-flat write inside an armed heap
  * piece. Log rip + regs + stack (budget-capped), unprotect ONLY
  * the faulting page (the rest of the heap stays armed), mark it
@@ -443,6 +480,22 @@ static int uml_nt_kheap_catch(
 			      UML_NT_X64_CTX_RBP(e->context));
 		if (wn > 0)
 			uml_nt_crash_write(wbuf, (unsigned int)wn);
+		{
+			struct uml_nt_flatcopy_rec fc;
+
+			if (uml_nt_flatcopy_snapshot(&fc))
+				wn = snprintf(wbuf, sizeof(wbuf),
+				      "[kheap] COPY OWNER: %s caller=%llx "
+				      "dst=%llx src=%llx len=%llu\n",
+				      fc.what, fc.caller, fc.dst, fc.src,
+				      fc.len);
+			else
+				wn = snprintf(wbuf, sizeof(wbuf),
+				      "[kheap] COPY OWNER: none — not "
+				      "uml_nt_copy_verify\n");
+			if (wn > 0)
+				uml_nt_crash_write(wbuf, (unsigned int)wn);
+		}
 		if (e != NULL && e->context != NULL)
 			uml_nt_crash_scan_stack(
 				UML_NT_X64_CTX_RSP(e->context));
