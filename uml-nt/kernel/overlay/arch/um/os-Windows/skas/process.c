@@ -310,8 +310,24 @@ void uml_nt_signal_check(struct uml_nt_stub_conn *c)
 	prev_sink = uml_nt_uacc_set_sink(&sink);
 
 	/* The previous ops (if any) streamed to completion (the pump
-	 * gates this call on plan_left == 0) — queue fresh. */
-	c->plan.n_ops = 0;
+	 * gates this call on plan_left == 0) — queue fresh.
+	 * M5.6a (140): if that gate ever breaks, MERGE — never wipe
+	 * a live stream (the reset class: orphaned MAPs + a floating
+	 * copy). Loud, the gate's name is wanted. */
+	if (c->plan_left != 0) {
+		static int sigmid_budget = 4;
+
+		if (sigmid_budget > 0) {
+			sigmid_budget--;
+			os_info("[streamsync] pid %lu signal delivery "
+				"MID-DRAIN (left=%d next=%d n=%d) — "
+				"MERGE, the queue wipe is forbidden\n",
+				(unsigned long)c->pid, c->plan_left,
+				c->plan_next, c->plan.n_ops);
+		}
+	} else {
+		c->plan.n_ops = 0;
+	}
 
 	rip_before = REGS_IP(regs->gp);
 
@@ -382,7 +398,7 @@ void uml_nt_signal_check(struct uml_nt_stub_conn *c)
 	 * the conn is already KILLED loud — skip the prime. */
 	if (c->plan.n_ops > 0 &&
 	    uml_nt_view_release_complete(c) == 0)
-		uml_nt_plan_issue_op(c, &c->plan.ops[0]);
+		uml_nt_plan_issue_op(c, &c->plan.ops[c->plan_next]);
 
 	/* M5.4 c3 (map 057): a delivery ON A WATCHED CONN is one of
 	 * the two candidate writers of the fork-residue cluster (the

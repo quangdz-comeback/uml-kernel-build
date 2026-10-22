@@ -95,8 +95,17 @@ int uml_nt_sc_plan_add(struct uml_nt_stub_conn *c, unsigned op, unsigned prot,
 	c->plan.ops[c->plan.n_ops].len = len;
 	c->plan.ops[c->plan.n_ops].off = off;
 	c->plan.n_ops++;
-	c->plan_next = 0;
-	c->plan_left = c->plan.n_ops;
+	/* M5.6a (to-shelley 140 — stream atomicity): mid-drain the
+	 * position is SACRED — the append rides behind the unissued
+	 * tail and the prime (uml_nt_view_release_complete) recounts
+	 * it (the 7496f70 drain-position restore keeps the PROT_DONE
+	 * context's own accounting). The reset-at-0 below is the
+	 * drained-plan, decision-time semantic every queued-op caller
+	 * relies on. */
+	if (c->plan_left == 0) {
+		c->plan_next = 0;
+		c->plan_left = c->plan.n_ops;
+	}
 	return 0;
 }
 

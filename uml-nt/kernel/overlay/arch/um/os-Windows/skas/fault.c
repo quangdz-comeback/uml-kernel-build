@@ -618,14 +618,20 @@ int uml_nt_view_region_covered(const struct uml_nt_view *vs, int n,
 	return 1;
 }
 
-int uml_nt_fault_augment_release_set(struct uml_nt_fault_plan *plan,
-				     const struct uml_nt_view *vs, int n)
+int uml_nt_fault_augment_release_set_from(struct uml_nt_fault_plan *plan,
+					    const struct uml_nt_view *vs, int n,
+					    int start)
 {
-	int i = 0, inserted = 0;
+	int i, inserted = 0;
 
 	if (plan == (struct uml_nt_fault_plan *)0 ||
 	    vs == (const struct uml_nt_view *)0)
 		return 0;
+	/* M5.6a (140): the mid-drain merge — only UNISSUED unmaps
+	 * (index >= start) trigger; insertions land past start, so
+	 * the drain position is preserved. start <= 0 = the full
+	 * prime-time pass. */
+	i = start > 0 ? start : 0;
 	while (i < plan->n_ops) {
 		int v, added = 0;
 
@@ -686,6 +692,30 @@ int uml_nt_fault_augment_release_set(struct uml_nt_fault_plan *plan,
 		i += added + 1;
 	}
 	return inserted;
+}
+
+int uml_nt_fault_augment_release_set(struct uml_nt_fault_plan *plan,
+				     const struct uml_nt_view *vs, int n)
+{
+	return uml_nt_fault_augment_release_set_from(plan, vs, n, 0);
+}
+
+/* M5.6a (to-shelley 140 — stream atomicity): the merge re-arm at a
+ * TRAP context. The stub waits for this round's answer, so NO op is
+ * in flight (unlike the PROT_DONE context, whose count carries the
+ * not-yet-consumed report — the +1 there is deliberate): the
+ * remaining stream is exactly the unissued tail. */
+int uml_nt_fault_plan_left_at_trap(const struct uml_nt_fault_plan *plan,
+				   int plan_next)
+{
+	if (plan == (const struct uml_nt_fault_plan *)0 ||
+	    plan->n_ops <= 0)
+		return 0;
+	if (plan_next <= 0)
+		return plan->n_ops;
+	if (plan_next >= plan->n_ops)
+		return 0;
+	return plan->n_ops - plan_next;
 }
 
 /* K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 / dlX

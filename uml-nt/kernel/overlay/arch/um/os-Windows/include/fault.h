@@ -342,6 +342,38 @@ int uml_nt_view_region_covered(const struct uml_nt_view *vs, int n,
 int uml_nt_fault_augment_release_set(struct uml_nt_fault_plan *plan,
 				     const struct uml_nt_view *vs, int n);
 
+/* ---- M5.6a (to-shelley 140 — stream atomicity): the MID-DRAIN
+ * merge primitives ----
+ *
+ * The pre-fix stream had two unconditional resets of the same
+ * class: view_release_complete re-armed plan_next=0/plan_left=n_ops
+ * at EVERY prime site, and the syscall-trap entry zeroed the plan
+ * outright — both fine on a drained plan, both fatal mid-drain (a
+ * restart from op0 re-issues the applied releases = double-UNMAP,
+ * the orphaned MAPs never stream while the table already moved =
+ * the dl139b park-reads-zeros formation, pid 3068, and the pending
+ * copy floats past its own drain = [cowcopy] after the park).
+ * The merge contract instead: only UNMAP ops at index >= start
+ * (still unissued) trigger release inserts; insertions land at
+ * index > start so the drain position is preserved; the dedup walk
+ * still spans the WHOLE plan (an issued UNMAP already released its
+ * base — never insert a second). start <= 0 = the prime-time full
+ * pass (identical to the function above). */
+int uml_nt_fault_augment_release_set_from(struct uml_nt_fault_plan *plan,
+					  const struct uml_nt_view *vs, int n,
+					  int start);
+
+/*
+ * The merge re-arm at a TRAP context (the stub waits for this
+ * round's answer — NO op is in flight, unlike the PROT_DONE
+ * context whose accounting carries the not-yet-consumed report):
+ * plan_left = n_ops - plan_next. plan_next <= 0 = a fresh arm
+ * (n_ops); plan_next past the end = 0 (nothing left to stream).
+ * Pure; host-tested in test_mm.c (test_mid_drain_merge).
+ */
+int uml_nt_fault_plan_left_at_trap(const struct uml_nt_fault_plan *plan,
+				   int plan_next);
+
 /* ---- K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 /
  * dlX 37579340518 — the RETIRE-LOST verdict): the view-swap
  * serialization ----

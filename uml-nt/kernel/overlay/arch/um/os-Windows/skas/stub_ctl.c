@@ -1589,10 +1589,37 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
  * itself. */
 int uml_nt_view_release_complete(struct uml_nt_stub_conn *c)
 {
-	int ins;
+	int ins, start = 0;
 
-	ins = uml_nt_fault_augment_release_set(&c->plan, c->views,
-					       c->nviews);
+	/* M5.6a (to-shelley 140 — stream atomicity, the dl139b
+	 * formation named): a prime arriving MID-DRAIN (plan_left>0
+	 * with a consumed position) must NOT re-arm from op0 — the
+	 * reset restarts the stream at the already-applied releases
+	 * (double-UNMAP), and the pending copy floats past its own
+	 * drain (pid 3068: the park at nr=228 read the fresh span's
+	 * ZEROS because the re-MAP tail never streamed, then the
+	 * [cowcopy] line fired a drain LATE). MERGE instead: augment
+	 * only the unissued tail, keep the position, recount the
+	 * remainder (trap context — nothing is in flight). Loud:
+	 * the protocol says traps cannot arrive mid-drain, so every
+	 * hit names the gate that broke. */
+	if (c->plan_left > 0 && c->plan_next > 0) {
+		static int merge_budget = 8;
+
+		start = c->plan_next;
+		if (merge_budget > 0) {
+			merge_budget--;
+			os_info("[streamsync] pid %lu MID-DRAIN prime "
+				"(left=%d next=%d n=%d copy_pend=%d) — "
+				"MERGE, the reset-at-op0 is forbidden\n",
+				(unsigned long)c->pid, c->plan_left,
+				c->plan_next, c->plan.n_ops,
+				c->copy_pend_kind);
+		}
+	}
+
+	ins = uml_nt_fault_augment_release_set_from(&c->plan, c->views,
+						    c->nviews, start);
 	if (ins < 0) {
 		os_info("[viewswap] pid %lu RELEASE-SET OVERFLOW — the "
 			"plan (%d op(s)) cannot hold the complete "
@@ -1615,6 +1642,15 @@ int uml_nt_view_release_complete(struct uml_nt_stub_conn *c)
 				"start)\n", (unsigned long)c->pid, ins);
 		}
 	}
+	if (start != 0) {
+		/* the merge re-arm: position kept, nothing in flight
+		 * (the stub waits on THIS round's answer) — the count
+		 * is the unissued tail, and the caller's issue of
+		 * ops[plan_next] re-joins the stream */
+		c->plan_left = uml_nt_fault_plan_left_at_trap(&c->plan,
+							      c->plan_next);
+		return 0;
+	}
 	c->plan_next = 0;
 	c->plan_left = c->plan.n_ops;
 	return 0;
@@ -1635,6 +1671,66 @@ int uml_nt_view_release_complete(struct uml_nt_stub_conn *c)
  * tcache_put pair in the abandoned source run, dl26 37539992560)
  * was exactly a tolerated survivor. */
 static int viewswap_stale_budget = 8;
+
+/* M5.6a (to-shelley 140, witness prong 3): the RESUME AUDIT —
+ * view==table at the guest-resumable point. When a re-homing
+ * stream has drained (every op applied, the answer below resumes
+ * the guest), every non-superseded MAP the plan issued must sit in
+ * the conn's view ledger with the op's own backing AND translate
+ * through the VMA table to that same run. A divergence is exactly
+ * the dl139b formation: the view maps a fresh handout whose copy
+ * never ran (the wiped mid-drain tail) while the table already
+ * moved. Kernel-side only (ledger + table walk — no stub
+ * round-trip), so it rides the drain end; the fault parks stay
+ * witness-free (the witness-placement rule). Loud, never fatal:
+ * the census above owns the refuse. */
+static void view_resume_audit(struct uml_nt_stub_conn *c)
+{
+	static int audit_budget = 8;
+	int i;
+
+	if (c->mm == NULL || c->plan.n_ops == 0)
+		return;
+	for (i = 0; i < c->plan.n_ops; i++) {
+		const struct uml_nt_fault_op *op = &c->plan.ops[i];
+		long long t0, t1;
+		int vi, found = 0;
+		int bad;
+
+		if (op->op != UML_NT_FOP_MAP || op->len == 0)
+			continue;
+		/* released in-plan (the corrective pair behind it
+		 * owns the final view) — the census's case */
+		if (uml_nt_fault_op_superseded(op, &c->plan))
+			continue;
+		for (vi = 0; vi < c->nviews; vi++)
+			if (c->views[vi].va == op->va) {
+				found = 1;
+				break;
+			}
+		t0 = uml_nt_vma_translate(c->mm, op->va, 1);
+		t1 = uml_nt_vma_translate(c->mm, op->va + op->len - 1, 1);
+		bad = !found || c->views[vi].off != op->off ||
+		      t0 < (long long)op->off ||
+		      t0 >= (long long)(op->off + op->len) ||
+		      t1 < (long long)op->off ||
+		      t1 >= (long long)(op->off + op->len);
+		if (bad && audit_budget > 0) {
+			audit_budget--;
+			os_info("[resumeaudit] VIEW!=TABLE pid %lu "
+				"va=0x%llx len=0x%llx op-off=0x%llx: "
+				"ledger=%d ledger-off=0x%llx "
+				"table=[0x%llx,0x%llx] — the guest "
+				"resumes into a view the table "
+				"disowns\n",
+				(unsigned long)c->pid, op->va, op->len,
+				op->off, found,
+				found ? c->views[vi].off : 0,
+				(unsigned long long)t0,
+				(unsigned long long)t1);
+		}
+	}
+}
 
 static int view_swap_guard(struct uml_nt_stub_conn *c)
 {
@@ -5968,6 +6064,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			d->err = 1;
 			return -1;
 		}
+		/* M5.6a (140): view==table at the resume — the
+		 * guest-resumable point after a re-homing stream. */
+		view_resume_audit(c);
 		if (c->plan_has_retval) {
 			/* A syscall carried these ops: re-publish its
 			 * return value (the stub's op results traveled
@@ -6125,6 +6224,26 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				d->regs.rsp, d->regs.rcx,
 				d->fault_addr, d->fault_type,
 				c->last_nr, c->last_ret);
+		}
+		/* M5.6a (140): a FAULT landing with a live stream
+		 * means the guest ran while ops were still unissued
+		 * — the plan mm_fault is about to overwrite was still
+		 * owed to the stub. The repair supersedes (the fault
+		 * is the live need); the log names the gate that let
+		 * the guest resume mid-stream. */
+		if (c->plan_left > 0) {
+			static int faultmid_budget = 4;
+
+			if (faultmid_budget > 0) {
+				faultmid_budget--;
+				os_info("[streamsync] pid %lu FAULT "
+					"MID-DRAIN (left=%d next=%d n=%d "
+					"copy_pend=%d) — the repair "
+					"supersedes the unissued tail\n",
+					(unsigned long)c->pid,
+					c->plan_left, c->plan_next,
+					c->plan.n_ops, c->copy_pend_kind);
+			}
 		}
 		rc = uml_nt_mm_fault(c->mm, c->ph, d->fault_addr,
 				     d->fault_type, &c->plan);
@@ -6555,15 +6674,47 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 
 	/* Syscall trap: the D16 dispatch (skas/syscall.c) owns the
 	 * surface; this function keeps the plan/protocol streaming. */
+	{
+	int trap_merged = 0;
+
 	d->action = UML_STUB_ACTION_NONE;
 	d->err = 0;
 	d->halt = 0;
 	c->plan.kill = 0;
-	c->plan.n_ops = 0;
-	c->plan.copy_src_off = 0;
-	c->plan.copy_dst_off = 0;
-	c->plan_next = 0;
-	c->plan_left = 0;
+	/* M5.6a (to-shelley 140 — stream atomicity): a SYSCALL trap
+	 * with plan_left > 0 means the previous plan's stream is still
+	 * unissued in part. The pre-fix wipe here orphaned those MAPs
+	 * (the table had already moved at queue time — the guest then
+	 * parked reading ZEROS off the fresh handout: dl139b pid 3068,
+	 * the nr=228 park) and floated the pending copy past its own
+	 * drain (the [cowcopy]-after-park line, then the SHARED-WRITE
+	 * at 100340). The wipe is FORBIDDEN mid-drain: keep the
+	 * position AND the pending copy descriptor; the handler's ops
+	 * append, release_complete merges the release set of the
+	 * unissued tail, and the stream re-joins at plan_next. Loud —
+	 * the protocol says a trap cannot arrive mid-drain, so every
+	 * hit names the gate that broke. */
+	if (c->plan_left > 0) {
+		static int midtrap_budget = 8;
+
+		trap_merged = 1;
+		if (midtrap_budget > 0) {
+			midtrap_budget--;
+			os_info("[streamsync] pid %lu SYSCALL trap "
+				"MID-DRAIN (left=%d next=%d n=%d "
+				"copy_pend=%d) — MERGE, the wipe is "
+				"forbidden\n",
+				(unsigned long)c->pid, c->plan_left,
+				c->plan_next, c->plan.n_ops,
+				c->copy_pend_kind);
+		}
+	} else {
+		c->plan.n_ops = 0;
+		c->plan.copy_src_off = 0;
+		c->plan.copy_dst_off = 0;
+		c->plan_next = 0;
+		c->plan_left = 0;
+	}
 	c->plan_has_retval = 0;
 	uml_nt_syscall_handle(c, d);
 	if (uml_nt_syscall_consume_exec()) {
@@ -6574,7 +6725,12 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * on the new conn. */
 		return 2;
 	}
-	stack_window_reassert(c);
+	/* M5.6a (140): merged mid-drain — the window re-assert
+	 * PREPENDS (resets the position), so it is skipped; the
+	 * in-flight plan already carries its own window ops from
+	 * its prime. */
+	if (!trap_merged)
+		stack_window_reassert(c);
 	/* K6 (cowcopy-race-class-fix): the release set + ARMING.
 	 * uaccess COW fixups queue UNMAP/MAP ops without arming the
 	 * stream (uacc_plan_op appends; only sc_plan_add set
@@ -6583,12 +6739,17 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * the table, and the stale view served every later guest
 	 * store into the abandoned backing with no fault and no
 	 * catch. plan_left = n_ops HERE makes "every queued op
-	 * streams" the invariant for every round shape. */
+	 * streams" the invariant for every round shape.
+	 * M5.6a (140): merged rounds keep the position —
+	 * release_complete augments the unissued tail and
+	 * recounts, and the issue below re-joins the stream
+	 * AT plan_next. */
 	if (uml_nt_view_release_complete(c) < 0)
 		return -1; /* release_complete already KILLed */
 	if (c->plan_left > 0)
 		issue_plan_op(c, &c->plan.ops[c->plan_next]);
 	return 0;
+	}
 }
 
 /* fork/clone(!CLONE_VM) hook (D16): clone the parent mm (M3.2 COW

@@ -2182,6 +2182,143 @@ static void test_release_set(void)
  * next op to issue is NOT a release, or the plan is exhausted (the
  * drain-end fallback). Never due for a NULL/empty plan (no drain
  * rounds would carry the hook). */
+/* M5.6a (to-shelley 140 — stream atomicity): the mid-drain merge
+ * primitives. A prime arriving mid-drain must NOT restart the
+ * stream from op0: the reset class double-UNMAPs applied releases,
+ * orphans the unissued MAPs while the table already moved (the
+ * dl139b park-reads-zeros formation), and lets the pending copy
+ * float past its own drain. */
+static void test_mid_drain_merge(void)
+{
+	struct uml_nt_fault_plan plan, full, from0;
+	struct uml_nt_view views[8];
+	int nv = 0, i;
+
+	memset(views, 0, sizeof(views));
+	/* v0: base of the ISSUED unmap's range (dedup by op0).
+	 * v1: mid-range of the ISSUED unmap — the prime-time pass's
+	 *     job; the merge must leave it alone.
+	 * v2: base of the UNISSUED unmap's range (dedup by op2 —
+	 *     the dedup walk spans the whole plan).
+	 * v3: mid-range of the UNISSUED unmap — the merge inserts
+	 *     this one, after op2. */
+	CHECK(uml_nt_view_track(views, &nv, 8, RAM, 4 * RUN, 0x100000,
+				UML_NT_PAGE_READWRITE) == 0);
+	CHECK(uml_nt_view_track(views, &nv, 8, RAM + 2 * RUN, RUN,
+				0x120000, UML_NT_PAGE_READWRITE) == 0);
+	CHECK(uml_nt_view_track(views, &nv, 8, RAM + 8 * RUN, 2 * RUN,
+				0x180000, UML_NT_PAGE_READWRITE) == 0);
+	CHECK(uml_nt_view_track(views, &nv, 8, RAM + 9 * RUN, RUN,
+				0x190000, UML_NT_PAGE_READWRITE) == 0);
+	CHECK(nv == 4);
+
+	memset(&plan, 0, sizeof(plan));
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = 4 * RUN;
+	plan.ops[1].op = UML_NT_FOP_MAP;
+	plan.ops[1].prot = UML_NT_PAGE_READWRITE;
+	plan.ops[1].va = RAM;
+	plan.ops[1].len = 4 * RUN;
+	plan.ops[1].off = 0x400000;
+	plan.ops[2].op = UML_NT_FOP_UNMAP;
+	plan.ops[2].va = RAM + 8 * RUN;
+	plan.ops[2].len = 2 * RUN;
+	plan.ops[3].op = UML_NT_FOP_MAP;
+	plan.ops[3].prot = UML_NT_PAGE_READWRITE;
+	plan.ops[3].va = RAM + 8 * RUN;
+	plan.ops[3].len = 2 * RUN;
+	plan.ops[3].off = 0x500000;
+	plan.n_ops = 4;
+	/* the drain sits at plan_next = 2: ops 0,1 issued/applied,
+	 * ops 2,3 still to stream */
+
+	CHECK(uml_nt_fault_augment_release_set_from(&plan, views, nv,
+						    2) == 1);
+	CHECK(plan.n_ops == 5);
+	/* the issued prefix is byte-identical — the position is
+	 * sacred */
+	CHECK(plan.ops[0].op == UML_NT_FOP_UNMAP &&
+	      plan.ops[0].va == RAM && plan.ops[0].len == 4 * RUN);
+	CHECK(plan.ops[1].op == UML_NT_FOP_MAP &&
+	      plan.ops[1].va == RAM && plan.ops[1].off == 0x400000);
+	CHECK(plan.ops[2].op == UML_NT_FOP_UNMAP &&
+	      plan.ops[2].va == RAM + 8 * RUN);
+	/* v3's release lands directly after its trigger, at ITS
+	 * base; the re-MAP shifts behind it */
+	CHECK(plan.ops[3].op == UML_NT_FOP_UNMAP);
+	CHECK(plan.ops[3].va == RAM + 9 * RUN);
+	CHECK(plan.ops[3].len == RUN);
+	CHECK(plan.ops[4].op == UML_NT_FOP_MAP);
+	CHECK(plan.ops[4].va == RAM + 8 * RUN);
+	/* v1 (issued trigger's range) got NO insert — its release
+	 * belonged to the prime-time pass */
+	for (i = 0; i < plan.n_ops; i++)
+		CHECK(!(plan.ops[i].op == UML_NT_FOP_UNMAP &&
+			plan.ops[i].va == RAM + 2 * RUN));
+
+	/* the merge re-arm at a trap: nothing in flight, the count
+	 * is exactly the unissued tail */
+	CHECK(uml_nt_fault_plan_left_at_trap(&plan, 2) == 3);
+	CHECK(uml_nt_fault_plan_left_at_trap(&plan, 0) == 5);
+	CHECK(uml_nt_fault_plan_left_at_trap(&plan, 5) == 0);
+	CHECK(uml_nt_fault_plan_left_at_trap(&plan, 99) == 0);
+	CHECK(uml_nt_fault_plan_left_at_trap((void *)0, 0) == 0);
+	{
+		struct uml_nt_fault_plan empty;
+
+		memset(&empty, 0, sizeof(empty));
+		CHECK(uml_nt_fault_plan_left_at_trap(&empty, 0) == 0);
+	}
+
+	/* parity: start <= 0 IS the prime-time full pass */
+	memset(&full, 0, sizeof(full));
+	full.ops[0].op = UML_NT_FOP_UNMAP;
+	full.ops[0].va = RAM;
+	full.ops[0].len = 4 * RUN;
+	full.ops[1].op = UML_NT_FOP_MAP;
+	full.ops[1].prot = UML_NT_PAGE_READWRITE;
+	full.ops[1].va = RAM;
+	full.ops[1].len = 4 * RUN;
+	full.ops[1].off = 0x400000;
+	full.ops[2].op = UML_NT_FOP_UNMAP;
+	full.ops[2].va = RAM + 8 * RUN;
+	full.ops[2].len = 2 * RUN;
+	full.ops[3].op = UML_NT_FOP_MAP;
+	full.ops[3].prot = UML_NT_PAGE_READWRITE;
+	full.ops[3].va = RAM + 8 * RUN;
+	full.ops[3].len = 2 * RUN;
+	full.ops[3].off = 0x500000;
+	full.n_ops = 4;
+	memcpy(&from0, &full, sizeof(full));
+	CHECK(uml_nt_fault_augment_release_set(&full, views, nv) == 2);
+	CHECK(uml_nt_fault_augment_release_set_from(&from0, views, nv,
+						    0) == 2);
+	CHECK(full.n_ops == 6 && from0.n_ops == 6);
+	CHECK(memcmp(full.ops, from0.ops,
+		     sizeof(full.ops[0]) * (unsigned)full.n_ops) == 0);
+	/* idempotent on the completed plan: every view's base is
+	 * released in-plan — a re-run (any start) adds nothing */
+	CHECK(uml_nt_fault_augment_release_set_from(&from0, views, nv,
+						    -3) == 0);
+	CHECK(from0.n_ops == 6);
+
+	/* start past the end: nothing unissued, nothing to do */
+	memset(&plan, 0, sizeof(plan));
+	plan.ops[0].op = UML_NT_FOP_UNMAP;
+	plan.ops[0].va = RAM;
+	plan.ops[0].len = 4 * RUN;
+	plan.n_ops = 1;
+	CHECK(uml_nt_fault_augment_release_set_from(&plan, views, nv,
+						    1) == 0);
+	CHECK(plan.n_ops == 1);
+	/* bad shapes */
+	CHECK(uml_nt_fault_augment_release_set_from((void *)0, views,
+						    nv, 0) == 0);
+	CHECK(uml_nt_fault_augment_release_set_from(&plan, (void *)0,
+						    nv, 0) == 0);
+}
+
 static void test_copy_due(void)
 {
 	struct uml_nt_fault_plan plan;
@@ -2379,6 +2516,7 @@ int main(void)
 	test_fork_storm();
 	test_swap_window();
 	test_release_set();
+	test_mid_drain_merge();
 	test_copy_due();
 	test_swap_serial();
 	test_release_gate();
