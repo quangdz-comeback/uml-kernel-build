@@ -240,8 +240,10 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * its own teardown drops and hold every dying mm's block
 	 * dead — a leak, not a safety win). */
 	c->nviews = 0;
-	uml_nt_mm_drop_for(c->mm, c->ph, c);
+	uml_nt_mm_drop(c->mm, c->ph);
 	uml_nt_phys_settle(c->ph, c);
+	if (uml_nt_syscall_mm() == c->mm)
+		uml_nt_uacc_set_mm(NULL);
 	kfree(c->mm);
 	if (!c->ph_shared)
 		kfree(c->ph);

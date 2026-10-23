@@ -295,6 +295,8 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	 * the binfmt search; this is belt-and-suspenders). */
 	if (bprm->mm == NULL || id->nt_conn == NULL)
 		return -ENOEXEC;
+	if (memcmp(bprm->buf, "\x7f" "ELF", 4) != 0)
+		return -ENOEXEC;
 	c = id->nt_conn;
 	/* S4c2: os_info is a DIRECT console write (reliable append
 	 * order, unlike the printk WARN batches) — this pins which

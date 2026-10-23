@@ -1,0 +1,32 @@
+um: release NT mm context in arch_exit_mmap when mm_users reaches 0
+
+On standard Linux, exit_mmap() frees all user pages when mm_users drops
+to 0 (__mmput), before MMF_OOM_SKIP is set and before lazy-TLB or
+oom_mm mm_count references are dropped. On UML-NT, guest physical runs
+live in mm->context.id.nt_conn and were only freed in destroy_context()
+(__mmdrop when mm_count hits 0), stranding 15-25 MiB of physical runs
+per exiting or OOM-killed process until PID 1 reaped the zombie.
+
+Hook arch_exit_mmap(mm) to call destroy_context(mm) under
+CONFIG_OS_WINDOWS so guest physical runs are released immediately in
+exit_mmap(). Since uml_nt_mmctx_destroy zeroes id->nt_conn, the later
+destroy_context(mm) in __mmdrop is a no-op.
+
+Signed-off-by: uml-nt agent <droid@factory.ai>
+---
+ a/arch/um/include/asm/mmu_context.h | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+--- a/arch/um/include/asm/mmu_context.h
++++ b/arch/um/include/asm/mmu_context.h
+@@ -24,6 +24,10 @@
+ #define destroy_context destroy_context
+ extern void destroy_context(struct mm_struct *mm);
+ 
++#ifdef CONFIG_OS_WINDOWS
++#define arch_exit_mmap(mm) destroy_context(mm)
++#endif
++
+ #include <asm-generic/mmu_context.h>
+ 
+ #endif

@@ -40,13 +40,22 @@ static int runs_order(int n)
 	return k;
 }
 
+static void clear_zone_watermark_boost(void)
+{
+	struct zone *z;
+
+	for_each_populated_zone(z)
+		z->watermark_boost = 0;
+}
+
 long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 {
 	struct page *pg;
-	int order = RUN_ORDER + runs_order(nruns);
+	int r_order = runs_order(nruns);
+	int order = RUN_ORDER + r_order;
 	int try;
 
-	if (order > MAX_PAGE_ORDER)
+	if (nruns < 1 || order > MAX_PAGE_ORDER)
 		return -1;
 
 	/* D25 (Shelley 2026-10-03, to-shelley 134): the handout ASSERT.
@@ -66,12 +75,23 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 	 * or compaction (referee H1 39898282926: order-8/9 failed with
 	 * 16 MiB reclaimable file cache + 10 MiB order 4..7 free). */
 	for (try = 0; try < 16; try++) {
+		clear_zone_watermark_boost();
 		pg = alloc_pages(GFP_KERNEL | __GFP_ZERO |
 				 __GFP_RETRY_MAYFAIL | __GFP_NOWARN, order);
+		clear_zone_watermark_boost();
 		if (pg == NULL)
 			return -1;
 		if (!PageSlab(pg) && !PageReserved(pg) &&
 		    page_ref_count(pg) == 1) {
+			if ((1 << r_order) > nruns) {
+				int want_pages = nruns << RUN_ORDER;
+				int total_pages = 1 << order;
+				int i;
+
+				split_page(pg, order);
+				for (i = want_pages; i < total_pages; i++)
+					__free_pages(pg + i, 0);
+			}
 			*page_out = pg;
 			return (long long)page_to_pfn(pg) << PAGE_SHIFT;
 		}
@@ -87,5 +107,17 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 
 void uml_nt_phys_backend_free(void *page, int nruns)
 {
-	__free_pages((struct page *)page, RUN_ORDER + runs_order(nruns));
+	struct page *pg = (struct page *)page;
+	int r_order = runs_order(nruns);
+
+	if ((1 << r_order) == nruns) {
+		__free_pages(pg, RUN_ORDER + r_order);
+	} else {
+		int want_pages = nruns << RUN_ORDER;
+		int i;
+
+		for (i = 0; i < want_pages; i++)
+			__free_pages(pg + i, 0);
+	}
+	clear_zone_watermark_boost();
 }

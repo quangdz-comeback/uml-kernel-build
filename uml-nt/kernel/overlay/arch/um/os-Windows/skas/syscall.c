@@ -186,23 +186,16 @@ static unsigned long long sys_write(struct uml_nt_stub_conn *c,
 	return a[2];
 }
 
+#define UML_NT_MMAP_SPAN_RUNS 64
+
 /* brk(2): the mm owns a pre-reserved, pre-mapped heap run (set up by
- * the exec path — heap_start..heap_end). Multi-run growth (M4 slice
- * 4): a request past the reservation re-homes the heap in a fresh
- * CONTIGUOUS span of the new total size — one MapViewOfFileEx must
- * cover the whole VMA (vma.h geometry), and the buddy owes no
- * adjacency, so in-place extension is only luck. The old contents
- * ride across through the flat view (kernel-side memcpy — the stub's
- * views are only mutated later, when the queued UNMAP old / MAP new
- * ops stream), the fresh growth area arrives zeroed (__GFP_ZERO
- * backend, the mmap path's guarantee), and the old span dies by
- * refcount. Fork-shared heaps grow correctly per-mm: the copy reads
- * the shared run's live content, the unref only drops THIS mm's
- * reference, the sibling keeps its own. Linux returns the CURRENT
- * brk (not an errno) on failure — every failure path here does
- * exactly that. Shrink: brk moves down, the reservation stays (no
- * unmap/relloc — Linux would release the pages; nothing we run
- * reclaims from it, and a regrow then needs no copy). */
+ * the exec path — heap_start..heap_end). Multi-run growth: a request
+ * past the reservation appends delta run spans covering [old_end,
+ * new_end) rather than re-homing the entire [heap_start, new_end)
+ * heap. Appending delta runs preserves existing heap views across
+ * COW splits (which subdivide [heap_start, old_end) into per-run VMAs)
+ * and avoids double-allocating + copying the existing heap on every
+ * growth step. */
 static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 				  const unsigned long long *a)
 {
@@ -221,217 +214,134 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 		return mm->brk;
 	}
 	if (a[0] > mm->heap_end) {
-		struct uml_nt_vma *hv = uml_nt_vma_find(mm, mm->heap_start);
 		unsigned long long old_end = mm->heap_end;
-		unsigned long long old_off, old_len, new_off, new_end;
-		long long nruns, i;
-		int old_max_refs = 0;
+		unsigned long long new_end, cur, clen = 0, chk;
+		long long delta_runs;
+		int plan_base, plan_left_base, plan_next_base;
 
-		if (hv == NULL || hv->start != mm->heap_start ||
-		    hv->end != old_end) {
+		if (uml_nt_vma_find(mm, mm->heap_start) == NULL ||
+		    uml_nt_vma_find(mm, old_end - 1) == NULL) {
 			os_info("[syscall] brk: heap VMA [0x%llx,0x%llx) "
-				"missing/mismatched — kept 0x%llx\n",
+				"missing — kept 0x%llx\n",
 				mm->heap_start, old_end, mm->brk);
 			return mm->brk;
 		}
-		nruns = ((a[0] - mm->heap_start) +
-			 UML_NT_PHYS_RUN_SIZE - 1) / UML_NT_PHYS_RUN_SIZE;
-		new_end = mm->heap_start +
-			(unsigned long long)nruns * UML_NT_PHYS_RUN_SIZE;
-		old_off = hv->run_off;
-		old_len = old_end - mm->heap_start;
-
-		/* M5.6a root-cause fix: the re-home's view swap (UNMAP
-		 * old + MAP new + the guards' NOACCESS re-arms) is
-		 * reserved BEFORE anything moves. A dropped op here is
-		 * the worst class of the swap window: the table would
-		 * point at the fresh span while the stub's view kept
-		 * serving the old runs — every later guest store lands
-		 * in a backing the table no longer owns (run-granular
-		 * lost-update, the dl18 37512134759 formation window).
-		 * Refusal keeps the old brk (Linux failure semantics,
-		 * same shape as the exhausted path below). */
-		{
-			int gi, guards = 0;
-
-			for (gi = 0; gi < mm->nguard; gi++)
-				if (mm->guard[gi].start < new_end &&
-				    mm->guard[gi].end > mm->heap_start)
-					guards++;
-			if (uml_nt_sc_plan_reserve(c, 2 + guards) < 0) {
-				os_info("[syscall] brk re-home: view-swap "
-					"plan full (%d op(s) needed) — "
-					"kept 0x%llx\n", 2 + guards,
-					mm->brk);
+		delta_runs = ((a[0] - old_end) +
+			      UML_NT_PHYS_RUN_SIZE - 1) / UML_NT_PHYS_RUN_SIZE;
+		new_end = old_end +
+			(unsigned long long)delta_runs * UML_NT_PHYS_RUN_SIZE;
+		for (chk = old_end; chk < new_end;
+		     chk += UML_NT_PHYS_RUN_SIZE) {
+			if (uml_nt_vma_find(mm, chk) != NULL) {
+				os_info("[syscall] brk: [0x%llx,0x%llx) "
+					"collides at 0x%llx — kept 0x%llx\n",
+					old_end, new_end, chk, mm->brk);
 				return mm->brk;
 			}
 		}
 
-		new_off = (unsigned long long)
-			uml_nt_phys_alloc_span(c->ph, (int)nruns);
-		if ((long long)new_off < 0) {
-			os_info("[syscall] brk: span of %lld run(s) "
-				"exhausted — kept 0x%llx\n",
-				nruns, mm->brk);
-			return mm->brk;
-		}
-		/* WRITER-HUNT (M5.6a): the re-home is a bulk fill of
-		 * old_len bytes into the fresh span — the WRITE side
-		 * (fresh, refs>0 by the table) must stay inside its
-		 * own allocated block at the decision. The READ side's
-		 * check moved with the copy (below): deferred, the
-		 * src legitimately parks/0-refs mid-drain after its
-		 * unref — a refs-based check there would false-kill
-		 * the legal drop; the src's liveness proof at the
-		 * copy is its GEN. On a check failure keep the old
-		 * brk (Linux failure semantics, same shape as the
-		 * exhausted path above) — the log names the side that
-		 * crossed. */
-		if (uml_nt_phys_block_check(c->ph, (long long)new_off,
-					    old_len) < 0) {
-			os_info("[fillguard] brk re-home old=0x%llx "
-				"new=0x%llx len=%llu: block check "
-				"failed — kept 0x%llx\n", old_off,
-				new_off, old_len, mm->brk);
-			return mm->brk;
-		}
-		/* K6 (M5.6a, feature cowcopy-race-class-fix, dlW
-		 * 37576991123 / dlX 37579340518 — the RETIRE-LOST
-		 * verdict): the re-home COPY is DEFERRED to the
-		 * teardown/re-map boundary of the op stream queued
-		 * below (stub_ctl.c brk_rehome_copy_exec, conn kind
-		 * 2) — the class fix's view-swap serialization: the
-		 * old view's UNMAP applies first, the copy rides AFTER
-		 * it and BEFORE the new MAP issues, so no window
-		 * exists in which the table says the new span while
-		 * the guest's writable view still maps the old one,
-		 * and stores landing in the old span during the
-		 * release phase are INCLUDED in the copy (they ride
-		 * into the live backing instead of retiring lost with
-		 * the abandoned source — the 16-fires/run chain where
-		 * each src is the previous arm's dst). The [flatwr]
-		 * BRK_FILL captures and the [cowrace] arm move with
-		 * the copy (t0 = the snapshot the live backing was
-		 * actually built from). The gens captured HERE are
-		 * the src's liveness proof at the deferred copy: a
-		 * gen move under the drain means the src re-handed —
-		 * the exec refuses loud, never a zeroed-heap resume. */
-		{
-			long long orun;
+		plan_base = c->plan.n_ops;
+		plan_left_base = c->plan_left;
+		plan_next_base = c->plan_next;
+		for (cur = old_end; cur < new_end; cur += clen) {
+			unsigned long long rem_runs =
+				(new_end - cur) / UML_NT_PHYS_RUN_SIZE;
+			unsigned int want =
+				(rem_runs > UML_NT_MMAP_SPAN_RUNS) ?
+				UML_NT_MMAP_SPAN_RUNS :
+				(unsigned int)rem_runs;
+			unsigned long long sp = (unsigned long long)-1LL;
 
-			/* D26 (to-shelley 144): the sharing degree of the
-			 * OLD span at the decision — the copy-mode input.
-			 * refs<=1 on every run = no sharer: no release-store
-			 * window can exist, the copy runs INLINE below,
-			 * before any op streams. refs>=2 keeps the K6
-			 * deferral (the due hook + the MAP-hold gate).
-			 * Measured BEFORE the unref loop below drops the
-			 * caller's own claims. */
-			for (orun = 0;
-			     orun < (long long)(old_len /
-						UML_NT_PHYS_RUN_SIZE);
-			     orun++) {
-				int r = uml_nt_phys_refs(c->ph,
-					(long long)old_off +
-					orun * UML_NT_PHYS_RUN_SIZE);
+			while (want >= 1) {
+				sp = (unsigned long long)
+					uml_nt_phys_alloc_span(c->ph,
+							       (int)want);
+				if ((long long)sp >= 0)
+					break;
+				if (want == 1)
+					break;
+				{
+					unsigned int p2 = 1;
 
-				if (r > old_max_refs)
-					old_max_refs = r;
+					while ((p2 << 1) < want)
+						p2 <<= 1;
+					want = p2;
+				}
 			}
-			c->copy_pend_kind = 2;
-			c->copy_pend_src = old_off;
-			c->copy_pend_dst = new_off;
-			c->copy_pend_len = old_len;
-			c->copy_pend_va = mm->heap_start;
-			c->copy_pend_gsrc = (unsigned long long)
-				uml_nt_phys_gen(c->ph,
-						(long long)old_off);
-			c->copy_pend_gdst = (unsigned long long)
-				uml_nt_phys_gen(c->ph,
-						(long long)new_off);
-		}
-
-		if (uml_nt_vma_del(mm, mm->heap_start, old_end) < 0 ||
-		    uml_nt_vma_add_gen(mm, mm->heap_start, new_end,
-				       new_off, UML_NT_PAGE_READWRITE, 0,
-				       (unsigned long long)uml_nt_phys_gen(
-					       c->ph, new_off)) < 0) {
-			/* Roll the old VMA back (the del succeeded if
-			 * we got here); the fresh span dies young. */
-			uml_nt_vma_add_gen(mm, mm->heap_start, old_end,
-					   old_off, UML_NT_PAGE_READWRITE,
-					   0,
-					   (unsigned long long)
-					   uml_nt_phys_gen(c->ph,
-							   old_off));
-			/* K6: the deferred-copy arm dies with the
-			 * re-home it described — no op stream will
-			 * ever drain it, and a stale arm would fire on
-			 * a LATER plan's drain with a freed dst (the
-			 * exec's dst block check would then KILL a
-			 * healthy conn). */
-			c->copy_pend_kind = 0;
-			for (i = 0; i < nruns; i++)
-				uml_nt_phys_unref_for(c->ph,
-						      (long long)new_off +
-						      i * UML_NT_PHYS_RUN_SIZE,
-						      c);
-			os_info("[syscall] brk: VMA resize failed — "
-				"kept 0x%llx\n", mm->brk);
-			return mm->brk;
-		}
-		for (i = 0; i < (long long)(old_len / UML_NT_PHYS_RUN_SIZE);
-		     i++)
-			uml_nt_phys_unref_for(c->ph,
-					      (long long)old_off +
-					      i * UML_NT_PHYS_RUN_SIZE, c);
-
-		/* Stub view swap, in this op order: the whole old view
-		 * (base = heap_start) goes, the bigger one arrives, and
-		 * any guards inside come back NOACCESS (the fresh MAP
-		 * covers them writable — the guard state is the fault
-		 * truth, the view must match it: vma.h note). */
-		uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0, mm->heap_start,
-				   old_len, old_off);
-		uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, UML_NT_PAGE_READWRITE,
-				   mm->heap_start,
-				   new_end - mm->heap_start, new_off);
-		{
-			int gi;
-
-			for (gi = 0; gi < mm->nguard; gi++) {
-				if (mm->guard[gi].start >= new_end ||
-				    mm->guard[gi].end <= mm->heap_start)
-					continue;
-				uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT,
-					UML_NT_PAGE_NOACCESS,
-					mm->guard[gi].start,
-					mm->guard[gi].end -
-					mm->guard[gi].start, 0);
+			if ((long long)sp < 0) {
+				os_info("[syscall] brk: span of %llu run(s) "
+					"at 0x%llx exhausted — kept 0x%llx\n",
+					rem_runs, cur, mm->brk);
+				goto rollback_brk;
 			}
+			clen = (unsigned long long)want *
+			       UML_NT_PHYS_RUN_SIZE;
+			if (uml_nt_sc_plan_reserve(c, 1) < 0) {
+				unsigned long long roff;
+
+				os_info("[syscall] brk: view-swap plan full "
+					"at 0x%llx — kept 0x%llx\n",
+					cur, mm->brk);
+				for (roff = sp; roff < sp + clen;
+				     roff += UML_NT_PHYS_RUN_SIZE)
+					uml_nt_phys_unref_for(c->ph,
+							      (long long)roff,
+							      c);
+				goto rollback_brk;
+			}
+			if (uml_nt_vma_add_gen(mm, cur, cur + clen, sp,
+					       UML_NT_PAGE_READWRITE, 0,
+					       (unsigned long long)
+					       uml_nt_phys_gen(
+						       c->ph,
+						       (long long)sp)) < 0) {
+				unsigned long long roff;
+
+				os_info("[syscall] brk: VMA add failed at "
+					"0x%llx — kept 0x%llx\n",
+					cur, mm->brk);
+				for (roff = sp; roff < sp + clen;
+				     roff += UML_NT_PHYS_RUN_SIZE)
+					uml_nt_phys_unref_for(c->ph,
+							      (long long)roff,
+							      c);
+				goto rollback_brk;
+			}
+			uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
+					   UML_NT_PAGE_READWRITE,
+					   cur, clen, sp);
+		}
+		if (0) {
+			unsigned long long rb;
+rollback_brk:
+			for (rb = old_end; rb < cur; ) {
+				const struct uml_nt_vma *rv =
+					uml_nt_vma_find(mm, rb);
+				unsigned long long rlen, roff, roff_end;
+
+				if (rv == NULL || rv->start != rb)
+					break;
+				rlen = rv->end - rv->start;
+				roff = rv->run_off;
+				roff_end = roff + rlen;
+				uml_nt_vma_del(mm, rb, rb + rlen);
+				for (; roff < roff_end;
+				     roff += UML_NT_PHYS_RUN_SIZE)
+					uml_nt_phys_unref_for(c->ph,
+							      (long long)roff,
+							      c);
+				rb += rlen;
+			}
+			c->plan.n_ops = plan_base;
+			c->plan_left = plan_left_base;
+			c->plan_next = plan_next_base;
+			return mm->brk;
 		}
 		os_info("[syscall] brk grow: heap [0x%llx,0x%llx) -> "
-			"[0x%llx,0x%llx) span off=0x%llx (contents "
-			"kept)\n", mm->heap_start, old_end,
-			mm->heap_start, new_end, new_off);
-		/* [cowtrap] alloc-side arm: the re-homed heap's FIRST
-		 * page (the tcache/malloc-metadata head) watches its
-		 * first write (report 106). */
-		uml_nt_cowtrap_arm_alloc(c, mm->heap_start, new_end -
-					 mm->heap_start, new_off);
-		/* [cowtrap] grow-side arm: the OLD frontier pages kept
-		 * coverage at the previous grow only — the retire above
-		 * dropped them; re-arm (run 37078256773 decode). */
-		uml_nt_cowtrap_arm_oldtail(c, mm->heap_start, old_end,
-					   new_off);
+			"[0x%llx,0x%llx) (+%lld run(s))\n",
+			mm->heap_start, old_end, mm->heap_start,
+			new_end, delta_runs);
 		mm->heap_end = new_end;
-		/* D26: no sharer at the decision — the copy runs
-		 * INLINE, now, before the queued view swap streams.
-		 * A refusal already KILLed loud via d->action (the
-		 * conn dies at the resume; the return value is moot). */
-		if (uml_nt_fault_copy_mode((unsigned int)
-		    old_max_refs) == 1)
-			(void)uml_nt_copy_pend_exec(c, "inline");
 	}
 	mm->brk = a[0];
 	return a[0];
@@ -698,42 +608,112 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 			return SC_RET(SC_ENOMEM);
 	}
 	nruns = (unsigned)(len / UML_NT_PHYS_RUN_SIZE);
-	/* M5.6a root-cause fix: the fresh span's MAP op is reserved
-	 * BEFORE the table moves (a dropped op strands the range on a
-	 * stale view over recycled runs — the swap-window class). */
-	if (uml_nt_sc_plan_reserve(c, 1) < 0) {
-		os_info("[syscall] mmap 0x%llx+%llu: view-swap plan "
-			"full — ENOMEM\n", va, len);
-		return SC_RET(SC_ENOMEM);
-	}
-	sp = uml_nt_phys_alloc_span(c->ph, (int)nruns);
-	if (sp < 0) {
-		/* Exhaustion or the backend double-alloc reject (the
-		 * [phys] alloc-reject line names it) — never silent:
-		 * the guest service dies 127 here otherwise. */
+	if (nruns > UML_NT_MMAP_SPAN_RUNS) {
 		os_info("[syscall] mmap 0x%llx+%llu: span of %u run(s) "
 			"failed\n", va, len, nruns);
 		return SC_RET(SC_ENOMEM);
 	}
-	if (uml_nt_vma_add_gen(c->mm, va, va + len, (unsigned long long)sp,
-			       prot, 0,
-			       (unsigned long long)uml_nt_phys_gen(
-				       c->ph, (long long)sp)) < 0) {
-		for (i = 0; i < nruns; i++)
-			uml_nt_phys_unref_for(c->ph, sp +
-					      (long long)i *
-					      UML_NT_PHYS_RUN_SIZE, c);
-		return SC_RET(SC_ENOMEM);
+	{
+		unsigned long long cur, clen = 0, first_sp = 0, first_clen = 0;
+		int plan_base = c->plan.n_ops;
+		int plan_left_base = c->plan_left;
+		int plan_next_base = c->plan_next;
+
+		for (cur = va; cur < va + len; cur += clen) {
+			unsigned long long rem_runs =
+				(va + len - cur) / UML_NT_PHYS_RUN_SIZE;
+			unsigned int want = (unsigned int)rem_runs;
+
+			sp = -1;
+			while (want >= 1) {
+				sp = uml_nt_phys_alloc_span(c->ph, (int)want);
+				if (sp >= 0)
+					break;
+				if (want == 1)
+					break;
+				{
+					unsigned int p2 = 1;
+
+					while ((p2 << 1) < want)
+						p2 <<= 1;
+					want = p2;
+				}
+			}
+			if (sp < 0) {
+				os_info("[syscall] mmap 0x%llx+%llu: span of "
+					"%llu run(s) at 0x%llx failed\n",
+					va, len, rem_runs, cur);
+				goto rollback_anon;
+			}
+			clen = (unsigned long long)want *
+			       UML_NT_PHYS_RUN_SIZE;
+			if (cur == va) {
+				first_sp = (unsigned long long)sp;
+				first_clen = clen;
+			}
+			if (uml_nt_sc_plan_reserve(c, 1) < 0) {
+				os_info("[syscall] mmap 0x%llx+%llu: "
+					"view-swap plan full — ENOMEM\n",
+					va, len);
+				for (i = 0; i < want; i++)
+					uml_nt_phys_unref_for(c->ph, sp +
+							      (long long)i *
+							      UML_NT_PHYS_RUN_SIZE,
+							      c);
+				goto rollback_anon;
+			}
+			if (uml_nt_vma_add_gen(c->mm, cur, cur + clen,
+					       (unsigned long long)sp,
+					       prot, 0,
+					       (unsigned long long)
+					       uml_nt_phys_gen(
+						       c->ph,
+						       (long long)sp)) < 0) {
+				for (i = 0; i < want; i++)
+					uml_nt_phys_unref_for(c->ph, sp +
+							      (long long)i *
+							      UML_NT_PHYS_RUN_SIZE,
+							      c);
+				goto rollback_anon;
+			}
+			uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, prot, cur, clen,
+					   (unsigned long long)sp);
+		}
+		if (0) {
+			unsigned long long rb;
+rollback_anon:
+			for (rb = va; rb < cur; ) {
+				const struct uml_nt_vma *rv =
+					uml_nt_vma_find(c->mm, rb);
+				unsigned long long rlen, roff, roff_end;
+
+				if (rv == NULL || rv->start != rb)
+					break;
+				rlen = rv->end - rv->start;
+				roff = rv->run_off;
+				roff_end = roff + rlen;
+				uml_nt_vma_del(c->mm, rb, rb + rlen);
+				for (; roff < roff_end;
+				     roff += UML_NT_PHYS_RUN_SIZE)
+					uml_nt_phys_unref_for(c->ph,
+							      (long long)roff,
+							      c);
+				rb += rlen;
+			}
+			c->plan.n_ops = plan_base;
+			c->plan_left = plan_left_base;
+			c->plan_next = plan_next_base;
+			return SC_RET(SC_ENOMEM);
+		}
+		os_info("[syscall] mmap 0x%llx+%llu prot=0x%x flags=0x%x "
+			"-> off=0x%llx%s\n", va, len, lprot, flags,
+			first_sp,
+			(flags & SC_MAP_FIXED) ? " FIXED" : "");
+		/* [cowtrap] alloc-side arm: the first WRITE into a multi-run
+		 * anon span names the poison-writer (report 106). */
+		if (first_clen >= 2 * UML_NT_PHYS_RUN_SIZE)
+			uml_nt_cowtrap_arm_alloc(c, va, first_clen, first_sp);
 	}
-	os_info("[syscall] mmap 0x%llx+%llu prot=0x%x flags=0x%x "
-		"-> off=0x%llx%s\n", va, len, lprot, flags,
-		(unsigned long long)sp,
-		(flags & SC_MAP_FIXED) ? " FIXED" : "");
-	uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, prot, va, len, (unsigned long long)sp);
-	/* [cowtrap] alloc-side arm: the first WRITE into a multi-run
-	 * anon span names the poison-writer (report 106). */
-	if (nruns >= 2)
-		uml_nt_cowtrap_arm_alloc(c, va, len, (unsigned long long)sp);
 	return va;
 }
 
@@ -745,7 +725,6 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
  * power-of-2 run count <= rem_runs (so runs_order never over-allocates
  * tail runs) and steps down (want >>= 1 down to 1 run) if high-order
  * buddy blocks are fragmented. */
-#define UML_NT_MMAP_SPAN_RUNS 64
 
 /* ld.so maps every shared library through here: ONE span mapping
  * (first segment's prot, no MAP_FIXED — the kernel picks the base),
@@ -1055,121 +1034,150 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 		return addr;
 	}
 
-	if (kind == 0) {
-		/* Fresh span. MAP_FIXED keeps the requested start (the
-		 * VMA is run-rounded around it — the [rs, addr) head
-		 * is a zero hole, run granularity); otherwise the
-		 * mapping IS the VMA base (the file offset belongs to
-		 * it). File VMAs map the view RWX (vma.h note).
-		 *
-		 * c3: a span is alloc_pages(order = RUN_ORDER +
-		 * runs_order(nruns)) — order 10 (64 runs, 4MB) is the
-		 * buddy's ceiling, so a bigger mapping (systemd's
-		 * libcrypto.so.3 is 4.7MB) is split into chunk VMAs,
-		 * each with its own span + view. fill/sweep and the
-		 * refill walk per-VMA pieces already; nothing else
-		 * knows the chunks exist. */
+	{
 		unsigned long long slen = re - rs;
-		unsigned long long cur, clen = 0;
-		int plan_base, plan_left_base, plan_next_base;
+		unsigned long long cur = 0, clen = 0;
+		unsigned long long err_ret = SC_RET(SC_ENOMEM);
+		int plan_base = c->plan.n_ops;
+		int plan_left_base = c->plan_left;
+		int plan_next_base = c->plan_next;
+		int have_fdesc = 1;
 
-		if (flags & SC_MAP_FIXED) {
-			va = rs;
-			map_start = addr;
-		} else {
-			va = uml_nt_vma_find_free(c->mm, slen, hint_base,
-						  UML_NT_SYSCALLS_BASE +
-						  uml_boot.physmem_size);
-			if (va == 0) {
-				fdput(fdesc);
-				return SC_RET(SC_ENOMEM);
-			}
-			map_start = va;
-		}
-		/* Chunk allocation with buddy-order fallback and full
-		 * rollback on mid-loop failure:
-		 * 1. Try min(rem_runs, UML_NT_MMAP_SPAN_RUNS) first so a
-		 *    normal shared library <= 4 MiB maps as a SINGLE VMA
-		 *    (preserving the 128-slot UML_NT_VMA_MAX table).
-		 * 2. If that order is fragmented in the buddy allocator,
-		 *    step down to the largest power-of-2 run count strictly
-		 *    below want ( down to 1 run = 64 KiB, order 4).
-		 * 3. If any chunk fails (span alloc, plan reserve, or
-		 *    VMA table), unref all runs of every chunk added in
-		 *    [va, cur) and roll back VMAs + plan ops. */
-		plan_base = c->plan.n_ops;
-		plan_left_base = c->plan_left;
-		plan_next_base = c->plan_next;
-		for (cur = va; cur < va + slen; cur += clen) {
-			unsigned long long rem_runs =
-				(va + slen - cur) / UML_NT_PHYS_RUN_SIZE;
-			unsigned int want =
-				(rem_runs > UML_NT_MMAP_SPAN_RUNS) ?
-				UML_NT_MMAP_SPAN_RUNS :
-				(unsigned int)rem_runs;
-
-			sp = (unsigned long long)-1LL;
-			while (want >= 1) {
-				sp = (unsigned long long)
-					uml_nt_phys_alloc_span(c->ph,
-							       (int)want);
-				if ((long long)sp >= 0)
-					break;
-				if (want == 1)
-					break;
-				{
-					unsigned int p2 = 1;
-
-					while ((p2 << 1) < want)
-						p2 <<= 1;
-					want = p2;
+		if (kind == 0) {
+			/* Fresh span. MAP_FIXED keeps the requested start (the
+			 * VMA is run-rounded around it — the [rs, addr) head
+			 * is a zero hole, run granularity); otherwise the
+			 * mapping IS the VMA base (the file offset belongs to
+			 * it). File VMAs map the view RWX (vma.h note).
+			 *
+			 * c3: a span is alloc_pages(order = RUN_ORDER +
+			 * runs_order(nruns)) — order 10 (64 runs, 4MB) is the
+			 * buddy's ceiling, so a bigger mapping (systemd's
+			 * libcrypto.so.3 is 4.7MB) is split into chunk VMAs,
+			 * each with its own span + view. fill/sweep and the
+			 * refill walk per-VMA pieces already; nothing else
+			 * knows the chunks exist. */
+			if (flags & SC_MAP_FIXED) {
+				va = rs;
+				map_start = addr;
+			} else {
+				va = uml_nt_vma_find_free(c->mm, slen, hint_base,
+							  UML_NT_SYSCALLS_BASE +
+							  uml_boot.physmem_size);
+				if (va == 0) {
+					fdput(fdesc);
+					return SC_RET(SC_ENOMEM);
 				}
+				map_start = va;
 			}
-			if ((long long)sp < 0) {
-				os_info("[syscall] mmap file 0x%llx+%llu: "
-					"span of %llu run(s) at 0x%llx failed "
-					"— ENOMEM\n", addr, len, rem_runs, cur);
-				goto rollback_chunks;
-			}
-			nruns = want;
-			clen = (unsigned long long)nruns *
-			       UML_NT_PHYS_RUN_SIZE;
-			if (uml_nt_sc_plan_reserve(c, 1) < 0) {
-				unsigned long long roff;
+			/* Chunk allocation with buddy-order fallback and full
+			 * rollback on mid-loop failure:
+			 * 1. Try min(rem_runs, UML_NT_MMAP_SPAN_RUNS) first so a
+			 *    normal shared library <= 4 MiB maps as a SINGLE VMA
+			 *    (preserving the 128-slot UML_NT_VMA_MAX table).
+			 * 2. If that order is fragmented in the buddy allocator,
+			 *    step down to the largest power-of-2 run count strictly
+			 *    below want ( down to 1 run = 64 KiB, order 4).
+			 * 3. If any chunk fails (span alloc, plan reserve, or
+			 *    VMA table), unref all runs of every chunk added in
+			 *    [va, cur) and roll back VMAs + plan ops. */
+			for (cur = va; cur < va + slen; cur += clen) {
+				unsigned long long rem_runs =
+					(va + slen - cur) / UML_NT_PHYS_RUN_SIZE;
+				unsigned int want =
+					(rem_runs > UML_NT_MMAP_SPAN_RUNS) ?
+					UML_NT_MMAP_SPAN_RUNS :
+					(unsigned int)rem_runs;
 
-				os_info("[syscall] mmap file 0x%llx+%llu: "
-					"view-swap plan full at 0x%llx "
-					"— ENOMEM\n", addr, len, cur);
-				for (roff = sp; roff < sp + clen;
-				     roff += UML_NT_PHYS_RUN_SIZE)
-					uml_nt_phys_unref_for(c->ph,
-							      (long long)roff,
-							      c);
-				goto rollback_chunks;
-			}
-			if (uml_nt_vma_add_gen(c->mm, cur, cur + clen, sp,
-					       UML_NT_PAGE_EXECUTE_READWRITE,
-					       UML_NT_VMA_FILE,
-					       (unsigned long long)
-					       uml_nt_phys_gen(
-						       c->ph,
-						       (long long)sp)) < 0) {
-				unsigned long long roff;
+				sp = (unsigned long long)-1LL;
+				while (want >= 1) {
+					sp = (unsigned long long)
+						uml_nt_phys_alloc_span(c->ph,
+								       (int)want);
+					if ((long long)sp >= 0)
+						break;
+					if (want == 1)
+						break;
+					{
+						unsigned int p2 = 1;
 
-				os_info("[syscall] mmap file 0x%llx+%llu: "
-					"vma table full at 0x%llx (nvma=%d) "
-					"— ENOMEM\n", addr, len, cur,
-					c->mm->nvma);
-				for (roff = sp; roff < sp + clen;
-				     roff += UML_NT_PHYS_RUN_SIZE)
-					uml_nt_phys_unref_for(c->ph,
-							      (long long)roff,
-							      c);
-				goto rollback_chunks;
+						while ((p2 << 1) < want)
+							p2 <<= 1;
+						want = p2;
+					}
+				}
+				if ((long long)sp < 0) {
+					os_info("[syscall] mmap file 0x%llx+%llu: "
+						"span of %llu run(s) at 0x%llx failed "
+						"— ENOMEM\n", addr, len, rem_runs, cur);
+					goto rollback_chunks;
+				}
+				nruns = want;
+				clen = (unsigned long long)nruns *
+				       UML_NT_PHYS_RUN_SIZE;
+				if (uml_nt_sc_plan_reserve(c, 1) < 0) {
+					unsigned long long roff;
+
+					os_info("[syscall] mmap file 0x%llx+%llu: "
+						"view-swap plan full at 0x%llx "
+						"— ENOMEM\n", addr, len, cur);
+					for (roff = sp; roff < sp + clen;
+					     roff += UML_NT_PHYS_RUN_SIZE)
+						uml_nt_phys_unref_for(c->ph,
+								      (long long)roff,
+								      c);
+					goto rollback_chunks;
+				}
+				if (uml_nt_vma_add_gen(c->mm, cur, cur + clen, sp,
+						       UML_NT_PAGE_EXECUTE_READWRITE,
+						       UML_NT_VMA_FILE,
+						       (unsigned long long)
+						       uml_nt_phys_gen(
+							       c->ph,
+							       (long long)sp)) < 0) {
+					unsigned long long roff;
+
+					os_info("[syscall] mmap file 0x%llx+%llu: "
+						"vma table full at 0x%llx (nvma=%d) "
+						"— ENOMEM\n", addr, len, cur,
+						c->mm->nvma);
+					for (roff = sp; roff < sp + clen;
+					     roff += UML_NT_PHYS_RUN_SIZE)
+						uml_nt_phys_unref_for(c->ph,
+								      (long long)roff,
+								      c);
+					goto rollback_chunks;
+				}
+				uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
+						   UML_NT_PAGE_EXECUTE_READWRITE,
+						   cur, clen, sp);
 			}
-			uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
-					   UML_NT_PAGE_EXECUTE_READWRITE,
-					   cur, clen, sp);
+		} else {
+			va = addr;
+			map_start = addr;
+		}
+
+		if (uml_nt_mmap_fill(c, map_start, len, f, off, fsize, 0) < 0) {
+			err_ret = SC_RET(SC_EFAULT);
+			if (kind == 0)
+				goto rollback_chunks;
+			fdput(fdesc);
+			return err_ret;
+		}
+		fdput(fdesc);
+		have_fdesc = 0;
+
+		if (lprot & SC_PROT_EXEC) {
+			long long p = uml_nt_mmap_sweep(c, map_start, len);
+
+			if (p < 0) {
+				err_ret = SC_RET(SC_EFAULT);
+				if (kind == 0)
+					goto rollback_chunks;
+				return err_ret;
+			}
+			os_info("[syscall] mmap exec sweep 0x%llx+%llu: %lld "
+				"syscall(s) patched (D20)\n", map_start, len, p);
 		}
 		if (0) {
 			unsigned long long rb;
@@ -1195,27 +1203,10 @@ rollback_chunks:
 			c->plan.n_ops = plan_base;
 			c->plan_left = plan_left_base;
 			c->plan_next = plan_next_base;
-			fdput(fdesc);
-			return SC_RET(SC_ENOMEM);
+			if (have_fdesc)
+				fdput(fdesc);
+			return err_ret;
 		}
-	} else {
-		va = addr;
-		map_start = addr;
-	}
-
-	if (uml_nt_mmap_fill(c, map_start, len, f, off, fsize, 0) < 0) {
-		fdput(fdesc);
-		return SC_RET(SC_EFAULT);
-	}
-	fdput(fdesc);
-
-	if (lprot & SC_PROT_EXEC) {
-		long long p = uml_nt_mmap_sweep(c, map_start, len);
-
-		if (p < 0)
-			return SC_RET(SC_EFAULT);
-		os_info("[syscall] mmap exec sweep 0x%llx+%llu: %lld "
-			"syscall(s) patched (D20)\n", map_start, len, p);
 	}
 	os_info("[syscall] mmap file 0x%llx+%llu prot=0x%x -> %s 0x%llx "
 		"off=0x%llx (size %llu)%s\n", map_start, len, lprot,
