@@ -272,4 +272,18 @@ int uml_nt_phys_block_check(const struct uml_nt_phys *p, long long off,
  * run allocation is under pressure (1 = reclaimed an entry, 0 = none). */
 int uml_nt_fcache_reclaim_one(void);
 
+/* M5.6a (census): fired on a FAILED handout — the moment the backend's
+ * fcache-reclaim loop is exhausted and the run pool is truly dry (the
+ * why=a autopsy point). The kernel answer (stub_ctl.c) prints the
+ * table census: used/parked/fcache + the top consuming conns + the
+ * kernel's own free/pagecache split. NULL in the unit tests. */
+struct uml_nt_phys;
+typedef void (*uml_nt_phys_pressure_fn)(struct uml_nt_phys *p);
+extern uml_nt_phys_pressure_fn uml_nt_phys_pressure_probe;
+
+/* Run-table census counters (pure): used = refs > 0, parked_runs =
+ * the quarantine's span runs (dropped, awaiting settle/release). */
+int uml_nt_phys_table_stats(const struct uml_nt_phys *p, int *used,
+			    int *parked_runs);
+
 #endif /* __UM_OS_WINDOWS_PHYSALLOC_H */

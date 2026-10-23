@@ -37,6 +37,8 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
+#include <linux/mm.h>
+#include <linux/vmstat.h>
 #include <init.h>
 #include <ntabi.h>
 #include <fault.h>
@@ -2362,6 +2364,166 @@ void uml_nt_run_alias_census(struct uml_nt_stub_conn *c,
 	os_info("[alias] census: %d live conns, foreign mappers of run "
 		"0x%llx+0x%llx listed above (none = kernel-side unseen "
 		"path)\n", conns, run_off, len);
+}
+
+/* ---------------- M5.6a census + IMGWATCH ----------------------
+ * The why=a/why=p autopsy pair (referees 39950777465/39950787337):
+ * the run pool died at login with zero phys-layer alarms, so the
+ * dying dumps alone could not say WHAT held the runs. The census
+ * prints the pool's composition at every exec/exit (the churn
+ * curve) and at every failed handout (the pressure moment):
+ * used/parked runs, fcache pins, live/dying conns, the top-3
+ * footprints, and the kernel's own free/pagecache/slab split (the
+ * guest pool shares the 120 MiB buddy with both). IMGWATCH rides
+ * the same walk: every exec fingerprints its pure-RO image runs
+ * (post-D20-patch) and the census re-hashes them per conn — a
+ * divergence is the rewritten-text class (victim #3's zeroed ld.so
+ * page) named at the first census after the write. */
+unsigned long long uml_nt_imgw_hash(const void *run_base)
+{
+	const unsigned long long *q = run_base;
+	unsigned long long h = 1469598103934665603ULL;
+	int i;
+
+	/* One qword per guest 4K page: the observed rewrite class is
+	 * page-scale (whole pages zeroed + stray dwords), so 16
+	 * samples per run discriminate it at a fraction of the cost
+	 * of a full 64 KiB hash. */
+	for (i = 0; i < 16; i++) {
+		h ^= q[i * 512];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+void uml_nt_imgwatch_capture(struct uml_nt_stub_conn *c,
+			     const struct uml_nt_elf_image *img, int reset)
+{
+	int si;
+
+	if (c == NULL || c->ph == NULL || img == NULL)
+		return;
+	if (reset)
+		c->imgw_n = 0;
+	for (si = 0; si < img->nseg; si++) {
+		unsigned int r;
+
+		for (r = 0; r < img->seg[si].ro_runs; r++) {
+			unsigned long long run =
+				img->seg[si].run_off +
+				(unsigned long long)r *
+				UML_NT_PHYS_RUN_SIZE;
+
+			if (c->imgw_n >= UML_NT_IMGWATCH_MAX)
+				return;
+			c->imgw_run[c->imgw_n] = run;
+			c->imgw_gen[c->imgw_n] =
+				uml_nt_phys_gen(c->ph, (long long)run);
+			c->imgw_hash[c->imgw_n] = uml_nt_imgw_hash(
+				(const void *)((const char *)
+				uml_boot.physmem_base + run));
+			c->imgw_n++;
+		}
+	}
+}
+
+#define UML_NT_CENSUS_TOP 3
+static int census_pressure_left = 8;
+static int imgw_fire_left = 32;
+
+void uml_nt_census(const char *tag, long long pid)
+{
+	struct task_struct *p;
+	struct uml_nt_phys *ph = NULL;
+	unsigned long top_pid[UML_NT_CENSUS_TOP] = { 0, 0, 0 };
+	int top_runs[UML_NT_CENSUS_TOP] = { 0, 0, 0 };
+	int used = 0, parked = 0, live = 0, dying = 0;
+	int fce = 0, fcr = 0;
+
+	if (tag[0] == 'p' && census_pressure_left-- <= 0)
+		return;
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		int vi, runs = 0, i, slot;
+
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL ||
+		    pc->dead_magic == UML_NT_CONN_DEAD)
+			continue;
+		if (ph == NULL && pc->ph != NULL)
+			ph = pc->ph;
+		if (!pc->alive) {
+			dying++;
+			continue;
+		}
+		live++;
+		for (vi = 0; vi < pc->mm->nvma; vi++)
+			runs += (int)((pc->mm->vma[vi].end -
+				       pc->mm->vma[vi].start) >>
+				      UML_NT_PHYS_RUN_SHIFT);
+		for (i = 0; i < pc->imgw_n; i++) {
+			unsigned long long run = pc->imgw_run[i];
+			unsigned long long h;
+
+			if (pc->ph == NULL ||
+			    uml_nt_phys_refs(pc->ph, (long long)run) <= 0 ||
+			    uml_nt_phys_gen(pc->ph, (long long)run) !=
+			    pc->imgw_gen[i])
+				continue;
+			h = uml_nt_imgw_hash((const void *)((const char *)
+					uml_boot.physmem_base + run));
+			if (h != pc->imgw_hash[i] && imgw_fire_left-- > 0)
+				os_info("[imgwatch] pid %lu: RO image run "
+					"0x%llx rewritten post-load (was "
+					"%016llx now %016llx) — text "
+					"rewrite class\n",
+					(unsigned long)pc->pid, run,
+					pc->imgw_hash[i], h);
+		}
+		for (slot = 0; slot < UML_NT_CENSUS_TOP; slot++) {
+			if (runs > top_runs[slot]) {
+				int k;
+
+				for (k = UML_NT_CENSUS_TOP - 1; k > slot;
+				     k--) {
+					top_runs[k] = top_runs[k - 1];
+					top_pid[k] = top_pid[k - 1];
+				}
+				top_runs[slot] = runs;
+				top_pid[slot] = (unsigned long)pc->pid;
+				break;
+			}
+		}
+	}
+	if (ph != NULL)
+		uml_nt_phys_table_stats(ph, &used, &parked);
+	uml_nt_fcache_stats(&fce, &fcr);
+	os_info("[census] %s pid %lld: used=%d/%d runs (%llu MiB) "
+		"parked=%d fc=%de/%dr live=%d dying=%d | free=%lluM "
+		"file=%lluM slab=%lluM | top %lu:%dr %lu:%dr %lu:%dr\n",
+		tag, pid, used,
+		(int)(uml_boot.physmem_size >> UML_NT_PHYS_RUN_SHIFT),
+		((unsigned long long)used << UML_NT_PHYS_RUN_SHIFT) >> 20,
+		parked, fce, fcr, live, dying,
+		(((unsigned long long)global_zone_page_state(NR_FREE_PAGES))
+		 << PAGE_SHIFT) >> 20,
+		(((unsigned long long)global_node_page_state(NR_FILE_PAGES))
+		 << PAGE_SHIFT) >> 20,
+		((((unsigned long long)global_node_page_state(
+			NR_SLAB_RECLAIMABLE_B)) +
+		  ((unsigned long long)global_node_page_state(
+			NR_SLAB_UNRECLAIMABLE_B)))) >> 20,
+		top_pid[0], top_runs[0], top_pid[1], top_runs[1],
+		top_pid[2], top_runs[2]);
+}
+
+void uml_nt_pressure_census(struct uml_nt_phys *p)
+{
+	/* the census walks the live conns' (shared) table itself */
+	(void)p;
+	uml_nt_census("pressure", -1);
 }
 
 /* [alloc-alias] (M5.6a, map 121 + to-shelley 119): the allocator's

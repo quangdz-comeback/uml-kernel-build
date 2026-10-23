@@ -26,6 +26,8 @@
 #include <fault.h>
 #include <uaccess_walk.h>
 
+#define UML_NT_IMGWATCH_MAX 16
+
 /* One guest process (stub side of the D10 protocol). Lives in the
  * kernel — the conn table is owned by stub_ctl.c (spawn/fork machinery). */
 struct uml_nt_stub_conn {
@@ -392,6 +394,21 @@ struct uml_nt_stub_conn {
 	 * unseeded conns — run 36813545490 "INIT pid 4252: 0 map
 	 * op(s)", stub rip=0 — reverted in 631632b). */
 	u32 dead_magic;
+	/* M5.6a IMGWATCH (why=p hunt, referee 39950787337 victim #3):
+	 * fingerprints of this exec's pure-RO image runs (interp/exe
+	 * region runs below the first writable PT_LOAD page), captured
+	 * post-D20-patch at exec commit. The per-exec/exit/pressure
+	 * census re-hashes every live conn's watched runs; a
+	 * divergence names the run whose loaded text was rewritten —
+	 * the zeroed-ld.so-page class that killed /bin/login. gen
+	 * pins the entry to the run's handout epoch so a recycled run
+	 * never false-fires; refs==0 entries are skipped (unmapped).
+	 * COW is content-preserving, fork children start with a fresh
+	 * (zeroed) watch — no false fires by construction. */
+	unsigned long long imgw_run[UML_NT_IMGWATCH_MAX];
+	unsigned long long imgw_gen[UML_NT_IMGWATCH_MAX];
+	unsigned long long imgw_hash[UML_NT_IMGWATCH_MAX];
+	int imgw_n;
 };
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args

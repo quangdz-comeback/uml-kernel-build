@@ -189,6 +189,7 @@ int uml_nt_elf_load(struct uml_nt_elf_image *out, struct uml_nt_mm *mm,
 	struct reg regs[UML_NT_ELF_MAX_SEG];
 	unsigned long long offs[UML_NT_ELF_MAX_SEG];
 	unsigned long long base, span_end, e_off, e_len, entry;
+	unsigned long long min_w_page = ~0ULL;
 	int nreg = 0, i, j, phn;
 
 	out->nseg = 0;
@@ -238,6 +239,15 @@ int uml_nt_elf_load(struct uml_nt_elf_image *out, struct uml_nt_mm *mm,
 			return UML_NT_ELF_VA;
 		rs = floor_run(p->p_vaddr);
 		re = ceil_run(p->p_vaddr + p->p_memsz);
+		/* IMGWATCH: first writable PAGE of the image — every
+		 * run wholly below it is content-stable post-load. */
+		if (p->p_flags & PF_W) {
+			unsigned long long wp =
+				p->p_vaddr & ~0xFFFULL;
+
+			if (wp < min_w_page)
+				min_w_page = wp;
+		}
 
 		for (j = 0; j < nreg; j++) {
 			if (rs < regs[j].re && re > regs[j].rs) {
@@ -412,10 +422,15 @@ merged:
 
 	/* ---- publish out + one VMA per region (fresh, no COW) ---- */
 	for (i = 0; i < nreg; i++) {
+		unsigned long long ro_end =
+			(min_w_page < regs[i].re) ? min_w_page : regs[i].re;
+
 		out->seg[i].start = regs[i].rs + base;
 		out->seg[i].end = regs[i].re + base;
 		out->seg[i].run_off = offs[i];
 		out->seg[i].prot = prot_from_flags(regs[i].flags);
+		out->seg[i].ro_runs = (ro_end > regs[i].rs) ?
+			(unsigned int)((ro_end - regs[i].rs) / RUN) : 0;
 	}
 	out->nseg = nreg;
 	out->entry = entry;

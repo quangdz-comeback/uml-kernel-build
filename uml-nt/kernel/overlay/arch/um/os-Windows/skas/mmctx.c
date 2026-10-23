@@ -182,6 +182,11 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * site when the destroy is the caller). */
 	uml_nt_deadwrite_arm(id->pid, "destroy");
 
+	/* M5.6a census: the dying conn still holds its runs here — the
+	 * exit line is the churn curve's down-tick (and the imgwatch
+	 * verify still sees this conn's image intact). */
+	uml_nt_census("exit", (long long)id->pid);
+
 	/* Kernel owns the kill (M2.2 parity): the stub may still be
 	 * suspended (never got guest code — the normal S1/S2 fate for
 	 * an mm whose exec failed) or parked after a halt. */

@@ -26,6 +26,34 @@ uml_nt_phys_mapped_fn uml_nt_phys_mapped_probe =
  * tests (they mock the backend and own no physmem). */
 uml_nt_phys_zero_fn uml_nt_phys_zero_hook = (uml_nt_phys_zero_fn)0;
 
+/* [census] pressure hook — pinned by main.c, NULL in unit tests. */
+uml_nt_phys_pressure_fn uml_nt_phys_pressure_probe =
+	(uml_nt_phys_pressure_fn)0;
+
+int uml_nt_phys_table_stats(const struct uml_nt_phys *p, int *used,
+			    int *parked_runs)
+{
+	long long i;
+	int u = 0, pk = 0;
+
+	if (p == 0)
+		return -1;
+	for (i = 0; i < RUNS(p); i++) {
+		if (p->refs[i] > 0)
+			u++;
+	}
+	for (i = 0; i < p->npark; i++) {
+		long long idx = p->park[i].off >> UML_NT_PHYS_RUN_SHIFT;
+
+		if (idx >= 0 && idx < RUNS(p) &&
+		    p->span_len[idx] > 0)
+			pk += p->span_len[idx];
+	}
+	*used = u;
+	*parked_runs = pk;
+	return 0;
+}
+
 static int run_index(struct uml_nt_phys *p, long long off)
 {
 	long long i;
@@ -70,8 +98,15 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns)
 	if (nruns < 1 || nruns > UML_NT_PHYS_MAX_RUNS)
 		return -1;
 	off = uml_nt_phys_backend_alloc_span(&pg, nruns);
-	if (off < 0)
+	if (off < 0) {
+		/* True pressure: the backend's fcache-reclaim loop is
+		 * already exhausted — census the pool at the moment
+		 * the why=a killer strikes (hook NULL in tests). */
+		if (uml_nt_phys_pressure_probe !=
+		    (uml_nt_phys_pressure_fn)0)
+			uml_nt_phys_pressure_probe(p);
 		return -1;
+	}
 	i = run_index(p, off);
 	if (i < 0 || i + nruns > RUNS(p) || pg == (void *)0)
 		goto reject;

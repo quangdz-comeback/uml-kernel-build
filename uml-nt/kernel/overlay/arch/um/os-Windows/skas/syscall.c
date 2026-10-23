@@ -768,6 +768,15 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
  * writable .data/.bss tail runs private per process. */
 #define UML_NT_FCACHE_MAX    64
 #define UML_NT_FCACHE_CHUNKS 32
+/* M5.6a: bounded-cache policy — the fcache exists to dedup
+ * shared-library TEXT. A non-ELF file passes inspect_ro_prefix with
+ * ro_runs == its whole span, so journald's grown journal (12.4 MiB
+ * mapped PROT_READ, referee 39950787337) would pin ~200 runs behind
+ * the reclaim loop's mapped-probe exemption: un-reclaimable while
+ * mapped, and its 64-slot entry evicts real libraries. Files over
+ * the cap map as plain private copies (freed at unmap/exit). 96
+ * runs = 6 MiB covers every boot library (libcrypto.so.3 = 76). */
+#define UML_NT_FCACHE_MAX_FILE_RUNS 96
 
 struct uml_nt_fcache_chunk {
 	unsigned long long run_off;
@@ -963,6 +972,20 @@ int uml_nt_fcache_reclaim_one(void)
 		}
 	}
 	return 1;
+}
+
+void uml_nt_fcache_stats(int *entries, int *runs)
+{
+	int i, ne = 0, nr = 0;
+
+	for (i = 0; i < UML_NT_FCACHE_MAX; i++) {
+		if (!g_fcache[i].used)
+			continue;
+		ne++;
+		nr += (int)g_fcache[i].ro_runs;
+	}
+	*entries = ne;
+	*runs = nr;
 }
 
 static struct uml_nt_fcache_entry *uml_nt_fcache_get(
@@ -1435,6 +1458,14 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 					uml_nt_inspect_ro_prefix(f, fsize,
 								 slen);
 				struct uml_nt_fcache_entry *fce = NULL;
+
+				if (ro_runs > UML_NT_FCACHE_MAX_FILE_RUNS) {
+					os_info("[syscall] mmap file: %u ro "
+						"runs > fcache cap — private "
+						"copy (size %llu)\n",
+						ro_runs, fsize);
+					ro_runs = 0;
+				}
 
 				if (ro_runs > 0)
 					fce = uml_nt_fcache_get(c, f, fsize,

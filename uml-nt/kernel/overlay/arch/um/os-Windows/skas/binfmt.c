@@ -537,6 +537,13 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		patched += (unsigned long long)p;
 	}
 
+	/* IMGWATCH (M5.6a): fingerprint the pure-RO image runs now —
+	 * post-D20-patch, pre-commit, before any guest instruction of
+	 * the new image has run. */
+	uml_nt_imgwatch_capture(c, &img, 1);
+	if (have_interp)
+		uml_nt_imgwatch_capture(c, &iimg, 0);
+
 	/* The M3.7 brk contract: one pre-reserved, pre-mapped heap run
 	 * (brk past it re-homes the heap in a bigger contiguous span —
 	 * syscall.c sys_brk, M4 slice 4).
@@ -585,6 +592,7 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		return rc;
 	setup_new_exec(bprm);
 	os_info("binfmt_umlnt: exec committed (new conn live)\n");
+	uml_nt_census("exec", (long long)c->pid);
 	rc = setup_arg_pages(bprm, STACK_TOP, 0 /* non-exec stack */);
 	if (rc)
 		return rc; /* upstream-shape post-commit failure: -ENOMEM

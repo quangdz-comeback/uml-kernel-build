@@ -94,6 +94,10 @@ void nt_main(struct uml_boot_info *bi)
 	 * uml_nt_release_mapped_scan. */
 	uml_nt_phys_mapped_probe = uml_nt_release_mapped_scan;
 
+	/* M5.6a (census): the failed-handout census — the pool autopsy
+	 * at the true pressure moment (why=a). */
+	uml_nt_phys_pressure_probe = uml_nt_pressure_census;
+
 	linux_main(uml_boot.argc, uml_boot.argv, uml_boot.envp);
 
 	/* linux_main runs start_uml() → start_kernel() → (M1) panic

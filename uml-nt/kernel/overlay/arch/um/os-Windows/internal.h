@@ -239,4 +239,20 @@ int uml_nt_release_mapped_scan(long long off, int nruns);
 void uml_nt_deadwrite_arm(int pid, const char *tag);
 void uml_nt_deadwrite_disarm(void);
 
+/* stub_ctl.c (M5.6a census + IMGWATCH, the why=a/why=p autopsy
+ * pair): the run-pool census at exec/exit/pressure + the pure-RO
+ * image-run fingerprints. See the census block comment in
+ * stub_ctl.c. uml_nt_pressure_census is pinned into
+ * uml_nt_phys_pressure_probe by main.c. */
+struct uml_nt_stub_conn;
+struct uml_nt_elf_image;
+struct uml_nt_phys;
+unsigned long long uml_nt_imgw_hash(const void *run_base);
+void uml_nt_imgwatch_capture(struct uml_nt_stub_conn *c,
+			     const struct uml_nt_elf_image *img, int reset);
+void uml_nt_census(const char *tag, long long pid);
+void uml_nt_pressure_census(struct uml_nt_phys *p);
+/* syscall.c: the shared RO file cache's occupancy (entries/runs). */
+void uml_nt_fcache_stats(int *entries, int *runs);
+
 #endif

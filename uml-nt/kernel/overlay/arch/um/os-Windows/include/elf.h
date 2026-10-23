@@ -67,6 +67,13 @@ struct uml_nt_elf_seg {
 	unsigned long long start, end;
 	unsigned long long run_off;
 	unsigned prot;
+	/* M5.6a IMGWATCH: count of the region's LEADING runs that no
+	 * writable PT_LOAD's page range touches — the bytes a legit
+	 * guest never writes post-load (the D20 patch runs before the
+	 * fingerprint). The census hashes them; a divergence is the
+	 * rewritten-text class (zeroed _dl_find_dso_for_object entry,
+	 * referee 39950787337 victim #3). */
+	unsigned int ro_runs;
 };
 
 struct uml_nt_elf_image {
