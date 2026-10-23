@@ -22,9 +22,6 @@ jobs:
           bash uml-nt/tests/test_console.sh
           # M5.6a slice D: the replay single-step (TF) state machine
           bash uml-nt/tests/test_ss.sh
-          # M5.6a K8: the backend run pool (fragmentation fix) — the
-          # put/get/pop/drain model the kernel's physbackend ships.
-          bash uml-nt/tests/test_runpool.sh
           # M5.6a D28 (Shelley lazy-file ruling): the demand-paged
           # file-VMA run window + file read clamp.
           bash uml-nt/tests/test_lazyfile.sh
@@ -72,4 +69,4 @@ jobs:
             uml-nt/tests/test_mm.sh uml-nt/tests/test_elf.sh \
             uml-nt/tests/test_uaccess.sh uml-nt/tests/test_bench.sh \
             uml-nt/tests/test_console.sh uml-nt/tests/test_ss.sh \
-            uml-nt/tests/test_runpool.sh uml-nt/tests/test_lazyfile.sh
+            uml-nt/tests/test_lazyfile.sh

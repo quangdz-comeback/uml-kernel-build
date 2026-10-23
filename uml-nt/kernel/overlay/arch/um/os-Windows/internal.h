@@ -254,7 +254,5 @@ void uml_nt_census(const char *tag, long long pid);
 void uml_nt_pressure_census(struct uml_nt_phys *p);
 /* syscall.c: the shared RO file cache's occupancy (entries/runs). */
 void uml_nt_fcache_stats(int *entries, int *runs);
-/* physbackend.c: the [runpool] released-run cache's occupancy. */
-void uml_nt_runpool_stats(int *entries, int *runs);
 
 #endif
