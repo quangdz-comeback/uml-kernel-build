@@ -169,6 +169,16 @@ static int overlaps_existing(const struct uml_nt_mm *mm,
 	return 0;
 }
 
+static void unref_region_span(struct uml_nt_phys *ph,
+			      unsigned long long off,
+			      unsigned long long len)
+{
+	unsigned long long r;
+
+	for (r = 0; r < len; r += RUN)
+		uml_nt_phys_unref(ph, (long long)(off + r));
+}
+
 int uml_nt_elf_load(struct uml_nt_elf_image *out, struct uml_nt_mm *mm,
 		    struct uml_nt_phys *ph, const void *image,
 		    unsigned long long len, void *section)
@@ -344,7 +354,8 @@ merged:
 		}
 		if (off < 0) {
 			for (j = 0; j < i; j++)
-				uml_nt_phys_unref(ph, (long long)offs[j]);
+				unref_region_span(ph, offs[j],
+						  regs[j].re - regs[j].rs);
 			return UML_NT_ELF_NOMEM;
 		}
 		offs[i] = (unsigned long long)off;
@@ -366,8 +377,8 @@ merged:
 			uml_nt_elf_fill_len =
 				regs[i].re - regs[i].rs;
 			for (j = 0; j < nreg; j++)
-				uml_nt_phys_unref(ph,
-					(long long)offs[j]);
+				unref_region_span(ph, offs[j],
+						  regs[j].re - regs[j].rs);
 			return UML_NT_ELF_FILL;
 		}
 		__builtin_memset((char *)section + offs[i], 0,
@@ -423,7 +434,8 @@ merged:
 				uml_nt_vma_del(mm, out->seg[j].start,
 					       out->seg[j].end);
 			for (j = 0; j < nreg; j++)
-				uml_nt_phys_unref(ph, (long long)offs[j]);
+				unref_region_span(ph, offs[j],
+						  regs[j].re - regs[j].rs);
 			out->nseg = 0;
 			return UML_NT_ELF_MM;
 		}
@@ -432,7 +444,7 @@ merged:
 
 fail_copy:
 	for (j = 0; j < nreg; j++)
-		uml_nt_phys_unref(ph, (long long)offs[j]);
+		unref_region_span(ph, offs[j], regs[j].re - regs[j].rs);
 	return UML_NT_ELF_SEG;
 }
 

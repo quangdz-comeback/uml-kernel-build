@@ -1102,35 +1102,44 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 			}
 			map_start = va;
 		}
-		/* Power-of-2 chunk allocation with order fallback and
-		 * full rollback on mid-loop failure:
-		 * 1. Pick the largest power-of-2 run count <= rem_runs
-		 *    (capped at UML_NT_MMAP_SPAN_RUNS) so runs_order()
-		 *    in physbackend.c never rounds up and strands tail
-		 *    runs inside a buddy block.
+		/* Chunk allocation with buddy-order fallback and full
+		 * rollback on mid-loop failure:
+		 * 1. Try min(rem_runs, UML_NT_MMAP_SPAN_RUNS) first so a
+		 *    normal shared library <= 4 MiB maps as a SINGLE VMA
+		 *    (preserving the 128-slot UML_NT_VMA_MAX table).
 		 * 2. If that order is fragmented in the buddy allocator,
-		 *    halve want >>= 1 down to 1 run (64 KiB, order 4).
+		 *    step down to the largest power-of-2 run count strictly
+		 *    below want ( down to 1 run = 64 KiB, order 4).
 		 * 3. If any chunk fails (span alloc, plan reserve, or
-		 *    VMA table), roll back all chunks added in [va, cur)
-		 *    so a failed multi-chunk mmap never leaks runs or
-		 *    strands partial VMAs/plan ops. */
+		 *    VMA table), unref all runs of every chunk added in
+		 *    [va, cur) and roll back VMAs + plan ops. */
 		plan_base = c->plan.n_ops;
 		plan_left_base = c->plan_left;
 		plan_next_base = c->plan_next;
 		for (cur = va; cur < va + slen; cur += clen) {
 			unsigned long long rem_runs =
 				(va + slen - cur) / UML_NT_PHYS_RUN_SIZE;
-			unsigned int want = UML_NT_MMAP_SPAN_RUNS;
+			unsigned int want =
+				(rem_runs > UML_NT_MMAP_SPAN_RUNS) ?
+				UML_NT_MMAP_SPAN_RUNS :
+				(unsigned int)rem_runs;
 
-			while (want > rem_runs)
-				want >>= 1;
 			sp = (unsigned long long)-1LL;
-			for (; want >= 1; want >>= 1) {
+			while (want >= 1) {
 				sp = (unsigned long long)
 					uml_nt_phys_alloc_span(c->ph,
 							       (int)want);
 				if ((long long)sp >= 0)
 					break;
+				if (want == 1)
+					break;
+				{
+					unsigned int p2 = 1;
+
+					while ((p2 << 1) < want)
+						p2 <<= 1;
+					want = p2;
+				}
 			}
 			if ((long long)sp < 0) {
 				os_info("[syscall] mmap file 0x%llx+%llu: "
@@ -1142,10 +1151,15 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 			clen = (unsigned long long)nruns *
 			       UML_NT_PHYS_RUN_SIZE;
 			if (uml_nt_sc_plan_reserve(c, 1) < 0) {
+				unsigned long long roff;
+
 				os_info("[syscall] mmap file 0x%llx+%llu: "
 					"view-swap plan full at 0x%llx "
 					"— ENOMEM\n", addr, len, cur);
-				uml_nt_phys_unref(c->ph, (long long)sp);
+				for (roff = sp; roff < sp + clen;
+				     roff += UML_NT_PHYS_RUN_SIZE)
+					uml_nt_phys_unref(c->ph,
+							  (long long)roff);
 				goto rollback_chunks;
 			}
 			if (uml_nt_vma_add_gen(c->mm, cur, cur + clen, sp,
@@ -1155,11 +1169,16 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 					       uml_nt_phys_gen(
 						       c->ph,
 						       (long long)sp)) < 0) {
+				unsigned long long roff;
+
 				os_info("[syscall] mmap file 0x%llx+%llu: "
 					"vma table full at 0x%llx (nvma=%d) "
 					"— ENOMEM\n", addr, len, cur,
 					c->mm->nvma);
-				uml_nt_phys_unref(c->ph, (long long)sp);
+				for (roff = sp; roff < sp + clen;
+				     roff += UML_NT_PHYS_RUN_SIZE)
+					uml_nt_phys_unref(c->ph,
+							  (long long)roff);
 				goto rollback_chunks;
 			}
 			uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
@@ -1172,15 +1191,18 @@ rollback_chunks:
 			for (rb = va; rb < cur; ) {
 				const struct uml_nt_vma *rv =
 					uml_nt_vma_find(c->mm, rb);
-				unsigned long long rlen;
-				long long roff;
+				unsigned long long rlen, roff, roff_end;
 
 				if (rv == NULL || rv->start != rb)
 					break;
 				rlen = rv->end - rv->start;
-				roff = (long long)rv->run_off;
+				roff = rv->run_off;
+				roff_end = roff + rlen;
 				uml_nt_vma_del(c->mm, rb, rb + rlen);
-				uml_nt_phys_unref(c->ph, roff);
+				for (; roff < roff_end;
+				     roff += UML_NT_PHYS_RUN_SIZE)
+					uml_nt_phys_unref(c->ph,
+							  (long long)roff);
 				rb += rlen;
 			}
 			c->plan.n_ops = plan_base;
@@ -1324,82 +1346,103 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 				       const unsigned long long *a)
 {
 	unsigned long long addr = a[0], len = a[1];
+	unsigned long long cur, end;
 	unsigned prot = linux_prot_to_nt((u32)a[2]);
 	struct uml_nt_vma *v;
+	int nops = 0;
 
-	if ((addr | len) & (UML_NT_FAULT_PAGE_SIZE - 1) || len == 0)
+	if ((addr | len) & (UML_NT_FAULT_PAGE_SIZE - 1) || len == 0 ||
+	    addr + len < addr)
 		return SC_RET(SC_EINVAL);
-	v = uml_nt_vma_find(c->mm, addr);
-	if (v == NULL || v->end < addr + len) {
-		os_info("[syscall] mprotect 0x%llx+%llu: not inside one "
-			"VMA\n", addr, len);
-		return SC_RET(SC_ENOMEM);
+	end = addr + len;
+	for (cur = addr; cur < end; ) {
+		v = uml_nt_vma_find(c->mm, cur);
+		if (v == NULL || v->end <= cur) {
+			os_info("[syscall] mprotect 0x%llx+%llu: not inside "
+				"mapped VMAs (hole at 0x%llx)\n",
+				addr, len, cur);
+			return SC_RET(SC_ENOMEM);
+		}
+		if (v->flags & UML_NT_VMA_COW) {
+			os_info("[syscall] mprotect on COW VMA — unsupported "
+				"(M4)\n");
+			return SC_RET(SC_ENOSYS);
+		}
+		if (!(v->flags & UML_NT_VMA_FILE))
+			nops++;
+		cur = (end < v->end) ? end : v->end;
 	}
-	if (v->flags & UML_NT_VMA_COW) {
-		os_info("[syscall] mprotect on COW VMA — unsupported "
-			"(M4)\n");
-		return SC_RET(SC_ENOSYS);
-	}
-	if (v->flags & UML_NT_VMA_FILE) {
+	if (nops == 0) {
 		/* File VMAs keep the union-privileged RWX view (vma.h
-		 * note): a restriction (glibc's RELRO mprotect) would
-		 * brick later refills and fault repairs for no boot
-		 * benefit — ack the call, change nothing. Guards
-		 * under the range still die (the change wins). */
-		int killed = uml_nt_guard_del_range(c->mm, addr,
-						    addr + len);
+		 * note): a restriction (glibc's RELRO mprotect, which
+		 * may span multiple chunk VMAs when a large library is
+		 * split across buddy blocks) would brick later refills
+		 * and fault repairs for no boot benefit — ack the call,
+		 * change nothing. Guards under the range still die (the
+		 * change wins). */
+		int killed = uml_nt_guard_del_range(c->mm, addr, end);
 
 		os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x (file "
 			"VMA — view stays RWX, %d guard(s) cleared)\n",
 			addr, len, prot, killed);
 		return 0;
 	}
-	/* M5.6a root-cause fix: the view PROTECT is reserved BEFORE the
-	 * guard state / VMA prot moves — a dropped op here leaves the
+	/* M5.6a root-cause fix: the view PROTECT ops are reserved BEFORE
+	 * the guard state / VMA prot moves — a dropped op here leaves the
 	 * fault truth (the guard table / VMA prot) and the stub's view
 	 * silently diverged (e.g. a NOACCESS guard the guest writes
 	 * straight through). Refusal is loud, Linux-shaped. */
-	if (uml_nt_sc_plan_reserve(c, 1) < 0) {
+	if (uml_nt_sc_plan_reserve(c, nops) < 0) {
 		os_info("[syscall] mprotect 0x%llx+%llu: view-swap plan "
 			"full — ENOMEM\n", addr, len);
 		return SC_RET(SC_ENOMEM);
 	}
-	if (addr == v->start && addr + len == v->end) {
-		int killed = uml_nt_guard_del_range(c->mm, addr,
-						    addr + len);
+	for (cur = addr; cur < end; ) {
+		unsigned long long piece, plen;
+		int killed;
 
-		if (uml_nt_vma_chg(c->mm, addr, addr + len, prot) < 0)
+		v = uml_nt_vma_find(c->mm, cur);
+		if (v == NULL || v->end <= cur)
 			return SC_RET(SC_ENOMEM);
-		/* An mprotect that makes a range exec-able for the
-		 * FIRST time sweeps it too (D20 (a) — an unpatched
-		 * guest syscall would be a real host syscall). Anon
-		 * pages sweep to zero patches; file VMAs already
-		 * swept at map (returned above). */
-		if ((a[2] & SC_PROT_EXEC) &&
-		    uml_nt_mmap_sweep(c, addr, len) < 0)
-			return SC_RET(SC_EFAULT);
-		os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x "
-			"(whole VMA, was lprot 0x%llx, %d guard(s) "
-			"cleared)\n", addr, len, prot, a[2], killed);
-	} else {
-		int killed = uml_nt_guard_del_range(c->mm, addr,
-						    addr + len);
-
-		if (prot == UML_NT_PAGE_NOACCESS) {
-			if (uml_nt_guard_add(c->mm, addr, addr + len) < 0)
-				return SC_RET(SC_ENOMEM);
-		} else if ((a[2] & SC_PROT_EXEC) &&
-			   uml_nt_mmap_sweep(c, addr, len) < 0) {
-			return SC_RET(SC_EFAULT);
+		piece = (end < v->end) ? end : v->end;
+		plen = piece - cur;
+		killed = uml_nt_guard_del_range(c->mm, cur, piece);
+		if (v->flags & UML_NT_VMA_FILE) {
+			cur = piece;
+			continue;
 		}
-		os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x "
-			"(sub-run, was lprot 0x%llx, %d guard(s) %s)\n",
-			addr, len, prot, a[2], killed,
-			(prot == UML_NT_PAGE_NOACCESS) ? "armed" :
-			"cleared");
+		if (cur == v->start && piece == v->end) {
+			if (uml_nt_vma_chg(c->mm, cur, piece, prot) < 0)
+				return SC_RET(SC_ENOMEM);
+			/* An mprotect that makes a range exec-able for the
+			 * FIRST time sweeps it too (D20 (a) — an unpatched
+			 * guest syscall would be a real host syscall). Anon
+			 * pages sweep to zero patches; file VMAs already
+			 * swept at map (returned above). */
+			if ((a[2] & SC_PROT_EXEC) &&
+			    uml_nt_mmap_sweep(c, cur, plen) < 0)
+				return SC_RET(SC_EFAULT);
+			os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x "
+				"(whole VMA, was lprot 0x%llx, %d guard(s) "
+				"cleared)\n", cur, plen, prot, a[2], killed);
+		} else {
+			if (prot == UML_NT_PAGE_NOACCESS) {
+				if (uml_nt_guard_add(c->mm, cur, piece) < 0)
+					return SC_RET(SC_ENOMEM);
+			} else if ((a[2] & SC_PROT_EXEC) &&
+				   uml_nt_mmap_sweep(c, cur, plen) < 0) {
+				return SC_RET(SC_EFAULT);
+			}
+			os_info("[syscall] mprotect 0x%llx+%llu -> 0x%x "
+				"(sub-run, was lprot 0x%llx, %d guard(s) %s)\n",
+				cur, plen, prot, a[2], killed,
+				(prot == UML_NT_PAGE_NOACCESS) ? "armed" :
+				"cleared");
+		}
+		uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT, prot, cur,
+				   plen, 0);
+		cur = piece;
 	}
-	uml_nt_sc_plan_add(c, UML_NT_FOP_PROTECT, prot, addr,
-		 len, 0);
 	return 0;
 }
 
