@@ -28,8 +28,62 @@
 #include <linux/mm.h>
 #include <asm/page.h>
 #include <physalloc.h>
+#include <runpool_model.h>
 
 #define RUN_ORDER (UML_NT_PHYS_RUN_SHIFT - PAGE_SHIFT)
+
+/* M5.6a K8 [runpool]: the released-run cache. The guest's runs and
+ * the kernel's own page cache share one zone; the exact span trim
+ * returns unused tails at RUN_ORDER while the kernel scatters order-0
+ * pages between the freed run blocks. Referees 39986204407/
+ * 39986213745 died why='a' on a single-run COW with ~5 MiB free after
+ * the 13 MiB hwdb.bin map had already failed order-4 handouts with
+ * 20 MiB free. Keep up to 64 released runs (4 MiB) out of the buddy
+ * and hand them back on the fault path; a buddy failure drains the
+ * pool and retries, so nothing hides from the kernel. The pure half
+ * (put/get/pop) is host-tested — tests/test_runpool.c. */
+#define UML_NT_RUNPOOL_MAX_RUNS 64
+static struct uml_nt_runpool g_runpool;
+static int g_runpool_ready;
+
+static void runpool_init_once(void)
+{
+	if (!g_runpool_ready) {
+		uml_nt_runpool_init(&g_runpool, UML_NT_RUNPOOL_MAX_RUNS,
+				    UML_NT_RUNPOOL_ENTRIES);
+		g_runpool_ready = 1;
+	}
+}
+
+/* Hand every pooled span back to the buddy (the allocator's failure
+ * path — the memory must be visible to the kernel again). */
+static void runpool_drain(void)
+{
+	unsigned long long off;
+	unsigned int nruns;
+	int total = 0;
+
+	while (uml_nt_runpool_pop(&g_runpool, &off, &nruns)) {
+		struct page *pg = pfn_to_page(off >> PAGE_SHIFT);
+		int r;
+
+		for (r = 0; r < nruns; r++)
+			__free_pages(pg + (r << RUN_ORDER), RUN_ORDER);
+		total += nruns;
+	}
+	if (total) {
+		clear_zone_watermark_boost();
+		printk(KERN_INFO "[runpool] drained %d run(s) to the buddy "
+		       "under alloc pressure\n", total);
+	}
+}
+
+void uml_nt_runpool_stats(int *entries, int *runs)
+{
+	runpool_init_once();
+	*entries = uml_nt_runpool_entries(&g_runpool);
+	*runs = (int)uml_nt_runpool_runs(&g_runpool);
+}
 
 static int runs_order(int n)
 {
@@ -57,6 +111,21 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 
 	if (nruns < 1 || order > MAX_PAGE_ORDER)
 		return -1;
+
+	/* [runpool] first: a released span is contiguous, refcount-1
+	 * backing — exactly what the buddy would have to reassemble
+	 * from a fragmented free list. */
+	runpool_init_once();
+	{
+		long long poff = uml_nt_runpool_get(&g_runpool,
+						    (unsigned int)nruns);
+
+		if (poff >= 0) {
+			*page_out = pfn_to_page((unsigned long long)poff >>
+						PAGE_SHIFT);
+			return poff;
+		}
+	}
 
 	/* D25 (Shelley 2026-10-03, to-shelley 134): the handout ASSERT.
 	 * A block the buddy just handed must be a clean free block —
@@ -88,8 +157,16 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 				if (pg != NULL)
 					break;
 			}
-			if (pg == NULL)
+			if (pg == NULL) {
+				/* [runpool] the shared buddy is dry for this
+				 * order — give the cached runs back and retry
+				 * once before failing the fault (why='a'). */
+				if (uml_nt_runpool_runs(&g_runpool) != 0) {
+					runpool_drain();
+					continue;
+				}
 				return -1;
+			}
 		}
 		if (!PageSlab(pg) && !PageReserved(pg) &&
 		    page_ref_count(pg) == 1) {
@@ -119,8 +196,15 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 void uml_nt_phys_backend_free(void *page, int nruns)
 {
 	struct page *pg = (struct page *)page;
+	unsigned long long off;
 	int r;
 
+	if (pg == NULL || nruns <= 0)
+		return;
+	runpool_init_once();
+	off = (unsigned long long)page_to_pfn(pg) << PAGE_SHIFT;
+	if (uml_nt_runpool_put(&g_runpool, off, (unsigned int)nruns) == 0)
+		return;
 	for (r = 0; r < nruns; r++)
 		__free_pages(pg + (r << RUN_ORDER), RUN_ORDER);
 	clear_zone_watermark_boost();

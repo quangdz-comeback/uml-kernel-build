@@ -22,6 +22,9 @@ jobs:
           bash uml-nt/tests/test_console.sh
           # M5.6a slice D: the replay single-step (TF) state machine
           bash uml-nt/tests/test_ss.sh
+          # M5.6a K8: the backend run pool (fragmentation fix) — the
+          # put/get/pop/drain model the kernel's physbackend ships.
+          bash uml-nt/tests/test_runpool.sh
           # M3.7 uaccess walker (D15) over the vma tree
           bash uml-nt/tests/test_uaccess.sh
           # M4.1 bench stats — the pure math the freestanding kernel
@@ -65,4 +68,5 @@ jobs:
             uml-nt/tests/test_os_windows_skeleton.sh uml-nt/tests/test_scan_patch.sh \
             uml-nt/tests/test_mm.sh uml-nt/tests/test_elf.sh \
             uml-nt/tests/test_uaccess.sh uml-nt/tests/test_bench.sh \
-            uml-nt/tests/test_console.sh uml-nt/tests/test_ss.sh
+            uml-nt/tests/test_console.sh uml-nt/tests/test_ss.sh \
+            uml-nt/tests/test_runpool.sh

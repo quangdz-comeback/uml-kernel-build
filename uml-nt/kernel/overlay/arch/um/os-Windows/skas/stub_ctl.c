@@ -2438,7 +2438,7 @@ void uml_nt_census(const char *tag, long long pid)
 	unsigned long top_pid[UML_NT_CENSUS_TOP] = { 0, 0, 0 };
 	int top_runs[UML_NT_CENSUS_TOP] = { 0, 0, 0 };
 	int used = 0, parked = 0, live = 0, dying = 0;
-	int fce = 0, fcr = 0;
+	int fce = 0, fcr = 0, rpe = 0, rpr = 0;
 
 	if (tag[0] == 'p' && census_pressure_left-- <= 0)
 		return;
@@ -2500,13 +2500,15 @@ void uml_nt_census(const char *tag, long long pid)
 	if (ph != NULL)
 		uml_nt_phys_table_stats(ph, &used, &parked);
 	uml_nt_fcache_stats(&fce, &fcr);
+	uml_nt_runpool_stats(&rpe, &rpr);
 	os_info("[census] %s pid %lld: used=%d/%d runs (%llu MiB) "
-		"parked=%d fc=%de/%dr live=%d dying=%d | free=%lluM "
-		"file=%lluM slab=%lluM | top %lu:%dr %lu:%dr %lu:%dr\n",
+		"parked=%d fc=%de/%dr pool=%de/%dr live=%d dying=%d | "
+		"free=%lluM file=%lluM slab=%lluM | "
+		"top %lu:%dr %lu:%dr %lu:%dr\n",
 		tag, pid, used,
 		(int)(uml_boot.physmem_size >> UML_NT_PHYS_RUN_SHIFT),
 		((unsigned long long)used << UML_NT_PHYS_RUN_SHIFT) >> 20,
-		parked, fce, fcr, live, dying,
+		parked, fce, fcr, rpe, rpr, live, dying,
 		(((unsigned long long)global_zone_page_state(NR_FREE_PAGES))
 		 << PAGE_SHIFT) >> 20,
 		(((unsigned long long)global_node_page_state(NR_FILE_PAGES))
