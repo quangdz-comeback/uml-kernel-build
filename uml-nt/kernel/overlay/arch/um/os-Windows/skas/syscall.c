@@ -388,6 +388,13 @@ static int uml_nt_mmap_refill_ok(struct uml_nt_mm *mm,
  * must land on a FREE range — silently replacing VMAs would need
  * stub-side view surgery (UnmapViewOfFile is whole-view); MAP_FIXED
  * over anything = -ENOMEM loud for now. */
+static int lazy_unmap(struct uml_nt_stub_conn *c, unsigned long long start,
+		      unsigned long long end);
+static unsigned long long lazy_find_free(struct uml_nt_stub_conn *c,
+					 unsigned long long len,
+					 unsigned long long base,
+					 unsigned long long limit);
+
 static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 				   const unsigned long long *a)
 {
@@ -411,6 +418,15 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 	len = (len + UML_NT_PHYS_RUN_SIZE - 1) &
 	      ~(UML_NT_PHYS_RUN_SIZE - 1);
 	prot = linux_prot_to_nt(lprot);
+
+	/* D28: an explicit MAP_FIXED replace over a deferred file region
+	 * drops (full cover) or materializes (partial) it first — the
+	 * region is invisible to the VMA replace below. */
+	if ((flags & SC_MAP_FIXED) && addr != 0 && len != 0 &&
+	    uml_nt_lazy_overlap(c, addr, addr + len)) {
+		if (lazy_unmap(c, addr, addr + len) < 0)
+			return SC_RET(SC_ENOMEM);
+	}
 
 	if (flags & SC_MAP_FIXED) {
 		static unsigned long long runs[UML_NT_PHYS_MAX_RUNS];
@@ -602,9 +618,9 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 						      (long long)runs[i], c);
 		}
 	} else {
-		va = uml_nt_vma_find_free(c->mm, len, UML_NT_SYSCALLS_BASE,
-					  UML_NT_SYSCALLS_BASE +
-					  uml_boot.physmem_size);
+		va = lazy_find_free(c, len, UML_NT_SYSCALLS_BASE,
+				    UML_NT_SYSCALLS_BASE +
+				    uml_boot.physmem_size);
 		if (va == 0)
 			return SC_RET(SC_ENOMEM);
 	}
@@ -1328,6 +1344,18 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 static unsigned long long lazy_demand_runs, lazy_eager_runs;
 static int lazy_reg_budget = 16, lazy_drop_budget = 24;
 static int lazy_demand_budget = 32;
+/* live deferred regions + their file/touched run totals (the D28
+ * point-1 instrument: the census prints the running ratio). */
+static int g_regions;
+static unsigned long long g_file_runs, g_touched;
+
+void uml_nt_lazy_stats(int *regions, unsigned long long *file_runs,
+		       unsigned long long *touched)
+{
+	*regions = g_regions;
+	*file_runs = g_file_runs;
+	*touched = g_touched;
+}
 
 static struct uml_nt_lazy_region *lazy_find(struct uml_nt_stub_conn *c,
 					    unsigned long long addr)
@@ -1357,6 +1385,29 @@ int uml_nt_lazy_overlap(struct uml_nt_stub_conn *c, unsigned long long start,
 	return 0;
 }
 
+/* A hint-based VA search that SEES the deferred regions: the VMA
+ * tree does not, so a plain find_free would hand the next mapping
+ * the region's own VA (the guest would silently lose the file
+ * mapping). Step the base past every collision. 0 = none. */
+static unsigned long long lazy_find_free(struct uml_nt_stub_conn *c,
+					 unsigned long long len,
+					 unsigned long long base,
+					 unsigned long long limit)
+{
+	unsigned long long va;
+	int i;
+
+	for (i = 0; i < 8; i++) {
+		va = uml_nt_vma_find_free(c->mm, len, base, limit);
+		if (va == 0)
+			return 0;
+		if (!uml_nt_lazy_overlap(c, va, va + len))
+			return va;
+		base = va + len;
+	}
+	return 0;
+}
+
 static int lazy_register(struct uml_nt_stub_conn *c, unsigned long long va,
 			 unsigned long long slen, struct file *f,
 			 unsigned long long fsize)
@@ -1382,6 +1433,8 @@ static int lazy_register(struct uml_nt_stub_conn *c, unsigned long long va,
 	r->file = f;
 	r->used = 1;
 	r->touched_runs = 0;
+	g_regions++;
+	g_file_runs += slen >> UML_NT_PHYS_RUN_SHIFT;
 	if (lazy_reg_budget > 0) {
 		lazy_reg_budget--;
 		os_info("[lazyfile] register pid %lu va=0x%llx len=0x%llx "
@@ -1433,6 +1486,7 @@ static int lazy_run(struct uml_nt_stub_conn *c, struct uml_nt_lazy_region *r,
 	}
 	r->touched_runs++;
 	lazy_demand_runs++;
+	g_touched++;
 	return 0;
 }
 
@@ -1530,9 +1584,53 @@ int uml_nt_lazy_eager(struct uml_nt_stub_conn *c, unsigned long long start,
 				r->touched_runs, lazy_demand_runs,
 				lazy_eager_runs);
 		}
+		g_regions--;
+		g_file_runs -= (r->end - r->start) >>
+			       UML_NT_PHYS_RUN_SHIFT;
+		g_touched -= r->touched_runs;
 		fput(r->file);
 		r->used = 0;
 	}
+	return 0;
+}
+
+/* A munmap/MAP_FIXED replace over a deferred region: a FULL cover
+ * drops it (upstream unmaps the mapping — no bytes ever needed); a
+ * partial cover materializes eagerly and lets the normal VMA path
+ * carve it. -1 = refusal. */
+static int lazy_unmap(struct uml_nt_stub_conn *c, unsigned long long start,
+		      unsigned long long end)
+{
+	int i, partial = 0;
+
+	for (i = 0; i < UML_NT_LAZY_MAX; i++) {
+		struct uml_nt_lazy_region *r = &c->lazy[i];
+
+		if (!r->used || r->start >= end || r->end <= start)
+			continue;
+		if (start <= r->start && end >= r->end) {
+			if (lazy_drop_budget > 0) {
+				lazy_drop_budget--;
+				os_info("[lazyfile] drop pid %lu va=0x%llx "
+					"file_runs=%llu touched=%llu "
+					"(unmapped)\n",
+					(unsigned long)c->pid, r->start,
+					(r->end - r->start) >>
+					UML_NT_PHYS_RUN_SHIFT,
+					r->touched_runs);
+			}
+			g_regions--;
+			g_file_runs -= (r->end - r->start) >>
+				       UML_NT_PHYS_RUN_SHIFT;
+			g_touched -= r->touched_runs;
+			fput(r->file);
+			r->used = 0;
+		} else {
+			partial = 1;
+		}
+	}
+	if (partial)
+		return uml_nt_lazy_eager(c, start, end);
 	return 0;
 }
 
@@ -1571,6 +1669,10 @@ void uml_nt_lazy_drop(struct uml_nt_stub_conn *c)
 				UML_NT_PHYS_RUN_SHIFT,
 				r->touched_runs, lazy_demand_runs);
 		}
+		g_regions--;
+		g_file_runs -= (r->end - r->start) >>
+			       UML_NT_PHYS_RUN_SHIFT;
+		g_touched -= r->touched_runs;
 		fput(r->file);
 		r->used = 0;
 	}
@@ -1642,7 +1744,7 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 	 * mapping this way). */
 	if (addr != 0 && len != 0 &&
 	    uml_nt_lazy_overlap(c, addr, addr + len)) {
-		if (uml_nt_lazy_eager(c, addr, addr + len) < 0) {
+		if (lazy_unmap(c, addr, addr + len) < 0) {
 			fdput(fdesc);
 			return SC_RET(SC_ENOMEM);
 		}
@@ -1732,25 +1834,11 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 				va = rs;
 				map_start = addr;
 			} else {
-				int tries;
-
-				va = 0;
-				for (tries = 0; tries < 8; tries++) {
-					va = uml_nt_vma_find_free(c->mm, slen,
-							hint_base,
-							UML_NT_SYSCALLS_BASE +
-							uml_boot.physmem_size);
-					if (va == 0)
-						break;
-					/* D27: the VMA-free search cannot
-					 * see a deferred region — step the
-					 * hint past it rather than land a
-					 * fresh mapping on top. */
-					if (!uml_nt_lazy_overlap(c, va,
-								 va + slen))
-						break;
-					hint_base = va + slen;
-				}
+				/* D28: a region-aware search — the VMA
+				 * tree cannot see a deferred region. */
+				va = lazy_find_free(c, slen, hint_base,
+						    UML_NT_SYSCALLS_BASE +
+						    uml_boot.physmem_size);
 				if (va == 0) {
 					fdput(fdesc);
 					return SC_RET(SC_ENOMEM);
@@ -2020,10 +2108,11 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 		return SC_RET(SC_EINVAL);
 	len = (len + UML_NT_PHYS_RUN_SIZE - 1) &
 	      ~(UML_NT_PHYS_RUN_SIZE - 1);
-	/* D27: unmap of a deferred region — materialize it so the VMA
-	 * enumeration below owns every byte it must release. */
+	/* D28: unmap of a deferred region — a full cover drops it (no
+	 * bytes ever needed); a partial cover materializes it so the
+	 * VMA enumeration below owns every byte it must release. */
 	if (uml_nt_lazy_overlap(c, addr, addr + len)) {
-		if (uml_nt_lazy_eager(c, addr, addr + len) < 0)
+		if (lazy_unmap(c, addr, addr + len) < 0)
 			return SC_RET(SC_ENOMEM);
 	}
 	/* Partial-VMA refusal + the view enumeration in one pass:

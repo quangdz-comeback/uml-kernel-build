@@ -453,6 +453,10 @@ int uml_nt_lazy_overlap(struct uml_nt_stub_conn *c, unsigned long long start,
 int uml_nt_lazy_clone(struct uml_nt_stub_conn *child,
 		      struct uml_nt_stub_conn *parent);
 void uml_nt_lazy_drop(struct uml_nt_stub_conn *c);
+/* D28 instrument: live deferred regions + their file/touched run
+ * totals (the census prints the ratio the lazy win quantifies). */
+void uml_nt_lazy_stats(int *regions, unsigned long long *file_runs,
+		       unsigned long long *touched);
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
  * = the guest syscall ABI). Installs the uaccess mm for the handler,

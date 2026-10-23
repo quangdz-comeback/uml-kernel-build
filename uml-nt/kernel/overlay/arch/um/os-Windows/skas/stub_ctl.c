@@ -2501,6 +2501,20 @@ void uml_nt_census(const char *tag, long long pid)
 		uml_nt_phys_table_stats(ph, &used, &parked);
 	uml_nt_fcache_stats(&fce, &fcr);
 	uml_nt_runpool_stats(&rpe, &rpr);
+	{
+		/* D28 instrument: the live deferred file regions and their
+		 * file-run vs touched-run totals (the lazy win's metric).
+		 * Budgeted — the census itself runs on every exec/exit. */
+		static int lazy_census_left = 24;
+		int lreg = 0;
+		unsigned long long lfr = 0, ltd = 0;
+
+		uml_nt_lazy_stats(&lreg, &lfr, &ltd);
+		if (lreg > 0 && lazy_census_left-- > 0)
+			os_info("[lazyfile] census pid %lld: regions=%d "
+				"file_runs=%llu touched=%llu\n",
+				pid, lreg, lfr, ltd);
+	}
 	os_info("[census] %s pid %lld: used=%d/%d runs (%llu MiB) "
 		"parked=%d fc=%de/%dr pool=%de/%dr live=%d dying=%d | "
 		"free=%lluM file=%lluM slab=%lluM | "
