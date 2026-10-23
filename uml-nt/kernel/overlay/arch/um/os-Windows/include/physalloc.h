@@ -268,4 +268,8 @@ int uml_nt_phys_parked(const struct uml_nt_phys *p);
 int uml_nt_phys_block_check(const struct uml_nt_phys *p, long long off,
 			    unsigned long long len);
 
+/* Reclaim one unmapped shared read-only file-cache entry when physical
+ * run allocation is under pressure (1 = reclaimed an entry, 0 = none). */
+int uml_nt_fcache_reclaim_one(void);
+
 #endif /* __UM_OS_WINDOWS_PHYSALLOC_H */

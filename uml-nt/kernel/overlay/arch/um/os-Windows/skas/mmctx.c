@@ -82,10 +82,13 @@ int uml_nt_mmctx_init(struct mm_id *id)
 		return -ENODEV;
 	}
 
-	c = kzalloc(sizeof(*c), GFP_KERNEL);
-	mm = kzalloc(sizeof(*mm), GFP_KERNEL);
-	if (c == NULL || mm == NULL)
-		goto fail;
+	c = kvzalloc(sizeof(*c), GFP_KERNEL);
+	mm = kvzalloc(sizeof(*mm), GFP_KERNEL);
+	if (c == NULL || mm == NULL) {
+		kvfree(mm);
+		kvfree(c);
+		return -ENOMEM;
+	}
 
 	/* Fresh address-space bookkeeping: empty VMA tree + the shared
 	 * physical run reference table over the buddy backend. */
@@ -240,14 +243,16 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * its own teardown drops and hold every dying mm's block
 	 * dead — a leak, not a safety win). */
 	c->nviews = 0;
-	uml_nt_mm_drop(c->mm, c->ph);
-	uml_nt_phys_settle(c->ph, c);
+	if (c->mm != NULL && c->ph != NULL) {
+		uml_nt_mm_drop(c->mm, c->ph);
+		uml_nt_phys_settle(c->ph, c);
+	}
 	if (uml_nt_syscall_mm() == c->mm)
 		uml_nt_uacc_set_mm(NULL);
-	kfree(c->mm);
+	kvfree(c->mm);
 	if (!c->ph_shared)
-		kfree(c->ph);
-	/* Stamp BEFORE kfree (048): any consumer still reaching this
+		kvfree(c->ph);
+	/* Stamp BEFORE kvfree (048): any consumer still reaching this
 	 * conn through a retained pointer must see DEAD and refuse the
 	 * walk (the census caught walks through freed-then-reused mm
 	 * structs — the VMA table carried pointer-shaped garbage: the
@@ -255,7 +260,7 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * that check ran out of order with the fork seed (d9808b9,
 	 * reverted). */
 	c->dead_magic = UML_NT_CONN_DEAD;
-	kfree(c);
+	kvfree(c);
 	id->nt_conn = NULL;
 	id->pid = -1;
 	/* [deadwrite]: the teardown wrote nothing through the funnel

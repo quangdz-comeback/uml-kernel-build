@@ -8110,6 +8110,8 @@ no_zero:
 				&parent->mm->vma[vi2];
 			unsigned long long po, pe;
 
+			if (!uml_nt_prot_writable(pv->prot))
+				continue;
 			for (po = pv->run_off,
 			     pe = pv->run_off +
 				  (pv->end - pv->start);

@@ -79,8 +79,18 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 		pg = alloc_pages(GFP_KERNEL | __GFP_ZERO |
 				 __GFP_RETRY_MAYFAIL | __GFP_NOWARN, order);
 		clear_zone_watermark_boost();
-		if (pg == NULL)
-			return -1;
+		if (pg == NULL) {
+			while (uml_nt_fcache_reclaim_one() > 0) {
+				pg = alloc_pages(GFP_KERNEL | __GFP_ZERO |
+						 __GFP_RETRY_MAYFAIL |
+						 __GFP_NOWARN, order);
+				clear_zone_watermark_boost();
+				if (pg != NULL)
+					break;
+			}
+			if (pg == NULL)
+				return -1;
+		}
 		if (!PageSlab(pg) && !PageReserved(pg) &&
 		    page_ref_count(pg) == 1) {
 			if (r_order > 0) {

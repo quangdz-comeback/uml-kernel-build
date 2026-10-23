@@ -412,7 +412,7 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 	prot = linux_prot_to_nt(lprot);
 
 	if (flags & SC_MAP_FIXED) {
-		unsigned long long runs[UML_NT_VMA_MAX];
+		static unsigned long long runs[UML_NT_PHYS_MAX_RUNS];
 		unsigned long long req_len = a[1];
 		int nfree, i;
 
@@ -548,7 +548,7 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 			return SC_RET(SC_ENOMEM);
 		}
 		nfree = uml_nt_vma_span_runs(c->mm, va, va + len, runs,
-					     UML_NT_VMA_MAX);
+					     UML_NT_PHYS_MAX_RUNS);
 		if (nfree < 0)
 			return SC_RET(SC_ENOMEM);
 		if (nfree > 0) {
@@ -755,6 +755,336 @@ rollback_anon:
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 				    unsigned long entry_off, void *mark);
 
+/* Shared read-only / executable file-run cache (M5.6a):
+ * Dynamic libraries (libc, libsystemd-shared, libcrypto, libgcrypt, ...)
+ * and read-only data files (LC_COLLATE, hwdb.bin, ld.so.cache) are
+ * mapped MAP_PRIVATE by every daemon and generator. For ELF shared
+ * libraries, all 64 KiB runs strictly before the first PF_W PT_LOAD
+ * segment (.data.rel.ro / .got / .data / .bss) are 100% read-only or
+ * executable; for non-ELF PROT_READ mappings at offset 0, all runs are
+ * read-only. Caching those read-only prefix runs across processes and
+ * mapping them as UML_NT_PAGE_EXECUTE_READ (non-writable) avoids
+ * duplicating ~18 MiB of physical runs per process while keeping the
+ * writable .data/.bss tail runs private per process. */
+#define UML_NT_FCACHE_MAX    64
+#define UML_NT_FCACHE_CHUNKS 32
+
+struct uml_nt_fcache_chunk {
+	unsigned long long run_off;
+	unsigned int nruns;
+};
+
+struct uml_nt_fcache_entry {
+	int used;
+	const void *sb;
+	unsigned long ino;
+	unsigned long long fsize;
+	long long mtime_sec;
+	long mtime_nsec;
+	unsigned int ro_runs;
+	unsigned int nchunks;
+	unsigned long long last_use;
+	struct uml_nt_fcache_chunk chunks[UML_NT_FCACHE_CHUNKS];
+};
+
+static struct uml_nt_fcache_entry g_fcache[UML_NT_FCACHE_MAX];
+static struct uml_nt_phys *g_fcache_ph;
+static unsigned long long g_fcache_tick;
+static unsigned char fcache_run_swept[UML_NT_PHYS_MAX_RUNS];
+
+struct uml_nt_elf64_ehdr {
+	unsigned char e_ident[16];
+	u16 e_type;
+	u16 e_machine;
+	u32 e_version;
+	u64 e_entry;
+	u64 e_phoff;
+	u64 e_shoff;
+	u32 e_flags;
+	u16 e_ehsize;
+	u16 e_phentsize;
+	u16 e_phnum;
+	u16 e_shentsize;
+	u16 e_shnum;
+	u16 e_shstrndx;
+};
+
+struct uml_nt_elf64_phdr {
+	u32 p_type;
+	u32 p_flags;
+	u64 p_offset;
+	u64 p_vaddr;
+	u64 p_paddr;
+	u64 p_filesz;
+	u64 p_memsz;
+	u64 p_align;
+};
+
+static unsigned int uml_nt_inspect_ro_prefix(struct file *f,
+					     unsigned long long fsize,
+					     unsigned long long slen)
+{
+	static struct uml_nt_elf64_phdr phs[32];
+	struct uml_nt_elf64_ehdr eh;
+	unsigned int total_runs = (unsigned int)(slen / UML_NT_PHYS_RUN_SIZE);
+	unsigned int ro_runs, i;
+	unsigned long long min_rw, ro_bytes;
+	int seen_load = 0;
+	loff_t pos = 0;
+
+	if (f == NULL || fsize == 0 || total_runs == 0)
+		return 0;
+	if (fsize < sizeof(eh) ||
+	    kernel_read(f, &eh, sizeof(eh), &pos) != (ssize_t)sizeof(eh))
+		return total_runs;
+	if (eh.e_ident[0] != 0x7f || eh.e_ident[1] != 'E' ||
+	    eh.e_ident[2] != 'L' || eh.e_ident[3] != 'F')
+		return total_runs;
+	if (eh.e_ident[4] != 2 ||
+	    eh.e_phentsize != sizeof(struct uml_nt_elf64_phdr) ||
+	    eh.e_phnum == 0 || eh.e_phnum > 32)
+		return 0;
+	if (eh.e_phoff + (unsigned long long)eh.e_phnum *
+	    sizeof(struct uml_nt_elf64_phdr) > fsize)
+		return 0;
+	pos = (loff_t)eh.e_phoff;
+	if (kernel_read(f, phs,
+			(size_t)eh.e_phnum * sizeof(struct uml_nt_elf64_phdr),
+			&pos) !=
+	    (ssize_t)((size_t)eh.e_phnum * sizeof(struct uml_nt_elf64_phdr)))
+		return 0;
+
+	min_rw = slen;
+	for (i = 0; i < eh.e_phnum; i++) {
+		if (phs[i].p_type != 1)
+			continue;
+		if (!seen_load) {
+			if ((phs[i].p_vaddr & ~(UML_NT_PHYS_RUN_SIZE - 1)) != 0)
+				return 0;
+			seen_load = 1;
+		}
+		if ((phs[i].p_flags & 2) && phs[i].p_vaddr < min_rw)
+			min_rw = phs[i].p_vaddr;
+	}
+	if (!seen_load)
+		return 0;
+	ro_runs = (unsigned int)(min_rw / UML_NT_PHYS_RUN_SIZE);
+	if (ro_runs > total_runs)
+		ro_runs = total_runs;
+	if (ro_runs == 0)
+		return 0;
+	ro_bytes = (unsigned long long)ro_runs * UML_NT_PHYS_RUN_SIZE;
+	for (i = 0; i < eh.e_phnum; i++) {
+		if (phs[i].p_type != 1 || phs[i].p_vaddr >= ro_bytes)
+			continue;
+		if (phs[i].p_flags & 2)
+			return 0;
+		if (phs[i].p_vaddr != phs[i].p_offset ||
+		    phs[i].p_filesz != phs[i].p_memsz)
+			return 0;
+		if (phs[i].p_flags & 1) {
+			unsigned long long ex_end =
+				(phs[i].p_vaddr + phs[i].p_filesz +
+				 UML_NT_FAULT_PAGE_SIZE - 1) &
+				~(UML_NT_FAULT_PAGE_SIZE - 1);
+
+			if (ex_end > ro_bytes)
+				return 0;
+		}
+	}
+	return ro_runs;
+}
+
+int uml_nt_fcache_reclaim_one(void)
+{
+	struct uml_nt_phys *ph = g_fcache_ph;
+	int best = -1;
+	unsigned long long best_use = ~0ULL;
+	int i;
+
+	if (ph == NULL)
+		return 0;
+	for (i = 0; i < UML_NT_FCACHE_MAX; i++) {
+		struct uml_nt_fcache_entry *e = &g_fcache[i];
+		unsigned int k, r;
+		int busy = 0;
+
+		if (!e->used)
+			continue;
+		for (k = 0; k < e->nchunks && !busy; k++) {
+			unsigned long long sp = e->chunks[k].run_off;
+			unsigned int nruns = e->chunks[k].nruns;
+
+			for (r = 0; r < nruns; r++) {
+				long long roff = (long long)(sp +
+					(unsigned long long)r *
+					UML_NT_PHYS_RUN_SIZE);
+
+				if (uml_nt_phys_refs(ph, roff) != 1) {
+					busy = 1;
+					break;
+				}
+			}
+			if (!busy &&
+			    uml_nt_phys_mapped_probe !=
+			    (uml_nt_phys_mapped_fn)0 &&
+			    uml_nt_phys_mapped_probe((long long)sp,
+						     (int)nruns) != 0)
+				busy = 1;
+		}
+		if (!busy && e->last_use < best_use) {
+			best_use = e->last_use;
+			best = i;
+		}
+	}
+	if (best < 0)
+		return 0;
+	{
+		struct uml_nt_fcache_entry *e = &g_fcache[best];
+		unsigned int k, r;
+
+		e->used = 0;
+		for (k = 0; k < e->nchunks; k++) {
+			unsigned long long sp = e->chunks[k].run_off;
+			unsigned int nruns = e->chunks[k].nruns;
+
+			for (r = 0; r < nruns; r++) {
+				unsigned int r_idx = (unsigned int)
+					(sp / UML_NT_PHYS_RUN_SIZE) + r;
+
+				if (r_idx < UML_NT_PHYS_MAX_RUNS)
+					fcache_run_swept[r_idx] = 0;
+				uml_nt_phys_unref_for(ph,
+					(long long)(sp +
+					(unsigned long long)r *
+					UML_NT_PHYS_RUN_SIZE),
+					(const void *)0);
+			}
+		}
+	}
+	return 1;
+}
+
+static struct uml_nt_fcache_entry *uml_nt_fcache_get(
+	struct uml_nt_stub_conn *c, struct file *f,
+	unsigned long long fsize, unsigned int ro_runs)
+{
+	struct inode *inode = file_inode(f);
+	const void *sb = inode->i_sb;
+	unsigned long ino = inode->i_ino;
+	long long mtime_sec = inode_get_mtime_sec(inode);
+	long mtime_nsec = inode_get_mtime_nsec(inode);
+	struct uml_nt_fcache_entry *e = NULL;
+	unsigned int rem, k, r;
+	unsigned long long foff = 0;
+	int i, slot = -1;
+
+	g_fcache_ph = c->ph;
+	for (i = 0; i < UML_NT_FCACHE_MAX; i++) {
+		if (!g_fcache[i].used) {
+			if (slot < 0)
+				slot = i;
+			continue;
+		}
+		if (g_fcache[i].sb == sb &&
+		    g_fcache[i].ino == ino &&
+		    g_fcache[i].fsize == fsize &&
+		    g_fcache[i].mtime_sec == mtime_sec &&
+		    g_fcache[i].mtime_nsec == mtime_nsec &&
+		    g_fcache[i].ro_runs == ro_runs) {
+			g_fcache[i].last_use = ++g_fcache_tick;
+			return &g_fcache[i];
+		}
+	}
+	if (slot < 0) {
+		if (uml_nt_fcache_reclaim_one() > 0) {
+			for (i = 0; i < UML_NT_FCACHE_MAX; i++) {
+				if (!g_fcache[i].used) {
+					slot = i;
+					break;
+				}
+			}
+		}
+		if (slot < 0)
+			return NULL;
+	}
+
+	e = &g_fcache[slot];
+	e->used = 0;
+	e->nchunks = 0;
+	rem = ro_runs;
+	while (rem > 0) {
+		unsigned int want = (rem > UML_NT_MMAP_SPAN_RUNS) ?
+				    UML_NT_MMAP_SPAN_RUNS : rem;
+		long long sp = -1;
+		unsigned long long clen;
+
+		if (e->nchunks >= UML_NT_FCACHE_CHUNKS)
+			goto fail_fcache;
+		while (want >= 1) {
+			sp = uml_nt_phys_alloc_span(c->ph, (int)want);
+			if (sp >= 0 || want == 1)
+				break;
+			{
+				unsigned int p2 = 1;
+
+				while ((p2 << 1) < want)
+					p2 <<= 1;
+				want = p2;
+			}
+		}
+		if (sp < 0)
+			goto fail_fcache;
+		e->chunks[e->nchunks].run_off = (unsigned long long)sp;
+		e->chunks[e->nchunks].nruns = want;
+		e->nchunks++;
+		for (r = 0; r < want; r++) {
+			unsigned int r_idx =
+				(unsigned int)((unsigned long long)sp /
+					       UML_NT_PHYS_RUN_SIZE) + r;
+
+			if (r_idx < UML_NT_PHYS_MAX_RUNS)
+				fcache_run_swept[r_idx] = 0;
+		}
+		clen = (unsigned long long)want * UML_NT_PHYS_RUN_SIZE;
+		memset((char *)uml_boot.physmem_base + sp, 0, clen);
+		if (foff < fsize) {
+			unsigned long long avail = fsize - foff;
+			unsigned long long n = (clen < avail) ? clen : avail;
+			loff_t pos = (loff_t)foff;
+
+			if (kernel_read(f, (char *)uml_boot.physmem_base + sp,
+					n, &pos) != (ssize_t)n)
+				goto fail_fcache;
+		}
+		foff += clen;
+		rem -= want;
+	}
+	e->sb = sb;
+	e->ino = ino;
+	e->fsize = fsize;
+	e->mtime_sec = mtime_sec;
+	e->mtime_nsec = mtime_nsec;
+	e->ro_runs = ro_runs;
+	e->last_use = ++g_fcache_tick;
+	e->used = 1;
+	return e;
+
+fail_fcache:
+	for (k = 0; k < e->nchunks; k++) {
+		unsigned long long sp = e->chunks[k].run_off;
+		unsigned int nruns = e->chunks[k].nruns;
+
+		for (r = 0; r < nruns; r++)
+			uml_nt_phys_unref_for(c->ph,
+				(long long)(sp + (unsigned long long)r *
+					    UML_NT_PHYS_RUN_SIZE),
+				(const void *)0);
+	}
+	e->nchunks = 0;
+	return NULL;
+}
+
 /* File bytes at `off` → [map_start, map_start+len), zeros beyond EOF
  * (everywhere for the anon bss refill). Walks per-VMA pieces — the
  * range may cross VMAs (each segment mapping does); each piece lands
@@ -780,6 +1110,10 @@ static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
 			return -1;
 		}
 		piece = (end < v->end) ? end : v->end;
+		if (!uml_nt_prot_writable(v->prot)) {
+			cur = piece;
+			continue;
+		}
 		dst = v->run_off + (cur - v->start);
 		/* KCOPY WITNESS (M5.6a, referees 37089977192 +
 		 * 37091284391 decode): the [tctrip] negative witness
@@ -895,6 +1229,16 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 		}
 		piece = (end < v->end) ? end : v->end;
 		off = v->run_off + (cur - v->start);
+		if (!uml_nt_prot_writable(v->prot)) {
+			unsigned int r_idx =
+				(unsigned int)(off / UML_NT_PHYS_RUN_SIZE);
+
+			if (r_idx < UML_NT_PHYS_MAX_RUNS &&
+			    fcache_run_swept[r_idx]) {
+				cur = piece;
+				continue;
+			}
+		}
 		/* K6 [flatwr]: the sweep PATCHES guest code in place —
 		 * zero-alloc in-place decode (no kvmalloc/kvfree). */
 		{
@@ -911,6 +1255,20 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 			uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_MMAP_SWEEP,
 					    cur, piece - cur, off, sg,
 					    (long long)off);
+			if (!uml_nt_prot_writable(v->prot)) {
+				unsigned long long ro;
+
+				for (ro = off & ~(UML_NT_PHYS_RUN_SIZE - 1);
+				     ro < off + (piece - cur);
+				     ro += UML_NT_PHYS_RUN_SIZE) {
+					unsigned int r_idx =
+						(unsigned int)(ro /
+							UML_NT_PHYS_RUN_SIZE);
+
+					if (r_idx < UML_NT_PHYS_MAX_RUNS)
+						fcache_run_swept[r_idx] = 1;
+				}
+			}
 		}
 		cur = piece;
 	}
@@ -985,7 +1343,7 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 		return SC_RET(SC_EINVAL);
 	}
 	kind = uml_nt_vma_map_kind(c->mm, addr, addr + len, &v);
-	if (kind < 0 && !(flags & SC_MAP_FIXED)) {
+	if (kind != 0 && !(flags & SC_MAP_FIXED)) {
 		/* c3: without MAP_FIXED the address is a HINT, not a
 		 * location — Linux searches free space from it. Our
 		 * run-rounding makes the loader's next hint overlap
@@ -1070,6 +1428,74 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 				}
 				map_start = va;
 			}
+			cur = va;
+			if (!(flags & (SC_MAP_SHARED | SC_MAP_FIXED)) &&
+			    off == 0 && lprot == SC_PROT_READ) {
+				unsigned int ro_runs =
+					uml_nt_inspect_ro_prefix(f, fsize,
+								 slen);
+				struct uml_nt_fcache_entry *fce = NULL;
+
+				if (ro_runs > 0)
+					fce = uml_nt_fcache_get(c, f, fsize,
+								ro_runs);
+				if (fce != NULL) {
+					unsigned int ci;
+
+					for (ci = 0; ci < fce->nchunks; ci++) {
+						unsigned long long sp_c =
+							fce->chunks[ci].run_off;
+						unsigned long long clen_c =
+							(unsigned long long)
+							fce->chunks[ci].nruns *
+							UML_NT_PHYS_RUN_SIZE;
+						unsigned long long roff;
+
+						if (uml_nt_sc_plan_reserve(c, 1) < 0)
+							goto rollback_chunks;
+						for (roff = sp_c;
+						     roff < sp_c + clen_c;
+						     roff += UML_NT_PHYS_RUN_SIZE) {
+							if (uml_nt_phys_ref(c->ph,
+								(long long)roff) < 0) {
+								unsigned long long r2;
+
+								for (r2 = sp_c;
+								     r2 < roff;
+								     r2 += UML_NT_PHYS_RUN_SIZE)
+									uml_nt_phys_unref_for(
+										c->ph,
+										(long long)r2,
+										(const void *)0);
+								goto rollback_chunks;
+							}
+						}
+						if (uml_nt_vma_add_gen(
+							c->mm, cur,
+							cur + clen_c, sp_c,
+							UML_NT_PAGE_EXECUTE_READ,
+							UML_NT_VMA_FILE,
+							(unsigned long long)
+							uml_nt_phys_gen(
+								c->ph,
+								(long long)sp_c)) < 0) {
+							for (roff = sp_c;
+							     roff < sp_c + clen_c;
+							     roff += UML_NT_PHYS_RUN_SIZE)
+								uml_nt_phys_unref_for(
+									c->ph,
+									(long long)roff,
+									(const void *)0);
+							goto rollback_chunks;
+						}
+						uml_nt_sc_plan_add(
+							c, UML_NT_FOP_MAP,
+							UML_NT_PAGE_EXECUTE_READ,
+							cur, clen_c, sp_c);
+						cur += clen_c;
+					}
+				}
+			}
 			/* Chunk allocation with buddy-order fallback and full
 			 * rollback on mid-loop failure:
 			 * 1. Try min(rem_runs, UML_NT_MMAP_SPAN_RUNS) first so a
@@ -1081,7 +1507,7 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 			 * 3. If any chunk fails (span alloc, plan reserve, or
 			 *    VMA table), unref all runs of every chunk added in
 			 *    [va, cur) and roll back VMAs + plan ops. */
-			for (cur = va; cur < va + slen; cur += clen) {
+			for (; cur < va + slen; cur += clen) {
 				unsigned long long rem_runs =
 					(va + slen - cur) / UML_NT_PHYS_RUN_SIZE;
 				unsigned int want =
@@ -1229,9 +1655,9 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 	 * serves every conn (the tce/claim_audit pattern) — the
 	 * 16K-stack discipline forbids a second 10KB frame here. */
 	static struct uml_nt_fault_op mun_views[UML_NT_VMA_MAX];
+	static unsigned long long runs[UML_NT_PHYS_MAX_RUNS]; /* section offsets */
 	unsigned long long addr = a[0], len = a[1];
 	struct uml_nt_mm *mm = c->mm;
-	unsigned long long runs[UML_NT_VMA_MAX]; /* section offsets */
 	int i, nruns, nviews;
 
 	if (addr & (UML_NT_PHYS_RUN_SIZE - 1) || len == 0)
@@ -1277,7 +1703,7 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 	 * len/RUN from every VMA's run_off unrefs unrelated backing —
 	 * underflows refcounts → premature frees). */
 	nruns = uml_nt_vma_span_runs(mm, addr, addr + len, runs,
-				     UML_NT_VMA_MAX);
+				     UML_NT_PHYS_MAX_RUNS);
 	if (nruns < 0) {
 		os_info("[syscall] munmap 0x%llx+%llu: unref set overflow\n",
 			addr, len);
@@ -1341,7 +1767,8 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 				addr, len, cur);
 			return SC_RET(SC_ENOMEM);
 		}
-		if (v->flags & UML_NT_VMA_COW) {
+		if ((v->flags & UML_NT_VMA_COW) &&
+		    !(v->flags & UML_NT_VMA_FILE)) {
 			os_info("[syscall] mprotect on COW VMA — unsupported "
 				"(M4)\n");
 			return SC_RET(SC_ENOSYS);
