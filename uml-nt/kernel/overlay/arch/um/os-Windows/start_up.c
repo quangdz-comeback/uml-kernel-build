@@ -299,7 +299,7 @@ static struct uml_nt_kheap_range {
 	unsigned long long hi; /* flat, exclusive */
 	int live;	       /* slot in use */
 } kheap_r[UML_NT_KHEAP_RANGES];
-static int kheap_log_budget = 4096;
+static int kheap_log_budget = 64;
 /* Pages a catch left RW for its replay (a burst writer can dirty
  * several before the next sync) — re-armed by the next sync, only
  * while their range stays live. */
@@ -504,8 +504,9 @@ static int uml_nt_kheap_catch(
 			uml_nt_crash_write(wbuf, (unsigned int)wn);
 		{
 			struct uml_nt_flatcopy_rec fc;
+			int owned = uml_nt_flatcopy_snapshot(&fc);
 
-			if (uml_nt_flatcopy_snapshot(&fc))
+			if (owned)
 				wn = snprintf(wbuf, sizeof(wbuf),
 				      "[kheap] COPY OWNER: %s caller=%llx "
 				      "dst=%llx src=%llx len=%llu\n",
@@ -517,10 +518,10 @@ static int uml_nt_kheap_catch(
 				      "uml_nt_copy_verify\n");
 			if (wn > 0)
 				uml_nt_crash_write(wbuf, (unsigned int)wn);
+			if (!owned && e != NULL && e->context != NULL)
+				uml_nt_crash_scan_stack(
+					UML_NT_X64_CTX_RSP(e->context));
 		}
-		if (e != NULL && e->context != NULL)
-			uml_nt_crash_scan_stack(
-				UML_NT_X64_CTX_RSP(e->context));
 	}
 	page = addr & ~0xfffull;
 	base = (PVOID)(uintptr_t)page;

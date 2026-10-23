@@ -316,11 +316,32 @@ merged:
 		}
 	}
 
-	/* ---- allocate the spans (contiguous blocks, D12) ---------- */
+	/* ---- allocate the spans (contiguous blocks, D12) ----------
+	 * If a multi-run merged region fails high-order buddy allocation
+	 * (e.g. systemd-udevd's 22-run merged image requesting order 9
+	 * under fragmentation), subdivide the region at the largest
+	 * power-of-2 run count < nruns and retry down to 1-run pieces. */
 	for (i = 0; i < nreg; i++) {
-		long long off = uml_nt_phys_alloc_span(ph,
-			(int)((regs[i].re - regs[i].rs) / RUN));
+		int nruns = (int)((regs[i].re - regs[i].rs) / RUN);
+		long long off = uml_nt_phys_alloc_span(ph, nruns);
 
+		while (off < 0 && nruns > 1 && nreg < UML_NT_ELF_MAX_SEG) {
+			int split = 1;
+			unsigned long long mid;
+
+			while ((split << 1) < nruns)
+				split <<= 1;
+			mid = regs[i].rs + (unsigned long long)split * RUN;
+			for (j = nreg; j > i + 1; j--)
+				regs[j] = regs[j - 1];
+			regs[i + 1].rs = mid;
+			regs[i + 1].re = regs[i].re;
+			regs[i + 1].flags = regs[i].flags;
+			regs[i].re = mid;
+			nreg++;
+			nruns = split;
+			off = uml_nt_phys_alloc_span(ph, nruns);
+		}
 		if (off < 0) {
 			for (j = 0; j < i; j++)
 				uml_nt_phys_unref(ph, (long long)offs[j]);
@@ -354,26 +375,28 @@ merged:
 	}
 	for (i = 0; i < phn; i++) {
 		const elf_phdr *p = &phd[i];
-		unsigned long long va, off;
-		int k = 0;
+		unsigned long long va, seg_end, copied = 0;
+		int k;
 
 		if (p->p_type != PT_LOAD || p->p_filesz == 0)
 			continue;
 		va = p->p_vaddr + base;
+		seg_end = va + p->p_filesz;
 		for (k = 0; k < nreg; k++) {
-			if (va >= regs[k].rs + base &&
-			    va + p->p_filesz <= regs[k].re + base)
-				break;
+			unsigned long long rs = regs[k].rs + base;
+			unsigned long long re = regs[k].re + base;
+			unsigned long long cs = (va > rs) ? va : rs;
+			unsigned long long ce = (seg_end < re) ? seg_end : re;
+
+			if (cs >= ce)
+				continue;
+			__builtin_memcpy((char *)section + offs[k] + (cs - rs),
+					 img + p->p_offset + (cs - va),
+					 ce - cs);
+			copied += ce - cs;
 		}
-		if (k == nreg) {
-			/* unreachable by construction (filesz ≤ memsz
-			 * and the region covers [vaddr, vaddr+memsz))
-			 * — defense against future edits, loud */
+		if (copied != p->p_filesz)
 			goto fail_copy;
-		}
-		off = offs[k] + (va - (regs[k].rs + base));
-		__builtin_memcpy((char *)section + off, img + p->p_offset,
-				 p->p_filesz);
 	}
 
 	/* ---- publish out + one VMA per region (fresh, no COW) ---- */

@@ -371,6 +371,7 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 			     uml_boot.physmem_base);
 	kvfree(buf);
 	if (rc != UML_NT_ELF_OK) {
+		kvfree(interp_buf);
 		os_info("binfmt_umlnt: load failed rc=%d\n", rc);
 		/* WRITER-HUNT (M5.6a): the pure loader parks the fill
 		 * guard's context in the globals — print them here. */

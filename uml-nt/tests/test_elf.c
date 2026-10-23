@@ -397,6 +397,51 @@ static void test_rollback(void)
 		CHECK(!mock_taken[i]);
 }
 
+/* When high-order buddy blocks are fragmented so a multi-run merged
+ * region cannot allocate as one contiguous span, uml_nt_elf_load
+ * subdivides the region at power-of-2 run boundaries and copies
+ * PT_LOAD file bytes across the split pieces. */
+static void test_fragmented_region_split(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm mm;
+	struct uml_nt_elf_image out;
+	elf_ehdr *eh;
+	int rc;
+
+	mock_reset();
+	/* Leave max contiguous free runs = 2 (no 4-run block available) */
+	mock_taken[2] = 1;
+	mock_taken[5] = 1;
+	mock_taken[8] = 1;
+	mock_taken[11] = 1;
+	mock_taken[14] = 1;
+
+	CHECK(uml_nt_phys_init(&ph, SPAN) == 0);
+	uml_nt_mm_init(&mm);
+	eh = mk_ehdr(2, 0x62000010ull);
+	/* Two PT_LOAD segments that merge into a 3-run region
+	 * [0x62000000, 0x62030000), which needs mock_need(3)=4 runs
+	 * unsplit, so it must split into 2 runs + 1 run. */
+	add_phdr(5 /* R|X */, 0x400, 0x62000000ull, 0x1000, 2 * RUN);
+	add_phdr(6 /* R|W */, 0x1400, 0x6201f000ull, 0x1800, RUN + 0x1000);
+	eh->e_entry = 0x62000010ull;
+
+	rc = uml_nt_elf_load(&out, &mm, &ph, img, 0x3000, sec);
+	CHECK(rc == UML_NT_ELF_OK);
+	CHECK(out.nseg == 2);
+	CHECK(out.seg[0].start == 0x62000000ull);
+	CHECK(out.seg[0].end == 0x62020000ull);
+	CHECK(out.seg[1].start == 0x62020000ull);
+	CHECK(out.seg[1].end == 0x62030000ull);
+	/* Second PT_LOAD spans [0x6201f000, 0x62020800) across the split
+	 * boundary at 0x62020000 — check bytes on both sides! */
+	CHECK(sec[out.seg[0].run_off + 0x1f000] == 0x11);
+	CHECK(sec[out.seg[1].run_off + 0x0] == 0x11);
+	CHECK(sec[out.seg[1].run_off + 0x7ff] == 0x11);
+	CHECK(sec[out.seg[1].run_off + 0x800] == 0x00);
+}
+
 /* Stack placement: one run above the highest region, RW, top past
  * the run. */
 static void test_stack(void)
@@ -890,6 +935,7 @@ int main(int argc, char **argv)
 	test_dyn();
 	test_errors();
 	test_rollback();
+	test_fragmented_region_split();
 	test_stack();
 	test_stack_tables();
 	test_interp_path();

@@ -225,8 +225,15 @@ static void uml_nt_cowwatch_arm(unsigned long long run_off,
 	cowwatchs[i].owner_pid = owner_pid;
 	cowwatchs[i].armed = 1;
 	cowwatchs[i].rounds = UML_NT_COWWATCH_ROUNDS;
-	os_info("[cowwatch] armed run=0x%llx owner=%lu@0x%llx "
-		"(slot %u)\n", run_off, owner_pid, owner_va, i);
+	{
+		static int cowwatch_arm_budget = 64;
+
+		if (cowwatch_arm_budget > 0) {
+			cowwatch_arm_budget--;
+			os_info("[cowwatch] armed run=0x%llx owner=%lu@0x%llx "
+				"(slot %u)\n", run_off, owner_pid, owner_va, i);
+		}
+	}
 }
 
 /* The alloc-side arm (report 106's closing slice): the poison is
@@ -586,6 +593,12 @@ int uml_nt_copy_verify(char *dst, const char *src, unsigned long long len,
 static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
 {
 	unsigned int i;
+	static unsigned int cowwatch_phase;
+	static int cowwatch_exp_budget = 64;
+
+	cowwatch_phase = (cowwatch_phase + 1) & 0xF;
+	if (cowwatch_phase != 0)
+		return;
 
 	for (i = 0; i < UML_NT_COWWATCH_N; i++) {
 		struct uml_nt_cowwatch *w = &cowwatchs[i];
@@ -596,8 +609,11 @@ static void uml_nt_cowwatch_round(struct uml_nt_stub_conn *c)
 			continue;
 		if (w->rounds-- == 0) {
 			w->armed = 0;
-			os_info("[cowwatch] run=0x%llx expired\n",
-				w->run_off);
+			if (cowwatch_exp_budget > 0) {
+				cowwatch_exp_budget--;
+				os_info("[cowwatch] run=0x%llx expired\n",
+					w->run_off);
+			}
 			continue;
 		}
 		base = w->run_off;
@@ -693,7 +709,10 @@ void uml_nt_cowwatch_touch(unsigned long long off, unsigned long long len,
 			   const char *what)
 {
 	unsigned int i;
+	static int cowwatch_kw_budget = 64;
 
+	if (cowwatch_kw_budget <= 0)
+		return;
 	for (i = 0; i < UML_NT_COWWATCH_N; i++) {
 		struct uml_nt_cowwatch *w = &cowwatchs[i];
 
@@ -702,9 +721,12 @@ void uml_nt_cowwatch_touch(unsigned long long off, unsigned long long len,
 		if (off + len <= w->run_off ||
 		    off >= w->run_off + UML_NT_PHYS_RUN_SIZE)
 			continue;
-		os_info("[cowwatch] kernel-write %s run=0x%llx touch "
-			"[0x%llx,+0x%llx) owner=%lu\n", what, w->run_off,
-			off, len, w->owner_pid);
+		if (cowwatch_kw_budget > 0) {
+			cowwatch_kw_budget--;
+			os_info("[cowwatch] kernel-write %s run=0x%llx touch "
+				"[0x%llx,+0x%llx) owner=%lu\n", what,
+				w->run_off, off, len, w->owner_pid);
+		}
 	}
 }
 
@@ -3977,12 +3999,24 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 		for (di = 0; di < 64; di++) {
 			unsigned long long ev = entries[di];
 			int depth;
+			const struct uml_nt_vma *ev_vma;
+			int ev_ok;
+
+			ev_vma = ((ev & 0xF) == 0 && (ev >> 48) == 0) ?
+				 uml_nt_vma_find(mm, ev) : NULL;
+			ev_ok = ((ev & 0xF) == 0 && (ev >> 48) == 0) &&
+				((ev >= mm->heap_start && ev < mm->heap_end) ||
+				 (ev_vma != NULL &&
+				  !(ev_vma->flags & UML_NT_VMA_FILE) &&
+				  (ev_vma->prot == UML_NT_PAGE_READWRITE ||
+				   ev_vma->prot ==
+				   UML_NT_PAGE_EXECUTE_READWRITE) &&
+				  ev + 16 <= ev_vma->end));
 
 			if (!c->tc_chunk_valid ||
 			    c->tc_chunk_va[di][0] != ev ||
 			    !c->tc_chunk_armed[di][0] ||
-			    (ev & 0xF) != 0 || (ev >> 48) != 0 ||
-			    ev < mm->heap_start || ev >= mm->heap_end) {
+			    !ev_ok) {
 				/* (Re)arm: the watched head changed
 				 * identity — walk the list and snapshot
 				 * its members NOW; compare from the
@@ -3993,15 +4027,15 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 					c->tc_chunk_armed[di][depth] = 0;
 				if ((tcache_chunk_budget > 0 ||
 				     tcache_poison_budget > 0) &&
-				    (ev & 0xF) == 0 && (ev >> 48) == 0 &&
-				    ev >= mm->heap_start &&
-				    ev < mm->heap_end) {
+				    ev_ok) {
 					unsigned long long chunk = ev;
 
 					for (depth = 0; depth < 4;
 					     depth++) {
 						unsigned long long data,
 							nxt;
+						const struct uml_nt_vma *nv;
+						int nxt_ok;
 						long long coff =
 							uml_nt_vma_translate(
 							mm, chunk, 8);
@@ -4023,9 +4057,26 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 							1;
 						if (nxt == 0)
 							break;
-						if ((nxt & 0xF) != 0 ||
-						    nxt < mm->heap_start ||
-						    nxt >= mm->heap_end) {
+						nv = ((nxt & 0xF) == 0 &&
+						      (nxt >> 48) == 0) ?
+						     uml_nt_vma_find(mm, nxt) :
+						     NULL;
+						nxt_ok = ((nxt & 0xF) == 0 &&
+							  (nxt >> 48) == 0) &&
+							 ((nxt >=
+							   mm->heap_start &&
+							   nxt <
+							   mm->heap_end) ||
+							  (nv != NULL &&
+							   !(nv->flags &
+							     UML_NT_VMA_FILE) &&
+							   (nv->prot ==
+							    UML_NT_PAGE_READWRITE ||
+							    nv->prot ==
+							    UML_NT_PAGE_EXECUTE_READWRITE) &&
+							   nxt + 16 <=
+							   nv->end));
+						if (!nxt_ok) {
 							/* POISON decoded at
 							 * walk time — the
 							 * list member's next
@@ -4178,10 +4229,27 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 				 * rest. Each class draws its own
 				 * budget; both re-arm. */
 				nxt = data ^ (chunk >> 12);
-				poison = nxt != 0 &&
-					((nxt & 0xF) != 0 ||
-					 nxt < mm->heap_start ||
-					 nxt >= mm->heap_end);
+				{
+					const struct uml_nt_vma *nv =
+						((nxt & 0xF) == 0 &&
+						 (nxt >> 48) == 0) ?
+						uml_nt_vma_find(mm, nxt) : NULL;
+					int nxt_ok =
+						((nxt & 0xF) == 0 &&
+						 (nxt >> 48) == 0) &&
+						((nxt >= mm->heap_start &&
+						  nxt < mm->heap_end) ||
+						 (nv != NULL &&
+						  !(nv->flags &
+						    UML_NT_VMA_FILE) &&
+						  (nv->prot ==
+						   UML_NT_PAGE_READWRITE ||
+						   nv->prot ==
+						   UML_NT_PAGE_EXECUTE_READWRITE) &&
+						  nxt + 16 <= nv->end));
+
+					poison = nxt != 0 && !nxt_ok;
+				}
 				/* GHOST CHECK (referee 37121882179
 				 * decode): the 16 POISON fires were
 				 * A-B-A ghosts — the head returned to

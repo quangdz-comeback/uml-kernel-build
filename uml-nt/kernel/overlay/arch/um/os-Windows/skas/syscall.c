@@ -737,13 +737,13 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 
 /* ---- M5.4 c2 (D20): file-backed mmap — the dynamic-loader path ----
  *
- * c3: max runs one fresh chunk may span — capped at 16 runs (1 MiB,
- * order 8) instead of 64 runs (4 MiB, order 10) so concurrent
- * generator/service loads of large shared libraries (libsystemd-shared
- * 3.25 MiB, libcrypto 4.56 MiB, libc 1.94 MiB) do not exhaust order-9/10
- * buddy blocks while earlier processes' freed spans sit in the D22
- * quarantine ring. sys_mmap_file splits around this cap. */
-#define UML_NT_MMAP_SPAN_RUNS 16
+/* D21 span-cap (archive 066): alloc_pages refuses order >
+ * MAX_PAGE_ORDER (10 -> 4MB = 64 runs). Max runs one fresh chunk may
+ * span is 64 (4 MiB, order 10); sys_mmap_file always picks the largest
+ * power-of-2 run count <= rem_runs (so runs_order never over-allocates
+ * tail runs) and steps down (want >>= 1 down to 1 run) if high-order
+ * buddy blocks are fragmented. */
+#define UML_NT_MMAP_SPAN_RUNS 64
 
 /* ld.so maps every shared library through here: ONE span mapping
  * (first segment's prot, no MAP_FIXED — the kernel picks the base),
@@ -1086,7 +1086,8 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 		 * refill walk per-VMA pieces already; nothing else
 		 * knows the chunks exist. */
 		unsigned long long slen = re - rs;
-		unsigned long long cur;
+		unsigned long long cur, clen = 0;
+		int plan_base, plan_left_base, plan_next_base;
 
 		if (flags & SC_MAP_FIXED) {
 			va = rs;
@@ -1101,44 +1102,51 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 			}
 			map_start = va;
 		}
-		/* M5.6a root-cause fix: the chunk MAPs are reserved
-		 * BEFORE the first chunk's span is allocated — a
-		 * dropped chunk op strands that chunk's view over
-		 * runs the table dropped (the swap-window class).
-		 * n_chunks = ceil(slen / (SPAN_RUNS * RUN)). */
-		{
-			unsigned long long chunk =
-				UML_NT_MMAP_SPAN_RUNS *
-				UML_NT_PHYS_RUN_SIZE;
+		/* Power-of-2 chunk allocation with order fallback and
+		 * full rollback on mid-loop failure:
+		 * 1. Pick the largest power-of-2 run count <= rem_runs
+		 *    (capped at UML_NT_MMAP_SPAN_RUNS) so runs_order()
+		 *    in physbackend.c never rounds up and strands tail
+		 *    runs inside a buddy block.
+		 * 2. If that order is fragmented in the buddy allocator,
+		 *    halve want >>= 1 down to 1 run (64 KiB, order 4).
+		 * 3. If any chunk fails (span alloc, plan reserve, or
+		 *    VMA table), roll back all chunks added in [va, cur)
+		 *    so a failed multi-chunk mmap never leaks runs or
+		 *    strands partial VMAs/plan ops. */
+		plan_base = c->plan.n_ops;
+		plan_left_base = c->plan_left;
+		plan_next_base = c->plan_next;
+		for (cur = va; cur < va + slen; cur += clen) {
+			unsigned long long rem_runs =
+				(va + slen - cur) / UML_NT_PHYS_RUN_SIZE;
+			unsigned int want = UML_NT_MMAP_SPAN_RUNS;
 
-			if (uml_nt_sc_plan_reserve(
-				    c, (int)((slen + chunk - 1) / chunk)) <
-			    0) {
-				fdput(fdesc);
-				os_info("[syscall] mmap file 0x%llx+%llu: "
-					"view-swap plan full (%llu "
-					"chunk(s)) — ENOMEM\n", addr, len,
-					(slen + chunk - 1) / chunk);
-				return SC_RET(SC_ENOMEM);
+			while (want > rem_runs)
+				want >>= 1;
+			sp = (unsigned long long)-1LL;
+			for (; want >= 1; want >>= 1) {
+				sp = (unsigned long long)
+					uml_nt_phys_alloc_span(c->ph,
+							       (int)want);
+				if ((long long)sp >= 0)
+					break;
 			}
-		}
-		for (cur = va; cur < va + slen; cur += nruns *
-						     UML_NT_PHYS_RUN_SIZE) {
-			unsigned long long clen = va + slen - cur;
-
-			if (clen > UML_NT_MMAP_SPAN_RUNS *
-			    UML_NT_PHYS_RUN_SIZE)
-				clen = UML_NT_MMAP_SPAN_RUNS *
-				       UML_NT_PHYS_RUN_SIZE;
-			nruns = clen / UML_NT_PHYS_RUN_SIZE;
-			sp = (unsigned long long)
-				uml_nt_phys_alloc_span(c->ph, (int)nruns);
 			if ((long long)sp < 0) {
 				os_info("[syscall] mmap file 0x%llx+%llu: "
-					"span of %u run(s) at 0x%llx failed "
-					"— ENOMEM\n", addr, len, nruns, cur);
-				fdput(fdesc);
-				return SC_RET(SC_ENOMEM);
+					"span of %llu run(s) at 0x%llx failed "
+					"— ENOMEM\n", addr, len, rem_runs, cur);
+				goto rollback_chunks;
+			}
+			nruns = want;
+			clen = (unsigned long long)nruns *
+			       UML_NT_PHYS_RUN_SIZE;
+			if (uml_nt_sc_plan_reserve(c, 1) < 0) {
+				os_info("[syscall] mmap file 0x%llx+%llu: "
+					"view-swap plan full at 0x%llx "
+					"— ENOMEM\n", addr, len, cur);
+				uml_nt_phys_unref(c->ph, (long long)sp);
+				goto rollback_chunks;
 			}
 			if (uml_nt_vma_add_gen(c->mm, cur, cur + clen, sp,
 					       UML_NT_PAGE_EXECUTE_READWRITE,
@@ -1152,12 +1160,34 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 					"— ENOMEM\n", addr, len, cur,
 					c->mm->nvma);
 				uml_nt_phys_unref(c->ph, (long long)sp);
-				fdput(fdesc);
-				return SC_RET(SC_ENOMEM);
+				goto rollback_chunks;
 			}
 			uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
 					   UML_NT_PAGE_EXECUTE_READWRITE,
 					   cur, clen, sp);
+		}
+		if (0) {
+			unsigned long long rb;
+rollback_chunks:
+			for (rb = va; rb < cur; ) {
+				const struct uml_nt_vma *rv =
+					uml_nt_vma_find(c->mm, rb);
+				unsigned long long rlen;
+				long long roff;
+
+				if (rv == NULL || rv->start != rb)
+					break;
+				rlen = rv->end - rv->start;
+				roff = (long long)rv->run_off;
+				uml_nt_vma_del(c->mm, rb, rb + rlen);
+				uml_nt_phys_unref(c->ph, roff);
+				rb += rlen;
+			}
+			c->plan.n_ops = plan_base;
+			c->plan_left = plan_left_base;
+			c->plan_next = plan_next_base;
+			fdput(fdesc);
+			return SC_RET(SC_ENOMEM);
 		}
 	} else {
 		va = addr;
@@ -3126,15 +3156,35 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 18: /* pwrite64 — journald writes the journal header +
 		  * seqnum right after the MAP_SHARED map (same run);
 		  * the explicit-offset twin of write/pread64. */
+	case 105: /* setuid */
+	case 106: /* setgid */
+	case 109: /* setpgid */
+	case 111: /* getpgrp */
+	case 113: /* setreuid — sd-executor setup_keyring() chowns the
+		   * per-service user keyring under the service's UID/GID
+		   * (systemd-resolved / systemd-networkd 237/KEYRING in
+		   * referee H1/H2 when nr=114/113 hit default ENOSYS
+		   * after b64ef19 enabled add_key). */
+	case 114: /* setregid */
+	case 115: /* getgroups */
 	case 116: /* setgroups — systemd's "Failed at step GROUP
 		   * spawning systemd-networkd" (execute.c:5314,
 		   * "Failed to determine supplementary groups" — the
 		   * initgroups tail; archive m5.4-c3 recorded it as
 		   * "networkd chết 216/GROUP (setgroups?)" — this is
 		   * the answer: the nr was never routed) */
+	case 117: /* setresuid */
+	case 118: /* getresuid */
+	case 119: /* setresgid */
+	case 120: /* getresgid */
+	case 121: /* getpgid */
+	case 122: /* setfsuid */
+	case 123: /* setfsgid */
+	case 124: /* getsid */
 	case 204: /* sched_getaffinity — systemd's CPU-shaping probe
 		   * (1x in run 36889953754); the honest answer here
 		   * is 1 CPU (CPUs=1) */
+	case 272: /* unshare */
 	case 288: /* accept4 — socket activation (the AF_UNIX
 		   * journald listeners are kernel-internal, D8 only
 		   * bans the kernel<->helper channel) */
@@ -3278,6 +3328,10 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 104: /* getgid */
 	case 107: /* geteuid */
 	case 108: /* getegid */
+		if (c->task_backed) {
+			ret = sys_vfs(nr, a);
+			break;
+		}
 		ret = 0;
 		break;
 	case 135: /* personality — see the conn field comment (systemd
@@ -3398,28 +3452,36 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		   * keyctl(KEYCTL_JOIN_SESSION_KEYRING) for every
 		   * sandboxed service; ENOSYS fails the whole spawn
 		   * (status=237/KEYRING — the dl1 networkd crash-loop).
-		   * We keep no keyring: JOIN returns a fake positive
-		   * serial (the step succeeds, the session keyring is
-		   * a phantom — nothing in the boot reads it back).
-		   * Other commands stay loud-ENOSYS so real keyring
-		   * users name themselves. */
-		if (a[0] == 1 /* KEYCTL_JOIN_SESSION_KEYRING */)
+		   * We keep no keyring: JOIN/GET_KEYRING_ID return a
+		   * fake positive serial (the step succeeds, the
+		   * session keyring is a phantom — nothing in the boot
+		   * reads it back) and metadata/link mutations on the
+		   * phantom serial (CHOWN/SETPERM/LINK/UNLINK/SET_TIMEOUT/
+		   * SET_REQKEY_KEYRING/SESSION_TO_PARENT) succeed as
+		   * no-ops. Other commands stay loud-ENOSYS so real
+		   * keyring users name themselves. */
+		if (a[0] == 0 /* KEYCTL_GET_KEYRING_ID */ ||
+		    a[0] == 1 /* KEYCTL_JOIN_SESSION_KEYRING */)
 			ret = 0x2e9;
-		else if (a[0] == 5 /* KEYCTL_SETPERM — the phantom
-			   * serial add_key now returns (0x2ea, b64ef19)
-			   * invites the caller's next step: the spawn's
-			   * keyring setup chmods its fresh key (dl17
-			   * 37497293608, task 48 modprobe@configfs —
-			   * the loud branch below failed the spawn at
-			   * step KEYRING). On a phantom keyring the
-			   * permission change is a no-op: 0 lets the
-			   * step pass. */)
+		else if (a[0] == 4 /* KEYCTL_CHOWN */ ||
+			 a[0] == 5 /* KEYCTL_SETPERM */ ||
+			 a[0] == 8 /* KEYCTL_LINK */ ||
+			 a[0] == 9 /* KEYCTL_UNLINK */ ||
+			 a[0] == 14 /* KEYCTL_SET_REQKEY_KEYRING */ ||
+			 a[0] == 15 /* KEYCTL_SET_TIMEOUT */ ||
+			 a[0] == 18 /* KEYCTL_SESSION_TO_PARENT */)
 			ret = 0;
 		else {
 			os_info("[syscall] keyctl cmd=%llu not "
 				"implemented → ENOSYS\n", a[0]);
 			ret = SC_RET(SC_ENOSYS);
 		}
+		break;
+	case 312: /* kcmp — journald probes fd equality for stream dedup
+		   * and falls back cleanly on ENOSYS; keep off the
+		   * default loud table so 2200+ probes per boot do not
+		   * flood the console. */
+		ret = SC_RET(SC_ENOSYS);
 		break;
 	default:
 		/* [fork-entry] audit: a fork-class nr that reaches the

@@ -46,6 +46,9 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 	int order = RUN_ORDER + runs_order(nruns);
 	int try;
 
+	if (order > MAX_PAGE_ORDER)
+		return -1;
+
 	/* D25 (Shelley 2026-10-03, to-shelley 134): the handout ASSERT.
 	 * A block the buddy just handed must be a clean free block —
 	 * a slab/reserved/still-buddy page here = the kernel's own
@@ -54,9 +57,17 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 	 * referee 37128298095's 452 copy_process+0x883 catches).
 	 * Tainted blocks go straight back to the buddy (it hands a
 	 * different block next); 16 strikes = the handout fails loud
-	 * and the caller sees -ENOMEM instead of poisoned memory. */
+	 * and the caller sees -ENOMEM instead of poisoned memory.
+	 *
+	 * __GFP_RETRY_MAYFAIL: every 64 KiB run has order >= 4 >
+	 * PAGE_ALLOC_COSTLY_ORDER (3). Without __GFP_RETRY_MAYFAIL,
+	 * __alloc_pages_slowpath (mm/page_alloc.c:4891) bails out to
+	 * nopage after a single pass without retrying pagecache reclaim
+	 * or compaction (referee H1 39898282926: order-8/9 failed with
+	 * 16 MiB reclaimable file cache + 10 MiB order 4..7 free). */
 	for (try = 0; try < 16; try++) {
-		pg = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+		pg = alloc_pages(GFP_KERNEL | __GFP_ZERO |
+				 __GFP_RETRY_MAYFAIL | __GFP_NOWARN, order);
 		if (pg == NULL)
 			return -1;
 		if (!PageSlab(pg) && !PageReserved(pg) &&
