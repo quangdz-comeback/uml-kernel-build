@@ -39,6 +39,7 @@
 #include <syscall.h>
 #include <bench.h>
 #include <uaccess_walk.h>
+#include <lazyfile_model.h>
 
 #define UML_NT_SYSCALLS_BASE UML_STUB_RAM_BASE
 
@@ -1298,6 +1299,283 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 	return total;
 }
 
+/* ---- D27: lazy (demand-paged) file-backed VMAs --------------------
+ *
+ * Shelley 2026-10-23 (to-shelley/147): file-backed RO mappings must
+ * demand-page like upstream — the run is allocated and the file read
+ * at the FIRST fault. The eager fill stays for the exec ELF image
+ * (binfmt's execve contract) and for bytes a syscall itself touches
+ * (mmap_fill); the sharing cache (b6785e3) is untouched (it serves
+ * its eligible mappings exactly as before).
+ *
+ * Eligibility (registration at mmap): fresh non-FIXED off==0
+ * PROT_READ mapping, run-aligned VA, >= 1 MiB, that the eager cache
+ * did NOT take. The referee case: udevd's 13 MiB hwdb.bin
+ * single-mapper PROT_READ map — a binary-search trie touches a small
+ * subset of its 199 runs but the eager copy burns 11% of the 120 MiB
+ * budget before login.
+ *
+ * The region owns a struct file reference (get_file at mmap — the
+ * guest may close the fd). A fault inside it materializes ONE run
+ * (alloc -> zero -> kernel_read via the synchronous ubd path -> VMA +
+ * MAP op) and the guest resumes. munmap/mprotect/refill/fresh-VA
+ * overlap are structural: they eagerly materialize the region first
+ * (fail-safe fallback; a long-lived database mapping never hits it).
+ * fork clones the regions (the child materializes into its own mm);
+ * mmctx destroy drops the file references. Budgeted [lazyfile] lines
+ * register/demand/drop carry the touched-vs-file-run accounting that
+ * quantifies the win. */
+static unsigned long long lazy_demand_runs, lazy_eager_runs;
+static int lazy_reg_budget = 16, lazy_drop_budget = 24;
+static int lazy_demand_budget = 32;
+
+static struct uml_nt_lazy_region *lazy_find(struct uml_nt_stub_conn *c,
+					    unsigned long long addr)
+{
+	int i;
+
+	for (i = 0; i < UML_NT_LAZY_MAX; i++) {
+		struct uml_nt_lazy_region *r = &c->lazy[i];
+
+		if (r->used && addr >= r->start && addr < r->end)
+			return r;
+	}
+	return NULL;
+}
+
+int uml_nt_lazy_overlap(struct uml_nt_stub_conn *c, unsigned long long start,
+			unsigned long long end)
+{
+	int i;
+
+	for (i = 0; i < UML_NT_LAZY_MAX; i++) {
+		struct uml_nt_lazy_region *r = &c->lazy[i];
+
+		if (r->used && r->start < end && r->end > start)
+			return 1;
+	}
+	return 0;
+}
+
+static int lazy_register(struct uml_nt_stub_conn *c, unsigned long long va,
+			 unsigned long long slen, struct file *f,
+			 unsigned long long fsize)
+{
+	struct uml_nt_lazy_region *r = NULL;
+	int i;
+
+	if ((va & (UML_NT_PHYS_RUN_SIZE - 1)) != 0)
+		return -1;
+	for (i = 0; i < UML_NT_LAZY_MAX; i++) {
+		if (!c->lazy[i].used) {
+			r = &c->lazy[i];
+			break;
+		}
+	}
+	if (r == NULL)
+		return -1;
+	get_file(f);
+	r->start = va;
+	r->end = va + slen;
+	r->file_off = 0;
+	r->fsize = fsize;
+	r->file = f;
+	r->used = 1;
+	r->touched_runs = 0;
+	if (lazy_reg_budget > 0) {
+		lazy_reg_budget--;
+		os_info("[lazyfile] register pid %lu va=0x%llx len=0x%llx "
+			"fsize=%llu runs=%llu\n", (unsigned long)c->pid, va,
+			slen, fsize, slen >> UML_NT_PHYS_RUN_SHIFT);
+	}
+	return 0;
+}
+
+/* One run: allocate, zero, read the file, install the VMA (+ MAP op
+ * when the caller's stream needs it). 0 = ok/already mapped. */
+static int lazy_run(struct uml_nt_stub_conn *c, struct uml_nt_lazy_region *r,
+		    unsigned long long run_va, unsigned long long run_end,
+		    int add_op)
+{
+	unsigned long long n, sp;
+	loff_t pos;
+
+	if (uml_nt_vma_find(c->mm, run_va) != NULL)
+		return 0;
+	sp = (unsigned long long)uml_nt_phys_alloc(c->ph);
+	if ((long long)sp < 0)
+		return -1;
+	memset((char *)uml_boot.physmem_base + sp, 0, UML_NT_PHYS_RUN_SIZE);
+	n = uml_nt_lazy_read_len(r->start, r->file_off, r->fsize, run_va,
+				 run_end - run_va);
+	if (n > 0) {
+		pos = (loff_t)(r->file_off + (run_va - r->start));
+		if (kernel_read(r->file,
+				(char *)uml_boot.physmem_base + sp, n,
+				&pos) != (ssize_t)n) {
+			uml_nt_phys_unref(c->ph, (long long)sp);
+			return -1;
+		}
+	}
+	if (uml_nt_vma_add_gen(c->mm, run_va, run_end, sp,
+			       UML_NT_PAGE_READONLY, UML_NT_VMA_FILE,
+			       (unsigned long long)
+			       uml_nt_phys_gen(c->ph, (long long)sp)) < 0) {
+		uml_nt_phys_unref(c->ph, (long long)sp);
+		return -1;
+	}
+	if (add_op &&
+	    uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, UML_NT_PAGE_READONLY,
+			       run_va, run_end - run_va, sp) < 0) {
+		uml_nt_vma_del(c->mm, run_va, run_end);
+		uml_nt_phys_unref(c->ph, (long long)sp);
+		return -1;
+	}
+	r->touched_runs++;
+	lazy_demand_runs++;
+	return 0;
+}
+
+int uml_nt_lazy_fault(struct uml_nt_stub_conn *c, unsigned long long va,
+		      unsigned type)
+{
+	struct uml_nt_lazy_region *r;
+	unsigned long long run_va, run_end;
+
+	if (type != UML_NT_FAULT_READ && type != UML_NT_FAULT_EXEC)
+		return 0;
+	if (uml_nt_vma_find(c->mm, va) != NULL)
+		return 0;
+	r = lazy_find(c, va);
+	if (r == NULL)
+		return 0;
+	/* Reset the plan exactly as the fault decision would (the tail
+	 * arms it via view_release_complete and issues op 0). */
+	c->plan.kill = 0;
+	c->plan.kill_why = 0;
+	c->plan.n_ops = 0;
+	c->plan.copy_src_off = 0;
+	c->plan.copy_dst_off = 0;
+	c->plan.cap_gen_src = 0;
+	c->plan.cap_gen_dst = 0;
+	c->plan.copy_src_refs = 0;
+	c->plan_next = 0;
+	c->plan_left = 0;
+	if (uml_nt_lazy_run_window(r->start, r->end, va, &run_va,
+				   &run_end) < 0 ||
+	    lazy_run(c, r, run_va, run_end, 1) < 0) {
+		c->plan.kill = 1;
+		c->plan.kill_why = 'w';
+		c->plan.n_ops = 0;
+		return -1;
+	}
+	if (lazy_demand_budget > 0) {
+		lazy_demand_budget--;
+		os_info("[lazyfile] demand pid %lu va=0x%llx run=0x%llx "
+			"foff=0x%llx len=0x%llx\n",
+			(unsigned long)c->pid, va, run_va,
+			r->file_off + (run_va - r->start),
+			run_end - run_va);
+	}
+	return 1;
+}
+
+int uml_nt_lazy_eager(struct uml_nt_stub_conn *c, unsigned long long start,
+		      unsigned long long end)
+{
+	unsigned long long rv;
+	int i, need = 0;
+
+	for (i = 0; i < UML_NT_LAZY_MAX; i++) {
+		struct uml_nt_lazy_region *r = &c->lazy[i];
+
+		if (r->used && r->start < end && r->end > start)
+			need += (int)((r->end - r->start) >>
+				      UML_NT_PHYS_RUN_SHIFT);
+	}
+	if (need == 0)
+		return 0;
+	if (uml_nt_sc_plan_reserve(c, need + 1) < 0) {
+		os_info("[lazyfile] eager 0x%llx+0x%llx: plan capacity "
+			"%d op(s) refused\n", start, end - start, need);
+		return -1;
+	}
+	for (i = 0; i < UML_NT_LAZY_MAX; i++) {
+		struct uml_nt_lazy_region *r = &c->lazy[i];
+
+		if (!r->used || r->start >= end || r->end <= start)
+			continue;
+		for (rv = r->start; rv < r->end;
+		     rv += UML_NT_PHYS_RUN_SIZE) {
+			unsigned long long re = rv + UML_NT_PHYS_RUN_SIZE;
+
+			if (re > r->end)
+				re = r->end;
+			if (lazy_run(c, r, rv, re, 1) < 0) {
+				os_info("[lazyfile] eager fail pid %lu "
+					"va=0x%llx\n",
+					(unsigned long)c->pid, rv);
+				return -1;
+			}
+			lazy_eager_runs++;
+		}
+		if (lazy_drop_budget > 0) {
+			lazy_drop_budget--;
+			os_info("[lazyfile] drop pid %lu va=0x%llx "
+				"file_runs=%llu touched=%llu (eager; "
+				"demand_total=%llu eager_total=%llu)\n",
+				(unsigned long)c->pid, r->start,
+				(r->end - r->start) >>
+				UML_NT_PHYS_RUN_SHIFT,
+				r->touched_runs, lazy_demand_runs,
+				lazy_eager_runs);
+		}
+		fput(r->file);
+		r->used = 0;
+	}
+	return 0;
+}
+
+int uml_nt_lazy_clone(struct uml_nt_stub_conn *child,
+		      struct uml_nt_stub_conn *parent)
+{
+	int i;
+
+	for (i = 0; i < UML_NT_LAZY_MAX; i++) {
+		struct uml_nt_lazy_region *pr = &parent->lazy[i];
+
+		if (!pr->used)
+			continue;
+		child->lazy[i] = *pr;
+		get_file(pr->file);
+	}
+	return 0;
+}
+
+void uml_nt_lazy_drop(struct uml_nt_stub_conn *c)
+{
+	int i;
+
+	for (i = 0; i < UML_NT_LAZY_MAX; i++) {
+		struct uml_nt_lazy_region *r = &c->lazy[i];
+
+		if (!r->used)
+			continue;
+		if (lazy_drop_budget > 0) {
+			lazy_drop_budget--;
+			os_info("[lazyfile] drop pid %lu va=0x%llx "
+				"file_runs=%llu touched=%llu "
+				"demand_total=%llu\n",
+				(unsigned long)c->pid, r->start,
+				(r->end - r->start) >>
+				UML_NT_PHYS_RUN_SHIFT,
+				r->touched_runs, lazy_demand_runs);
+		}
+		fput(r->file);
+		r->used = 0;
+	}
+}
+
 /* The fd is a GUEST fd in the serving task's files_struct (the same
  * table every routed sys_vfs call uses). */
 static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
@@ -1357,6 +1635,18 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 		return SC_RET(SC_EACCES);
 	}
 	fsize = i_size_read(file_inode(f));
+
+	/* D27: a structural op over a deferred region materializes it
+	 * eagerly first (the VMA tree sees a real mapping from here on;
+	 * the registration path never targets a long-lived database
+	 * mapping this way). */
+	if (addr != 0 && len != 0 &&
+	    uml_nt_lazy_overlap(c, addr, addr + len)) {
+		if (uml_nt_lazy_eager(c, addr, addr + len) < 0) {
+			fdput(fdesc);
+			return SC_RET(SC_ENOMEM);
+		}
+	}
 
 	rs = addr & ~(UML_NT_PHYS_RUN_SIZE - 1);
 	re = (addr + len + UML_NT_PHYS_RUN_SIZE - 1) &
@@ -1442,9 +1732,25 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 				va = rs;
 				map_start = addr;
 			} else {
-				va = uml_nt_vma_find_free(c->mm, slen, hint_base,
-							  UML_NT_SYSCALLS_BASE +
-							  uml_boot.physmem_size);
+				int tries;
+
+				va = 0;
+				for (tries = 0; tries < 8; tries++) {
+					va = uml_nt_vma_find_free(c->mm, slen,
+							hint_base,
+							UML_NT_SYSCALLS_BASE +
+							uml_boot.physmem_size);
+					if (va == 0)
+						break;
+					/* D27: the VMA-free search cannot
+					 * see a deferred region — step the
+					 * hint past it rather than land a
+					 * fresh mapping on top. */
+					if (!uml_nt_lazy_overlap(c, va,
+								 va + slen))
+						break;
+					hint_base = va + slen;
+				}
 				if (va == 0) {
 					fdput(fdesc);
 					return SC_RET(SC_ENOMEM);
@@ -1527,6 +1833,25 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 					}
 				}
 			}
+			/* D27: no eager bytes yet (the sharing cache did not
+			 * take this mapping) and the guest asked for a
+			 * read-only file view — DEFER it. Runs + file bytes
+			 * are materialized at the first fault (the 13 MiB
+			 * hwdb.bin case). Writable mappings stay eager (the
+			 * single-mapper emulation lets writes land in the
+			 * run; a lazy RO view would turn them into faults). */
+			if (cur == va && !(flags & SC_MAP_FIXED) && off == 0 &&
+			    lprot == SC_PROT_READ && len >= (1ull << 20) &&
+			    fsize != 0 &&
+			    lazy_register(c, va, slen, f, fsize) == 0) {
+				fdput(fdesc);
+				have_fdesc = 0;
+				os_info("[syscall] mmap file 0x%llx+%llu: "
+					"deferred (lazy runs, %llu byte(s))\n",
+					va, len, fsize);
+				return va;
+			}
+
 			/* Chunk allocation with buddy-order fallback and full
 			 * rollback on mid-loop failure:
 			 * 1. Try min(rem_runs, UML_NT_MMAP_SPAN_RUNS) first so a
@@ -1695,6 +2020,12 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 		return SC_RET(SC_EINVAL);
 	len = (len + UML_NT_PHYS_RUN_SIZE - 1) &
 	      ~(UML_NT_PHYS_RUN_SIZE - 1);
+	/* D27: unmap of a deferred region — materialize it so the VMA
+	 * enumeration below owns every byte it must release. */
+	if (uml_nt_lazy_overlap(c, addr, addr + len)) {
+		if (uml_nt_lazy_eager(c, addr, addr + len) < 0)
+			return SC_RET(SC_ENOMEM);
+	}
 	/* Partial-VMA refusal + the view enumeration in one pass:
 	 * UnmapViewOfFile releases the WHOLE view at map_va, so the
 	 * release op set is exactly one op per removed VMA (whole
@@ -1789,6 +2120,12 @@ static unsigned long long sys_mprotect(struct uml_nt_stub_conn *c,
 	if ((addr | len) & (UML_NT_FAULT_PAGE_SIZE - 1) || len == 0 ||
 	    addr + len < addr)
 		return SC_RET(SC_EINVAL);
+	/* D27: mprotect over a deferred region materializes it (the
+	 * walk below needs VMAs; a deferred region is invisible). */
+	if (uml_nt_lazy_overlap(c, addr, addr + len)) {
+		if (uml_nt_lazy_eager(c, addr, addr + len) < 0)
+			return SC_RET(SC_ENOMEM);
+	}
 	end = addr + len;
 	for (cur = addr; cur < end; ) {
 		v = uml_nt_vma_find(c->mm, cur);

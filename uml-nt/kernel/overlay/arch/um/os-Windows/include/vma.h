@@ -23,10 +23,14 @@
 
 #include <physalloc.h>
 
-#define UML_NT_VMA_MAX 256 /* fixed table; systemd's loader-chunked
+#define UML_NT_VMA_MAX 384 /* fixed table; systemd's loader-chunked
 	* mm blew past 64 — "fork: mm clone failed" run 36776389525
 	* (38 vma(s) seeded at the first fork, grown past the cap by
-	* the next) */
+	* the next). D27: lazy file regions materialize one VMA per
+	* touched run (hwdb.bin = up to 199); 384 keeps a fully
+	* touched 13 MiB map + the process's other VMAs inside the
+	* table. The INIT plan streams one op per VMA, still under
+	* UML_NT_FAULT_MAX_OPS (768). */
 
 #define UML_NT_FAULT_PAGE_SIZE 0x1000ull /* guest page granularity —
 	* owned here (vma geometry: guards are page-granular); fault.h

@@ -186,6 +186,9 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * exit line is the churn curve's down-tick (and the imgwatch
 	 * verify still sees this conn's image intact). */
 	uml_nt_census("exit", (long long)id->pid);
+	/* D27: drop the deferred file regions' file references (the
+	 * touched-vs-file-run [lazyfile] line rides this path). */
+	uml_nt_lazy_drop(c);
 
 	/* Kernel owns the kill (M2.2 parity): the stub may still be
 	 * suspended (never got guest code — the normal S1/S2 fate for

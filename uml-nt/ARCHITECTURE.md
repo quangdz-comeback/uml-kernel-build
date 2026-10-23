@@ -424,3 +424,25 @@ handout run guest (VA phải nằm ngoài kernel-pool region) + unit test
 fork-storm: 1000 fork liên tiếp, 0 lần object kernel đè run guest.
 FORBIDDEN: vá lún từng site copy_process (bệnh nằm ở pool, không
 phải ở fork).
+
+## D28 (2026-10-23, Shelley — phán quyết cho to-shelley/147; phiếu gọi
+## "D27" nhưng repo đã dùng D27 cho replay TF, nên ghi D28)
+File-backed RO/EXEC VMAs phải DEMAND-PAGED như upstream Linux: trang
+được cấp run + đọc từ file tại FAULT ĐẦU TIÊN (qua ubd sync path, patch
+0012), không eager-fill cả file lúc mmap. `mmap_fill` giữ eager CHỈ cho
+trang touched trong cùng syscall (như read()) và cho ảnh exec ELF
+(binfmt giao kèo execve); cache chia sẻ RO (b6785e3) giữ nguyên.
+- Lý do: bức tường thật là budget 120M với working set 87-91M + 24M
+  kernel. hwdb.bin 13M eager = 11% RAM cho một file đọc thưa (udevd
+  tra binary-search trie — touch một phần nhỏ). Lazy mapping là
+  upstream parity và mở đường cho unit files/locales.
+- FIX (M5.6a K8): region deferred per-conn (run-aligned, non-FIXED,
+  off=0, PROT_READ, >=1MiB, không do fcache nhận). Fault đầu tiên:
+  cấp 1 run, zero, kernel_read đoạn file tương ứng, add VMA READONLY +
+  MAP op, resume. munmap/mprotect/refill/fresh-VA-overlap là
+  structural: materialize eager region trước (fail-safe). Fork clone
+  region (get_file); mmctx destroy fput. VMA_MAX 256→384 (một run
+  materialized = một VMA; hwdb tối đa 199). Witness [lazyfile]
+  register/demand/drop đếm touched-vs-file-runs.
+- CẤM: nới mem=120M để qua gate; bỏ qua fcache share; eager-fill lại
+  file lớn "cho chắc".

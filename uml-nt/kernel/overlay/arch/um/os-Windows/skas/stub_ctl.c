@@ -6764,8 +6764,24 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		c->rp_active = 0;
 		d->ss_page = 0;
 		d->ss_rearm_ro = 0;
-		rc = uml_nt_mm_fault(c->mm, c->ph, d->fault_addr,
-				     d->fault_type, &c->plan);
+		{
+			/* D27: a fault inside a DEFERRED file region
+			 * materializes its run from the file and resumes
+			 * (upstream demand paging). Not ours -> the
+			 * normal decision. */
+			int lz = uml_nt_lazy_fault(c, d->fault_addr,
+						    d->fault_type);
+
+			if (lz > 0)
+				rc = 0;
+			else if (lz < 0)
+				rc = -1;
+			else
+				rc = uml_nt_mm_fault(c->mm, c->ph,
+						     d->fault_addr,
+						     d->fault_type,
+						     &c->plan);
+		}
 		/* [replay-check] arm AFTER the repair decision: only a
 		 * plan the guest will resume into (no kill) replays
 		 * the store. */
@@ -8026,6 +8042,10 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		uml_nt_fork_disarm();
 		return -ENOMEM;
 	}
+	/* D27: the child inherits the parent's DEFERRED file regions —
+	 * a first touch in the child materializes into the child's own
+	 * mm (the file reference is shared). */
+	(void)uml_nt_lazy_clone(child, parent);
 	/* Contents of the eager (private) spans: everything whose
 	 * run_off moved (the stack VMA — the COW-shared runs are the
 	 * same bytes by construction). */

@@ -28,6 +28,25 @@
 
 #define UML_NT_IMGWATCH_MAX 16
 
+struct file;
+
+/* M5.6a D27 (Shelley 2026-10-23): a DEFERRED file mapping — the VMA is
+ * registered here and gets runs + file bytes at the first fault
+ * (upstream demand paging), not at mmap. Only run-aligned fresh
+ * PROT_READ mappings that the eager sharing cache did not take (the
+ * 13 MiB hwdb.bin single-mapper case) register. The region owns a
+ * file reference; any structural op over it (munmap/mprotect/refill)
+ * materializes it eagerly first. */
+#define UML_NT_LAZY_MAX 4
+struct uml_nt_lazy_region {
+	unsigned long long start, end;	/* run-aligned VA span */
+	unsigned long long file_off;	/* file offset of start */
+	unsigned long long fsize;
+	struct file *file;
+	int used;
+	unsigned long long touched_runs;
+};
+
 /* One guest process (stub side of the D10 protocol). Lives in the
  * kernel — the conn table is owned by stub_ctl.c (spawn/fork machinery). */
 struct uml_nt_stub_conn {
@@ -409,7 +428,31 @@ struct uml_nt_stub_conn {
 	unsigned long long imgw_gen[UML_NT_IMGWATCH_MAX];
 	unsigned long long imgw_hash[UML_NT_IMGWATCH_MAX];
 	int imgw_n;
+	/* D27 lazy file regions (see struct uml_nt_lazy_region). Cloned
+	 * on fork (a child's first touch materializes into its own mm),
+	 * dropped at mmctx destroy. */
+	struct uml_nt_lazy_region lazy[UML_NT_LAZY_MAX];
 };
+
+/* D27: materialize the faulting run from the file. 1 = handled (the
+ * plan carries the MAP op; the caller resumes), 0 = not a lazy
+ * address (the normal fault path decides), -1 = materialization
+ * failed (the plan is set to kill). */
+int uml_nt_lazy_fault(struct uml_nt_stub_conn *c, unsigned long long va,
+		      unsigned type);
+/* D27: eagerly materialize + unregister every lazy region overlapping
+ * [start, end) — the structural-op fallback. 0 = ok, -1 = refused
+ * (plan capacity / alloc / read). */
+int uml_nt_lazy_eager(struct uml_nt_stub_conn *c, unsigned long long start,
+		      unsigned long long end);
+/* D27: does [start, end) overlap a lazy region? */
+int uml_nt_lazy_overlap(struct uml_nt_stub_conn *c, unsigned long long start,
+			unsigned long long end);
+/* D27 fork/exit lifetime. clone returns 0 or -1 (refusal — the fork
+ * fails loud rather than leave a child with unmapped regions). */
+int uml_nt_lazy_clone(struct uml_nt_stub_conn *child,
+		      struct uml_nt_stub_conn *parent);
+void uml_nt_lazy_drop(struct uml_nt_stub_conn *c);
 
 /* Dispatch one syscall trap served on `c` (d->regs.rax = nr, d->args
  * = the guest syscall ABI). Installs the uaccess mm for the handler,
