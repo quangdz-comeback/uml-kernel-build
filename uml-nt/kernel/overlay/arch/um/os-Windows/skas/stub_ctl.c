@@ -3036,6 +3036,15 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 	 * one). */
 	d->ss_page = 0;
 	d->ss_rearm_ro = 0;
+	/* Never arm replay single-stepping on a COW-split fault (where
+	 * the VMA table already points to the unpopulated dst run and
+	 * fault_cowcopy_exec will arm cowtrap RO at the end of the
+	 * drain): the post-drain resume lands on a cowtrap RO page,
+	 * whose 1-op restore-W fault will arm replay_check_arm cleanly
+	 * once dst is populated. */
+	if (c->plan.copy_src_off != 0 || c->plan.copy_dst_off != 0 ||
+	    c->copy_pend_kind != 0)
+		return;
 	if (d->fault_type != 1 || mm == NULL ||
 	    mm->heap_start == 0 ||
 	    d->fault_addr < mm->heap_start ||
@@ -6030,8 +6039,14 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	uml_nt_phys_set_drop_owner(c->ph, c);
 	/* WRITER-HUNT (M5.6a): the direct-write canary — validate the
 	 * conn's tcache BEFORE serving this round; poison seen here
-	 * was produced up to the previous round (last_nr names it). */
-	tcache_watch(c);
+	 * was produced up to the previous round (last_nr names it).
+	 * Skip during PROT_DONE / pending-copy drain rounds: mid-drain
+	 * the VMA table already points at the unpopulated dst run
+	 * before uml_nt_copy_pend_exec copies src->dst, so scanning or
+	 * arming cowtrap/ktrip here reads pre-copy zeros and appends
+	 * ops mid-drain ahead of the drain-position restore. */
+	if (d->cmd != UML_STUB_CMD_PROT_DONE && c->copy_pend_kind == 0)
+		tcache_watch(c);
 	ss_stray_watch(c);
 
 	if (d->cmd == UML_STUB_CMD_SYSCALL) {
@@ -6501,6 +6516,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					c->plan.n_ops, c->copy_pend_kind);
 			}
 		}
+		c->rp_active = 0;
+		d->ss_page = 0;
+		d->ss_rearm_ro = 0;
 		rc = uml_nt_mm_fault(c->mm, c->ph, d->fault_addr,
 				     d->fault_type, &c->plan);
 		/* [replay-check] arm AFTER the repair decision: only a

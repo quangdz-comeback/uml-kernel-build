@@ -2543,6 +2543,63 @@ static void test_release_gate(void)
 				      int, const void *))0;
 }
 
+/* M5.6a (referee 39840684191): a multi-run COW VMA whose FIRST run has
+ * dropped to refs==1 (because the fork peer COW-split run 0 before the
+ * child ran UML_STUB_CMD_INIT) while later runs remain shared (refs>=2)
+ * MUST still map READONLY in uml_nt_vma_effective_prot /
+ * uml_nt_mm_init_plan, and uml_nt_mm_init_plan must also check every run
+ * for refs==0 (kill_why='z') and cowbreak audit. */
+static void test_multirun_cow_effective_prot(void)
+{
+	struct uml_nt_phys ph;
+	struct uml_nt_mm parent, child;
+	struct uml_nt_fault_plan pplan, cplan;
+	long long span;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&parent);
+	uml_nt_mm_init(&child);
+
+	span = uml_nt_phys_alloc_span(&ph, 4);
+	CHECK(span >= 0);
+	CHECK(uml_nt_vma_add(&parent, RAM, RAM + 4 * RUN,
+			     (unsigned long long)span,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	CHECK(uml_nt_mm_clone(&child, &parent, &ph, RAM + 8 * RUN) == 0);
+	/* All 4 runs start at refs == 2 */
+	CHECK(uml_nt_phys_refs(&ph, span + 0 * RUN) == 2);
+	CHECK(uml_nt_phys_refs(&ph, span + 1 * RUN) == 2);
+	CHECK(uml_nt_phys_refs(&ph, span + 2 * RUN) == 2);
+	CHECK(uml_nt_phys_refs(&ph, span + 3 * RUN) == 2);
+
+	/* Parent faults on run 0 BEFORE child runs init_plan: run 0 drops
+	 * to refs==1, while runs 1..3 remain shared (refs==2) and the
+	 * child still has a single 4-run VMA starting at run 0. */
+	CHECK(uml_nt_mm_fault(&parent, &ph, RAM + 0x100,
+			      UML_NT_FAULT_WRITE, &pplan) == 0);
+	CHECK(!pplan.kill);
+	CHECK(uml_nt_phys_refs(&ph, span + 0 * RUN) == 1);
+	CHECK(uml_nt_phys_refs(&ph, span + 1 * RUN) == 2);
+	CHECK(child.nvma == 1);
+
+	/* Child's 4-run VMA has refs(run_off)==1, but runs 1..3 have
+	 * refs==2: effective_prot and init_plan MUST return READONLY! */
+	CHECK(uml_nt_vma_effective_prot(&child.vma[0], &ph) ==
+	      UML_NT_PAGE_READONLY);
+	CHECK(uml_nt_mm_init_plan(&child, &ph, &cplan) == 0);
+	CHECK(cplan.n_ops == 1);
+	CHECK(cplan.ops[0].prot == UML_NT_PAGE_READONLY);
+	CHECK(uml_nt_cowbreak_audit_count == 0);
+
+	/* If a non-first run in a multi-run VMA has refs==0, init_plan
+	 * must refuse with kill_why == 'z'. */
+	CHECK(uml_nt_phys_unref(&ph, span + 2 * RUN) == 1);
+	CHECK(uml_nt_phys_unref(&ph, span + 2 * RUN) == 0);
+	CHECK(uml_nt_mm_init_plan(&child, &ph, &cplan) < 0);
+	CHECK(cplan.kill_why == 'z');
+}
+
 int main(void)
 {
 	test_phys();
@@ -2572,6 +2629,7 @@ int main(void)
 	test_map_covers();
 	test_swap_serial();
 	test_release_gate();
+	test_multirun_cow_effective_prot();
 
 	if (fails) {
 		printf("test_mm: %d failure(s)\n", fails);

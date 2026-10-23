@@ -503,6 +503,9 @@ void userspace(struct uml_pt_regs *regs)
 		 * the handler runs, delivery returns). The timeout
 		 * keeps a dead/hung stub loud instead of a silent
 		 * boot hang (M1.9 lesson). */
+		{
+		unsigned int wait_tmo = 0;
+
 		for (;;) {
 			HANDLE waits[3], hnet, hcon;
 			ULONG w, code;
@@ -564,6 +567,27 @@ void userspace(struct uml_pt_regs *regs)
 						(unsigned)c->d->xstate_flags);
 					os_dump_core();
 				}
+				wait_tmo++;
+				if (wait_tmo == 5 || wait_tmo == 15 ||
+				    wait_tmo == 30) {
+					os_info("[userspace-tmo] stub pid %d "
+						"wait=%us cmd=%u req=%llu "
+						"done=%llu action=%u left=%d "
+						"next=%d last_nr=%llu "
+						"rip=0x%llx rsp=0x%llx "
+						"ss_page=0x%llx\n",
+						mm_id->pid, wait_tmo,
+						(unsigned)c->d->cmd,
+						c->d->req_seq,
+						c->d->done_seq,
+						(unsigned)c->d->action,
+						c->plan_left,
+						c->plan_next,
+						c->last_nr,
+						c->d->regs.rip,
+						c->d->regs.rsp,
+						c->d->ss_page);
+				}
 				continue;
 			}
 			if (w == 0xFFFFFFFFu /*WAIT_FAILED*/) {
@@ -577,6 +601,7 @@ void userspace(struct uml_pt_regs *regs)
 			/* Any other wait outcome: treat as the trap
 			 * being ready (defensive; not reachable). */
 			break;
+		}
 		}
 
 		cmd = c->d->cmd;

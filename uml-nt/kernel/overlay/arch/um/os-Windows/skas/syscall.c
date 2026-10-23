@@ -737,10 +737,13 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 
 /* ---- M5.4 c2 (D20): file-backed mmap — the dynamic-loader path ----
  *
- * c3: max runs one fresh chunk may span — order-10 in the buddy
- * (RUN_ORDER 4 + 6); anything bigger fails alloc_pages with a
- * MAX_ORDER WARN. sys_mmap_file splits around this cap. */
-#define UML_NT_MMAP_SPAN_RUNS 64
+ * c3: max runs one fresh chunk may span — capped at 16 runs (1 MiB,
+ * order 8) instead of 64 runs (4 MiB, order 10) so concurrent
+ * generator/service loads of large shared libraries (libsystemd-shared
+ * 3.25 MiB, libcrypto 4.56 MiB, libc 1.94 MiB) do not exhaust order-9/10
+ * buddy blocks while earlier processes' freed spans sit in the D22
+ * quarantine ring. sys_mmap_file splits around this cap. */
+#define UML_NT_MMAP_SPAN_RUNS 16
 
 /* ld.so maps every shared library through here: ONE span mapping
  * (first segment's prot, no MAP_FIXED — the kernel picks the base),
@@ -1131,6 +1134,9 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 			sp = (unsigned long long)
 				uml_nt_phys_alloc_span(c->ph, (int)nruns);
 			if ((long long)sp < 0) {
+				os_info("[syscall] mmap file 0x%llx+%llu: "
+					"span of %u run(s) at 0x%llx failed "
+					"— ENOMEM\n", addr, len, nruns, cur);
 				fdput(fdesc);
 				return SC_RET(SC_ENOMEM);
 			}
@@ -1141,6 +1147,10 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 					       uml_nt_phys_gen(
 						       c->ph,
 						       (long long)sp)) < 0) {
+				os_info("[syscall] mmap file 0x%llx+%llu: "
+					"vma table full at 0x%llx (nvma=%d) "
+					"— ENOMEM\n", addr, len, cur,
+					c->mm->nvma);
 				uml_nt_phys_unref(c->ph, (long long)sp);
 				fdput(fdesc);
 				return SC_RET(SC_ENOMEM);

@@ -45,9 +45,16 @@ static unsigned long long page_run_off(const struct uml_nt_vma *vma,
 unsigned uml_nt_vma_effective_prot(const struct uml_nt_vma *vma,
 				   struct uml_nt_phys *ph)
 {
-	if ((vma->flags & UML_NT_VMA_COW) &&
-	    uml_nt_phys_refs(ph, (long long)vma->run_off) > 1)
-		return uml_nt_prot_readonly(vma->prot);
+	unsigned long long off, end_off;
+
+	if (vma->flags & UML_NT_VMA_COW) {
+		end_off = vma->run_off + (vma->end - vma->start);
+		for (off = vma->run_off; off < end_off;
+		     off += UML_NT_PHYS_RUN_SIZE) {
+			if (uml_nt_phys_refs(ph, (long long)off) > 1)
+				return uml_nt_prot_readonly(vma->prot);
+		}
+	}
 	return vma->prot;
 }
 
@@ -378,14 +385,20 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		return -1;
 	for (i = 0; i < mm->nvma; i++) {
 		const struct uml_nt_vma *v = &mm->vma[i];
+		unsigned long long off, end_off;
 
 		/* Map 049 item 2: refuse to map a VMA whose run the
 		 * table no longer counts (stolen at an unbalanced
 		 * drop) — the child would boot on foreign bytes.
-		 * kill_why='z' for the caller's log. */
-		if (uml_nt_phys_refs(ph, (long long)v->run_off) == 0) {
-			plan->kill_why = 'z';
-			return -1;
+		 * kill_why='z' for the caller's log. Check EVERY run
+		 * of a multi-run VMA, not just run_off. */
+		end_off = v->run_off + (v->end - v->start);
+		for (off = v->run_off; off < end_off;
+		     off += UML_NT_PHYS_RUN_SIZE) {
+			if (uml_nt_phys_refs(ph, (long long)off) == 0) {
+				plan->kill_why = 'z';
+				return -1;
+			}
 		}
 		if (plan_op(plan, UML_NT_FOP_MAP,
 			    uml_nt_vma_effective_prot(v, ph),
@@ -399,29 +412,36 @@ int uml_nt_mm_init_plan(const struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	 * write skipped the COW fault and ate the sharer's heap
 	 * (the deterministic fd=0x1a bk=0x8000 = the same malloc
 	 * arena field at the same heap VA every process gets).
-	 * Audit the emitted MAP ops: writable + shared = the break,
-	 * recorded for the caller's log (pure file: no os_info). */
+	 * Audit the emitted MAP ops across every run they cover:
+	 * writable + shared = the break, recorded for the caller's
+	 * log (pure file: no os_info). */
 	{
 		int ai;
 
 		uml_nt_cowbreak_audit_count = 0;
 		for (ai = 0; ai < plan->n_ops; ai++) {
 			struct uml_nt_fault_op *ao = &plan->ops[ai];
+			unsigned long long off, end_off;
 
 			if (ao->op != UML_NT_FOP_MAP ||
 			    !uml_nt_prot_writable(ao->prot))
 				continue;
-			if (uml_nt_phys_refs(ph,
-				    (long long)ao->off) < 2)
-				continue;
-			if (uml_nt_cowbreak_audit_count == 0) {
-				uml_nt_cowbreak_va = ao->va;
-				uml_nt_cowbreak_run = ao->off;
-				uml_nt_cowbreak_refs =
-					uml_nt_phys_refs(ph,
-					    (long long)ao->off);
+			end_off = ao->off + ao->len;
+			for (off = ao->off; off < end_off;
+			     off += UML_NT_PHYS_RUN_SIZE) {
+				if (uml_nt_phys_refs(ph,
+					    (long long)off) < 2)
+					continue;
+				if (uml_nt_cowbreak_audit_count == 0) {
+					uml_nt_cowbreak_va = ao->va +
+						(off - ao->off);
+					uml_nt_cowbreak_run = off;
+					uml_nt_cowbreak_refs =
+						uml_nt_phys_refs(ph,
+						    (long long)off);
+				}
+				uml_nt_cowbreak_audit_count++;
 			}
-			uml_nt_cowbreak_audit_count++;
 		}
 	}
 	/* The fork child inherits the parent's guards (vma.h): the
