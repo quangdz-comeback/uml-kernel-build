@@ -418,6 +418,21 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 	if ((er->ExceptionCode & 0xC0000000u) != 0xC0000000u ||
 	    InterlockedExchange(&reported, 1) != 0)
 		return;
+	/* v15: the console line below is routinely cut at 19 bytes at
+	 * the death site — record the complete exception in the shared
+	 * block first (the kernel's death print reads it). seq LAST. */
+	if (d != NULL) {
+		d->unowned_code = er->ExceptionCode;
+		d->unowned_last_cmd = d->cmd;
+		d->unowned_rip = (unsigned long long)c->Rip;
+		d->unowned_rsp = (unsigned long long)c->Rsp;
+		d->unowned_op = er->NumberParameters > 0 ?
+			(unsigned long long)er->ExceptionInformation[0] : 0;
+		d->unowned_addr = er->NumberParameters > 1 ?
+			(unsigned long long)er->ExceptionInformation[1] : 0;
+		MemoryBarrier();
+		d->unowned_seq = 1;
+	}
 	/* The stub's own view of the qword just below rsp (a `ret` into
 	 * a bad target popped it) — compared with the kernel's view of
 	 * the same VA, it separates a real write from a stale view. */

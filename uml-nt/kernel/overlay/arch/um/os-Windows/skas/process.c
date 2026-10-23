@@ -565,6 +565,24 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->regs.rsp,
 						c->d->regs.rax,
 						(unsigned)c->d->xstate_flags);
+					/* v15 (D28 follow-up): the complete
+					 * unowned-exception record — the
+					 * console line that named it was cut
+					 * to 19 bytes at the previous death
+					 * sites. */
+					if (c->d->unowned_seq == 1)
+						os_info("[stubtest] UNOWNED "
+							"code=%08x last_cmd=%u "
+							"rip=%llx rsp=%llx "
+							"op=%llu addr=%llx\n",
+							(unsigned)c->d->
+								unowned_code,
+							(unsigned)c->d->
+								unowned_last_cmd,
+							c->d->unowned_rip,
+							c->d->unowned_rsp,
+							c->d->unowned_op,
+							c->d->unowned_addr);
 					os_dump_core();
 				}
 				wait_tmo++;

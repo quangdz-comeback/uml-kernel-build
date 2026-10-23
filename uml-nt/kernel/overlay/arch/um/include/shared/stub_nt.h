@@ -337,6 +337,22 @@ struct uml_nt_stub_data {
 	u32_nt ss_stray_n;
 	u32_nt _pad_ss_stray;
 	unsigned long long ss_stray[8][8];
+	/* -- v15 (D28 follow-up, login-depth corruption): the unowned-
+	 * exception record. report_unowned's 512-byte console line loses
+	 * everything past its first 19 bytes at the death site ("stub:
+	 * UNOWNED exce" — referees 39993301942 lazy?/40001382875), i.e.
+	 * the exception code, the faulting VA and the op are invisible
+	 * exactly where the next class lives (0xC0000096 PRIVILEGED_
+	 * INSTRUCTION at login). The stub records the complete exception
+	 * here BEFORE it dies; the kernel's "died silently" print reads
+	 * it. unowned_seq written last: 0 = none, 1 = complete. */
+	u32_nt unowned_code;
+	u32_nt unowned_last_cmd;
+	unsigned long long unowned_rip;
+	unsigned long long unowned_rsp;
+	unsigned long long unowned_op;   /* ExceptionInformation[0] */
+	unsigned long long unowned_addr; /* ExceptionInformation[1] */
+	unsigned long long unowned_seq;
 };
 
 #endif /* __UML_STUB_NT_H */
