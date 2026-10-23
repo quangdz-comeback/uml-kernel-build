@@ -2581,7 +2581,12 @@ void uml_nt_census(const char *tag, long long pid)
 					unsigned long long mp =
 						(unsigned long long)ac->ppid + 1;
 
-					if (v->flags & UML_NT_VMA_COW)
+					/* Fork COW shares and the fcache's
+					 * RO/EXEC file-run sharing (FILE)
+					 * are both by design — only an
+					 * image/anon share is suspicious. */
+					if (v->flags & (UML_NT_VMA_COW |
+							UML_NT_VMA_FILE))
 						continue;
 					for (ro = v->run_off;
 					     ro < v->run_off +

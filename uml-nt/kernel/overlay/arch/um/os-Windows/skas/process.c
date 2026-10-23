@@ -570,7 +570,10 @@ void userspace(struct uml_pt_regs *regs)
 					 * console line that named it was cut
 					 * to 19 bytes at the previous death
 					 * sites. */
-					if (c->d->unowned_seq == 1)
+					if (c->d->unowned_seq == 1) {
+						long long uo = -1;
+						unsigned long long urun = 0;
+
 						os_info("[stubtest] UNOWNED "
 							"code=%08x last_cmd=%u "
 							"rip=%llx rsp=%llx "
@@ -583,6 +586,34 @@ void userspace(struct uml_pt_regs *regs)
 							c->d->unowned_rsp,
 							c->d->unowned_op,
 							c->d->unowned_addr);
+						/* D28 follow-up: the exception
+						 * RIP's backing run + the
+						 * TO_GUEST ledger for it —
+						 * the writer of a corrupted
+						 * code page names itself. */
+						if (c->mm != NULL)
+							uo = uml_nt_vma_translate(
+								c->mm,
+								c->d->unowned_rip,
+								1);
+						if (uo >= 0) {
+							struct uml_nt_vma *uv =
+								uml_nt_vma_find(
+								  c->mm,
+								  c->d->unowned_rip);
+
+							urun = ((unsigned long long)uo) &
+								~(UML_NT_PHYS_RUN_SIZE - 1);
+							if (uv != NULL)
+								os_info("[stubtest] UNOWNED "
+									"rip in vma [0x%llx,0x%llx) "
+									"prot=0x%x flags=0x%x run=0x%llx\n",
+									uv->start, uv->end,
+									uv->prot, uv->flags,
+									urun);
+							uml_nt_uacc_towrite_dump(urun);
+						}
+					}
 					os_dump_core();
 				}
 				wait_tmo++;
