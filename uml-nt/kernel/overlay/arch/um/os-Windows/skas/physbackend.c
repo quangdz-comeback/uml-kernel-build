@@ -50,7 +50,7 @@ static void clear_zone_watermark_boost(void)
  * and hand them back on the fault path; a buddy failure drains the
  * pool and retries, so nothing hides from the kernel. The pure half
  * (put/get/pop) is host-tested — tests/test_runpool.c. */
-#define UML_NT_RUNPOOL_MAX_RUNS 64
+#define UML_NT_RUNPOOL_MAX_RUNS 0 /* A/B: pool off (Shelley 147.1) */
 static struct uml_nt_runpool g_runpool;
 static int g_runpool_ready;
 
