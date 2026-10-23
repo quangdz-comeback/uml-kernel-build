@@ -32,6 +32,14 @@
 
 #define RUN_ORDER (UML_NT_PHYS_RUN_SHIFT - PAGE_SHIFT)
 
+static void clear_zone_watermark_boost(void)
+{
+	struct zone *z;
+
+	for_each_populated_zone(z)
+		z->watermark_boost = 0;
+}
+
 /* M5.6a K8 [runpool]: the released-run cache. The guest's runs and
  * the kernel's own page cache share one zone; the exact span trim
  * returns unused tails at RUN_ORDER while the kernel scatters order-0
@@ -92,14 +100,6 @@ static int runs_order(int n)
 	for (k = 0; (1 << k) < n; k++)
 		;
 	return k;
-}
-
-static void clear_zone_watermark_boost(void)
-{
-	struct zone *z;
-
-	for_each_populated_zone(z)
-		z->watermark_boost = 0;
 }
 
 long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
