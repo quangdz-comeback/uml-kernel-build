@@ -330,8 +330,27 @@ int os_map_memory(void *virt, int fd, unsigned long long off,
 			}
 			for (pp = (unsigned int)((p0 - b) >> 12);
 			     pp < (unsigned int)((p1 - b) >> 12);
-			     pp++)
-				priv_pages[bi][pp] = 1;
+			     pp++) {
+				if (!priv_pages[bi][pp]) {
+					unsigned long long pva =
+						b + ((unsigned long long)pp << 12);
+					unsigned long long poff =
+						off + (pva - v);
+
+					if (uml_boot.physmem_base &&
+					    poff + 0x1000ULL <=
+					    uml_boot.physmem_size)
+						__builtin_memcpy(
+							(void *)(uintptr_t)pva,
+							(const char *)uml_boot.physmem_base +
+							poff, 0x1000);
+					else
+						__builtin_memset(
+							(void *)(uintptr_t)pva,
+							0, 0x1000);
+					priv_pages[bi][pp] = 1;
+				}
+			}
 			/* 098 ζ: R17 escalation ledger — block 2048 is
 			 * where the untracked-page guard keeps firing
 			 * (0x6800f000, page 15). Trace every claim in
@@ -408,37 +427,18 @@ int os_unmap_memory(void *addr, int len)
 	/* Untracked page: the old path decommitted it anyway and
 	 * wrapped the counter 0 -> 255 (the saturation undercount's
 	 * mirror). With per-page bits, a clear bit means no live
-	 * claim of ours — refusing is the only sound answer. */
+	 * claim of ours — ignore idempotently (returning 0 so tlb.c's
+	 * update_pte_range loop continues unmapping subsequent pages
+	 * in the range instead of aborting mid-batch). */
 	if (idx < 0 || priv_pages[idx][pi] == 0) {
 		static int nuntracked_refused;
 
-		nuntracked_refused++;
-		os_info("os_unmap_memory: untracked page 0x%llx "
-			"refused (idx=%d pi=%d refusal #%d)\n", v, idx,
-			pi, nuntracked_refused);
-		if (idx >= 0) {
-			/* 097 γ': WHICH pages of this block are still
-			 * claimed — a partially-claimed block here is
-			 * the R17 hole's shape (some pages claimed by
-			 * a dead region, their bits never cleared);
-			 * a fully-clear block means the whole block's
-			 * ledger was lost. The vmr dump names the last
-			 * ops. */
-			os_info("os_unmap_memory:   block %d bits "
-				"%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d "
-				"cnt=%d\n", idx, priv_pages[idx][0],
-				priv_pages[idx][1], priv_pages[idx][2],
-				priv_pages[idx][3], priv_pages[idx][4],
-				priv_pages[idx][5], priv_pages[idx][6],
-				priv_pages[idx][7], priv_pages[idx][8],
-				priv_pages[idx][9], priv_pages[idx][10],
-				priv_pages[idx][11], priv_pages[idx][12],
-				priv_pages[idx][13], priv_pages[idx][14],
-				priv_pages[idx][15],
-				priv_block_cnt(idx));
+		if (++nuntracked_refused <= 8) {
+			os_info("os_unmap_memory: untracked page 0x%llx "
+				"ignored (idx=%d pi=%d #%d)\n", v, idx,
+				pi, nuntracked_refused);
 		}
-		uml_nt_vmr_dump("untracked-page guard refused", 24);
-		return -EINVAL;
+		return 0;
 	}
 
 	if (!nt->VirtualFree((PVOID)(uintptr_t)v, 0x1000,
@@ -449,20 +449,11 @@ int os_unmap_memory(void *addr, int len)
 		return -1;
 	}
 	priv_pages[idx][pi] = 0;
+	(void)va0;
 	if (idx == 2048)
 		os_info("[r17-ledger] block 2048 decommit va=0x%llx "
 			"page %d\n", v, pi);
 	vmr_push(v, 0x1000, 1, (unsigned char)priv_block_cnt(idx));
-	if (!priv_block_live(idx) &&
-	    !nt->VirtualFree((PVOID)(uintptr_t)va0, 0, MEM_RELEASE)) {
-		os_info("os_unmap_memory: private release @%px "
-			"failed\n", addr);
-		uml_nt_vmr_dump("release failed", 24);
-		return -1;
-	}
-	if (idx == 2048 && !priv_block_live(idx))
-		os_info("[r17-ledger] block 2048 release (all pages "
-			"gone)\n");
 	return 0;
 }
 

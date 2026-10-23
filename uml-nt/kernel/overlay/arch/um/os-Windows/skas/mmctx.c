@@ -55,6 +55,14 @@ static unsigned long __attribute__((ms_abi)) mmctx_spawn_thread(void *arg)
 	return 0;
 }
 
+/* Global physical run reference table shared across all task-backed
+ * guest address spaces. Using a single table prevents parent-exit UAF
+ * when a parent (formerly ph_shared == 0) exits or execs while forked
+ * children (ph_shared == 1) still reference the table, and avoids a
+ * 128 KiB order-5 kzalloc on every fork/exec. */
+static struct uml_nt_phys g_mmctx_phys;
+static int g_mmctx_phys_inited;
+
 /* init_new_context body (CONFIG_OS_WINDOWS). Returns 0 on success,
  * -errno on failure — mm_init() aborts the mm (and the exec/fork)
  * exactly like the upstream start_userspace failure. */
@@ -62,7 +70,6 @@ int uml_nt_mmctx_init(struct mm_id *id)
 {
 	struct uml_nt_stub_conn *c;
 	struct uml_nt_spawn_req req;
-	struct uml_nt_phys *ph;
 	struct uml_nt_mm *mm;
 	ULONG tid;
 	HANDLE th;
@@ -77,21 +84,23 @@ int uml_nt_mmctx_init(struct mm_id *id)
 
 	c = kzalloc(sizeof(*c), GFP_KERNEL);
 	mm = kzalloc(sizeof(*mm), GFP_KERNEL);
-	ph = kzalloc(sizeof(*ph), GFP_KERNEL);
-	if (c == NULL || mm == NULL || ph == NULL)
+	if (c == NULL || mm == NULL)
 		goto fail;
 
-	/* Fresh address-space bookkeeping: empty VMA tree + a private
-	 * refcount table over the SHARED buddy backend (the buddy owns
-	 * exclusivity — the table only tracks runs this mm allocated;
-	 * fork shares the PARENT's table via conn cloning, S3). */
+	/* Fresh address-space bookkeeping: empty VMA tree + the shared
+	 * physical run reference table over the buddy backend. */
 	uml_nt_mm_init(mm);
-	if (uml_nt_phys_init(ph, uml_boot.physmem_size) < 0) {
-		os_warn("mmctx: phys run table init failed\n");
-		goto fail;
+	if (!g_mmctx_phys_inited) {
+		if (uml_nt_phys_init(&g_mmctx_phys,
+				     uml_boot.physmem_size) < 0) {
+			os_warn("mmctx: phys run table init failed\n");
+			goto fail;
+		}
+		g_mmctx_phys_inited = 1;
 	}
 	c->mm = mm;
-	c->ph = ph;
+	c->ph = &g_mmctx_phys;
+	c->ph_shared = 1;
 
 	/* Fat thread for CreateProcessA (pitfall 11); the spawn itself
 	 * is CreateProcess(suspended) — S5 measured ~1ms. */

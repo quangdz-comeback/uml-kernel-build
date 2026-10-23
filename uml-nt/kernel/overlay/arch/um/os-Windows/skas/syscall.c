@@ -25,6 +25,7 @@
 #include <linux/binfmts.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/major.h>
 #include <linux/mm.h>
 #include <linux/ptrace.h>
 #include <linux/string.h>
@@ -371,18 +372,19 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 			 * healthy conn). */
 			c->copy_pend_kind = 0;
 			for (i = 0; i < nruns; i++)
-				uml_nt_phys_unref(c->ph,
-						  (long long)new_off +
-						  i * UML_NT_PHYS_RUN_SIZE);
+				uml_nt_phys_unref_for(c->ph,
+						      (long long)new_off +
+						      i * UML_NT_PHYS_RUN_SIZE,
+						      c);
 			os_info("[syscall] brk: VMA resize failed — "
 				"kept 0x%llx\n", mm->brk);
 			return mm->brk;
 		}
 		for (i = 0; i < (long long)(old_len / UML_NT_PHYS_RUN_SIZE);
 		     i++)
-			uml_nt_phys_unref(c->ph,
-					  (long long)old_off +
-					  i * UML_NT_PHYS_RUN_SIZE);
+			uml_nt_phys_unref_for(c->ph,
+					      (long long)old_off +
+					      i * UML_NT_PHYS_RUN_SIZE, c);
 
 		/* Stub view swap, in this op order: the whole old view
 		 * (base = heap_start) goes, the bigger one arrives, and
@@ -685,8 +687,8 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 			}
 			uml_nt_vma_del(c->mm, va, va + len);
 			for (i = 0; i < nfree; i++)
-				uml_nt_phys_unref(c->ph,
-						  (long long)runs[i]);
+				uml_nt_phys_unref_for(c->ph,
+						      (long long)runs[i], c);
 		}
 	} else {
 		va = uml_nt_vma_find_free(c->mm, len, UML_NT_SYSCALLS_BASE,
@@ -718,9 +720,9 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 			       (unsigned long long)uml_nt_phys_gen(
 				       c->ph, (long long)sp)) < 0) {
 		for (i = 0; i < nruns; i++)
-			uml_nt_phys_unref(c->ph, sp +
-					  (long long)i *
-					  UML_NT_PHYS_RUN_SIZE);
+			uml_nt_phys_unref_for(c->ph, sp +
+					      (long long)i *
+					      UML_NT_PHYS_RUN_SIZE, c);
 		return SC_RET(SC_ENOMEM);
 	}
 	os_info("[syscall] mmap 0x%llx+%llu prot=0x%x flags=0x%x "
@@ -905,7 +907,7 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 
 	while (cur < end) {
 		struct uml_nt_vma *v = uml_nt_vma_find(c->mm, cur);
-		unsigned long long piece, off, mk;
+		unsigned long long piece, off;
 
 		if (v == NULL || v->end <= cur) {
 			os_info("[syscall] mmap sweep 0x%llx: unmapped "
@@ -914,32 +916,15 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 		}
 		piece = (end < v->end) ? end : v->end;
 		off = v->run_off + (cur - v->start);
-		mk = (unsigned long long)(uintptr_t)
-		     kvmalloc(piece - cur, GFP_KERNEL);
-		if (mk == 0) {
-			/* R17 DIAG: a NULL here right after the
-			 * __vmap_pages_range_noflush !pte_none WARN
-			 * (mm/vmalloc.c:542, run 36984931372) = the
-			 * stale-PTE hit — dump the band ledger ring
-			 * (read-only) to name the previous window
-			 * ops around the victim VA. */
-			uml_nt_vmr_dump("sweep mark-buffer alloc "
-					"failed", 24);
-			os_info("[syscall] mmap sweep 0x%llx: mark alloc "
-				"failed (%llu bytes)\n", cur, piece - cur);
-			return -1;
-		}
-		/* K6 [flatwr]: the sweep PATCHES guest code in place — a
-		 * kernel flat write of guest content; kvmalloc can sleep
-		 * mid-piece, so capture the (run, gen) at the translate
-		 * and prove the patch landed in the same backing after. */
+		/* K6 [flatwr]: the sweep PATCHES guest code in place —
+		 * zero-alloc in-place decode (no kvmalloc/kvfree). */
 		{
 			unsigned long long sg = (unsigned long long)
 				uml_nt_phys_gen(c->ph, (long long)off);
 
 			total += uml_nt_patch_syscalls(
 				(char *)uml_boot.physmem_base + off,
-				piece - cur, 0, (void *)(uintptr_t)mk);
+				piece - cur, 0, NULL);
 			/* 098 δ: the sweep PATCHES guest code in place —
 			 * a cowwatch-armed run touched here is the writer. */
 			uml_nt_cowwatch_touch(off, piece - cur,
@@ -948,7 +933,6 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 					    cur, piece - cur, off, sg,
 					    (long long)off);
 		}
-		kvfree((void *)(uintptr_t)mk);
 		cur = piece;
 	}
 	return total;
@@ -1158,8 +1142,9 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 					"— ENOMEM\n", addr, len, cur);
 				for (roff = sp; roff < sp + clen;
 				     roff += UML_NT_PHYS_RUN_SIZE)
-					uml_nt_phys_unref(c->ph,
-							  (long long)roff);
+					uml_nt_phys_unref_for(c->ph,
+							      (long long)roff,
+							      c);
 				goto rollback_chunks;
 			}
 			if (uml_nt_vma_add_gen(c->mm, cur, cur + clen, sp,
@@ -1177,8 +1162,9 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 					c->mm->nvma);
 				for (roff = sp; roff < sp + clen;
 				     roff += UML_NT_PHYS_RUN_SIZE)
-					uml_nt_phys_unref(c->ph,
-							  (long long)roff);
+					uml_nt_phys_unref_for(c->ph,
+							      (long long)roff,
+							      c);
 				goto rollback_chunks;
 			}
 			uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
@@ -1201,8 +1187,9 @@ rollback_chunks:
 				uml_nt_vma_del(c->mm, rb, rb + rlen);
 				for (; roff < roff_end;
 				     roff += UML_NT_PHYS_RUN_SIZE)
-					uml_nt_phys_unref(c->ph,
-							  (long long)roff);
+					uml_nt_phys_unref_for(c->ph,
+							      (long long)roff,
+							      c);
 				rb += rlen;
 			}
 			c->plan.n_ops = plan_base;
@@ -1319,7 +1306,7 @@ static unsigned long long sys_munmap(struct uml_nt_stub_conn *c,
 	if (uml_nt_vma_del(mm, addr, addr + len) < 0)
 		return SC_RET(SC_ENOMEM);
 	for (i = 0; i < nruns; i++)
-		uml_nt_phys_unref(c->ph, (long long)runs[i]);
+		uml_nt_phys_unref_for(c->ph, (long long)runs[i], c);
 	uml_nt_guard_del_range(mm, addr, addr + len); /* guards die too */
 	for (i = 0; i < nviews; i++)
 		if (uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0,
@@ -3227,23 +3214,48 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 204: /* sched_getaffinity — systemd's CPU-shaping probe
 		   * (1x in run 36889953754); the honest answer here
 		   * is 1 CPU (CPUs=1) */
+	case 96:  /* gettimeofday */
+	case 161: /* chroot */
+	case 201: /* time */
+	case 229: /* clock_getres */
 	case 272: /* unshare */
 	case 288: /* accept4 — socket activation (the AF_UNIX
 		   * journald listeners are kernel-internal, D8 only
 		   * bans the kernel<->helper channel) */
+	case 429: /* move_mount */
+	case 430: /* fsopen */
+	case 431: /* fsconfig */
+	case 432: /* fsmount */
+	case 433: /* fspick */
+	case 442: /* mount_setattr */
 		ret = sys_vfs(nr, a);
 		break;
-	case 1: /* write — fds 0/1/2 ride the console hand-path (probe
-		  * conns have no files_struct; the bench markers ride
-		  * here too, M4.1). fd >= 3 = the REAL VFS: the guest
-		  * owns its fds since M3.8 — sockets (M5.1d nettest:
-		  * write on the connected TCP socket), pipes, files.
-		  * The hand-path's EBADF-for-everything-else swallowed
-		  * exactly those. */
-		if (a[0] > 2)
+	case 1: /* write — fds 1/2 on console tty ride the console
+		  * hand-path (probe conns have no files_struct; the
+		  * bench markers ride here too, M4.1). fd >= 3, fd 0
+		  * on task-backed conns (e.g. agetty opening /run/utmp
+		  * on fd 0), or fds 1/2 redirected to pipes, sockets,
+		  * regular files, or /dev/null ride the REAL VFS. */
+		if (a[0] > 2 || (c->task_backed && a[0] == 0)) {
 			ret = sys_vfs(nr, a);
-		else
+		} else if (c->task_backed) {
+			struct fd f = fdget((unsigned int)a[0]);
+			int use_vfs = 0;
+
+			if (!fd_file(f)) {
+				use_vfs = 1;
+			} else {
+				struct inode *ino = file_inode(fd_file(f));
+
+				if (!S_ISCHR(ino->i_mode) ||
+				    imajor(ino) == MEM_MAJOR)
+					use_vfs = 1;
+			}
+			fdput(f);
+			ret = use_vfs ? sys_vfs(nr, a) : sys_write(c, a);
+		} else {
 			ret = sys_write(c, a);
+		}
 		break;
 	case 9: /* mmap — file-backed (fd != -1) = the dynamic-loader
 		 * path (M5.4 c2, D20); anon stays below. fd is an INT

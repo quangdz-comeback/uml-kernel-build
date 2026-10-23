@@ -153,12 +153,12 @@ static int witness_off(void)
 
 	if (uml_nt_witness_off >= 0)
 		return uml_nt_witness_off;
-	uml_nt_witness_off = 0;
+	uml_nt_witness_off = 1;
 	for (i = 0; i < uml_boot.argc; i++)
 		if (uml_boot.argv[i] != NULL &&
 		    __builtin_strcmp(uml_boot.argv[i],
-				     "uml_nt_witness=0") == 0)
-			uml_nt_witness_off = 1;
+				     "uml_nt_witness=1") == 0)
+			uml_nt_witness_off = 0;
 	if (uml_nt_witness_off)
 		os_info("[witness] uml_nt_witness=0 — guest-visible "
 			"instrumentation OFF (cowtrap/mapcanary/ss)\n");
@@ -4308,19 +4308,22 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 						cur_chunk = cnxt;
 					}
 					if (!live) {
+						static int n_tcstale_log;
+
 						poison = 0;
-						os_info("[tcchunk-stale] "
-							"pid %lu list[%d] "
-							"d%d va=0x%llx "
-							"0x%llx -> 0x%llx "
-							"(A-B-A ghost — "
-							"chunk left the "
-							"chain; churn)\n",
-							(unsigned long)
-							c->pid, di, depth,
-							chunk, c->
-							tc_chunk_snap[di]
-							[depth], data);
+						if (++n_tcstale_log <= 32)
+							os_info("[tcchunk-stale] "
+								"pid %lu list[%d] "
+								"d%d va=0x%llx "
+								"0x%llx -> 0x%llx "
+								"(A-B-A ghost — "
+								"chunk left the "
+								"chain; churn)\n",
+								(unsigned long)
+								c->pid, di, depth,
+								chunk, c->
+								tc_chunk_snap[di]
+								[depth], data);
 					}
 				}
 				if (poison) {
@@ -5874,18 +5877,22 @@ static int fault_cowcopy_exec(struct uml_nt_stub_conn *c,
 		char hex[49];
 		int hi;
 
-		for (hi = 0; hi < 16; hi++)
-			snprintf(hex + hi * 3, sizeof(hex) - hi * 3,
-				 "%02x ", fp[hi]);
-		os_info("[cowcopy] pid %lu src=0x%llx (refs=%d) "
-			"dst=0x%llx (refs=%d) fp=%s (%s)\n",
-			(unsigned long)c->pid, c->copy_pend_src,
-			uml_nt_phys_refs(c->ph,
-				(long long)c->copy_pend_src),
-			c->copy_pend_dst,
-			uml_nt_phys_refs(c->ph,
-				(long long)c->copy_pend_dst),
-			hex, when);
+		static int n_cowcopy_log;
+
+		if (++n_cowcopy_log <= 64) {
+			for (hi = 0; hi < 16; hi++)
+				snprintf(hex + hi * 3, sizeof(hex) - hi * 3,
+					 "%02x ", fp[hi]);
+			os_info("[cowcopy] pid %lu src=0x%llx (refs=%d) "
+				"dst=0x%llx (refs=%d) fp=%s (%s)\n",
+				(unsigned long)c->pid, c->copy_pend_src,
+				uml_nt_phys_refs(c->ph,
+					(long long)c->copy_pend_src),
+				c->copy_pend_dst,
+				uml_nt_phys_refs(c->ph,
+					(long long)c->copy_pend_dst),
+				hex, when);
+		}
 		/* cowwatch arm: a SHARED src run = the poison target
 		 * class (the writer writes after the copy — see the
 		 * cowwatch block comment). Owner VA unknown at this
@@ -6418,9 +6425,15 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			 * resumes. The stub-side verify (stub.c
 			 * verify_prot) proved each apply actually took;
 			 * this line proves the retval waited for it. */
-			os_info("[fork-sync] plan done: %d op(s) applied, "
-				"retval 0x%llx published\n", c->plan.n_ops,
-				(unsigned long long)c->plan_retval);
+			{
+				static int n_forksync_log;
+
+				if (++n_forksync_log <= 64)
+					os_info("[fork-sync] plan done: %d op(s) applied, "
+						"retval 0x%llx published\n",
+						c->plan.n_ops,
+						(unsigned long long)c->plan_retval);
+			}
 		}
 		d->action = UML_STUB_ACTION_NONE;
 		d->err = 0;
@@ -6975,9 +6988,15 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		c->last_fault_rip = d->regs.rip;
 		c->last_fault_addr = d->fault_addr;
 		c->last_fault_valid = 1;
-		os_info("[stubtest] FAULT pid %lu addr=0x%llx type=%u -> "
-			"%d op(s)\n", (unsigned long)c->pid, d->fault_addr,
-			d->fault_type, c->plan.n_ops);
+		{
+			static int n_fault_log;
+
+			if (++n_fault_log <= 64)
+				os_info("[stubtest] FAULT pid %lu addr=0x%llx type=%u -> "
+					"%d op(s)\n", (unsigned long)c->pid,
+					d->fault_addr, d->fault_type,
+					c->plan.n_ops);
+		}
 		/* K6 (cowcopy-race-class-fix, dlW 37576991123 / dlX
 		 * 37579340518 — the RETIRE-LOST verdict): the COW copy
 		 * directive is DEFERRED, not executed here. The verdict
@@ -7508,6 +7527,8 @@ void uml_nt_switch_trace(void *from, void *to)
 			s.plan = &c->plan;
 			(void)uml_nt_uacc_set_sink(&s);
 			(void)uml_nt_uacc_nr_switch(&c->active_nr);
+			if (c->ph != NULL)
+				uml_nt_phys_set_drop_owner(c->ph, c);
 		} else {
 			uml_nt_uacc_set_mm(NULL);
 			(void)uml_nt_uacc_set_sink(NULL);
@@ -7715,20 +7736,26 @@ void uml_nt_phys_zero_flat(long long off, int nruns)
 void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 			   int refs, const void *owner)
 {
+	static int n_phys_log;
+	int normal = (strcmp(kind, "park") == 0 ||
+		      strcmp(kind, "free") == 0);
+
 	/* The tag identity = the mis-tag witness (the prior hunt
 	 * round's ask): a park/free whose owner is NOT the conn
 	 * whose mm still maps the run = the free-while-mapped
 	 * alias reborn. Print the owner's PID, not a bare tag. */
 	if (owner != (const void *)0) {
-		os_info("[phys] %s off=0x%llx runs=%d refs=%d "
-			"owner=pid %lu\n", kind,
-			(unsigned long long)off, nruns, refs,
-			(unsigned long)((const struct uml_nt_stub_conn *)
-					owner)->pid);
+		if (!normal || ++n_phys_log <= 64)
+			os_info("[phys] %s off=0x%llx runs=%d refs=%d "
+				"owner=pid %lu\n", kind,
+				(unsigned long long)off, nruns, refs,
+				(unsigned long)((const struct uml_nt_stub_conn *)
+						owner)->pid);
 		return;
 	}
-	os_info("[phys] %s off=0x%llx runs=%d refs=%d owner=none\n",
-		kind, (unsigned long long)off, nruns, refs);
+	if (!normal || ++n_phys_log <= 64)
+		os_info("[phys] %s off=0x%llx runs=%d refs=%d owner=none\n",
+			kind, (unsigned long long)off, nruns, refs);
 	/* WRITER-HUNT (M5.6a) run 36984940632: the rot generation
 	 * chain (heap piece <- cowcopy dst <- recycled run) says a
 	 * live conn's drop was PARKED under a FOREIGN tag — the D22
@@ -7787,7 +7814,8 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	 * shares the parent's table and abandons its fresh, unclaimed
 	 * one (phys_init allocates nothing — the kzalloc is the only
 	 * memory). */
-	kfree(child->ph);
+	if (!child->ph_shared && child->ph != parent->ph)
+		kfree(child->ph);
 	child->ph = parent->ph;
 	child->ph_shared = 1;
 
@@ -7909,19 +7937,23 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 			char hex[49];
 			int hi;
 
-			for (hi = 0; hi < 16; hi++)
-				snprintf(hex + hi * 3,
-					 sizeof(hex) - hi * 3,
-					 "%02x ", fp[hi]);
-			os_info("[eager] fork-seed vma %d src=0x%llx "
-				"(refs=%d) dst=0x%llx (refs=%d) len=%llu "
-				"fp=%s\n", vi, pv->run_off,
-				uml_nt_phys_refs(parent->ph,
-					(long long)pv->run_off),
-				cv->run_off,
-				uml_nt_phys_refs(child->ph,
-					(long long)cv->run_off),
-				cv->end - cv->start, hex);
+			static int n_eager_log;
+
+			if (++n_eager_log <= 64) {
+				for (hi = 0; hi < 16; hi++)
+					snprintf(hex + hi * 3,
+						 sizeof(hex) - hi * 3,
+						 "%02x ", fp[hi]);
+				os_info("[eager] fork-seed vma %d src=0x%llx "
+					"(refs=%d) dst=0x%llx (refs=%d) len=%llu "
+					"fp=%s\n", vi, pv->run_off,
+					uml_nt_phys_refs(parent->ph,
+						(long long)pv->run_off),
+					cv->run_off,
+					uml_nt_phys_refs(child->ph,
+						(long long)cv->run_off),
+					cv->end - cv->start, hex);
+			}
 		}
 	}
 	/* M5.4 c3 (map 053 item 2b): the eager stack copy hands the

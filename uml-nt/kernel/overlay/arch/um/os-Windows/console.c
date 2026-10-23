@@ -58,18 +58,26 @@
 
 /* ---- tty driver -------------------------------------------------------- */
 static struct tty_driver *g_driver;
-static struct tty_port g_port;
+/* Two ports: index 0 = /dev/tty0 (used by getty@tty0.service),
+ * index 1 = /dev/console (returned by nt_con_device for major 5, minor 1).
+ * Separating them prevents getty@tty0's TIOCVHANGUP/session-exit from
+ * hanging up console-getty's /dev/console tty_struct. */
+static struct tty_port g_port[2];
 
 static const struct tty_port_operations nt_con_port_ops = { };
 
 static int nt_con_tty_open(struct tty_struct *tty, struct file *filp)
 {
-	return tty_port_open(&g_port, tty, filp);
+	int idx = (tty->index == 1) ? 1 : 0;
+
+	return tty_port_open(&g_port[idx], tty, filp);
 }
 
 static void nt_con_tty_close(struct tty_struct *tty, struct file *filp)
 {
-	tty_port_close(&g_port, tty, filp);
+	int idx = (tty->index == 1) ? 1 : 0;
+
+	tty_port_close(&g_port[idx], tty, filp);
 }
 
 static ssize_t nt_con_tty_write(struct tty_struct *tty, const u8 *buf,
@@ -99,7 +107,8 @@ static void nt_con_printk(struct console *co, const char *s, unsigned int n)
 
 static struct tty_driver *nt_con_device(struct console *c, int *index)
 {
-	*index = 0;
+	(void)c;
+	*index = 1;
 	return g_driver;
 }
 
@@ -119,36 +128,63 @@ static struct console nt_cons = {
 static struct uml_nt_con_ring g_con_ring;
 static HANDLE g_con_wake;
 static int g_con_live;
+static int g_con_armed = 1;
 
 HANDLE uml_nt_console_wake_event(void)
 {
 	return g_con_wake;
 }
 
-int uml_nt_console_pending(void)
+static int console_reader_waiting(void)
 {
-	return g_con_live && uml_nt_con_ring_pending(&g_con_ring);
-}
-
-/* vCPU-side drain (D19): move every queued byte into the port's
- * flip buffer on the kernel thread, then one flip push. Called
- * from the userspace() wait wake (skas/process.c) and the
- * unblock_signals flush (signal.c) — the same safe points the
- * pending-only timer alarm flushes at. */
-void uml_nt_console_flush(void)
-{
-	unsigned char buf[256];
-	unsigned int n, total = 0;
+	struct tty_struct *tty;
 
 	if (!g_con_live)
-		return;
-	while ((n = uml_nt_con_ring_pop(&g_con_ring, buf,
-					sizeof(buf))) != 0) {
-		tty_insert_flip_string(&g_port, buf, n);
-		total += n;
+		return 0;
+	if (work_pending(&g_port[1].buf.work))
+		return 0;
+	tty = READ_ONCE(g_port[1].itty);
+	if (tty == NULL || test_bit(TTY_HUPPED, &tty->flags) ||
+	    test_bit(TTY_HUPPING, &tty->flags)) {
+		g_con_armed = 1;
+		return 0;
 	}
-	if (total != 0)
-		tty_flip_buffer_push(&g_port);
+	if (!waitqueue_active(&tty->read_wait)) {
+		g_con_armed = 1;
+		return 0;
+	}
+	return g_con_armed;
+}
+
+int uml_nt_console_pending(void)
+{
+	return console_reader_waiting() &&
+	       uml_nt_con_ring_pending(&g_con_ring);
+}
+
+/* vCPU-side drain (D19): move at most one line from the ring into
+ * the /dev/console port's flip buffer on the kernel thread when a
+ * reader is actively sleeping on tty->read_wait, then push. Pacing
+ * one line per read_wait sleep prevents early boot opens/closes and
+ * login/bash tcsetattr(TCSAFLUSH) from wiping queued command lines. */
+void uml_nt_console_flush(void)
+{
+	unsigned char ch;
+	unsigned int total = 0;
+
+	if (!console_reader_waiting())
+		return;
+	while (total < 256 &&
+	       uml_nt_con_ring_pop(&g_con_ring, &ch, 1) == 1) {
+		tty_insert_flip_string(&g_port[1], &ch, 1);
+		total++;
+		if (ch == '\n' || ch == '\r')
+			break;
+	}
+	if (total != 0) {
+		g_con_armed = 0;
+		tty_flip_buffer_push(&g_port[1]);
+	}
 }
 
 static unsigned long __attribute__((ms_abi)) nt_con_reader(void *arg)
@@ -230,10 +266,12 @@ static int __init nt_con_init(void)
 	ULONG tid;
 	int err;
 
-	tty_port_init(&g_port);
-	g_port.ops = &nt_con_port_ops;
+	tty_port_init(&g_port[0]);
+	g_port[0].ops = &nt_con_port_ops;
+	tty_port_init(&g_port[1]);
+	g_port[1].ops = &nt_con_port_ops;
 
-	g_driver = tty_alloc_driver(1, TTY_DRIVER_REAL_RAW |
+	g_driver = tty_alloc_driver(2, TTY_DRIVER_REAL_RAW |
 				       TTY_DRIVER_DYNAMIC_DEV);
 	if (IS_ERR(g_driver))
 		return PTR_ERR(g_driver);
@@ -258,16 +296,19 @@ static int __init nt_con_init(void)
 	 * "tty driver does not set tty->port" WARN on every console
 	 * open, and the real VFS write path (writev from musl stdio)
 	 * had no port-backed tty. */
-	g_driver->ports[0] = &g_port;
+	g_driver->ports[0] = &g_port[0];
+	g_driver->ports[1] = &g_port[1];
 	err = tty_register_driver(g_driver);
 	if (err) {
 		printk(KERN_ERR "uml-nt: can't register console tty driver"
 		       " (err %d)\n", err);
 		tty_driver_kref_put(g_driver);
-		tty_port_destroy(&g_port);
+		tty_port_destroy(&g_port[0]);
+		tty_port_destroy(&g_port[1]);
 		return err;
 	}
 	tty_register_device(g_driver, 0, NULL); /* /dev/tty0 */
+	tty_register_device(g_driver, 1, NULL); /* /dev/console target */
 
 	register_console(&nt_cons);
 	printk(KERN_INFO "uml-nt: stdio console ready (stdin %s)\n",

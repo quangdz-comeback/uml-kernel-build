@@ -234,22 +234,14 @@ static long long uml_nt_patch_image(const struct uml_nt_elf_image *im)
 	int si;
 
 	for (si = 0; si < im->nseg; si++) {
-		unsigned long long slen, mk;
+		unsigned long long slen;
 
 		if (!uml_nt_prot_execable(im->seg[si].prot))
 			continue;
 		slen = im->seg[si].end - im->seg[si].start;
-		mk = (unsigned long long)(uintptr_t)
-		     kvmalloc(slen, GFP_KERNEL);
-		if (mk == 0) {
-			os_info("binfmt_umlnt: patch mark alloc failed "
-				"(%llu bytes)\n", slen);
-			return -ENOMEM;
-		}
 		total += uml_nt_patch_syscalls(
 			uml_boot.physmem_base + im->seg[si].run_off,
-			slen, 0, (void *)(uintptr_t)mk);
-		kvfree((void *)(uintptr_t)mk);
+			slen, 0, NULL);
 	}
 	return (long long)total;
 }
@@ -574,7 +566,7 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 			       UML_NT_PAGE_READWRITE, 0,
 			       (unsigned long long)uml_nt_phys_gen(
 				       c->ph, heap_off)) < 0) {
-		uml_nt_phys_unref(c->ph, heap_off);
+		uml_nt_phys_unref_for(c->ph, heap_off, c);
 		os_info("binfmt_umlnt: heap vma failed at 0x%llx\n",
 			heap_va);
 		return -ENOMEM;

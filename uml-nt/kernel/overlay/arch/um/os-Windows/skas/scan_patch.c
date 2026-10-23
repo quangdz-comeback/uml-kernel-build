@@ -302,13 +302,12 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 				    unsigned long entry_off, void *markp)
 {
 	u8_scan *b = buf, *end = b + len;
-	u8_scan *mark = markp;
 	unsigned long o, patched = 0;
 	int pass;
 
-	if (len < 2 || markp == 0)
+	(void)markp;
+	if (len < 2)
 		return 0;
-	__builtin_memset(mark, 0, len);
 
 	for (pass = 0; pass < 2; pass++) {
 		o = (pass == 0) ? 0 : entry_off;
@@ -321,15 +320,11 @@ unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 				o++;
 				continue;
 			}
-			mark[o] = 1;
+			if (L == 2 && b[o] == 0x0F && b[o + 1] == 0x05) {
+				b[o + 1] = 0x0B;
+				patched++;
+			}
 			o += L;
-		}
-	}
-
-	for (o = 0; o + 2 <= len; o++) {
-		if (mark[o] && b[o] == 0x0F && b[o + 1] == 0x05) {
-			b[o + 1] = 0x0B;
-			patched++;
 		}
 	}
 	return patched;

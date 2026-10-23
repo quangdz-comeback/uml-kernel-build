@@ -48,12 +48,16 @@ static void con_unlock(void)
 void nt_console_write(const char *s, unsigned int n)
 {
 	IO_STATUS_BLOCK iosb;
+	NTSTATUS st;
 
 	if (nt == NULL || uml_boot.stdio_out == NULL || n == 0)
 		return;
 	con_lock();
-	nt->NtWriteFile(uml_boot.stdio_out, NULL, NULL, NULL, &iosb,
-			(void *)s, n, NULL, NULL);
+	st = nt->NtWriteFile(uml_boot.stdio_out, NULL, NULL, NULL, &iosb,
+			     (void *)s, n, NULL, NULL);
+	if (st == (NTSTATUS)0x00000103 /* STATUS_PENDING */)
+		nt->NtWaitForSingleObject(uml_boot.stdio_out, 0,
+					  UML_NT_INFINITE);
 	con_unlock();
 }
 

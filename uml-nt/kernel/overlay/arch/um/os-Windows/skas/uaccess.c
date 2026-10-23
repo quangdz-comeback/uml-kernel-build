@@ -474,7 +474,7 @@ unsigned long raw_copy_to_user(void __user *to, const void *from,
 		 * at line ~23k, so "no [uawrite] at the poisoned VAs"
 		 * was unprovable. 4096 lines ~ fits the whole boot. */
 		if (bulk) {
-			if (++uacc_heap_writes <= 4096)
+			if (++uacc_heap_writes <= 64)
 				uacc_wlog("[uawrite]", uacc_heap_writes,
 					  va, n, q0, q1, fnv, nr);
 		} else {
