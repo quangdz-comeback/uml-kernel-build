@@ -663,4 +663,22 @@ typedef void (*uml_nt_flatwr_uacc_fn)(const struct uml_nt_mm *mm,
 				      unsigned long long gen_dst);
 extern uml_nt_flatwr_uacc_fn uml_nt_flatwr_uacc_hook;
 
+/* D28 follow-up (Shelley 148): the kernel->guest write ledger. The
+ * walker calls this for every TO_GUEST / ZERO_GUEST chunk with the
+ * ACTUAL backing run offset it wrote (post-fixup); the recorder keeps
+ * a run-keyed ring and the [imgwatch] fire scans it. NULL in the host
+ * unit tests, pinned by the kernel. */
+typedef void (*uml_nt_towrite_fn)(const struct uml_nt_mm *mm,
+				  unsigned long long va,
+				  unsigned long long run,
+				  unsigned long long len);
+extern uml_nt_towrite_fn uml_nt_uacc_towrite_hook;
+/* uaccess.c: record one write / dump the ring entries for a run
+ * (budgeted; called by the imgwatch fire). */
+void uml_nt_uacc_towrite_rec(const struct uml_nt_mm *mm,
+			     unsigned long long va,
+			     unsigned long long run,
+			     unsigned long long len);
+void uml_nt_uacc_towrite_dump(unsigned long long run);
+
 #endif /* __UM_OS_WINDOWS_UACCESS_WALK_H */

@@ -2474,13 +2474,62 @@ void uml_nt_census(const char *tag, long long pid)
 				continue;
 			h = uml_nt_imgw_hash((const void *)((const char *)
 					uml_boot.physmem_base + run));
-			if (h != pc->imgw_hash[i] && imgw_fire_left-- > 0)
+			if (h != pc->imgw_hash[i] && imgw_fire_left-- > 0) {
+				unsigned long long vstart = 0, vend = 0;
+				int vi2;
+
 				os_info("[imgwatch] pid %lu: RO image run "
 					"0x%llx rewritten post-load (was "
 					"%016llx now %016llx) — text "
 					"rewrite class\n",
 					(unsigned long)pc->pid, run,
 					pc->imgw_hash[i], h);
+				/* D28 follow-up: name the writer. The run's
+				 * VA in THIS conn + the TO_GUEST ledger
+				 * (run-keyed — the writer may be another
+				 * mm) + the view-op log over the range. */
+				for (vi2 = 0; vi2 < pc->mm->nvma; vi2++) {
+					struct uml_nt_vma *iv =
+						&pc->mm->vma[vi2];
+					unsigned long long span =
+						iv->end - iv->start;
+
+					if (run < iv->run_off ||
+					    run >= iv->run_off + span)
+						continue;
+					vstart = iv->start +
+						 (run - iv->run_off);
+					vend = vstart +
+					       UML_NT_PHYS_RUN_SIZE;
+					os_info("[imgwatch]   run->va "
+						"0x%llx vma [0x%llx,0x%llx) "
+						"prot=0x%x flags=0x%x\n",
+						vstart, iv->start, iv->end,
+						iv->prot, iv->flags);
+					break;
+				}
+				if (vend != 0) {
+					int ok, on = pc->op_log_n;
+					int olo = on > 64 ? on - 64 : 0;
+
+					uml_nt_uacc_towrite_dump(run);
+					for (ok = olo; ok < on &&
+					     ok < olo + 64; ok++) {
+						unsigned long long *eo =
+							pc->op_log[ok % 64];
+
+						if (eo[2] >= vend ||
+						    eo[2] + eo[3] <= vstart)
+							continue;
+						os_info("[imgwatch]   op "
+							"op=%llu prot=0x%llx "
+							"va=0x%llx len=0x%llx "
+							"off=0x%llx\n",
+							eo[0], eo[1], eo[2],
+							eo[3], eo[4]);
+					}
+				}
+			}
 		}
 		for (slot = 0; slot < UML_NT_CENSUS_TOP; slot++) {
 			if (runs > top_runs[slot]) {
@@ -2494,6 +2543,87 @@ void uml_nt_census(const char *tag, long long pid)
 				top_runs[slot] = runs;
 				top_pid[slot] = (unsigned long)pc->pid;
 				break;
+			}
+		}
+	}
+	/* D28 follow-up (Shelley 148): cross-mm run alias census — two
+	 * LIVE conns' VMAs claiming the same run. Fork parent/child
+	 * shares are expected (filtered via ppid); an UNRELATED pair is
+	 * the double-claim/image-sharing class the co-mapper dump
+	 * hinted at. Log-only, budgeted. */
+	{
+		static int alias_left = 24;
+		static unsigned long long owner[UML_NT_PHYS_MAX_RUNS];
+		static unsigned long long owner_pp[UML_NT_PHYS_MAX_RUNS];
+		struct task_struct *ap;
+
+		if (alias_left > 0) {
+			memset(owner, 0, sizeof(owner));
+			memset(owner_pp, 0, sizeof(owner_pp));
+			for_each_process(ap) {
+				struct uml_nt_stub_conn *ac;
+				int ai;
+
+				if (ap->mm == NULL)
+					continue;
+				ac = ((struct mm_id *)
+				      &ap->mm->context.id)->nt_conn;
+				if (ac == NULL || ac->mm == NULL ||
+				    !ac->alive ||
+				    ac->dead_magic == UML_NT_CONN_DEAD)
+					continue;
+				for (ai = 0; ai < ac->mm->nvma; ai++) {
+					struct uml_nt_vma *v =
+						&ac->mm->vma[ai];
+					unsigned long long ro;
+					unsigned long long me =
+						(unsigned long long)ac->pid + 1;
+					unsigned long long mp =
+						(unsigned long long)ac->ppid + 1;
+
+					if (v->flags & UML_NT_VMA_COW)
+						continue;
+					for (ro = v->run_off;
+					     ro < v->run_off +
+						  (v->end - v->start);
+					     ro += UML_NT_PHYS_RUN_SIZE) {
+						unsigned int idx =
+							(unsigned int)
+							(ro /
+							 UML_NT_PHYS_RUN_SIZE);
+
+						if (idx >=
+						    UML_NT_PHYS_MAX_RUNS)
+							break;
+						if (owner[idx] == 0) {
+							owner[idx] = me;
+							owner_pp[idx] = mp;
+							continue;
+						}
+						if (owner[idx] == me)
+							continue;
+						/* expected fork share */
+						if (owner[idx] == mp ||
+						    owner_pp[idx] == me)
+							continue;
+						if (alias_left > 0) {
+							alias_left--;
+							os_info("[runalias] "
+								"%s: run "
+								"0x%llx pid %lu "
+								"(ppid %llu) vs "
+								"pid %llu prot=0x%x "
+								"flags=0x%x\n",
+								tag, ro,
+								(unsigned long)
+								ac->pid,
+								ac->ppid,
+								owner[idx] - 1,
+								v->prot,
+								v->flags);
+						}
+					}
+				}
 			}
 		}
 	}

@@ -375,6 +375,10 @@ int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 			w = uml_nt_uacc_write_ptr(mm, base, va);
 			if (w == (char *)0)
 				return -1;
+			if (uml_nt_uacc_towrite_hook != (uml_nt_towrite_fn)0)
+				uml_nt_uacc_towrite_hook(mm, va,
+					(unsigned long long)(w - base),
+					chunk);
 			uacc_bcopy(w, buf, chunk);
 			buf += chunk;
 			break;
@@ -382,6 +386,10 @@ int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 			w = uml_nt_uacc_write_ptr(mm, base, va);
 			if (w == (char *)0)
 				return -1;
+			if (uml_nt_uacc_towrite_hook != (uml_nt_towrite_fn)0)
+				uml_nt_uacc_towrite_hook(mm, va,
+					(unsigned long long)(w - base),
+					chunk);
 			uacc_bzero(w, chunk);
 			break;
 		}
@@ -962,6 +970,9 @@ int uml_nt_view_maps_span(unsigned long long view_off,
  * (the physalloc zero/alias-hook pattern). */
 uml_nt_flatwr_uacc_fn uml_nt_flatwr_uacc_hook =
 	(uml_nt_flatwr_uacc_fn)0;
+
+/* D28 follow-up: the kernel->guest write ledger hook (NULL in tests). */
+uml_nt_towrite_fn uml_nt_uacc_towrite_hook = (uml_nt_towrite_fn)0;
 
 int uml_nt_flatwr_class(unsigned long long gen_old,
 			unsigned long long gen_now,

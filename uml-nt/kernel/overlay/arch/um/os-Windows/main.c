@@ -84,6 +84,7 @@ void nt_main(struct uml_boot_info *bi)
 	 * this hook (capture the (run, gen) at the translate, compare
 	 * with the phys gen + the current table translate at write). */
 	uml_nt_flatwr_uacc_hook = uml_nt_flatwr_uacc_fixup;
+	uml_nt_uacc_towrite_hook = uml_nt_uacc_towrite_rec;
 
 	/* K6 (M5.6a, feature cowcopy-race-class-fix, dlW 37576991123 /
 	 * dlX 37579340518 — the RETIRE-LOST verdict): the RELEASE GATE

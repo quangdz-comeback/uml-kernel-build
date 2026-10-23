@@ -25,6 +25,9 @@ jobs:
           # M5.6a D28 (Shelley lazy-file ruling): the demand-paged
           # file-VMA run window + file read clamp.
           bash uml-nt/tests/test_lazyfile.sh
+          # M5.6a D28 follow-up: the run-keyed kernel->guest write ledger
+          # the [imgwatch] fire scans (writer identification).
+          bash uml-nt/tests/test_writeledger.sh
           # M3.7 uaccess walker (D15) over the vma tree
           bash uml-nt/tests/test_uaccess.sh
           # M4.1 bench stats — the pure math the freestanding kernel
@@ -69,4 +72,4 @@ jobs:
             uml-nt/tests/test_mm.sh uml-nt/tests/test_elf.sh \
             uml-nt/tests/test_uaccess.sh uml-nt/tests/test_bench.sh \
             uml-nt/tests/test_console.sh uml-nt/tests/test_ss.sh \
-            uml-nt/tests/test_lazyfile.sh
+            uml-nt/tests/test_lazyfile.sh uml-nt/tests/test_writeledger.sh

@@ -29,6 +29,52 @@
 #include <internal.h>
 #include <os.h>
 #include <uaccess_walk.h>
+#include <writeledger_model.h>
+
+/* D28 follow-up (Shelley 148): the run-keyed kernel->guest write
+ * ledger. Every TO_GUEST/ZERO funnel chunk records (run, va, len, the
+ * in-flight guest nr); the [imgwatch] fire dumps the entries for the
+ * rewritten run. The writer may be a different mm than the victim
+ * (a run freed/re-handed across processes), which is why the key is
+ * the section run offset and not the VA. */
+static struct uml_nt_write_ledger uacc_towrite;
+
+void uml_nt_uacc_towrite_rec(const struct uml_nt_mm *mm,
+			     unsigned long long va,
+			     unsigned long long run,
+			     unsigned long long len)
+{
+	(void)mm;
+	uml_nt_writeledger_put(&uacc_towrite, run, va, len,
+			       uml_nt_uacc_nr_current());
+}
+
+void uml_nt_uacc_towrite_dump(unsigned long long run)
+{
+	static int dump_budget = 16;
+	int idx[8];
+	int i, n;
+
+	n = uml_nt_writeledger_find(&uacc_towrite, run, idx, 8);
+	if (n == 0)
+		return;
+	if (dump_budget <= 0) {
+		if (dump_budget == 0) {
+			dump_budget = -1;
+			os_info("[towrite] dump budget exhausted\n");
+		}
+		return;
+	}
+	dump_budget--;
+	os_info("[towrite] run=0x%llx: %d recent kernel write(s)\n",
+		run, n);
+	for (i = 0; i < n; i++) {
+		const struct uml_nt_write_ent *e = &uacc_towrite.e[idx[i]];
+
+		os_info("[towrite]   va=0x%llx len=%llu nr=%llu\n",
+			e->va, e->len, e->nr);
+	}
+}
 
 static struct uml_nt_mm *uacc_mm;
 
