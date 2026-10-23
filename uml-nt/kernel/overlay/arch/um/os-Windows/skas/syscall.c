@@ -286,7 +286,7 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 				     roff += UML_NT_PHYS_RUN_SIZE)
 					uml_nt_phys_unref_for(c->ph,
 							      (long long)roff,
-							      c);
+							      (const void *)0);
 				goto rollback_brk;
 			}
 			if (uml_nt_vma_add_gen(mm, cur, cur + clen, sp,
@@ -304,7 +304,7 @@ static unsigned long long sys_brk(struct uml_nt_stub_conn *c,
 				     roff += UML_NT_PHYS_RUN_SIZE)
 					uml_nt_phys_unref_for(c->ph,
 							      (long long)roff,
-							      c);
+							      (const void *)0);
 				goto rollback_brk;
 			}
 			uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
@@ -329,7 +329,7 @@ rollback_brk:
 				     roff += UML_NT_PHYS_RUN_SIZE)
 					uml_nt_phys_unref_for(c->ph,
 							      (long long)roff,
-							      c);
+							      (const void *)0);
 				rb += rlen;
 			}
 			c->plan.n_ops = plan_base;
@@ -659,7 +659,7 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 					uml_nt_phys_unref_for(c->ph, sp +
 							      (long long)i *
 							      UML_NT_PHYS_RUN_SIZE,
-							      c);
+							      (const void *)0);
 				goto rollback_anon;
 			}
 			if (uml_nt_vma_add_gen(c->mm, cur, cur + clen,
@@ -673,7 +673,7 @@ static unsigned long long sys_mmap(struct uml_nt_stub_conn *c,
 					uml_nt_phys_unref_for(c->ph, sp +
 							      (long long)i *
 							      UML_NT_PHYS_RUN_SIZE,
-							      c);
+							      (const void *)0);
 				goto rollback_anon;
 			}
 			uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, prot, cur, clen,
@@ -697,7 +697,7 @@ rollback_anon:
 				     roff += UML_NT_PHYS_RUN_SIZE)
 					uml_nt_phys_unref_for(c->ph,
 							      (long long)roff,
-							      c);
+							      (const void *)0);
 				rb += rlen;
 			}
 			c->plan.n_ops = plan_base;
@@ -1125,7 +1125,7 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 					     roff += UML_NT_PHYS_RUN_SIZE)
 						uml_nt_phys_unref_for(c->ph,
 								      (long long)roff,
-								      c);
+								      (const void *)0);
 					goto rollback_chunks;
 				}
 				if (uml_nt_vma_add_gen(c->mm, cur, cur + clen, sp,
@@ -1145,7 +1145,7 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 					     roff += UML_NT_PHYS_RUN_SIZE)
 						uml_nt_phys_unref_for(c->ph,
 								      (long long)roff,
-								      c);
+								      (const void *)0);
 					goto rollback_chunks;
 				}
 				uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
@@ -1197,7 +1197,7 @@ rollback_chunks:
 				     roff += UML_NT_PHYS_RUN_SIZE)
 					uml_nt_phys_unref_for(c->ph,
 							      (long long)roff,
-							      c);
+							      (const void *)0);
 				rb += rlen;
 			}
 			c->plan.n_ops = plan_base;

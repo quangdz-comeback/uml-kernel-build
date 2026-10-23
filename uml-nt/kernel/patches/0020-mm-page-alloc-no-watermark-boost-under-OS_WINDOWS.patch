@@ -1,0 +1,32 @@
+mm/page_alloc: disable watermark_boost under CONFIG_OS_WINDOWS
+
+On UML-NT (CONFIG_OS_WINDOWS) with a 128 MiB single-zone memory pool and
+no swap or background kswapd compaction, guest 64 KiB physical runs are
+allocated with GFP_KERNEL (MIGRATE_UNMOVABLE). When order-0 pagecache
+allocations (GFP_HIGHUSER_MOVABLE) fall back to MIGRATE_UNMOVABLE
+pageblocks, boost_watermark() adds up to 4096 KiB to
+zone->watermark_boost, raising the effective min watermark from 1344 KiB
+to 5440 KiB and triggering false OOM kills when >5 MiB of RAM is free.
+
+Disable watermark_boost_factor under CONFIG_OS_WINDOWS, matching upstream
+boost_watermark()'s small-zone exemption rationale.
+
+Signed-off-by: uml-nt agent <droid@factory.ai>
+---
+ a/mm/page_alloc.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -301,7 +301,11 @@ const char * const migratetype_names[MIGRATE_TYPES] = {
+ 
+ int min_free_kbytes = 1024;
+ int user_min_free_kbytes = -1;
++#ifdef CONFIG_OS_WINDOWS
++static int watermark_boost_factor __read_mostly;
++#else
+ static int watermark_boost_factor __read_mostly = 15000;
++#endif
+ static int watermark_scale_factor = 10;
+ int defrag_mode;
+ 

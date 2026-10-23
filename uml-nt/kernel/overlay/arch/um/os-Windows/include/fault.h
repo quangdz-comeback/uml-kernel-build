@@ -86,7 +86,7 @@ void uml_nt_cowwatch_touch(unsigned long long off, unsigned long long len,
  * SIGSEGV 'w'). 256 covers the systemd boot: ~50 VMAs (INIT plans),
  * ~40 writable views * 2 ops, plus the uaccess fixup bursts (4 per
  * COW run fixed mid-syscall). */
-#define UML_NT_FAULT_MAX_OPS 256
+#define UML_NT_FAULT_MAX_OPS 768
 
 /* The VEH dispatch window (c00000fd fix, archive 065 work order):
  * Windows builds the exception dispatch state (EXCEPTION_RECORD +

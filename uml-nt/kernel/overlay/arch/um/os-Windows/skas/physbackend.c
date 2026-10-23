@@ -83,14 +83,15 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 			return -1;
 		if (!PageSlab(pg) && !PageReserved(pg) &&
 		    page_ref_count(pg) == 1) {
-			if ((1 << r_order) > nruns) {
-				int want_pages = nruns << RUN_ORDER;
-				int total_pages = 1 << order;
-				int i;
+			if (r_order > 0) {
+				int total_runs = 1 << r_order;
+				int r;
 
-				split_page(pg, order);
-				for (i = want_pages; i < total_pages; i++)
-					__free_pages(pg + i, 0);
+				for (r = 1; r < total_runs; r++)
+					set_page_count(pg + (r << RUN_ORDER), 1);
+				for (r = nruns; r < total_runs; r++)
+					__free_pages(pg + (r << RUN_ORDER),
+						     RUN_ORDER);
 			}
 			*page_out = pg;
 			return (long long)page_to_pfn(pg) << PAGE_SHIFT;
@@ -108,16 +109,9 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 void uml_nt_phys_backend_free(void *page, int nruns)
 {
 	struct page *pg = (struct page *)page;
-	int r_order = runs_order(nruns);
+	int r;
 
-	if ((1 << r_order) == nruns) {
-		__free_pages(pg, RUN_ORDER + r_order);
-	} else {
-		int want_pages = nruns << RUN_ORDER;
-		int i;
-
-		for (i = 0; i < want_pages; i++)
-			__free_pages(pg + i, 0);
-	}
+	for (r = 0; r < nruns; r++)
+		__free_pages(pg + (r << RUN_ORDER), RUN_ORDER);
 	clear_zone_watermark_boost();
 }
