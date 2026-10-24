@@ -3464,6 +3464,31 @@ static void uml_nt_pivot_wslot_arm(struct uml_nt_stub_conn *c)
 	d->dr_exec_mask = 0;
 	c->ws_armed = 1;
 	c->ws_hits = 0;
+	/* THE RESOLVER'S XSAVE SIZE (Shelley 153): _dl_runtime_resolve_*
+	 * does `and $-64,%rsp; sub QWORD PTR [rip+disp],%rsp` where the
+	 * operand is `_rtld_global_ro+0x1b0` (ld.so file offset 0x32c70,
+	 * disassembled at 0x121c8/0x12298) — a RUNTIME value that ld.so
+	 * fills from CPUID. If that value exceeds the free space between
+	 * the guest's rsp and the bottom of its 64K stack run, the
+	 * resolver's save area lands in the interp's text (which our exec
+	 * setup maps RWX directly below the stack). Read it here so the
+	 * arithmetic is MEASURED, not inferred. */
+	{
+		long long so = uml_nt_vma_translate(c->mm,
+						   c->interp_base + 0x32c70, 16);
+		unsigned long long xsz = 0, xsz2 = 0;
+
+		if (so >= 0) {
+			xsz = *(const unsigned long long *)(const void *)
+				((char *)uml_boot.physmem_base + so);
+			xsz2 = *(const unsigned long long *)(const void *)
+				((char *)uml_boot.physmem_base + so + 8);
+		}
+		os_info("[pivot-xsav] pid %lu interp_base=0x%llx "
+			"_rtld_global_ro+0x1b0=0x%llx (+0x1b8=0x%llx) — the "
+			"resolver will `sub` that from rsp\n",
+			(unsigned long)c->pid, c->interp_base, xsz, xsz2);
+	}
 	os_info("[pivot-wslot] pid %lu %s: four DR WRITE slots on the "
 		"interp text at 0x%llx/0x%llx/0x%llx/0x%llx (interp base "
 		"0x%llx) — the pivot's vfprintf arg array lands here\n",
