@@ -657,55 +657,66 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			/* v19 EXECUTE breakpoint ([pivot-dr]): the #DB is
 			 * delivered BEFORE the instruction executes, so
 			 * c->Rip IS the watched entry — publish this state
-			 * as its own round (fault_type EXEC) and let the
-			 * kernel decide. No qword read, no churn filter:
-			 * an execute hit has no value semantics. */
+			 * as its own round (fault_type DREXEC) and let the
+			 * kernel decide. NO qword read and NO churn filter:
+			 * an execute hit has no value semantics, and the
+			 * churn filter's "v == 0 -> CONTINUE_EXECUTION"
+			 * arm turned a hit into an endless #DB loop at the
+			 * entry (referees 40103784001/40105908117: the
+			 * guest stopped dead, no round, req == done). */
 			if (d->dr_exec_mask & (1u << slot)) {
 				d->fault_addr = (unsigned long long)
 					(uintptr_t)c->Rip;
 				d->fault_type = UML_NT_FAULT_DREXEC;
 				is_exec = 1;
 				c->Dr6 = 0;
-			} else
-			if (veh_readable(slot_va)) {
-				guest_read_site = 3;
-				v = *(volatile unsigned long long *)
-					(uintptr_t)slot_va;
-				guest_read_site = 0;
-			}
-			c->Dr6 = 0;
-			/* Legit churn: 0, a heap-shaped pointer, or the
-			 * empty-bin self-link — slot-0x10 (an fd slot) /
-			 * slot-0x18 (a bk slot) = the bin head address
-			 * itself. Bin-head slots (dr_watch[2..3], armed
-			 * at arena discovery) legitimately take the head
-			 * value on every bin clear; without this they'd
-			 * storm. */
-			if (v == 0 ||
-			    (v >= d->dr_heap_lo && v < d->dr_heap_hi) ||
-			    v == slot_va - 0x10 || v == slot_va - 0x18) {
-				if (d->ss_page == 0)
-					return EXCEPTION_CONTINUE_EXECUTION;
-				/* dl10 (37279719927): a fault-repaired
-				 * store INTO a watched slot fires ONE #DB
-				 * that is both the DR hit and the replay's
-				 * post-store step; consuming it here left
-				 * ss_page armed on a stale fault.
-				 * Reclassify without the DR bits: a hop or
-				 * the post-store step completes the
-				 * replay below; a watched-slot write
-				 * elsewhere keeps the old early return
-				 * (the arm stays, no census storm). */
-				cls = uml_nt_ss_classify(0, d->ss_page,
-							 c->Rip,
-							 fs_tramp_target,
-							 tf_lo, tf_hi);
-				if (cls == UML_NT_SS_STRAY)
-					return EXCEPTION_CONTINUE_EXECUTION;
+				cls = 0;	/* the report flow below */
 			} else {
-				is_watch = 1;
-				watch_va = slot_va;
-				cls = 0; /* the report flow below */
+				if (veh_readable(slot_va)) {
+					guest_read_site = 3;
+					v = *(volatile unsigned long long *)
+						(uintptr_t)slot_va;
+					guest_read_site = 0;
+				}
+				c->Dr6 = 0;
+				/* Legit churn: 0, a heap-shaped pointer,
+				 * or the empty-bin self-link — slot-0x10
+				 * (an fd slot) / slot-0x18 (a bk slot) =
+				 * the bin head address itself. Bin-head
+				 * slots (dr_watch[2..3], armed at arena
+				 * discovery) legitimately take the head
+				 * value on every bin clear; without this
+				 * they'd storm. */
+				if (v == 0 ||
+				    (v >= d->dr_heap_lo && v < d->dr_heap_hi) ||
+				    v == slot_va - 0x10 || v == slot_va - 0x18) {
+					if (d->ss_page == 0)
+						return EXCEPTION_CONTINUE_EXECUTION;
+					/* dl10 (37279719927): a
+					 * fault-repaired store INTO a
+					 * watched slot fires ONE #DB
+					 * that is both the DR hit and
+					 * the replay's post-store step;
+					 * consuming it here left
+					 * ss_page armed on a stale
+					 * fault. Reclassify without
+					 * the DR bits: a hop or the
+					 * post-store step completes the
+					 * replay below; a watched-slot
+					 * write elsewhere keeps the old
+					 * early return (the arm stays,
+					 * no census storm). */
+					cls = uml_nt_ss_classify(0, d->ss_page,
+								 c->Rip,
+								 fs_tramp_target,
+								 tf_lo, tf_hi);
+					if (cls == UML_NT_SS_STRAY)
+						return EXCEPTION_CONTINUE_EXECUTION;
+				} else {
+					is_watch = 1;
+					watch_va = slot_va;
+					cls = 0; /* report flow */
+				}
 			}
 		}
 		if (cls == UML_NT_SS_HOP) {
