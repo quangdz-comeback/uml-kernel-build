@@ -3280,6 +3280,25 @@ static int uml_nt_sample_read(struct uml_nt_stub_conn *c,
 	return 0;
 }
 
+/* A sample is a GUEST sample only when the thread is executing guest
+ * code: between the answer release and the next trap the stub spends
+ * its first tens of microseconds waking up and running its own
+ * dispatch/C paths (rip in ntdll, rsp still on the guest stack) —
+ * referees 40092427406/40092433563 sampled exactly that and learned
+ * nothing. Everything outside the guest span is retried, never logged
+ * and never charged to the budget. */
+static int uml_nt_sample_is_guest(const struct uml_nt_stub_conn *c,
+				  unsigned long long rip)
+{
+	unsigned long long lo, hi;
+
+	if (c->d == NULL)
+		return 0;
+	lo = (unsigned long long)c->d->ram_base;
+	hi = lo + (unsigned long long)c->d->ram_size;
+	return rip >= lo && rip < hi;
+}
+
 /* Is `rip` inside the interp's image run(s)? Cheap: the conn's image
  * runs are runs, not VAs — translate and match, like the rsp test. */
 static int uml_nt_sample_rip_in_image(struct uml_nt_stub_conn *c,
@@ -3324,14 +3343,22 @@ unsigned int uml_nt_sample_burst(struct uml_nt_stub_conn *c)
 	/* Never sample a round in flight: the pump released the answer, so
 	 * the stub must be back in guest code. A published request ends
 	 * the burst (the interval just closed). */
-	while (n < c->smp_left && d->req_seq == d->done_seq) {
+	while (n < c->smp_left && c->smp_tries < UML_NT_SMP_TRIES &&
+	       d->req_seq == d->done_seq) {
 		unsigned long long rip = 0, rsp = 0, rbp = 0, rdi = 0,
 				   rsi = 0, rbx = 0;
 		int rsp_text, hit_dldso, arg_text;
 
+		c->smp_tries++;
 		if (uml_nt_sample_read(c, &rip, &rsp, &rbp, &rdi, &rsi,
 				       &rbx) < 0)
 			break;
+		if (!uml_nt_sample_is_guest(c, rip)) {
+			/* the stub is still waking up / inside its own
+			 * dispatch: this is not the guest running. Keep
+			 * probing (the suspension alone paces us). */
+			continue;
+		}
 		n++;
 		c->smp_n++;
 		rsp_text = uml_nt_resume_rsp_wild(c, rsp);
@@ -3414,6 +3441,7 @@ static void uml_nt_sample_arm(struct uml_nt_stub_conn *c)
 	c->smp_arms++;
 	c->smp_left = n;
 	c->smp_n = 0;
+	c->smp_tries = 0;
 	c->smp_prev_valid = 0;
 	c->smp_in_text = 0;
 	os_info("[pivot-sample] pid %lu %s SAMPLER armed (%u sample(s), arm "

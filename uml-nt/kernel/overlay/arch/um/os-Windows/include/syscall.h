@@ -57,6 +57,10 @@
  * 400 samples cover several ms of guest execution). */
 #define UML_NT_SMP_PER_ARM 400u
 #define UML_NT_SMP_PER_CONN 2400u
+/* Suspension attempts per arm. Samples taken while the stub is waking
+ * up / in its own dispatch path are retried, not charged: 800 tries is
+ * a few milliseconds of probing, far past the ~50 us wake latency. */
+#define UML_NT_SMP_TRIES 800u
 /* The claimed pivot entry (Shelley 150's static walk):
  * _dl_find_dso_for_object's array-marshalling window in the interp
  * (entry 0xb490, the '-0x428/-0x430(%rbp,%rcx,1)' marshal at 0xc626). */
@@ -581,6 +585,7 @@ struct uml_nt_stub_conn {
 	unsigned long long smp_prev_rdi, smp_prev_rsi, smp_prev_rbx;
 	int smp_prev_valid;
 	unsigned int smp_in_text;
+	unsigned int smp_tries;
 	/* GetThreadContext target: 0x4d0 bytes (x64 CONTEXT), 16-aligned.
 	 * Per-conn because two kernel tasks may serve two stubs at once —
 	 * a shared static buffer would hand one conn's registers to the
