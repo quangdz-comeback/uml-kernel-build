@@ -3449,6 +3449,14 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
 	static int exec_budget = 64;
 
 	c->dr_exec_hits++;
+	/* ONE-SHOT: the resume re-executes the entry, and an armed
+	 * execute breakpoint would re-fire on it forever (the stub's
+	 * fault-resume lands exactly there). Disarm before answering —
+	 * the next close(3) arms again. */
+	c->dr_exec_armed = 0;
+	c->dr_exec_va = 0;
+	d->dr_watch[UML_NT_DR_EXEC_SLOT] = 0;
+	d->dr_exec_mask &= ~(1u << UML_NT_DR_EXEC_SLOT);
 	so = uml_nt_vma_translate(c->mm, d->regs.rsp, 8);
 	if (so >= 0)
 		ret = *(const unsigned long long *)(const void *)
@@ -10442,12 +10450,13 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	/* M5.6a [pivot-sample]: TF is retired (the Windows dispatcher eats
 	 * TF on every hop) — the sampler replaces it on the same arm
 	 * point. */
-	if (uml_nt_sample_should_arm(c))
-		uml_nt_sample_arm(c);
-	/* M5.6a [pivot-dr]: the execute breakpoint is armed on the first
-	 * release of a login conn and re-asserted on every one (a v13
-	 * tcache arm may claim slots 0/1/3; slot 2 always comes back). */
-	if (c->imgw_n > 0 && c->d->action == UML_STUB_ACTION_NONE)
+	/* M5.6a [pivot-dr]: the close(3) gate arms the one-shot execute
+	 * breakpoint on the interp's DSO-lookup entry. The sampler of
+	 * to-shelley/150 stays in the tree but is NOT armed: the interval
+	 * is ~1-2 us and a suspend/read probe is ~10 us, so it can never
+	 * land inside (referees 40094545095/40094551603). */
+	if (c->d->action == UML_STUB_ACTION_NONE && c->dr_exec_armed == 0 &&
+	    uml_nt_sample_should_arm(c))
 		uml_nt_dr_exec_arm(c);
 	/* M5.6a login-depth follow-up (Shelley 149): the RESUME answer —
 	 * only a NONE answer releases the stub out of its VEH back into
