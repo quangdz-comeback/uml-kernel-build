@@ -3264,7 +3264,12 @@ static int uml_nt_sample_read(struct uml_nt_stub_conn *c,
 	unsigned char *ctx = c->smp_ctx;
 	int ok;
 
-	*(unsigned int *)(ctx + 0x30) = 0x00100001u; /* CONTEXT_CONTROL */
+	/* CONTEXT_CONTROL | CONTEXT_INTEGER: the pivot hunt needs the
+	 * ARGUMENT registers (rdi/rsi) and rbx, not just rsp/rbp/rip —
+	 * with CONTROL alone every integer slot reads back 0 (referees
+	 * 40094545095/40094551603 sampled rdi=rsi=rbx=0 on every guest
+	 * rip, which cannot tell a text-shaped argument). */
+	*(unsigned int *)(ctx + 0x30) = 0x00100003u;
 	if (nt->SuspendThread(c->thread) == (ULONG)-1)
 		return -1;
 	ok = nt->GetThreadContext(c->thread, ctx);
@@ -3337,19 +3342,20 @@ unsigned int uml_nt_sample_burst(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
 	unsigned int n = 0;
+	unsigned int tries = 0;
 
 	if (c->smp_left == 0 || c->mm == NULL || c->thread == NULL || d == NULL)
 		return 0;
 	/* Never sample a round in flight: the pump released the answer, so
 	 * the stub must be back in guest code. A published request ends
 	 * the burst (the interval just closed). */
-	while (n < c->smp_left && c->smp_tries < UML_NT_SMP_TRIES &&
+	while (n < c->smp_left && tries < UML_NT_SMP_TRIES &&
 	       d->req_seq == d->done_seq) {
 		unsigned long long rip = 0, rsp = 0, rbp = 0, rdi = 0,
 				   rsi = 0, rbx = 0;
 		int rsp_text, hit_dldso, arg_text;
 
-		c->smp_tries++;
+		tries++;
 		if (uml_nt_sample_read(c, &rip, &rsp, &rbp, &rdi, &rsi,
 				       &rbx) < 0)
 			break;
@@ -3384,7 +3390,7 @@ unsigned int uml_nt_sample_burst(struct uml_nt_stub_conn *c)
 				hit_dldso ? " [ARRAY-UNDER-TEXT-RBP]" :
 				arg_text ? " [TEXT-PTR-IN-ARG]" : "");
 
-		if (rsp_text || hit_dldso) {
+		if (rsp_text || hit_dldso || arg_text) {
 			/* The claim, checked live: print the sample BEFORE
 			 * (the caller / the instruction that produced the
 			 * bad pointer) and stop the burst. */
@@ -3441,7 +3447,6 @@ static void uml_nt_sample_arm(struct uml_nt_stub_conn *c)
 	c->smp_arms++;
 	c->smp_left = n;
 	c->smp_n = 0;
-	c->smp_tries = 0;
 	c->smp_prev_valid = 0;
 	c->smp_in_text = 0;
 	os_info("[pivot-sample] pid %lu %s SAMPLER armed (%u sample(s), arm "
