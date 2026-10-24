@@ -6703,9 +6703,8 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								0x20,
 								"rsp-image-tcb");
 							os_info("[rsp-image] fs_base=0x%llx "
-								"canary/guard dumped at "
-								"+0x28
-", d->fs_base);
+								"canary/guard dumped "
+								"at +0x28\n", d->fs_base);
 						}
 
 						if (po >= 0)
