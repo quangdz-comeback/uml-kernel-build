@@ -2666,6 +2666,13 @@ static void test_stack_grow(void)
 	/* below the reservation: clean SIGSEGV, unconditionally */
 	CHECK(uml_nt_stack_want_grow(top, lim, lim - 0x1000, lim - 0x800,
 				     UML_NT_STACK_GROW_UNIT) == -1);
+	/* a far-below address — a guard probe, a wild pointer — is NOT a
+	 * stack access even when it is below the floor: the ordinary
+	 * path must see it (CI M3 40140365399: the M3.1 guard test
+	 * probes PROT_NONE 7 MiB under rsp) */
+	CHECK(uml_nt_stack_want_grow(top, lim, lim - 0x700000,
+				     top - 0x1000,
+				     UML_NT_STACK_GROW_UNIT) == 0);
 	/* a wild pointer far below rsp is NOT a stack access: leave it
 	 * to the ordinary wild-pointer kill */
 	CHECK(uml_nt_stack_want_grow(top, lim, lim + 0x1000, lim + 0x400000,

@@ -161,12 +161,17 @@ static inline int uml_nt_stack_want_grow(unsigned long long top,
 {
 	if (top == 0 || limit == 0 || limit >= top)
 		return 0;
+	/* PROXIMITY FIRST (CI M3 run 40140365399: the M3.1 guard test
+	 * probes a PROT_NONE guard 0x7 MiB below the stack pointer; a
+	 * "below the floor = SIGSEGV" test that ran first killed it
+	 * before uml_nt_mm_fault could see the guard). Only an address
+	 * that could be the stack pointer's own growth is ours at all. */
+	if (rsp == 0 || addr + UML_NT_STACK_NEAR + 0x100 < rsp)
+		return 0;
 	if (addr >= top)
 		return 0;
 	if (addr < limit)
 		return -1;
-	if (rsp != 0 && addr + UML_NT_STACK_NEAR + 0x100 < rsp)
-		return 0;
 	(void)unit;
 	return 1;
 }
