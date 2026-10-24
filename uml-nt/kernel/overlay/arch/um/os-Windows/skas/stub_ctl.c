@@ -6680,6 +6680,18 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								c->last_trap_rsp,
 								1);
 
+						/* The pivot source: 48 qwords
+						 * around the previous trap's
+						 * stack entry (a jmp_buf /
+						 * saved-rbp slot / return
+						 * address names the pivot). */
+						if (c->last_trap_rsp > 0x80)
+							dump_guest_bytes(
+								c->mm,
+								c->last_trap_rsp - 0x80,
+								0x180,
+								"rsp-image-stk");
+
 						if (po >= 0)
 							uml_nt_uacc_towrite_dump(
 								((unsigned long long)po) &
