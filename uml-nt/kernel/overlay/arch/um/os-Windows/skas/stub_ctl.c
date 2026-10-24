@@ -3554,6 +3554,18 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 		dump_guest_bytes(c->mm, d->regs.rip - 0x20, 0x60,
 				 "pivot-wslot-code");
 		dump_guest_bytes(c->mm, v, 0x40, "pivot-wslot-pushed");
+		/* THE PIVOT IS HERE. Referee 40120649948 decoded the first
+		 * push exactly: a `call` at module+0x1342 to its own PLT
+		 * entry at module+0x1120, so the pushed qword is the
+		 * return address module+0x1347 — and rsp was ALREADY
+		 * 0x6001c600 (base+0xc600) when that call ran. The
+		 * function that made the call therefore set rsp; its body
+		 * lies in the ~0x200 bytes before the return address, and
+		 * every reference in the sequence above held a legit stack
+		 * frame pointer (rbp=0x6005c6a0) and legit arguments. */
+		if (v > 0x200)
+			dump_guest_bytes(c->mm, v - 0x200, 0x200,
+					 "pivot-wslot-caller-code");
 	}
 	/* THE TEXT STACK ITSELF: dump 0x300 from rsp upward. Once the
 	 * guest runs with rsp inside the interp's text, every frame
