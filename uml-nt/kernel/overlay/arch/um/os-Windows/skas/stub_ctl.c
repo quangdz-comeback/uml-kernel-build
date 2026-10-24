@@ -8321,7 +8321,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		/* M5.6a [pivot-dr]: a DR execute-breakpoint round — the
 		 * state at the interp's DSO-lookup entry, BEFORE its first
 		 * instruction. Pure observation: answer NONE. */
-		if (d->fault_type == UML_NT_FAULT_EXEC) {
+		if (d->fault_type == UML_NT_FAULT_DREXEC) {
 			uml_nt_dr_exec_round(c);
 			d->action = UML_STUB_ACTION_NONE;
 			d->err = 0;

@@ -59,7 +59,7 @@
  * needs is pinned here — keep in sync with fault.h. */
 #define UML_NT_FAULT_WATCHPT 0x10u
 #define UML_NT_FAULT_STEP 0x20u /* keep in sync with fault.h */
-#define UML_NT_FAULT_EXEC 0x40u /* v19 DR execute breakpoint hit
+#define UML_NT_FAULT_DREXEC 0x40u /* v19 DR execute breakpoint hit
 				 * (delivered BEFORE the instruction;
 				 * fault_addr = the entry rip) */
 
@@ -663,7 +663,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			if (d->dr_exec_mask & (1u << slot)) {
 				d->fault_addr = (unsigned long long)
 					(uintptr_t)c->Rip;
-				d->fault_type = UML_NT_FAULT_EXEC;
+				d->fault_type = UML_NT_FAULT_DREXEC;
 				is_exec = 1;
 				c->Dr6 = 0;
 			} else

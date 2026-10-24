@@ -36,7 +36,7 @@
 				    * repair; the store already
 				    * landed — pure witness) */
 #define UML_NT_FAULT_STEP 0x20u
-#define UML_NT_FAULT_EXEC 0x40u    /* v19 DR execute breakpoint (the
+#define UML_NT_FAULT_DREXEC 0x40u  /* v19 DR execute breakpoint (the
 				    * #DB lands BEFORE the instruction;
 				    * fault_addr = the entry rip) */    /* v18 TF trace step (no repair:
 				    * the guest is being single-
