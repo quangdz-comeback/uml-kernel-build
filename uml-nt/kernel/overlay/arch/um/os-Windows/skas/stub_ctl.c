@@ -2774,6 +2774,50 @@ static void jmpbuf_scan(struct uml_nt_stub_conn *c,
 			"%016llx)\n", (unsigned long)c->pid, g_now);
 }
 
+/* One-shot dump of the TEXT-stack frames at the first wild fire: the
+ * guest is now running on an image run, and everything ABOVE the wild
+ * rsp is the caller chain it built there — including the initial value
+ * the pivot installed (the Windows dispatch context only wrote below
+ * rsp). Compare against the image file offline: the boundary where
+ * the file bytes end is the top the pivot started from, and the
+ * return-address chain names the caller that pivoted. */
+static void dump_wild_text_stack(struct uml_nt_stub_conn *c,
+				 unsigned long long rsp)
+{
+	struct uml_nt_vma *v;
+	unsigned long long run_va, va, end;
+	long long ro;
+
+	if (c->mm == NULL)
+		return;
+	v = uml_nt_vma_find(c->mm, rsp);
+	if (v == NULL)
+		return;
+	ro = uml_nt_vma_translate(c->mm, rsp, 1);
+	if (ro < 0)
+		return;
+	run_va = v->start + ((((unsigned long long)ro) &
+			      ~(UML_NT_PHYS_RUN_SIZE - 1)) - v->run_off);
+	if (run_va < v->start || run_va >= v->end)
+		return;
+	end = run_va + UML_NT_PHYS_RUN_SIZE;
+	if (end > v->end)
+		end = v->end;
+	va = rsp & ~127ull;
+	if (va < run_va)
+		va = run_va;
+	os_info("[wild-stack-text] pid %lu rsp=0x%llx: dumping "
+		"0x%llx..0x%llx (the caller chain ABOVE the pivot rsp; "
+		"the dispatch context wrote below)\n",
+		(unsigned long)c->pid, rsp, va, end);
+	while (va < end) {
+		int n = (end - va < 128) ? (int)(end - va) : 128;
+
+		dump_guest_bytes(c->mm, va, n, "wild-stack-text");
+		va += (unsigned long long)n;
+	}
+}
+
 /* One-shot raw dump of the previous trap's 64 KiB stack run: the
  * catch frame is above the previous rsp (older frame) and the Windows
  * dispatch context only wrote BELOW it, so the run is the intact
@@ -6911,6 +6955,11 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 							c->last_trap_rip : 0,
 						c->last_trap_valid ?
 							c->last_trap_rsp : 0);
+					if (!c->wild_text_dumped) {
+						c->wild_text_dumped = 1;
+						dump_wild_text_stack(c,
+							d->regs.rsp);
+					}
 					/* Guard stability at the fire: the
 					 * recorded init vs the value the
 					 * pivot's longjmp would demangle

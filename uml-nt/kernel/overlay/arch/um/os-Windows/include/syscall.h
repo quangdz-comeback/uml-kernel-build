@@ -468,6 +468,10 @@ struct uml_nt_stub_conn {
 	 * above the previous rsp and is intact — the raw 64 KiB lets the
 	 * offline scan try every guard/candidate without another boot. */
 	int stack_run_dumped;
+	/* The same one-shot for the text-stack frames themselves: at the
+	 * first wild fire, everything above the pivot rsp is the caller
+	 * chain the guest built on the image run. */
+	int wild_text_dumped;
 	/* M5.6a writer-hunt follow-up: the resume-boundary audit. The
 	 * value the kernel EXPECTED the stub to resume at after the
 	 * previous real trap round; the stub publishes its actual
