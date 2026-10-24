@@ -372,6 +372,21 @@ struct uml_nt_stub_data {
 	 * (RW=01 LEN=10). */
 	u32_nt dr_exec_mask;
 	u32_nt _pad_dr_exec;
+	/* -- v20: the DR hit's OWN address (Shelley 152/153) ----------
+	 * The v13 write-watch path published fault_addr = the armed slot
+	 * VA, which is right only when the store lands exactly on it. A
+	 * store that lands elsewhere in the 8-byte slot (or a write whose
+	 * reported address differs) then mislabels both the value read
+	 * and the code dumped around the store — referees
+	 * 40118595476/40122644293 hit exactly that ambiguity (the dump
+	 * around "the store" fell inside the module's PLT while the
+	 * surrounding qwords were ld.so vfprintf arg-array slots).
+	 * dr_hit_va = ExceptionInformation[1] (the address actually
+	 * accessed), dr_hit_type = ExceptionInformation[0] (0 read /
+	 * 1 write / 8 execute). fault_addr keeps its v13 meaning so the
+	 * tcache watch is unchanged. */
+	unsigned long long dr_hit_va;
+	unsigned long long dr_hit_type;
 	/* -- v14: the stray #DB ledger (M5.6a K7 slice D) --------------
 	 * A #DB the replay window does not admit — nothing armed, or a
 	 * rip neither inside the TF trampoline, at the store's door, nor

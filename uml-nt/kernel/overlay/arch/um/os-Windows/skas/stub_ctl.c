@@ -3475,6 +3475,73 @@ static void uml_nt_pivot_wslot_arm(struct uml_nt_stub_conn *c)
 		c->interp_base);
 }
 
+/* [pivot-wslot] caller walk (Shelley 152(b)): an EXECUTE breakpoint at
+ * ONE concrete address, moved up the call chain, at most four hops.
+ *
+ * This is not the TF instrument that died on the Windows dispatcher:
+ * the target is a known address, the volume is a handful of hits per
+ * login (referee 40114317847 measured 5 hits/conn for a similar
+ * breakpoint, and the 20k-hit variant never killed a stub), and each
+ * hop answers one question — is rsp already text HERE? */
+static void uml_nt_chain_arm(struct uml_nt_stub_conn *c,
+			     unsigned long long va)
+{
+	struct uml_nt_stub_data *d = c->d;
+
+	if (d == NULL || c->mm == NULL || va == 0 || c->chain_hops >= 4)
+		return;
+	c->chain_va = va;
+	c->chain_armed = 1;
+	d->dr_watch[UML_NT_DR_EXEC_SLOT] = va;
+	d->dr_exec_mask |= 1u << UML_NT_DR_EXEC_SLOT;
+	os_info("[pivot-chain] pid %lu %s hop %u armed at 0x%llx "
+		"(execute) — does the text rsp already exist there?\n",
+		(unsigned long)c->pid, c->exec_path, c->chain_hops, va);
+}
+
+/* One walk hop: the state at a chain address, then the next hop taken
+ * from the text stack's own return address ([rsp] = the caller's
+ * continuation, planted by the call that entered this frame). */
+static void uml_nt_chain_round(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	unsigned long long va = c->chain_va;
+	unsigned long long ret = 0;
+	struct uml_nt_vma *rv;
+	long long so;
+	int code = 0;
+
+	c->chain_armed = 0;
+	c->chain_va = 0;
+	d->dr_watch[UML_NT_DR_EXEC_SLOT] = 0;
+	d->dr_exec_mask &= ~(1u << UML_NT_DR_EXEC_SLOT);
+	so = uml_nt_vma_translate(c->mm, d->regs.rsp, 8);
+	if (so >= 0)
+		ret = *(const unsigned long long *)(const void *)
+			((char *)uml_boot.physmem_base + so);
+	rv = ret ? uml_nt_vma_find(c->mm, ret) : NULL;
+	if (rv != NULL && (rv->prot & 0x40))	/* PAGE_EXECUTE_* */
+		code = 1;
+	os_info("[pivot-chain] pid %lu %s HOP %u at 0x%llx: rsp=0x%llx "
+		"rbp=0x%llx rdi=0x%llx rsi=0x%llx rdx=0x%llx rbx=0x%llx "
+		"[rsp]=0x%llx%s\n",
+		(unsigned long)c->pid, c->exec_path, c->chain_hops, va,
+		d->regs.rsp, d->regs.rbp, d->regs.rdi, d->regs.rsi,
+		d->regs.rdx, d->regs.rbx, ret,
+		(d->regs.rsp >= c->interp_base &&
+		 d->regs.rsp < c->interp_base + 0x40000) ?
+		" [rsp ALREADY IN TEXT]" : " [rsp legit]");
+	/* the code around this hop (the function that owns it) */
+	if (va > 0x200)
+		dump_guest_bytes(c->mm, va - 0x200, 0x200, "pivot-chain-code");
+	if (d->regs.rsp > 0x80)
+		dump_guest_bytes(c->mm, d->regs.rsp - 0x40, 0x140,
+				 "pivot-chain-stack");
+	c->chain_hops++;
+	if (code && c->chain_hops < 4)
+		uml_nt_chain_arm(c, ret);
+}
+
 /* A write to one of the ruled text qwords: the store that marshal's
  * the arg array INTO the interp's own text. Report the order, the
  * post-store value, the store instruction, the frame pointer (the
@@ -3489,13 +3556,22 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 		v = *(const unsigned long long *)(const void *)
 			((char *)uml_boot.physmem_base + vo);
 	c->ws_hits++;
+	if (c->ws_hits == 1 && c->chain_hops == 0 && v != ~0ull) {
+		struct uml_nt_vma *pv = uml_nt_vma_find(c->mm, v);
+
+		/* the pushed qword, if it is code, is the first concrete
+		 * address of the chain */
+		if (pv != NULL && (pv->prot & 0x40))
+			uml_nt_chain_arm(c, v);
+	}
 	/* Where did the text stack get its top? The FIRST hit is the one
 	 * that matters; every later hit is the stack descending. */
 	os_info("[pivot-wslot] pid %lu %s HIT #%u slot=%d va=0x%llx "
-		"value=0x%llx post-rip=0x%llx rbp=0x%llx rsp=0x%llx "
-		"depth=0x%llx\n",
+		"real=0x%llx type=%llu value=0x%llx post-rip=0x%llx "
+		"rbp=0x%llx rsp=0x%llx depth=0x%llx\n",
 		(unsigned long)c->pid, c->exec_path, c->ws_hits, slot,
-		d->fault_addr, v, d->regs.rip, d->regs.rbp, d->regs.rsp,
+		d->fault_addr, d->dr_hit_va, d->dr_hit_type, v,
+		d->regs.rip, d->regs.rbp, d->regs.rsp,
 		(c->interp_base + 0xc600ull > d->regs.rsp) ?
 		(c->interp_base + 0xc600ull - d->regs.rsp) : 0);
 	os_info("[pivot-wslot]   rax=0x%llx rbx=0x%llx rcx=0x%llx "
@@ -3550,10 +3626,15 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 	 * mmap'd at 0x607a0000 (login mm, 47 VMAs dumped below), whose
 	 * image offset cannot be decoded offline — so the witness
 	 * carries the bytes. */
-	if (d->regs.rip > 0x20 && c->ws_hits == 1) {
-		dump_guest_bytes(c->mm, d->regs.rip - 0x20, 0x60,
+	if (d->regs.rip > 0x150 && c->ws_hits <= 2) {
+		/* Shelley 152: 0x150 of code ENDING at the store (the
+		 * instruction itself, plus the block that set rsp) and
+		 * the qwords around the stored pointer. */
+		dump_guest_bytes(c->mm, d->regs.rip - 0x150, 0x150,
 				 "pivot-wslot-code");
-		dump_guest_bytes(c->mm, v, 0x40, "pivot-wslot-pushed");
+		if (v > 0x40 && v < 0x800000000000ull)
+			dump_guest_bytes(c->mm, v - 0x40, 0x80,
+					 "pivot-wslot-pushed");
 		/* THE PIVOT IS HERE. Referee 40120649948 decoded the first
 		 * push exactly: a `call` at module+0x1342 to its own PLT
 		 * entry at module+0x1120, so the pushed qword is the
@@ -3563,9 +3644,6 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 		 * lies in the ~0x200 bytes before the return address, and
 		 * every reference in the sequence above held a legit stack
 		 * frame pointer (rbp=0x6005c6a0) and legit arguments. */
-		if (v > 0x200)
-			dump_guest_bytes(c->mm, v - 0x200, 0x200,
-					 "pivot-wslot-caller-code");
 	}
 	/* THE TEXT STACK ITSELF: dump 0x300 from rsp upward. Once the
 	 * guest runs with rsp inside the interp's text, every frame
@@ -8510,7 +8588,10 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * state at the interp's DSO-lookup entry, BEFORE its first
 		 * instruction. Pure observation: answer NONE. */
 		if (d->fault_type == UML_NT_FAULT_DREXEC) {
-			uml_nt_dr_exec_round(c);
+			if (c->chain_armed)
+				uml_nt_chain_round(c);
+			else
+				uml_nt_dr_exec_round(c);
 			d->action = UML_STUB_ACTION_NONE;
 			d->err = 0;
 			return 0;
@@ -8537,8 +8618,16 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * the value table-side, resume verbatim (empty plan,
 		 * no repair — nothing faulted). */
 		if (d->fault_type == UML_NT_FAULT_WATCHPT) {
+			/* v20: the address the store actually hit, not the
+			 * armed slot — they differ when the store lands
+			 * inside the 8-byte slot but not on its first byte
+			 * (and the value/code dumps must follow the REAL
+			 * address, Shelley 152). fault_addr keeps the v13
+			 * meaning for the tcache watch below. */
+			unsigned long long hit_va = d->dr_hit_va ?
+				d->dr_hit_va : d->fault_addr;
 			int wslot = uml_nt_pwslot_index(c->interp_base,
-							d->fault_addr);
+							hit_va);
 
 			if (wslot >= 0) {
 				uml_nt_pivot_wslot_round(c, wslot);

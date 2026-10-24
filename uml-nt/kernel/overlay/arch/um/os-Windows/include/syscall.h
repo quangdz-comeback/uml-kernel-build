@@ -615,6 +615,14 @@ struct uml_nt_stub_conn {
 	 * stores reconstructs the array walk. */
 	unsigned int ws_armed;
 	unsigned int ws_hits;
+	/* [pivot-wslot] caller walk (Shelley 152): after the first store,
+	 * an EXECUTE breakpoint hops UP the call chain — each hop is one
+	 * concrete address taken from the text stack, the state at the
+	 * hop is logged with 0x200 of code, and the walk stops at four
+	 * hops or at the first non-code target. */
+	unsigned long long chain_va;
+	unsigned int chain_hops;
+	unsigned int chain_armed;
 	/* GetThreadContext target: 0x4d0 bytes (x64 CONTEXT), 16-aligned.
 	 * Per-conn because two kernel tasks may serve two stubs at once —
 	 * a shared static buffer would hand one conn's registers to the

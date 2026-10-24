@@ -664,6 +664,12 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			 * arm turned a hit into an endless #DB loop at the
 			 * entry (referees 40103784001/40105908117: the
 			 * guest stopped dead, no round, req == done). */
+			/* v20: the addressed qword — the armed slot VA is NOT
+			 * the address the store necessarily hit. */
+			d->dr_hit_va = er ? (unsigned long long)
+				er->ExceptionInformation[1] : 0;
+			d->dr_hit_type = er ? (unsigned long long)
+				er->ExceptionInformation[0] : 0;
 			if (d->dr_exec_mask & (1u << slot)) {
 				d->fault_addr = (unsigned long long)
 					(uintptr_t)c->Rip;
