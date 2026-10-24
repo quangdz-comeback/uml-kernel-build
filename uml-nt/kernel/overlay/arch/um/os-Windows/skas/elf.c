@@ -551,6 +551,17 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
 	va = ceil_run(hi);
 	if (va < hi)
 		return UML_NT_ELF_MM; /* wrapped — absurd image size */
+	/* THE GAP (Shelley 154): the stack's reservation must be memory
+	 * the process does NOT otherwise own, exactly like Linux where
+	 * the stack lives far above every library. Our layout is
+	 * compact — the interpreter ends right where the stack used to
+	 * begin — and that adjacency is what let a deep stack excursion
+	 * land on ld.so's own text instead of faulting. Leaving the
+	 * reservation empty below the committed run makes an excursion
+	 * a real fault, which uml_nt_stack_grow() then commits. */
+	va += UML_NT_STACK_RLIMIT;
+	if (va < hi + UML_NT_STACK_RLIMIT)
+		return UML_NT_ELF_MM; /* wrapped */
 	off = uml_nt_phys_alloc_span(ph, 1);
 	if (off < 0)
 		return UML_NT_ELF_NOMEM;
@@ -577,6 +588,11 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
 		mm->stack_top - UML_NT_STACK_RLIMIT : UML_NT_GUEST_VA_BASE;
 	if (mm->stack_limit < UML_NT_GUEST_VA_BASE)
 		mm->stack_limit = UML_NT_GUEST_VA_BASE;
+	/* top - RLIMIT is exactly the gap's start: the whole reservation
+	 * below the committed run is unmapped until a fault grows it. */
+	mm->stack_limit = ceil_run(mm->stack_limit);
+	if (mm->stack_limit + UML_NT_STACK_RLIMIT < mm->stack_top)
+		mm->stack_limit = mm->stack_top - UML_NT_STACK_RLIMIT;
 	return UML_NT_ELF_OK;
 }
 

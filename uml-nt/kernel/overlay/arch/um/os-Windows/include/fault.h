@@ -137,7 +137,12 @@ void uml_nt_cowwatch_touch(unsigned long long off, unsigned long long len,
  * beyond the reservation = SIGSEGV with upstream semantics.
  * ============================================================ */
 #define UML_NT_STACK_RLIMIT	(8ull << 20)	/* RLIMIT_STACK default */
-#define UML_NT_STACK_GROW_UNIT	(8ull * UML_NT_PHYS_RUN_SIZE) /* 512 KiB */
+/* One RUN per fault: the run that faulted is by definition uncovered
+ * (VMAs are run-granular), so a growth can never collide with a
+ * neighbouring VMA — a 512 KiB chunk could, and did kill the host
+ * kernel's own boot (CI M3 run 40139934966: kill '?'). Large
+ * excursions simply fault once per run. */
+#define UML_NT_STACK_GROW_UNIT	(UML_NT_PHYS_RUN_SIZE)	/* 64 KiB */
 /* `address + 65536 + 32 * sizeof(unsigned long) >= sp` is what
  * expand_downwards() requires before it believes a fault is a stack
  * access at all; anything further below rsp stays an ordinary wild

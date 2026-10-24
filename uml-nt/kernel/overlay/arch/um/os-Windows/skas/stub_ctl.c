@@ -3558,7 +3558,7 @@ static void uml_nt_chain_round(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
 	unsigned long long va = c->chain_va;
-	unsigned long long ret = 0;
+	unsigned long long ret = 0, caller_ra = 0;
 	struct uml_nt_vma *rv;
 	long long so;
 	int code = 0;
@@ -3567,19 +3567,24 @@ static void uml_nt_chain_round(struct uml_nt_stub_conn *c)
 	c->chain_va = 0;
 	d->dr_watch[UML_NT_DR_EXEC_SLOT] = 0;
 	d->dr_exec_mask &= ~(1u << UML_NT_DR_EXEC_SLOT);
-	so = uml_nt_vma_translate(c->mm, d->regs.rsp, 8);
-	if (so >= 0)
+	so = uml_nt_vma_translate(c->mm, d->regs.rsp, 16);
+	if (so >= 0) {
+		/* [rsp] = the pushed %rbx; [rsp+8] = the call-site's
+		 * return address (what the PLT pushed). */
 		ret = *(const unsigned long long *)(const void *)
 			((char *)uml_boot.physmem_base + so);
+		caller_ra = *(const unsigned long long *)(const void *)
+			((char *)uml_boot.physmem_base + so + 8);
+	}
 	rv = ret ? uml_nt_vma_find(c->mm, ret) : NULL;
 	if (rv != NULL && (rv->prot & 0x40))	/* PAGE_EXECUTE_* */
 		code = 1;
 	os_info("[pivot-chain] pid %lu %s HOP %u at 0x%llx: rsp=0x%llx "
 		"rbp=0x%llx rdi=0x%llx rsi=0x%llx rdx=0x%llx rbx=0x%llx "
-		"[rsp]=0x%llx%s\n",
+		"[rsp]=0x%llx callerRA=0x%llx%s\n",
 		(unsigned long)c->pid, c->exec_path, c->chain_hops, va,
 		d->regs.rsp, d->regs.rbp, d->regs.rdi, d->regs.rsi,
-		d->regs.rdx, d->regs.rbx, ret,
+		d->regs.rdx, d->regs.rbx, ret, caller_ra,
 		(d->regs.rsp >= c->interp_base &&
 		 d->regs.rsp < c->interp_base + 0x40000) ?
 		" [rsp ALREADY IN TEXT]" : " [rsp legit]");
@@ -3629,13 +3634,13 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 	}
 	if (c->ws_hits == 1 && c->d->regs.rbp >= 0x10000)
 		uml_nt_frame_walk(c, c->d->regs.rbp, 8);
-	if (c->ws_hits == 1 && c->chain_hops == 0 && v != ~0ull) {
-		struct uml_nt_vma *pv = uml_nt_vma_find(c->mm, v);
-
-		/* the pushed qword, if it is code, is the first concrete
-		 * address of the chain */
-		if (pv != NULL && (pv->prot & 0x40))
-			uml_nt_chain_arm(c, v);
+	if (c->ws_hits == 1 && c->chain_hops == 0 && c->interp_base != 0) {
+		/* Shelley 154 §4: arm on the LAZY-BINDING RESOLVER itself.
+		 * It is entered with the PLT call's return address at
+		 * [rsp+8] (after its own `push %rbx`), so one hit names
+		 * the call-site that ran with a text rsp. ld.so 0x121c0 =
+		 * `push %rbx; mov %rsp,%rbx; and $-64; sub [xsave],%rsp`. */
+		uml_nt_chain_arm(c, c->interp_base + 0x121c0);
 	}
 	/* Where did the text stack get its top? The FIRST hit is the one
 	 * that matters; every later hit is the stack descending. */
