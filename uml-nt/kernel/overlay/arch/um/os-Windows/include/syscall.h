@@ -28,6 +28,30 @@
 
 #define UML_NT_IMGWATCH_MAX 16
 
+/* M5.6a login-depth follow-up (Shelley 149 [resume-regs]): one guest
+ * resume as the kernel ANSWERED it. The witness's whole point is that
+ * d->regs is the stub's resume state (gp_to_context applies it
+ * verbatim), so the answer's rsp is directly comparable with the trap
+ * capture of the same round — a syscall/fault fold touches rip and rax
+ * only, and the single legitimate stack rewrite is a verbatim push
+ * (sigframe placement / rt_sigreturn). The ring keeps the interval
+ * tail for a conn whose next trap lands in image text; `last` is the
+ * record right before that trap (the round the referee question
+ * names). */
+#define UML_NT_RRES_RING 16
+struct uml_nt_rres_rec {
+	unsigned long long seq;		/* the round's req_seq */
+	unsigned long long rip, rsp, rbp, rbx, rax;
+	unsigned long long trap_rip;	/* this round's capture */
+	unsigned long long trap_rsp;
+	unsigned long long last_nr;
+	long long last_ret;
+	unsigned int cmd;		/* UML_STUB_CMD_* of the round */
+	unsigned int verbatim;		/* XS_VERBATIM on the answer */
+	unsigned int wild;		/* rsp landed in an image run */
+	unsigned int cls;		/* uml_nt_rres_class of the round */
+};
+
 struct file;
 
 /* M5.6a D27 (Shelley 2026-10-23): a DEFERRED file mapping — the VMA is
@@ -480,6 +504,27 @@ struct uml_nt_stub_conn {
 	 * check only watched faults. */
 	unsigned long long exp_resume_rip;
 	int exp_resume_valid;
+	/* M5.6a login-depth follow-up (Shelley 149 [resume-regs]) — see
+	 * struct uml_nt_rres_rec. res_trap_* hold the LAST real trap's
+	 * capture (op rounds never touch d->regs, so the trap capture
+	 * stays the round's origin until the guest resumes); res_last is
+	 * the answer released after it. res_chk_* carry the rsp the stub
+	 * must restore, compared against its own d->resume_rsp at the
+	 * next real trap. kzalloc-zeroed: no init needed. */
+	struct uml_nt_rres_rec res_ring[UML_NT_RRES_RING];
+	unsigned int res_ring_next;
+	unsigned int res_ring_n;
+	struct uml_nt_rres_rec res_last;
+	int res_last_valid;
+	unsigned long long res_trap_rip;
+	unsigned long long res_trap_rsp;
+	int res_trap_valid;
+	unsigned long long res_chk_rsp;
+	int res_chk_valid;
+	unsigned int res_wild_n;
+	unsigned int res_rewrite_n;
+	unsigned int res_applied_bad;
+	unsigned int res_seen;
 	/* D27 lazy file regions (see struct uml_nt_lazy_region). Cloned
 	 * on fork (a child's first touch materializes into its own mm),
 	 * dropped at mmctx destroy. */

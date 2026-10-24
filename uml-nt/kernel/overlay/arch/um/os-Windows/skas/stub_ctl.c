@@ -2902,6 +2902,183 @@ void uml_nt_imgwatch_park_check(struct uml_nt_stub_conn *c)
 		c->d->regs.rsp);
 }
 
+/*
+ * M5.6a login-depth follow-up (Shelley 149) — the [resume-regs]
+ * witness.
+ *
+ * The whole login class hangs on one unanswered question: when the
+ * conn resumed after round close(3) (trap rsp=0x6005d258, clean), did
+ * the guest come back with that rsp — or did the answer already carry
+ * the wild text rsp the next trap reports (0x6001c228, inside the
+ * interp run)? Every existing witness logs the TRAP state only, so
+ * both halves of the referee question look identical in the log.
+ *
+ * The resume state IS d->regs: the stub's VEH applies it verbatim
+ * (gp_to_context) before returning EXCEPTION_CONTINUE_EXECUTION, and a
+ * syscall/fault fold touches rip (+2 / replay) and rax (retval) only.
+ * So the answer's rsp against the SAME round's trap capture splits the
+ * class cleanly (resume_model.h: SAME / VERBATIM / REWRITE), and the
+ * stub's own d->resume_rsp closes the last gap — a CONTEXT restore that
+ * did not carry what the answer said.
+ *
+ * Budget: 256 loud lines (rewrite-class resumes and resumes whose rsp
+ * landed in an image run); the ring keeps the interval tail for the
+ * fire dump. Idle resumes print nothing — a clean boot stays quiet.
+ */
+static int uml_nt_resume_rsp_wild(struct uml_nt_stub_conn *c,
+				  unsigned long long rsp)
+{	long long ro;
+
+	if (c->imgw_n <= 0 || c->mm == NULL)
+		return 0;
+	ro = uml_nt_vma_translate(c->mm, rsp, 1);
+	if (ro < 0)
+		return 0;
+	return uml_nt_imgwatch_is_image(c,
+			((unsigned long long)ro) &
+			~(UML_NT_PHYS_RUN_SIZE - 1));
+}
+
+/* The round class as a stable word (a multi-op round resumes at its
+ * drain end, so "op-drain" is a resume too). */
+static const char *uml_nt_resume_cmd_name(unsigned int cmd)
+{
+	switch (cmd) {
+	case UML_STUB_CMD_SYSCALL:
+		return "syscall";
+	case UML_STUB_CMD_FAULT:
+		return "fault";
+	case UML_STUB_CMD_PROT_DONE:
+		return "op-drain";
+	case UML_STUB_CMD_INIT:
+		return "init";
+	default:
+		return "?";
+	}
+}
+
+/* The answer is about to release the stub: record what the guest will
+ * resume with. `pushed` = signal delivery rewrote the state this round
+ * (uml_nt_signal_check); the XS_VERBATIM flag is the kernel's own word
+ * on it and is what the classifier trusts. */
+static void uml_nt_resume_regs_record(struct uml_nt_stub_conn *c,
+				      int pushed)
+{
+	struct uml_nt_stub_data *d = c->d;
+	struct uml_nt_rres_rec *r;
+	unsigned int verbatim =
+		(d->xstate_flags & UML_STUB_XS_VERBATIM) ? 1u : 0u;
+	int cls = UML_NT_RRES_UNCHANGED;
+	int wild;
+
+	/* Only conns that carry an image run: the class this names is a
+	 * stack pointer inside loaded text, and nothing else is (the
+	 * [rsp-image] gate — same condition, same reason). */
+	if (c->imgw_n <= 0)
+		return;
+
+	if (c->res_trap_valid)
+		cls = uml_nt_resume_regs_class(c->res_trap_rsp,
+					       d->regs.rsp, (int)verbatim);
+	wild = uml_nt_resume_rsp_wild(c, d->regs.rsp);
+	c->res_seen++;
+	if (wild)
+		c->res_wild_n++;
+	if (cls == UML_NT_RRES_REWRITE)
+		c->res_rewrite_n++;
+
+	r = &c->res_ring[c->res_ring_next];
+	r->seq = d->req_seq;
+	r->rip = d->regs.rip;
+	r->rsp = d->regs.rsp;
+	r->rbp = d->regs.rbp;
+	r->rbx = d->regs.rbx;
+	r->rax = d->regs.rax;
+	r->trap_rip = c->res_trap_rip;
+	r->trap_rsp = c->res_trap_rsp;
+	r->last_nr = c->last_nr;
+	r->last_ret = c->last_ret;
+	r->cmd = d->cmd;
+	r->verbatim = verbatim;
+	r->wild = wild ? 1u : 0u;
+	r->cls = (unsigned int)cls;
+	c->res_ring_next = (c->res_ring_next + 1) % UML_NT_RRES_RING;
+	if (c->res_ring_n < UML_NT_RRES_RING)
+		c->res_ring_n++;
+	c->res_last = *r;
+	c->res_last_valid = 1;
+
+	/* The stub-side half of the same contract: the rsp the CONTEXT
+	 * restore must carry is the rsp this answer just published. */
+	c->res_chk_rsp = d->regs.rsp;
+	c->res_chk_valid = 1;
+
+	if (wild || cls == UML_NT_RRES_REWRITE) {
+		static int rres_budget = 256;
+
+		if (rres_budget > 0) {
+			rres_budget--;
+			os_info("[resume-regs] pid %lu %s resume rip=0x%llx "
+				"rsp=0x%llx rbp=0x%llx rbx=0x%llx rax=0x%llx "
+				"trap-rsp=0x%llx verdict=%s verbatim=%u "
+				"pushed=%d last_nr=%llu last_ret=%lld%s%s\n",
+				(unsigned long)c->pid,
+				uml_nt_resume_cmd_name(d->cmd),
+				d->regs.rip, d->regs.rsp, d->regs.rbp,
+				d->regs.rbx, d->regs.rax, c->res_trap_rsp,
+				uml_nt_resume_regs_name(cls), verbatim, pushed,
+				c->last_nr, c->last_ret,
+				wild ? " [RSP-IN-IMAGE-RUN]" : "",
+				cls == UML_NT_RRES_REWRITE ?
+					" [REWRITE: the answer moved rsp]" : "");
+		}
+	}
+}
+
+/* At the first wild-rsp fire: the immediately preceding resume (the
+ * round that closed before the guest entered image text) plus the
+ * interval tail. A clean SAME record here means the stub restored the
+ * trap's own stack pointer and the pivot happened in guest code; a
+ * REWRITE record means our own answer carried the wild value. */
+static void uml_nt_resume_regs_fire(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_rres_rec *l = &c->res_last;
+	int i, n;
+
+	if (!c->res_last_valid) {
+		os_info("[resume-regs] pid %lu no resume recorded yet "
+			"(seen=%u) — the pivot precedes the witness window\n",
+			(unsigned long)c->pid, c->res_seen);
+		return;
+	}
+	os_info("[resume-regs] pid %lu PREV RESUME seq=%llu %s "
+		"rip=0x%llx rsp=0x%llx rbp=0x%llx rbx=0x%llx "
+		"trap-rip=0x%llx trap-rsp=0x%llx verdict=%s verbatim=%u "
+		"last_nr=%llu last_ret=%lld — SAME rsp here = the pivot is "
+		"GUEST code; a wild rsp here = our reg-restore\n",
+		(unsigned long)c->pid, l->seq,
+		uml_nt_resume_cmd_name(l->cmd),
+		l->rip, l->rsp, l->rbp, l->rbx, l->trap_rip, l->trap_rsp,
+		uml_nt_resume_regs_name((int)l->cls), l->verbatim,
+		l->last_nr, l->last_ret);
+	n = (int)c->res_ring_n;
+	if (n > 6)
+		n = 6;
+	for (i = n; i >= 1; i--) {
+		unsigned int idx = (c->res_ring_next + UML_NT_RRES_RING -
+				    (unsigned int)i) % UML_NT_RRES_RING;
+		struct uml_nt_rres_rec *e = &c->res_ring[idx];
+
+		os_info("[resume-regs]   -%d seq=%llu %s rip=0x%llx "
+			"rsp=0x%llx last_nr=%llu last_ret=%lld %s%s\n",
+			i, e->seq,
+			uml_nt_resume_cmd_name(e->cmd),
+			e->rip, e->rsp, e->last_nr, e->last_ret,
+			uml_nt_resume_regs_name((int)e->cls),
+			e->wild ? " WILD" : "");
+	}
+}
+
 void uml_nt_census(const char *tag, long long pid)
 {
 	struct task_struct *p;
@@ -6869,6 +7046,45 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
 
+	/* M5.6a login-depth follow-up (Shelley 149 [resume-regs]): the
+	 * round's trap capture is the reference the answer's resume rsp
+	 * is judged against. Op rounds (PROT_DONE) publish a result
+	 * WITHOUT touching d->regs, so the last real trap stays the
+	 * origin of the resume until the guest actually runs again — no
+	 * reset here. */
+	if (d->cmd == UML_STUB_CMD_SYSCALL || d->cmd == UML_STUB_CMD_FAULT) {
+		c->res_trap_rip = d->regs.rip;
+		c->res_trap_rsp = d->regs.rsp;
+		c->res_trap_valid = 1;
+	}
+
+	/* The stub-side half of the same contract: at the previous
+	 * real trap's resume the stub published the CONTEXT rsp it
+	 * carried out of the handler; the answer had put a DIFFERENT
+	 * value in d->regs. That is the restore (or the Windows
+	 * context load), never the guest's own arithmetic. */
+	if (c->res_chk_valid &&
+	    (d->cmd == UML_STUB_CMD_SYSCALL ||
+	     d->cmd == UML_STUB_CMD_FAULT)) {
+		static int rca_budget = 32;
+
+		c->res_chk_valid = 0;
+		if (rca_budget > 0 && d->resume_rsp != 0 &&
+		    d->resume_rsp != c->res_chk_rsp) {
+			rca_budget--;
+			c->res_applied_bad++;
+			os_info("[resume-regs] pid %lu the stub restored "
+				"rsp=0x%llx but the answer carried 0x%llx "
+				"(delta %lld) last_nr=%llu — the CONTEXT "
+				"restore did not carry the kernel's stack "
+				"pointer\n",
+				(unsigned long)c->pid, d->resume_rsp,
+				c->res_chk_rsp,
+				(long long)(d->resume_rsp - c->res_chk_rsp),
+				c->last_nr);
+		}
+	}
+
 	/* M5.6a login-depth follow-up (Shelley 148-UPDATE 9/10): the
 	 * TLS guard probe on every real trap — the first non-zero
 	 * fs:0x30 is the security_init value, every later sight must
@@ -6955,6 +7171,10 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 							c->last_trap_rip : 0,
 						c->last_trap_valid ?
 							c->last_trap_rsp : 0);
+					/* The referee for the pivot itself: the
+					 * resume this trap followed (see
+					 * uml_nt_resume_regs_fire). */
+					uml_nt_resume_regs_fire(c);
 					if (!c->wild_text_dumped) {
 						c->wild_text_dumped = 1;
 						dump_wild_text_stack(c,
@@ -9432,6 +9652,7 @@ fail:
 int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 {
 	int rc;
+	int pushed = 0;
 
 	mb();
 	if (c->d->req_seq != c->d->done_seq + 1) {
@@ -9466,8 +9687,6 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	if (c->task_backed && c->owner_regs != NULL &&
 	    (c->d->cmd == UML_STUB_CMD_SYSCALL ||
 	     c->d->cmd == UML_STUB_CMD_FAULT)) {
-		int pushed = 0;
-
 		if (c->plan_left == 0) {
 			pushed = uml_nt_signal_check(c);
 			/* Push only when signal_check pulled THIS trap's
@@ -9519,6 +9738,17 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * audit point as the residue-watch (post-service, post-signal,
 	 * pre-release); the round identity on a hit = the writer. */
 	uml_nt_cowwatch_round(c);
+	/* M5.6a login-depth follow-up (Shelley 149): the RESUME answer —
+	 * only a NONE answer releases the stub out of its VEH back into
+	 * guest code, and only a real trap (or the op drain that ends
+	 * one) carries that resume. Recorded after signal delivery so
+	 * the state is exactly what the CONTEXT restore will apply. */
+	if (c->res_trap_valid &&
+	    c->d->action == UML_STUB_ACTION_NONE &&
+	    (c->d->cmd == UML_STUB_CMD_SYSCALL ||
+	     c->d->cmd == UML_STUB_CMD_FAULT ||
+	     c->d->cmd == UML_STUB_CMD_PROT_DONE))
+		uml_nt_resume_regs_record(c, pushed);
 	mb();
 	nt->NtSetEvent(c->evt_out, NULL);
 	if (c->d->halt || c->d->action == UML_STUB_ACTION_KILL) {

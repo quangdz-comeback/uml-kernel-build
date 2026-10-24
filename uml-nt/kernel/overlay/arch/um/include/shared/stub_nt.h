@@ -223,6 +223,23 @@ struct uml_nt_stub_data {
 	 * rip+2, ...). */
 	unsigned long long resume_rip;
 
+	/* -- v17: the resume RSP witness (M5.6a, Shelley 149) --------
+	 * v8 published the resume TARGET, never the stack pointer the
+	 * restore actually carried. The login-depth pivot's referee
+	 * question is exactly that: after round close(3) (trap
+	 * rsp=0x6005d258, clean) the next trap reports rsp=0x6001c228
+	 * inside the interp text. Either the kernel's answer already
+	 * rewrote rsp, or the stub's CONTEXT restore did not apply the
+	 * value it was handed, or the guest pivoted on its own. The
+	 * stub records the CONTEXT rsp it is about to return
+	 * EXCEPTION_CONTINUE_EXECUTION with (after gp_to_context, the DR
+	 * re-arm and the xstate restore — what Windows will really
+	 * load); the kernel compares it with the rsp it put in d->regs
+	 * at the answer. Equal + a clean answer rsp = the guest's own
+	 * arithmetic (pivot in guest code); a mismatch names the
+	 * restore, not the guest. */
+	unsigned long long resume_rsp;
+
 	/* -- v9: the view readback (M5.6a, referee 37197703025) ------- */
 	/* The twin scan stayed ambiguous across same-VA-space fork
 	 * children (an inherited tcache copy at the same in-run offset

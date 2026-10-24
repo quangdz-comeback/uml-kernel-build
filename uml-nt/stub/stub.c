@@ -1055,6 +1055,12 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		}
 		d->resume_rip = fs_tramp_target ? fs_tramp_target
 			: (unsigned long long)c->Rip;
+		/* v17: the rsp this CONTEXT carries out of the handler —
+		 * after gp_to_context (verbatim d->regs), the DR re-arm
+		 * and the xstate restore. The kernel compares it with the
+		 * rsp it answered: equal + clean = the guest's own stack
+		 * arithmetic; a mismatch is OUR restore, not the guest. */
+		d->resume_rsp = (unsigned long long)c->Rsp;
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
@@ -1103,6 +1109,10 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		}
 		d->resume_rip = d->regs.rip;
 	}
+	/* v17: the final CONTEXT rsp of this resume (see the
+	 * verbatim branch above). The TF trampoline swaps rsp out and
+	 * back around its popfq, so this is the guest's own value. */
+	d->resume_rsp = (unsigned long long)c->Rsp;
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);
 
