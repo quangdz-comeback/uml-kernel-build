@@ -1213,6 +1213,14 @@ static const char *const flatwr_sites[] = {
 /* The site core (no conn needed — the uacc hook has none: the
  * record carries pid=0 and the live nr, the decode correlates the
  * round from the surrounding [uawrite]/[uacc-fixup] lines). */
+/* The persistent image-run table (M5.6a writer-hunt follow-up): every
+ * captured image run + its handout gen; registration happens at
+ * imgwatch capture, AFTER the exec-time patching. The TO_GUEST funnel
+ * and every flat kernel write test it — a hit is a post-load write
+ * into loaded image text, logged with its site. */
+static unsigned long long g_image_gen[UML_NT_PHYS_MAX_RUNS];
+static struct uml_nt_phys *g_image_ph;
+
 static void flatwr_core(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			unsigned long pid, unsigned long long nr,
 			unsigned long long ret, int site,
@@ -1228,6 +1236,25 @@ static void flatwr_core(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 
 	if (ph == NULL)
 		return;
+	/* A flat write into a REGISTERED image run (any conn) with no
+	 * funnel record is a post-load text rewrite. The exec-time
+	 * sweep runs before registration, so it never lands here. */
+	if (off != (unsigned long long)-1LL) {
+		static int fwi_budget = 16;
+		unsigned int ii = (unsigned int)(off /
+						 UML_NT_PHYS_RUN_SIZE);
+
+		if (ii < UML_NT_PHYS_MAX_RUNS && g_image_gen[ii] != 0 &&
+		    uml_nt_phys_gen(ph, (long long)off) ==
+		    g_image_gen[ii] && fwi_budget > 0 &&
+		    site != UML_NT_FLATWR_SITE_COWCOPY_SRC) {
+			fwi_budget--;
+			os_info("[flatwr-image] site=%d pid %lu "
+				"va=0x%llx len=%llu off=0x%llx nr=%llu — "
+				"a flat kernel write into a loaded image "
+				"run\n", site, pid, va, len, off, nr);
+		}
+	}
 	gen_now = (unsigned long long)uml_nt_phys_gen(ph,
 						      (long long)off);
 	if (mm != NULL && va != 0 && tbl_expect >= 0)
@@ -2418,10 +2445,8 @@ unsigned long long uml_nt_imgw_hash_full(const void *run_base)
  * every captured image run + its handout gen; the TO_GUEST funnel
  * tests each write against this table and logs a hit immediately.
  * The generation pins the entry to the run's life — a recycled run
- * (new gen) never false-fires. */
-static unsigned long long g_image_gen[UML_NT_PHYS_MAX_RUNS];
-static struct uml_nt_phys *g_image_ph;
-
+ * (new gen) never false-fires. The table itself sits next to
+ * flatwr_core (the flat-write sites use it too). */
 void uml_nt_image_run_register(unsigned long long run,
 			       unsigned long long gen,
 			       struct uml_nt_phys *ph)
