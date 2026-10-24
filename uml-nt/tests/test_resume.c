@@ -135,6 +135,65 @@ int main(void)
 	CHECK(uml_nt_resume_expected(1, 0x601e800full, 1,
 				     0x601e800full) == 0x601e800full);
 
+	/* 8. The resume-RSP contract (Shelley 149 [resume-regs]). The
+	 *    witness asks one question: when the login conn resumed
+	 *    after round close(3) (trap rsp=0x6005d258, clean), did the
+	 *    guest come back with that same rsp — or did the kernel/
+	 *    stub answer carry a different (already wild) one?
+	 *
+	 *    A syscall or fault round changes NO stack pointer: every
+	 *    round is the trap state verbatim plus a rip/rax fold. The
+	 *    ONE legitimate rsp rewrite is a verbatim push (signal
+	 *    frame placed below the trap rsp, or rt_sigreturn restoring
+	 *    an arbitrary one). Anything else is the reg-restore bug
+	 *    class and must classify as REWRITE, never as clean. */
+	CHECK(uml_nt_resume_regs_class(0x6005d258ull, 0x6005d258ull, 0) ==
+	      UML_NT_RRES_UNCHANGED);
+	/* A wild resume on a plain round is the bug class — the value
+	 * the rp1 fire would have shown had the kernel written it. */
+	CHECK(uml_nt_resume_regs_class(0x6005d258ull, 0x6001c228ull, 0) ==
+	      UML_NT_RRES_REWRITE);
+	/* Upwards is just as illegal (a restore that pops). */
+	CHECK(uml_nt_resume_regs_class(0x6005d258ull, 0x6005d2a8ull, 0) ==
+	      UML_NT_RRES_REWRITE);
+	/* A signal frame placed below the trap rsp: the verbatim class,
+	 * with the shift measurable (frame length). */
+	CHECK(uml_nt_resume_regs_class(0x6005d258ull, 0x6005cf00ull, 1) ==
+	      UML_NT_RRES_VERBATIM);
+	CHECK(uml_nt_resume_regs_below(0x6005d258ull, 0x6005cf00ull) ==
+	      0x358ull);
+	/* rt_sigreturn: the restored rsp is arbitrary, including ABOVE
+	 * the trap rsp (the syscall ran on the frame). Legitimate — the
+	 * verbatim flag is the only thing that separates it from the
+	 * rewrite class. */
+	CHECK(uml_nt_resume_regs_class(0x6005cf00ull, 0x6005d258ull, 1) ==
+	      UML_NT_RRES_VERBATIM);
+	CHECK(uml_nt_resume_regs_below(0x6005cf00ull, 0x6005d258ull) == 0);
+	/* A verbatim round that did NOT move rsp is still the plain
+	 * case (nothing to explain). */
+	CHECK(uml_nt_resume_regs_class(0x6005d258ull, 0x6005d258ull, 1) ==
+	      UML_NT_RRES_UNCHANGED);
+	/* The fire's own interval, spelled out: trap rsp clean, the
+	 * resume the kernel answered is what the stub restored, and the
+	 * NEXT trap arrived with a text rsp. Only a guest-side pivot
+	 * explains that chain — this is what the witness must prove
+	 * from the log, not what the model may assume. */
+	{
+		unsigned long long trap = 0x6005d258ull; /* close(3) */
+		unsigned long long resume = 0x6005d258ull; /* answered */
+		unsigned long long next_trap = 0x6001c228ull; /* fstatat */
+
+		CHECK(uml_nt_resume_regs_class(trap, resume, 0) ==
+		      UML_NT_RRES_UNCHANGED);
+		CHECK(resume == trap);
+		/* The guest's own arithmetic between the two traps is
+		 * NOT the kernel's business: the detector must not call
+		 * the next trap's wild rsp a resume rewrite. */
+		CHECK(next_trap != resume);
+		CHECK(uml_nt_resume_regs_below(resume, next_trap) ==
+		      0x6005d258ull - 0x6001c228ull);
+	}
+
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);
 		return 1;

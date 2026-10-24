@@ -114,4 +114,67 @@ uml_nt_resume_expected(int syscall_cmd, unsigned long long trap_rip,
 	return trap_rip;
 }
 
+/*
+ * ---- the resume REGISTER contract (M5.6a [resume-regs], Shelley 149) ----
+ *
+ * The same boundary, one register wider. The login-depth pivot hangs on
+ * ONE open question: when the conn resumed after round close(3) — trap
+ * rsp=0x6005d258, clean — did the guest come back with that rsp, or did
+ * the ANSWER already carry the wild text rsp (0x6001c228) the next trap
+ * reports? The trap→answer fold touches rip (syscall +2 / fault replay /
+ * verbatim) and rax (retval) only: a syscall or a fault resumes the
+ * stack pointer EXACTLY as trapped. d->regs is the stub's resume state
+ * (gp_to_context applies it verbatim), so the answer's rsp is directly
+ * checkable against the trap capture of the SAME round.
+ *
+ * The one legitimate rewrite is the verbatim push: signal delivery
+ * places the sigframe BELOW the trap rsp (do_signal's frame is the
+ * handler's entry sp) and rt_sigreturn restores an arbitrary sp from
+ * the frame. Both carry UML_STUB_XS_VERBATIM. Every other rsp change
+ * on the way out is the reg-restore bug class — the kernel/stub half of
+ * the referee question — and must be named, never treated as clean.
+ */
+enum uml_nt_rres_class {
+	UML_NT_RRES_UNCHANGED = 0, /* resume rsp == the trap's own rsp */
+	UML_NT_RRES_VERBATIM = 1,  /* a verbatim push rewrote the file
+				    * (sigframe placement / sigreturn) */
+	UML_NT_RRES_REWRITE = 2,   /* a plain round changed rsp on the
+				    * way out: kernel/stub reg-restore bug */
+};
+
+/* Classify one round's resume rsp against its trap capture. `verbatim`
+ * is the kernel's own XS_VERBATIM flag for this answer. */
+static inline int uml_nt_resume_regs_class(unsigned long long trap_rsp,
+					   unsigned long long resume_rsp,
+					   int verbatim)
+{
+	if (resume_rsp == trap_rsp)
+		return UML_NT_RRES_UNCHANGED;
+	return verbatim ? UML_NT_RRES_VERBATIM : UML_NT_RRES_REWRITE;
+}
+
+/* How far BELOW the trap rsp the resume landed (a sigframe placement
+ * distance); 0 when the resume rsp is the trap rsp or above it. */
+static inline unsigned long long
+uml_nt_resume_regs_below(unsigned long long trap_rsp,
+			 unsigned long long resume_rsp)
+{
+	return resume_rsp < trap_rsp ? trap_rsp - resume_rsp : 0;
+}
+
+/* The witness verdict as a stable word for the log line. */
+static inline const char *uml_nt_resume_regs_name(int cls)
+{
+	switch (cls) {
+	case UML_NT_RRES_UNCHANGED:
+		return "SAME";
+	case UML_NT_RRES_VERBATIM:
+		return "VERBATIM";
+	case UML_NT_RRES_REWRITE:
+		return "REWRITE";
+	default:
+		return "?";
+	}
+}
+
 #endif /* UML_NT_RESUME_MODEL_H */
