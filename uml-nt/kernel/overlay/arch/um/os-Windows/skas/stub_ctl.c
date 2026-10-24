@@ -3416,6 +3416,8 @@ void uml_nt_dr_exec_arm(struct uml_nt_stub_conn *c)
 	if (d == NULL || c->mm == NULL || c->imgw_n <= 0 ||
 	    !uml_nt_conn_is_login(c))
 		return;
+	if (c->dr_exec_va == 0 && c->interp_base != 0)
+		c->dr_exec_va = c->interp_base + UML_NT_DLDSO_ENTRY_OFF;
 	if (c->dr_exec_va == 0)
 		c->dr_exec_va = uml_nt_interp_entry_va(c);
 	if (c->dr_exec_va == 0)

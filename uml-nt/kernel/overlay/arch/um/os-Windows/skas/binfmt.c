@@ -488,6 +488,12 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	 * current_cred() is still the OLD one pre-commit). */
 	memset(&ax, 0, sizeof(ax));
 	ax.at_base = have_interp ? iimg.base : 0;
+	/* M5.6a [pivot-dr]: the conn records the interp's load base — the
+	 * DR execute breakpoint on _dl_find_dso_for_object needs it, and a
+	 * PIE exe is ET_DYN too, so no VMA heuristic can tell them apart
+	 * (referee 40101817550 armed at the exe base). */
+	if (c != NULL)
+		c->interp_base = have_interp ? iimg.base : 0;
 	ax.at_entry = img.entry;
 	ax.at_phdr = img.phdr_va;
 	ax.at_phnum = img.phnum;

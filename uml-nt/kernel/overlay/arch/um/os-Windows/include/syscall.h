@@ -593,6 +593,12 @@ struct uml_nt_stub_conn {
 	 * is the deterministic way in: it fires BEFORE the entry's first
 	 * instruction with rdi = the addr argument. */
 	unsigned long long dr_exec_va;
+	/* The interp's own load base, recorded by binfmt at the exec
+	 * commit (iimg.base — the same value that goes into AT_BASE). The
+	 * VMA heuristic cannot tell the interp from the exe for a PIE
+	 * (/bin/login is ET_DYN too, referee 40101817550 picked the exe
+	 * base 0x60000000 and armed at 0x6000b490). */
+	unsigned long long interp_base;
 	unsigned int dr_exec_armed;
 	unsigned int dr_exec_hits;
 	/* GetThreadContext target: 0x4d0 bytes (x64 CONTEXT), 16-aligned.
