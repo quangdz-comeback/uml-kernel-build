@@ -106,6 +106,63 @@ static int plan_guards(const struct uml_nt_mm *mm,
 	return 0;
 }
 
+/* THE LINUX-SHAPED STACK (fault.h, Shelley 154): a fault on an address
+ * no VMA covers, inside [stack_limit, stack_top) and near the stack
+ * pointer, grows the stack downwards by committing one GROW_UNIT chunk
+ * (upstream expand_downwards). Returns:
+ *   1  = grew; `plan` carries the MAP op that makes the chunk visible
+ *  -1  = below the reservation: kill with plan->kill_why = 'k'
+ *        (clean SIGSEGV, upstream semantics — never a silent write)
+ *   0  = not a stack fault: the caller falls through to the ordinary
+ *        wild-pointer decision.
+ */
+int uml_nt_stack_grow(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+		      unsigned long long addr, unsigned long long rsp,
+		      struct uml_nt_fault_plan *plan)
+{
+	unsigned long long start, committed = 0, off;
+	int d, i;
+
+	d = uml_nt_stack_want_grow(mm->stack_top, mm->stack_limit, addr,
+				   rsp, UML_NT_STACK_GROW_UNIT);
+	if (d == 0)
+		return 0;
+	if (d < 0) {
+		plan->kill = 1;
+		plan->kill_why = 'k';
+		return -1;
+	}
+	/* the committed stack's current bottom (the VMA that contains
+	 * the top); 0 = none */
+	for (i = 0; i < mm->nvma; i++)
+		if (addr < mm->vma[i].end && mm->vma[i].end <= mm->stack_top &&
+		    (committed == 0 || mm->vma[i].start < committed))
+			committed = mm->vma[i].start;
+	start = uml_nt_stack_grow_start(mm->stack_limit, committed, addr);
+	off = uml_nt_phys_alloc_span(ph, UML_NT_STACK_GROW_UNIT /
+					UML_NT_PHYS_RUN_SIZE);
+	if (off < 0) {
+		plan->kill = 1;
+		plan->kill_why = 'a';
+		return -1;
+	}
+	if (uml_nt_vma_add_gen(mm, start, start + UML_NT_STACK_GROW_UNIT,
+			       (unsigned long long)off, 0x04u /* RW */, 0,
+			       (unsigned long long)uml_nt_phys_gen(ph, off)) < 0) {
+		uml_nt_phys_unref(ph, off);
+		plan->kill = 1;
+		plan->kill_why = '?';
+		return -1;
+	}
+	if (plan_op(plan, UML_NT_FOP_MAP, 0x04u, start,
+		    UML_NT_STACK_GROW_UNIT, (unsigned long long)off) < 0) {
+		plan->kill = 1;
+		plan->kill_why = 'o';
+		return -1;
+	}
+	return 1;
+}
+
 int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		    unsigned long long addr, unsigned type,
 		    struct uml_nt_fault_plan *plan)

@@ -8795,11 +8795,48 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			int lz = uml_nt_lazy_fault(c, d->fault_addr,
 						    d->fault_type);
 
+			int sg = 0;
+
 			if (lz > 0)
 				rc = 0;
 			else if (lz < 0)
 				rc = -1;
 			else
+				sg = uml_nt_stack_grow(c->mm, c->ph,
+						       d->fault_addr,
+						       d->regs.rsp, &c->plan);
+			if (sg > 0) {
+				static int grow_budget = 32;
+
+				rc = 0;   /* the stack grew: the plan maps it */
+				if (grow_budget > 0 && c->plan.n_ops > 0) {
+					grow_budget--;
+					os_info("[stack-grow] pid %lu %s "
+						"fault 0x%llx rsp=0x%llx grew "
+						"the stack to [0x%llx,0x%llx) "
+						"(RLIMIT floor 0x%llx) — the "
+						"Linux shape replaces the 64K "
+						"run\n",
+						(unsigned long)c->pid,
+						c->exec_path, d->fault_addr,
+						d->regs.rsp,
+						c->plan.ops[0].va,
+						c->plan.ops[0].va +
+						c->plan.ops[0].len,
+						c->mm->stack_limit);
+				}
+			} else if (sg < 0) {
+				/* clean SIGSEGV, upstream semantics */
+				rc = -1;
+				os_info("[stack-grow] pid %lu %s fault "
+					"0x%llx rsp=0x%llx is BELOW the "
+					"RLIMIT_STACK floor 0x%llx — "
+					"clean SIGSEGV\n",
+					(unsigned long)c->pid, c->exec_path,
+					d->fault_addr, d->regs.rsp,
+					c->mm->stack_limit);
+			}
+			else if (lz == 0)
 				rc = uml_nt_mm_fault(c->mm, c->ph,
 						     d->fault_addr,
 						     d->fault_type,

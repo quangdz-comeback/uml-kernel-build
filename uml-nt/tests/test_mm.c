@@ -2600,8 +2600,11 @@ static void test_multirun_cow_effective_prot(void)
 	CHECK(cplan.kill_why == 'z');
 }
 
+static void test_stack_grow(void);
+
 int main(void)
 {
+	test_stack_grow();
 	test_phys();
 	test_span();
 	test_phys_d22();
@@ -2637,4 +2640,55 @@ int main(void)
 	}
 	printf("test_mm: all ok\n");
 	return 0;
+}
+
+/* ============================================================
+ * Section S — the Linux-shaped stack (Shelley 154 ruling):
+ * the reservation is RLIMIT_STACK (8 MiB) below the same top,
+ * commitment is lazy (one grow unit per fault), and anything
+ * below the reservation is a CLEAN SIGSEGV — never a silent
+ * write into the interp's text (referee evidence: a 64 KiB
+ * stack sitting directly above a RWX ld.so).
+ * ============================================================ */
+static void test_stack_grow(void)
+{
+	unsigned long long top = 0x60060000ull;
+	unsigned long long lim = top - UML_NT_STACK_RLIMIT;
+
+	/* inside the reservation, just below the committed stack, and
+	 * near the stack pointer: grow */
+	CHECK(uml_nt_stack_want_grow(top, lim, top - 0x20000, top - 0x19000,
+				     UML_NT_STACK_GROW_UNIT) == 1);
+	/* deep but still inside: grows (that is the whole point — the
+	 * resolver's XSAVE area is ~2.5 KiB, a PAM/NSS chain is deeper) */
+	CHECK(uml_nt_stack_want_grow(top, lim, lim + 0x1000, lim + 0x2000,
+				     UML_NT_STACK_GROW_UNIT) == 1);
+	/* below the reservation: clean SIGSEGV, unconditionally */
+	CHECK(uml_nt_stack_want_grow(top, lim, lim - 0x1000, lim - 0x800,
+				     UML_NT_STACK_GROW_UNIT) == -1);
+	/* a wild pointer far below rsp is NOT a stack access: leave it
+	 * to the ordinary wild-pointer kill */
+	CHECK(uml_nt_stack_want_grow(top, lim, lim + 0x1000, lim + 0x400000,
+				     UML_NT_STACK_GROW_UNIT) == 0);
+	/* above the top, or a conn with no reservation */
+	CHECK(uml_nt_stack_want_grow(top, lim, top + 0x1000, top,
+				     UML_NT_STACK_GROW_UNIT) == 0);
+	CHECK(uml_nt_stack_want_grow(0, 0, 0x60010000, 0x60010000,
+				     UML_NT_STACK_GROW_UNIT) == 0);
+	/* a reservation that has collapsed to nothing cannot grow */
+	CHECK(uml_nt_stack_want_grow(top, top, top - 0x1000, top - 0x800,
+				     UML_NT_STACK_GROW_UNIT) == 0);
+	/* the unit is clamped to the reservation floor */
+	{
+		unsigned long long s = uml_nt_stack_grow_start(
+			lim, top - UML_NT_STACK_GROW_UNIT, lim + 0x10);
+
+		CHECK(s == lim);
+	}
+	{
+		unsigned long long s = uml_nt_stack_grow_start(
+			lim, 0x60050000ull, 0x6004f123ull);
+
+		CHECK(s == 0x60040000ull);
+	}
 }

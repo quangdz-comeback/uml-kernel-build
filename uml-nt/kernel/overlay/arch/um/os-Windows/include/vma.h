@@ -117,6 +117,12 @@ struct uml_nt_mm {
 	 * mm, cleared on drop. */
 	struct uml_nt_guard guard[UML_NT_GUARD_MAX];
 	int nguard;
+	/* THE STACK (fault.h, Shelley 154): the committed VMA sits at
+	 * the top; [stack_limit, stack_top) is the RLIMIT_STACK
+	 * reservation a fault may grow into, lazily. stack_top == 0 =
+	 * no stack on this mm (POC/bootstrap contexts). */
+	unsigned long long stack_top;
+	unsigned long long stack_limit;
 };
 
 void uml_nt_mm_init(struct uml_nt_mm *mm);

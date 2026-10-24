@@ -113,6 +113,76 @@ void uml_nt_cowwatch_touch(unsigned long long off, unsigned long long len,
  * VMAs, so a fresh conn's stack run starts fully RW. */
 #define UML_NT_STACK_GROW_AHEAD 0x4000ull /* 16KB below the trap rsp */
 
+/* ============================================================
+ * THE LINUX-SHAPED STACK (Shelley's ruling on to-shelley 154).
+ *
+ * Upstream a process starts with a stack VMA whose *reservation* is
+ * RLIMIT_STACK (8 MiB, the getrlimit default) while only the top
+ * pages are committed; a fault below the committed start grows it
+ * downwards (`expand_downwards`, guarded by the rsp proximity check)
+ * and a fault below the reservation is a clean SIGSEGV.
+ *
+ * uml-nt instead mapped ONE 64 KiB run for the stack, directly above
+ * the interpreter's mapping, whose views we keep RWX. That silently
+ * turns any stack excursion deeper than 64 KiB into a write into
+ * ld.so's own text: referees 40114317847/40122644293 caught the lazy
+ * binding resolver (`and $-64,%rsp` + `sub _rtld_global_ro+0x1b0`,
+ * a 0x9c0-byte XSAVE area) running with rsp ALREADY inside that text
+ * and then the whole NSS/PAM call chain pushing into it — the
+ * 258-byte footprint, the wild entry, the login death. A real Linux
+ * stack absorbs all of it.
+ *
+ * So: reservation = 8 MiB below the same top, commitment = lazy in
+ * GROW_UNIT chunks (reservation is NOT commitment — mem=120M stands),
+ * beyond the reservation = SIGSEGV with upstream semantics.
+ * ============================================================ */
+#define UML_NT_STACK_RLIMIT	(8ull << 20)	/* RLIMIT_STACK default */
+#define UML_NT_STACK_GROW_UNIT	(8ull * UML_NT_PHYS_RUN_SIZE) /* 512 KiB */
+/* `address + 65536 + 32 * sizeof(unsigned long) >= sp` is what
+ * expand_downwards() requires before it believes a fault is a stack
+ * access at all; anything further below rsp stays an ordinary wild
+ * pointer. */
+#define UML_NT_STACK_NEAR	(64ull << 10)
+
+/* Is `addr` (which no VMA covers) a stack growth request?
+ *  1 = yes, grow down (caller commits a chunk)
+ * -1 = below the reservation: clean SIGSEGV
+ *  0 = not ours: the ordinary wild-pointer decision */
+static inline int uml_nt_stack_want_grow(unsigned long long top,
+					 unsigned long long limit,
+					 unsigned long long addr,
+					 unsigned long long rsp,
+					 unsigned long long unit)
+{
+	if (top == 0 || limit == 0 || limit >= top)
+		return 0;
+	if (addr >= top)
+		return 0;
+	if (addr < limit)
+		return -1;
+	if (rsp != 0 && addr + UML_NT_STACK_NEAR + 0x100 < rsp)
+		return 0;
+	(void)unit;
+	return 1;
+}
+
+/* Where the new chunk starts: the run containing `addr`, never below
+ * the reservation floor and never above the committed stack. */
+static inline unsigned long long
+uml_nt_stack_grow_start(unsigned long long limit,
+			unsigned long long committed_start,
+			unsigned long long addr)
+{
+	unsigned long long start = addr & ~(UML_NT_PHYS_RUN_SIZE - 1);
+
+	if (committed_start != 0 && start >= committed_start)
+		start = (committed_start >= UML_NT_PHYS_RUN_SIZE) ?
+			committed_start - UML_NT_PHYS_RUN_SIZE : 0;
+	if (start < limit)
+		start = limit & ~(UML_NT_PHYS_RUN_SIZE - 1);
+	return start;
+}
+
 struct uml_nt_fault_op {
 	unsigned op;   /* UML_NT_FOP_* */
 	unsigned prot; /* MAP/PROTECT: NT PAGE_* */
@@ -156,6 +226,10 @@ struct uml_nt_fault_plan {
  * unknown access class, write to read-only VMA, physmem exhausted —
  * every fail path loud). `addr` is the raw faulting VA.
  */
+int uml_nt_stack_grow(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+		      unsigned long long addr, unsigned long long rsp,
+		      struct uml_nt_fault_plan *plan);
+
 int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		    unsigned long long addr, unsigned type,
 		    struct uml_nt_fault_plan *plan);

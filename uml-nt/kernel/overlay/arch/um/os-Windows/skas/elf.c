@@ -13,6 +13,7 @@
  * linker-produced ELFs.
  */
 #include <elf.h>
+#include <fault.h> /* UML_NT_STACK_RLIMIT (the Linux-shaped stack) */
 
 /* ELF64 constants + the two on-disk structs we touch (naturally
  * aligned — sizes asserted below; no host headers, D1). */
@@ -562,6 +563,20 @@ int uml_nt_elf_stack_place(struct uml_nt_elf_image *img,
 	}
 	*top_out = va + RUN;
 	img->stack_top = va + RUN;
+	/* THE LINUX-SHAPED STACK (fault.h): the committed run above is
+	 * only the TOP of the stack. The reservation below it is
+	 * RLIMIT_STACK (8 MiB) and is committed lazily by
+	 * uml_nt_stack_grow() — reservation is NOT commitment, so
+	 * mem=120M is untouched. On Linux the stack VMA already spans
+	 * the whole reservation and grows on fault; the shape is what
+	 * matters (a stack excursion of a few hundred KiB is ordinary),
+	 * and the 64 KiB-only shape is exactly what turned the dynamic
+	 * linker's XSAVE save area into a write over ld.so's text. */
+	mm->stack_top = va + RUN;
+	mm->stack_limit = (mm->stack_top > UML_NT_STACK_RLIMIT) ?
+		mm->stack_top - UML_NT_STACK_RLIMIT : UML_NT_GUEST_VA_BASE;
+	if (mm->stack_limit < UML_NT_GUEST_VA_BASE)
+		mm->stack_limit = UML_NT_GUEST_VA_BASE;
 	return UML_NT_ELF_OK;
 }
 
