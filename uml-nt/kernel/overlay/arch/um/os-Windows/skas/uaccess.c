@@ -44,9 +44,11 @@ void uml_nt_uacc_towrite_rec(const struct uml_nt_mm *mm,
 			     unsigned long long run,
 			     unsigned long long len)
 {
+	unsigned long long nr = uml_nt_uacc_nr_current();
+
 	(void)mm;
-	uml_nt_writeledger_put(&uacc_towrite, run, va, len,
-			       uml_nt_uacc_nr_current());
+	uml_nt_writeledger_put(&uacc_towrite, run, va, len, nr);
+	uml_nt_image_run_touch(run, va, len, nr);
 }
 
 void uml_nt_uacc_towrite_dump(unsigned long long run)

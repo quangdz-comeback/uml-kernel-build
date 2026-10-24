@@ -681,4 +681,17 @@ void uml_nt_uacc_towrite_rec(const struct uml_nt_mm *mm,
 			     unsigned long long len);
 void uml_nt_uacc_towrite_dump(unsigned long long run);
 
+/* M5.6a writer-hunt follow-up: the persistent image-run write witness.
+ * Image runs are registered (run + handout gen) at imgwatch capture;
+ * every TO_GUEST funnel write tests them and logs a hit IMMEDIATELY —
+ * the ring dump at death can miss a write thousands of syscalls old. */
+struct uml_nt_phys;
+void uml_nt_image_run_register(unsigned long long run,
+			       unsigned long long gen,
+			       struct uml_nt_phys *ph);
+void uml_nt_image_run_touch(unsigned long long run,
+			    unsigned long long va,
+			    unsigned long long len,
+			    unsigned long long nr);
+
 #endif /* __UM_OS_WINDOWS_UACCESS_WALK_H */

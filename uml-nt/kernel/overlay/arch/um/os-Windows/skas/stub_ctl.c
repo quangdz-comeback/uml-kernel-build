@@ -2414,6 +2414,47 @@ unsigned long long uml_nt_imgw_hash_full(const void *run_base)
 	return h;
 }
 
+/* The persistent image-run write witness (rf pair 40064950549/590):
+ * every captured image run + its handout gen; the TO_GUEST funnel
+ * tests each write against this table and logs a hit immediately.
+ * The generation pins the entry to the run's life — a recycled run
+ * (new gen) never false-fires. */
+static unsigned long long g_image_gen[UML_NT_PHYS_MAX_RUNS];
+static struct uml_nt_phys *g_image_ph;
+
+void uml_nt_image_run_register(unsigned long long run,
+			       unsigned long long gen,
+			       struct uml_nt_phys *ph)
+{
+	unsigned int i = (unsigned int)(run / UML_NT_PHYS_RUN_SIZE);
+
+	if (i < UML_NT_PHYS_MAX_RUNS && gen != 0) {
+		g_image_gen[i] = gen;
+		g_image_ph = ph;
+	}
+}
+
+void uml_nt_image_run_touch(unsigned long long run,
+			    unsigned long long va,
+			    unsigned long long len,
+			    unsigned long long nr)
+{
+	static int imgwr_budget = 16;
+	unsigned int i;
+
+	if (g_image_ph == (struct uml_nt_phys *)0 || imgwr_budget <= 0)
+		return;
+	i = (unsigned int)(run / UML_NT_PHYS_RUN_SIZE);
+	if (i >= UML_NT_PHYS_MAX_RUNS || g_image_gen[i] == 0)
+		return;
+	if (uml_nt_phys_gen(g_image_ph, (long long)run) != g_image_gen[i])
+		return;
+	imgwr_budget--;
+	os_info("[towrite-image] run=0x%llx va=0x%llx len=%llu nr=%llu "
+		"— a kernel funnel write landed in a loaded image run\n",
+		run, va, len, nr);
+}
+
 void uml_nt_imgwatch_capture(struct uml_nt_stub_conn *c,
 			     const struct uml_nt_elf_image *img, int reset)
 {
@@ -2443,6 +2484,9 @@ void uml_nt_imgwatch_capture(struct uml_nt_stub_conn *c,
 			c->imgw_full[c->imgw_n] = uml_nt_imgw_hash_full(
 				(const void *)((const char *)
 				uml_boot.physmem_base + run));
+			uml_nt_image_run_register(run,
+						  c->imgw_gen[c->imgw_n],
+						  c->ph);
 			c->imgw_n++;
 		}
 	}
