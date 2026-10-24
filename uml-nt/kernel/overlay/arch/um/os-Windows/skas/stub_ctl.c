@@ -6691,6 +6691,22 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								c->last_trap_rsp - 0x80,
 								0x180,
 								"rsp-image-stk");
+						/* The TCB's canary/pointer guard: a
+						 * jmp_buf on the stack is PTR_MANGLEd
+						 * with fs:0x30 — dump both so the
+						 * dumped qwords can be demangled
+						 * offline (setjmp vs longjmp guard). */
+						if (d->fs_base != 0) {
+							dump_guest_bytes(
+								c->mm,
+								d->fs_base + 0x28,
+								0x20,
+								"rsp-image-tcb");
+							os_info("[rsp-image] fs_base=0x%llx "
+								"canary/guard dumped at "
+								"+0x28
+", d->fs_base);
+						}
 
 						if (po >= 0)
 							uml_nt_uacc_towrite_dump(
