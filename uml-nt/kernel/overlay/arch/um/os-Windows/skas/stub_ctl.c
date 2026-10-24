@@ -3434,6 +3434,87 @@ void uml_nt_dr_exec_arm(struct uml_nt_stub_conn *c)
 	}
 }
 
+/* [pivot-wslot] (to-shelley 151, Shelley's ruling): arm the four
+ * ruled interp-text qwords as DR WRITE slots for a login conn.
+ *
+ * Why a WRITE watch and not the execute breakpoint: text is never
+ * written by a correct guest, so the first hit IS the pivot's
+ * footprint — no interval racing (the interval is ~1-2 us, shorter
+ * than a suspend/read probe), no one-shot blind spot (the exec
+ * breakpoint could only see the first call of each interval, 0 hits
+ * with a text rbp out of 20000 in referees 40111848005/40111855705),
+ * and the hit carries the store's own post-rip, rbp (= the pivot
+ * value, measured rather than inferred) and the caller frame.
+ *
+ * Ownership: all four hardware slots belong to this watch. The tcache
+ * entries[] watch (slots 0/1) and the arena bin heads (2/3) stand
+ * down for this conn — see tcache_watch. */
+static void uml_nt_pivot_wslot_arm(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	int i;
+
+	if (d == NULL || c->mm == NULL || c->imgw_n <= 0 || c->ws_armed)
+		return;
+	if (c->interp_base == 0 || !uml_nt_conn_is_login(c))
+		return;
+	for (i = 0; i < (int)UML_NT_PWSLOT_N; i++)
+		d->dr_watch[i] = c->interp_base + uml_nt_pwslot_off(i);
+	/* write watchpoints, not execute ones */
+	d->dr_exec_mask = 0;
+	c->ws_armed = 1;
+	c->ws_hits = 0;
+	os_info("[pivot-wslot] pid %lu %s: four DR WRITE slots on the "
+		"interp text at 0x%llx/0x%llx/0x%llx/0x%llx (interp base "
+		"0x%llx) — the pivot's vfprintf arg array lands here\n",
+		(unsigned long)c->pid, c->exec_path,
+		c->interp_base + uml_nt_pwslot_off(0),
+		c->interp_base + uml_nt_pwslot_off(1),
+		c->interp_base + uml_nt_pwslot_off(2),
+		c->interp_base + uml_nt_pwslot_off(3),
+		c->interp_base);
+}
+
+/* A write to one of the ruled text qwords: the store that marshal's
+ * the arg array INTO the interp's own text. Report the order, the
+ * post-store value, the store instruction, the frame pointer (the
+ * pivot value), every register, and the frame itself. */
+static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
+{
+	struct uml_nt_stub_data *d = c->d;
+	long long vo = uml_nt_vma_translate(c->mm, d->fault_addr, 8);
+	unsigned long long v = ~0ull;
+
+	if (vo >= 0)
+		v = *(const unsigned long long *)(const void *)
+			((char *)uml_boot.physmem_base + vo);
+	c->ws_hits++;
+	os_info("[pivot-wslot] pid %lu %s HIT #%u slot=%d va=0x%llx "
+		"value=0x%llx post-rip=0x%llx rbp=0x%llx rsp=0x%llx\n",
+		(unsigned long)c->pid, c->exec_path, c->ws_hits, slot,
+		d->fault_addr, v, d->regs.rip, d->regs.rbp, d->regs.rsp);
+	os_info("[pivot-wslot]   rax=0x%llx rbx=0x%llx rcx=0x%llx "
+		"rdx=0x%llx rsi=0x%llx rdi=0x%llx\n",
+		d->regs.rax, d->regs.rbx, d->regs.rcx, d->regs.rdx,
+		d->regs.rsi, d->regs.rdi);
+	os_info("[pivot-wslot]   r8=0x%llx r9=0x%llx r10=0x%llx "
+		"r11=0x%llx r12=0x%llx r13=0x%llx r14=0x%llx "
+		"r15=0x%llx flags=0x%llx\n",
+		d->regs.r8, d->regs.r9, d->regs.r10, d->regs.r11,
+		d->regs.r12, d->regs.r13, d->regs.r14, d->regs.r15,
+		d->regs.rflags);
+	/* The vfprintf frame: the array sits at -0x430/-0x428(%rbp), so
+	 * 0x440 below rbp reaches the frame base and 0x400 covers the
+	 * whole stride-16 array plus the saved slots above it. */
+	if (d->regs.rbp > 0x440)
+		dump_guest_bytes(c->mm, d->regs.rbp - 0x440, 0x400,
+				 "pivot-wslot-frame");
+	/* The caller's frame: where the value rbp came from. */
+	if (d->regs.rbp >= 0x100 && d->regs.rbp < 0x800000000000ull)
+		dump_guest_bytes(c->mm, d->regs.rbp, 0x100,
+				 "pivot-wslot-above-rbp");
+}
+
 /* One execute-breakpoint round: the state at the ENTRY, before its
  * first instruction. rdi is the `addr` argument, [rsp] the caller's
  * return address — the two facts the pivot hunt needs. */
@@ -5194,7 +5275,7 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	 * storm; the stub filters legit put/get churn in place and
 	 * reports only non-heap landings. (Supersedes the tctrip RO
 	 * arm — dl6's storm killed that design.) */
-	if (c->tctrip_want && !witness_off()) {
+	if (c->tctrip_want && !witness_off() && !c->ws_armed) {
 		int wi;
 
 		/* slots 0/1: tcache entries[0..1] (the dl5 family);
@@ -8391,6 +8472,13 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * the value table-side, resume verbatim (empty plan,
 		 * no repair — nothing faulted). */
 		if (d->fault_type == UML_NT_FAULT_WATCHPT) {
+			int wslot = uml_nt_pwslot_index(c->interp_base,
+							d->fault_addr);
+
+			if (wslot >= 0) {
+				uml_nt_pivot_wslot_round(c, wslot);
+				return 0;
+			}
 			if (watch_budget > 0) {
 				long long vo = uml_nt_vma_translate(
 					c->mm, d->fault_addr, 8);
@@ -10477,10 +10565,15 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * to-shelley/150 stays in the tree but is NOT armed: the interval
 	 * is ~1-2 us and a suspend/read probe is ~10 us, so it can never
 	 * land inside (referees 40094545095/40094551603). */
-	if (c->d->action == UML_STUB_ACTION_NONE && c->dr_exec_armed == 0 &&
-	    c->dr_exec_hits < UML_NT_DR_EXEC_MAX_HITS &&
-	    uml_nt_conn_is_login(c))
-		uml_nt_dr_exec_arm(c);
+	/* M5.6a [pivot-wslot] (to-shelley 151, Shelley's ruling): the
+	 * DR EXECUTE breakpoint is RETIRED — it saw 20000 entry calls per
+	 * login with a clean rbp every time (referees 40111848005/
+	 * 40111855705), which falsified the "entry call with a text rbp"
+	 * hypothesis and cost 20000 round trips. The four WRITE slots on
+	 * the observed array qwords replace it: text is never written by
+	 * a correct guest, so the first hit is the pivot itself. */
+	if (c->d->action == UML_STUB_ACTION_NONE && !c->ws_armed)
+		uml_nt_pivot_wslot_arm(c);
 	/* M5.6a login-depth follow-up (Shelley 149): the RESUME answer —
 	 * only a NONE answer releases the stub out of its VEH back into
 	 * guest code, and only a real trap (or the op drain that ends

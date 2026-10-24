@@ -216,4 +216,49 @@ static inline int uml_nt_tf_trace_next(unsigned int left, int in_image,
 	return UML_NT_TF_STEP;
 }
 
+
+/* ============================================================
+ * [pivot-wslot] — the pivot's footprint is a stride-16 vfprintf
+ * argument array (to-shelley 151/Shelley's ruling: the stores are
+ * `-0x430/-0x428(%rbp,%rcx,1)` with `cmp $0x3f,%ebx`, i.e.
+ * argsize[]/args_value[]), and the qwords it lands on are the same
+ * in every boot. The kernel therefore arms DR WRITE slots on four
+ * of them: the store itself is the witness, and it names the
+ * instruction, the frame (rbp = the pivot value) and the caller.
+ *
+ * The interp is a DSO, so the watch addresses MUST be derived from
+ * its load base — a fixed absolute address would watch the wrong
+ * page at a different base. Offsets are interp-relative (the ruling
+ * quotes the absolute 0x6001c4b8.. at base 0x60010000).
+ * ============================================================ */
+#define UML_NT_PWSLOT_N 4u
+
+/* The four ruled slots, in arm order. */
+static inline unsigned int uml_nt_pwslot_off(int i)
+{
+	switch (i) {
+	case 0: return 0xc4b8u;
+	case 1: return 0xc4d0u;
+	case 2: return 0xc4e0u;
+	case 3: return 0xc510u;
+	}
+	return 0;
+}
+
+/* Which ruled slot (0..3) does `addr` name, for an interp at `base`?
+ * -1 = not ours: a write anywhere else in text (or on the stack) must
+ * keep its ordinary meaning. */
+static inline int uml_nt_pwslot_index(unsigned long long base,
+				      unsigned long long addr)
+{
+	int i;
+
+	if (base == 0 || addr < base)
+		return -1;
+	for (i = 0; i < (int)UML_NT_PWSLOT_N; i++)
+		if (addr == base + uml_nt_pwslot_off(i))
+			return i;
+	return -1;
+}
+
 #endif /* UML_NT_RESUME_MODEL_H */

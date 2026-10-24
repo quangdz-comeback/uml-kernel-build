@@ -606,6 +606,15 @@ struct uml_nt_stub_conn {
 	unsigned long long interp_base;
 	unsigned int dr_exec_armed;
 	unsigned int dr_exec_hits;
+	/* [pivot-wslot] (to-shelley 151, Shelley's ruling): the four
+	 * interp-relative text qwords the pivot's vfprintf arg array
+	 * lands on are armed as DR WRITE slots. ws_armed owns all four
+	 * hardware slots for the login conn (tcache_watch stands down:
+	 * a heap-entries watch on a guest whose stack is in text is
+	 * noise), and ws_seq numbers the hits so the ORDER of the
+	 * stores reconstructs the array walk. */
+	unsigned int ws_armed;
+	unsigned int ws_hits;
 	/* GetThreadContext target: 0x4d0 bytes (x64 CONTEXT), 16-aligned.
 	 * Per-conn because two kernel tasks may serve two stubs at once —
 	 * a shared static buffer would hand one conn's registers to the

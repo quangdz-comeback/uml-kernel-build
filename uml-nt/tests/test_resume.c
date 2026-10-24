@@ -37,9 +37,11 @@ resume_target(int cls, unsigned long long rip, unsigned long long verbatim)
 		return ~0ull; /* REJECT: no resume target exists */
 	}
 }
+static void test_pwslot(void);
 
 int main(void)
 {
+	test_pwslot();
 	/* The bytes at the observed death sites (Debian bookworm
 	 * ld-linux 2.36, extracted from the referee image):
 	 *   0xb578: 0f 84 90 02 00 00   je
@@ -224,4 +226,39 @@ int main(void)
 	}
 	printf("test_resume: all checks passed\n");
 	return 0;
+}
+
+/* ============================================================
+ * Section 10 — [pivot-wslot] (to-shelley 151, Shelley's ruling):
+ * the pivot's footprint in the interp's text is a stride-16
+ * vfprintf arg array, and the four addresses it lands on are
+ * deterministic. The kernel arms DR WRITE slots on them, so the
+ * slot identity must be decided from the interp base alone —
+ * no absolute address may be baked in (the interp is a DSO and
+ * its load base is whatever the loader picked).
+ * ============================================================ */
+static void test_pwslot(void)
+{
+	unsigned long long b = 0x60010000ull;
+
+	/* the four ruled slots, in arm order */
+	CHECK(uml_nt_pwslot_index(b, b + 0xc4b8) == 0);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc4d0) == 1);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc4e0) == 2);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc510) == 3);
+	/* everything else is NOT ours: a write elsewhere in text (or on
+	 * the stack) must keep the v13/tcache meaning */
+	CHECK(uml_nt_pwslot_index(b, b + 0xc4b9) == -1);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc4c0) == -1);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc2c8) == -1);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc228) == -1);
+	CHECK(uml_nt_pwslot_index(b, 0x6005c6a0ull) == -1);
+	/* an unknown base disarms the whole classifier */
+	CHECK(uml_nt_pwslot_index(0, b + 0xc4b8) == -1);
+	/* the same offsets must hold at a different load base: this is a
+	 * DSO, and a fixed absolute address would silently watch the
+	 * wrong page */
+	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x7000c4b8ull) == 0);
+	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x7000c510ull) == 3);
+	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x6001c4b8ull) == -1);
 }
