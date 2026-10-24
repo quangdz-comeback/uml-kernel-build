@@ -47,6 +47,7 @@
 #include <stub_nt.h>
 #include <ss_model.h>
 #include <resume_model.h>
+#include <guard_model.h>
 
 #include <os.h>
 #include <syscall.h>
@@ -2574,28 +2575,128 @@ void uml_nt_imgwatch_death_check(struct uml_nt_stub_conn *c,
 		"image set (%d watched run(s))\n", run, c->imgw_n);
 }
 
+/* Read the TCB secrets glibc sets from AT_RANDOM: fs:0x28 canary and
+ * fs:0x30 pointer guard. */
+static int guard_tcb_read(struct uml_nt_stub_conn *c,
+			  struct uml_nt_stub_data *d,
+			  unsigned long long *canary,
+			  unsigned long long *guard)
+{
+	long long co, go;
+
+	if (c->mm == NULL || d->fs_base == 0 ||
+	    d->fs_base > ~0ull - 0x38)
+		return -1;
+	co = uml_nt_vma_translate(c->mm, d->fs_base + 0x28, 8);
+	go = uml_nt_vma_translate(c->mm, d->fs_base + 0x30, 8);
+	if (co < 0 || go < 0)
+		return -1;
+	memcpy(canary, (char *)uml_boot.physmem_base + co, 8);
+	memcpy(guard, (char *)uml_boot.physmem_base + go, 8);
+	return 0;
+}
+
+/* M5.6a login-depth follow-up (to-shelley 148-UPDATE 9/10): guard
+ * stability. The static TLS block is zeroed until glibc's
+ * security_init copies AT_RANDOM (canary = bytes 0..7, guard = bytes
+ * 8..15); the first non-matching sight is "not initialized yet". Once
+ * recorded, every real trap re-check: a changed fs:0x30 makes every
+ * jmp_buf demangle to a foreign pointer — the wild-stack pivot would
+ * be a guard-change symptom, not a corrupted buffer. */
+static void guard_probe(struct uml_nt_stub_conn *c,
+			struct uml_nt_stub_data *d)
+{
+	static int guard_init_budget = 64;
+	static int guard_change_budget = 16;
+	static int guard_tcb_budget = 8;
+	unsigned long long canary, guard;
+	int tcb = -1;
+
+	if (guard_tcb_read(c, d, &canary, &guard) < 0)
+		return;
+	if (c->auxv_rand_valid)
+		tcb = uml_nt_guard_tcb_check(c->auxv_rand, canary, guard);
+	if (!c->guard_seen) {
+		/* With nonzero AT_RANDOM, the derived guard is nonzero
+		 * — a zero fs:0x30 means TLS is still the kernel's zeroed
+		 * block. With zero AT_RANDOM the guard IS zero; tcb
+		 * reports the match (the [auxv-random] line names the
+		 * host-RNG starvation). */
+		if (guard == 0 &&
+		    !(tcb >= 0 && (tcb & UML_NT_GUARD_TCB_GUARD)))
+			return;
+		c->guard_seen = 1;
+		c->guard_init = guard;
+		c->guard_canary = canary;
+		c->guard_changes = 0;
+		if (guard_init_budget > 0) {
+			guard_init_budget--;
+			os_info("[guard-init] pid %lu fs_base=0x%llx "
+				"canary=%016llx guard=%016llx tcb=%d "
+				"last_nr=%llu last_ret=%lld — TLS secrets "
+				"recorded for the stability check\n",
+				(unsigned long)c->pid, d->fs_base, canary,
+				guard, tcb, c->last_nr, c->last_ret);
+		}
+		return;
+	}
+	if (guard != c->guard_init) {
+		c->guard_changes++;
+		if (guard_change_budget > 0) {
+			guard_change_budget--;
+			os_info("[guard-change] pid %lu fs_base=0x%llx "
+				"init=%016llx now=%016llx canary "
+				"%016llx -> %016llx tcb=%d last_nr=%llu "
+				"last_ret=%lld trap rip=0x%llx rsp=0x%llx "
+				"— PTR_DEMANGLE now yields foreign "
+				"pointers\n",
+				(unsigned long)c->pid, d->fs_base,
+				c->guard_init, guard, c->guard_canary,
+				canary, tcb, c->last_nr, c->last_ret,
+				d->regs.rip, d->regs.rsp);
+		}
+	} else if (tcb != -1 && tcb !=
+		   (UML_NT_GUARD_TCB_CANARY | UML_NT_GUARD_TCB_GUARD) &&
+		   guard_tcb_budget > 0) {
+		guard_tcb_budget--;
+		os_info("[guard-tcb] pid %lu fs_base=0x%llx canary="
+			"%016llx guard=%016llx tcb=%d last_nr=%llu — the "
+			"TCB no longer matches the exec's AT_RANDOM\n",
+			(unsigned long)c->pid, d->fs_base, canary, guard,
+			tcb, c->last_nr);
+	}
+}
+
 /* glibc's x86-64 jmp_buf: qword 6 = PTR_MANGLE(rsp), qword 7 =
  * PTR_MANGLE(rip), the guard at fs:0x30. At a wild-rsp fire, scan the
- * previous stack run for that signature (demangled rsp inside a
- * writable VMA, demangled rip inside a mapped VMA): a hit names the
- * catch frame whose saved rsp the longjmp restored — the pivot
- * source. */
+ * previous stack run plus the run above it (older frames live at
+ * higher addresses) for that signature, under the fire guard and the
+ * recorded init guard. The VMA test IS the signature: a demangled
+ * random qword lands inside a mapped guest VMA with probability
+ * ~2^-47 (guest VAs occupy megabytes of a 2^64 space). Classification
+ * is the branch decision:
+ *   saved-rsp in the stack VMA => an intact catch frame; its longjmp
+ *                                 would restore a valid stack, the
+ *                                 pivot is elsewhere;
+ *   saved-rsp in an image run => Branch A: setjmp itself ran on a
+ *                                 text stack, the longjmp only
+ *                                 REPLAYED the slip. */
 static void jmpbuf_scan(struct uml_nt_stub_conn *c,
 			struct uml_nt_stub_data *d, unsigned long long rsp)
 {
-	unsigned long long g;
-	long long go, ro;
+	unsigned long long g_now, g_init, canary;
+	long long ro;
 	struct uml_nt_vma *sv;
-	unsigned long long run, i;
+	unsigned long long run, run_va, nq;
 	const unsigned long long *q;
-	int hits = 0;
+	int hits = 0, have_init, ri, i;
 
 	if (c->mm == NULL || d->fs_base == 0 || rsp < 8)
 		return;
-	go = uml_nt_vma_translate(c->mm, d->fs_base + 0x30, 8);
-	if (go < 0)
+	if (guard_tcb_read(c, d, &canary, &g_now) < 0)
 		return;
-	memcpy(&g, (char *)uml_boot.physmem_base + go, 8);
+	g_init = c->guard_init;
+	have_init = c->guard_seen && g_init != g_now;
 	sv = uml_nt_vma_find(c->mm, rsp - 1);
 	if (sv == NULL)
 		return;
@@ -2603,35 +2704,112 @@ static void jmpbuf_scan(struct uml_nt_stub_conn *c,
 	if (ro < 0)
 		return;
 	run = ((unsigned long long)ro) & ~(UML_NT_PHYS_RUN_SIZE - 1);
-	q = (const unsigned long long *)((char *)uml_boot.physmem_base +
-					 run);
-	for (i = 0; i + 1 < UML_NT_PHYS_RUN_SIZE / 8 && hits < 4; i++) {
-		unsigned long long v0 = q[i] >> 17 |
-					q[i] << (64 - 17);
-		unsigned long long v1 = q[i + 1] >> 17 |
-					q[i + 1] << (64 - 17);
-		unsigned long long d0 = v0 ^ g, d1 = v1 ^ g;
-		unsigned long long sva;
+	for (ri = 0; ri < 2 && hits < 4; ri++) {
+		unsigned long long r = run + (unsigned long long)ri *
+			UML_NT_PHYS_RUN_SIZE;
 
-		if (d0 < sv->start || d0 >= sv->end)
+		run_va = sv->start + (r - sv->run_off);
+		if (run_va < sv->start || run_va >= sv->end)
 			continue;
-		if (uml_nt_vma_find(c->mm, d1) == NULL)
-			continue;
-		sva = sv->start + (run - sv->run_off) + i * 8;
-		if (sva < sv->start || sva >= sv->end)
-			continue;
-		hits++;
-		os_info("[jmpbuf] pid %lu slot=0x%llx raw=%016llx "
-			"%016llx saved-rsp=0x%llx saved-rip=0x%llx "
-			"guard=%016llx — a catch frame on the trap "
-			"stack\n",
-			(unsigned long)c->pid, sva, q[i], q[i + 1],
-			d0, d1, g);
+		nq = UML_NT_PHYS_RUN_SIZE / 8;
+		if (run_va + nq * 8 > sv->end)
+			nq = (sv->end - run_va) / 8;
+		q = (const unsigned long long *)((char *)uml_boot.physmem_base
+						 + r);
+		for (i = 0; i + 1 < (int)nq && hits < 4; i++) {
+			int k, nguard = have_init ? 2 : 1;
+
+			for (k = 0; k < nguard && hits < 4; k++) {
+				unsigned long long g = k ? g_init : g_now;
+				unsigned long long d0, d1, sva;
+				struct uml_nt_vma *v0, *v1;
+				long long t0;
+				int img0;
+				const char *cls;
+
+				d0 = uml_nt_guard_demangle(q[i], g);
+				d1 = uml_nt_guard_demangle(q[i + 1], g);
+				v1 = uml_nt_vma_find(c->mm, d1);
+				if (v1 == NULL)
+					continue;
+				v0 = uml_nt_vma_find(c->mm, d0);
+				if (v0 == NULL)
+					continue;
+				t0 = uml_nt_vma_translate(c->mm, d0, 1);
+				img0 = t0 >= 0 &&
+				       uml_nt_imgwatch_is_image(c,
+					((unsigned long long)t0) &
+					~(UML_NT_PHYS_RUN_SIZE - 1));
+				cls = img0 ? "TEXT" :
+				      (v0 == sv ? "STACK" :
+				       (uml_nt_prot_writable(v0->prot) ?
+					"WRITABLE" : "RO"));
+				sva = run_va + (unsigned long long)i * 8;
+				hits++;
+				os_info("[jmpbuf] pid %lu slot=0x%llx "
+					"raw=%016llx %016llx saved-rsp="
+					"0x%llx [%s] saved-rip=0x%llx "
+					"[0x%llx,0x%llx) prot=0x%x "
+					"guard=%016llx%s\n",
+					(unsigned long)c->pid, sva,
+					q[i], q[i + 1], d0, cls, d1,
+					v1->start, v1->end, v1->prot, g,
+					k ? " (INIT guard)" : "");
+				if (img0)
+					os_info("[jmpbuf-TEXT] pid %lu "
+						"slot=0x%llx saved-rsp="
+						"0x%llx saved-rip=0x%llx "
+						"— setjmp itself ran on "
+						"an image/text stack: the "
+						"longjmp REPLAYED the "
+						"slip (Branch A)\n",
+						(unsigned long)c->pid, sva,
+						d0, d1);
+			}
+		}
 	}
 	if (hits == 0)
-		os_info("[jmpbuf] pid %lu: no PTR_MANGLEd catch frame in "
-			"the stack run (guard=%016llx)\n",
-			(unsigned long)c->pid, g);
+		os_info("[jmpbuf] pid %lu: no PTR_MANGLEd (rsp,rip) pair "
+			"with mapped targets in the stack run (guard="
+			"%016llx)\n", (unsigned long)c->pid, g_now);
+}
+
+/* One-shot raw dump of the previous trap's 64 KiB stack run: the
+ * catch frame is above the previous rsp (older frame) and the Windows
+ * dispatch context only wrote BELOW it, so the run is the intact
+ * pivot source. Offline, every candidate can be demangled under every
+ * guard without another boot. */
+static void dump_prev_stack_run(struct uml_nt_stub_conn *c,
+				unsigned long long rsp)
+{
+	struct uml_nt_vma *sv;
+	unsigned long long run_va, end;
+	long long ro;
+
+	if (c->mm == NULL || rsp < 1)
+		return;
+	sv = uml_nt_vma_find(c->mm, rsp - 1);
+	if (sv == NULL)
+		return;
+	ro = uml_nt_vma_translate(c->mm, rsp, 1);
+	if (ro < 0)
+		return;
+	run_va = sv->start + ((((unsigned long long)ro) &
+			       ~(UML_NT_PHYS_RUN_SIZE - 1)) - sv->run_off);
+	if (run_va < sv->start || run_va >= sv->end)
+		return;
+	end = run_va + UML_NT_PHYS_RUN_SIZE;
+	if (end > sv->end)
+		end = sv->end;
+	os_info("[stack-run] pid %lu prev rsp=0x%llx: dumping "
+		"0x%llx..0x%llx (the intact catch frame/pivot region)\n",
+		(unsigned long)c->pid, rsp, run_va, end);
+	while (run_va < end) {
+		int n = (end - run_va < 128) ? (int)(end - run_va) : 128;
+
+		dump_guest_bytes(c->mm, run_va, n, "prev-stack-run");
+		run_va += (unsigned long long)n;
+	}
 }
 
 int uml_nt_imgwatch_is_image(struct uml_nt_stub_conn *c,
@@ -6647,6 +6825,13 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
 
+	/* M5.6a login-depth follow-up (Shelley 148-UPDATE 9/10): the
+	 * TLS guard probe on every real trap — the first non-zero
+	 * fs:0x30 is the security_init value, every later sight must
+	 * match it (a change demangles jmp_bufs into foreign pointers). */
+	if (d->cmd == UML_STUB_CMD_SYSCALL || d->cmd == UML_STUB_CMD_FAULT)
+		guard_probe(c, d);
+
 	/* Trap-site view/table diff (v16): the stub publishes the 8
 	 * bytes it actually executed at the trap RIP; the table holds
 	 * its own run's bytes at the same VA. A mismatch is a stale
@@ -6726,6 +6911,39 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 							c->last_trap_rip : 0,
 						c->last_trap_valid ?
 							c->last_trap_rsp : 0);
+					/* Guard stability at the fire: the
+					 * recorded init vs the value the
+					 * pivot's longjmp would demangle
+					 * with. */
+					{
+						unsigned long long gc, gg;
+						int gv = -1;
+
+						if (guard_tcb_read(c, d, &gc,
+								   &gg) == 0)
+							gv = uml_nt_guard_verdict(
+								c->guard_init,
+								gg,
+								c->guard_seen);
+						os_info("[guard-fire] pid %lu "
+							"init=%016llx now="
+							"%016llx canary_now="
+							"%016llx verdict=%s "
+							"tcb=%d changes=%u\n",
+							(unsigned long)c->pid,
+							c->guard_init, gg, gc,
+							gv == UML_NT_GUARD_STABLE ?
+								"STABLE" :
+							gv == UML_NT_GUARD_CHANGED ?
+								"CHANGED" :
+							gv == UML_NT_GUARD_FIRST ?
+								"FIRST" : "UNREADABLE",
+							c->auxv_rand_valid ?
+							uml_nt_guard_tcb_check(
+								c->auxv_rand,
+								gc, gg) : -1,
+							c->guard_changes);
+					}
 					/* The slip sits in the interval that just
 					 * closed: the kernel writes that round
 					 * made are still in the ledger. Dump the
@@ -6734,6 +6952,11 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					 * names itself here). */
 					if (c->last_trap_valid &&
 					    c->mm != NULL) {
+						if (!c->stack_run_dumped) {
+							c->stack_run_dumped = 1;
+							dump_prev_stack_run(c,
+								c->last_trap_rsp);
+						}
 						long long po =
 							uml_nt_vma_translate(
 								c->mm,
@@ -8883,6 +9106,17 @@ no_zero:
 			child->imgw_full[gi] = parent->imgw_full[gi];
 		}
 	}
+	/* GUARD inheritance (M5.6a login-depth follow-up): the child's
+	 * TCB memory is the parent's COW-shared block and its exec's
+	 * AT_RANDOM is the same — comparing against the parent's
+	 * recorded init is exactly right. */
+	memcpy(child->auxv_rand, parent->auxv_rand,
+	       sizeof(child->auxv_rand));
+	child->auxv_rand_valid = parent->auxv_rand_valid;
+	child->guard_init = parent->guard_init;
+	child->guard_canary = parent->guard_canary;
+	child->guard_seen = parent->guard_seen;
+	child->guard_changes = parent->guard_changes;
 	/* M5.4 c3 (map 057): arm the residue-watch — the per-round
 	 * whole-stack-VMA scan that names the round re-introducing
 	 * the fork-resume value into the child's stack (seed proven

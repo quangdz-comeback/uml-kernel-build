@@ -447,6 +447,27 @@ struct uml_nt_stub_conn {
 	unsigned long long last_trap_rip;
 	unsigned long long last_trap_rsp;
 	int last_trap_valid;
+	/* M5.6a login-depth follow-up (to-shelley 148-UPDATE 9/10): the
+	 * exec's AT_RANDOM bytes + the TLS guard probe. glibc derives
+	 * fs:0x28 (stack canary) from bytes 0..7 and fs:0x30 (pointer
+	 * guard) from bytes 8..15; a guard that changes between setjmp
+	 * and longjmp demangles a jmp_buf into a foreign pointer (the
+	 * wild-stack pivot class). Every real trap re-reads fs:0x30 and
+	 * compares it with the first sight ([guard-init]/[guard-change],
+	 * stub_ctl.c); the fire also re-checks the TCB against these
+	 * bytes (uml_nt_guard_tcb_check). auxv_rand_valid = an exec
+	 * filled them. kzalloc init = unseen/0. */
+	unsigned char auxv_rand[16];
+	int auxv_rand_valid;
+	unsigned long long guard_init;
+	unsigned long long guard_canary;
+	int guard_seen;
+	unsigned int guard_changes;
+	/* The full previous-stack-run dump fires once per conn (the
+	 * first wild-rsp trap): the catch frame the pivot restored lives
+	 * above the previous rsp and is intact — the raw 64 KiB lets the
+	 * offline scan try every guard/candidate without another boot. */
+	int stack_run_dumped;
 	/* M5.6a writer-hunt follow-up: the resume-boundary audit. The
 	 * value the kernel EXPECTED the stub to resume at after the
 	 * previous real trap round; the stub publishes its actual

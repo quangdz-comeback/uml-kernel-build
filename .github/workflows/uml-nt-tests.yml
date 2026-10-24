@@ -32,6 +32,10 @@ jobs:
           # trap -> resume boundary contract — only the ud2 sentinel is
           # a syscall; every resume lands on the claimed boundary.
           bash uml-nt/tests/test_resume.sh
+          # M5.6a login-depth follow-up (Shelley 148-UPDATE 9/10): the
+          # guest TLS pointer-guard contract — PTR_MANGLE arithmetic,
+          # guard-stability verdict, AT_RANDOM -> TCB derivation.
+          bash uml-nt/tests/test_guard.sh
           # M3.7 uaccess walker (D15) over the vma tree
           bash uml-nt/tests/test_uaccess.sh
           # M4.1 bench stats — the pure math the freestanding kernel
@@ -77,4 +81,4 @@ jobs:
             uml-nt/tests/test_uaccess.sh uml-nt/tests/test_bench.sh \
             uml-nt/tests/test_console.sh uml-nt/tests/test_ss.sh \
             uml-nt/tests/test_lazyfile.sh uml-nt/tests/test_writeledger.sh \
-            uml-nt/tests/test_resume.sh
+            uml-nt/tests/test_resume.sh uml-nt/tests/test_guard.sh

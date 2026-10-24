@@ -455,6 +455,33 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	if (stk == NULL)
 		return -ENOEXEC;
 	get_random_bytes(rnd, sizeof(rnd));
+	/* M5.6a login-depth follow-up (to-shelley 148-UPDATE 9/10):
+	 * the AT_RANDOM bytes are the ONLY entropy input behind the
+	 * guest's fs:0x28 canary + fs:0x30 pointer guard (glibc
+	 * security_init). Keep them on the conn for the per-trap guard
+	 * probe and log them per exec: if every boot/exec sees the same
+	 * bytes, the deterministic guard story is host-RNG starvation,
+	 * not a guest write. */
+	{
+		static const char hexd[] = "0123456789abcdef";
+		static int auxv_rand_budget = 80;
+		char hex[33];
+		int bi;
+
+		for (bi = 0; bi < 16; bi++) {
+			hex[2 * bi] = hexd[rnd[bi] >> 4];
+			hex[2 * bi + 1] = hexd[rnd[bi] & 0xf];
+		}
+		hex[32] = 0;
+		for (bi = 0; bi < 16; bi++)
+			c->auxv_rand[bi] = rnd[bi];
+		c->auxv_rand_valid = 1;
+		if (auxv_rand_budget > 0) {
+			auxv_rand_budget--;
+			os_info("[auxv-random] %s: %s\n", bprm->filename,
+				hex);
+		}
+	}
 	/* D20 cluster 1: the auxv a starter needs — AT_BASE points at
 	 * the interp (0 static), AT_ENTRY/AT_PHDR at the MAIN image.
 	 * The ids come from bprm->cred (the prepared exec cred —
