@@ -3544,6 +3544,17 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 			}
 		}
 	}
+	/* THE CODE THAT CONSUMED THE BAD rsp: the store instruction's
+	 * own bytes (post-rip - 0x20 .. +0x40), and the bytes at the
+	 * pushed pointer. The store sits in a 14248-byte module freshly
+	 * mmap'd at 0x607a0000 (login mm, 47 VMAs dumped below), whose
+	 * image offset cannot be decoded offline — so the witness
+	 * carries the bytes. */
+	if (d->regs.rip > 0x20 && c->ws_hits == 1) {
+		dump_guest_bytes(c->mm, d->regs.rip - 0x20, 0x60,
+				 "pivot-wslot-code");
+		dump_guest_bytes(c->mm, v, 0x40, "pivot-wslot-pushed");
+	}
 	/* THE TEXT STACK ITSELF: dump 0x300 from rsp upward. Once the
 	 * guest runs with rsp inside the interp's text, every frame
 	 * push leaves a return address there — so this dump IS the call
