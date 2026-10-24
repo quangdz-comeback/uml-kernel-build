@@ -253,7 +253,12 @@ struct uml_nt_stub_data {
 	 * never visible to the guest: the capture and the resume both
 	 * strip it (ss_model.h), the trampoline raises it itself. */
 	u32_nt tf_trace;
-	u32_nt _pad_tf;
+	/* Why the stub stopped tracing (0 = still tracing / never armed):
+	 * 1 = the traced instruction faulted on a wiped TLS base (the D18
+	 * fs fixup re-executes it with the base live, but TF is spent —
+	 * the interval needs another arm). Read by the kernel's trace-end
+	 * line so an early end is never silent. */
+	u32_nt tf_stop;
 
 	/* -- v9: the view readback (M5.6a, referee 37197703025) ------- */
 	/* The twin scan stayed ambiguous across same-VA-space fork

@@ -42,8 +42,13 @@
 /* M5.6a [pivot trace]: steps kept for the pivot line's call-site view
  * and the per-conn / per-arm step budgets (a bound on the boot cost). */
 #define UML_NT_TF_RING 8
-#define UML_NT_TF_STEPS_PER_ARM 1500u
-#define UML_NT_TF_STEPS_PER_CONN 3000u
+/* The traced intervals run 1-2k instructions (a 1129-step arm
+ * ended at the next syscall in referee 40086019923), and the
+ * login path reaches the pivot after a couple of close(3)s — so
+ * an arm is 3000 steps and a conn may spend 15000 (~1.5 s of
+ * single-stepping) before the instrument gives up. */
+#define UML_NT_TF_STEPS_PER_ARM 3000u
+#define UML_NT_TF_STEPS_PER_CONN 15000u
 /* Longest exec path the conn records (gates the trace to the victim
  * binary class; also names the conn in the pivot lines). */
 #define UML_NT_EXEC_PATH_MAX 48

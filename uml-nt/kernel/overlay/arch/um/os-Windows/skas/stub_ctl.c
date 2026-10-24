@@ -3119,6 +3119,7 @@ static void uml_nt_tf_trace_arm(struct uml_nt_stub_conn *c)
 	c->tf_prev_valid = 1;
 	c->tf_n = 0;
 	c->tf_rr = 0;
+	d->tf_stop = 0;
 	d->tf_trace = n;
 	os_info("[pivot-trace] pid %lu %s TF TRACE armed (%u step(s), arm "
 		"%u): from rip=0x%llx rsp=0x%llx last_nr=%llu last_ret=%lld — "
@@ -3198,12 +3199,19 @@ static void uml_nt_tf_trace_step(struct uml_nt_stub_conn *c)
 			rip, rsp);
 		d->tf_trace = 0;
 	} else {
-		os_info("[pivot-trace] pid %lu step %u rip=0x%llx "
-			"rsp=0x%llx rbp=0x%llx rbx=0x%llx rax=0x%llx "
-			"insn=%016llx\n",
-			(unsigned long)c->pid,
-			UML_NT_TF_STEPS_PER_ARM - c->tf_left, rip, rsp,
-			d->regs.rbp, d->regs.rbx, d->regs.rax, d->trap_insn);
+		unsigned int n = UML_NT_TF_STEPS_PER_ARM - c->tf_left;
+
+		/* Volume policy: the first 64 steps of an arm are logged
+		 * whole (the interval's shape), then every 256th as a
+		 * heartbeat — the pivot line always prints, and the ring
+		 * carries its context. A 3000-step arm costs ~76 lines. */
+		if (n <= 64 || (n & 0xff) == 0)
+			os_info("[pivot-trace] pid %lu step %u rip=0x%llx "
+				"rsp=0x%llx rbp=0x%llx rbx=0x%llx rax=0x%llx "
+				"insn=%016llx\n",
+				(unsigned long)c->pid, n, rip, rsp,
+				d->regs.rbp, d->regs.rbx, d->regs.rax,
+				d->trap_insn);
 		if (c->tf_left == 0) {
 			os_info("[pivot-trace] pid %lu budget spent (%u step(s), "
 				"arm %u) at rip=0x%llx rsp=0x%llx — no pivot in "
@@ -3236,6 +3244,18 @@ static int uml_nt_tf_trace_should_arm(struct uml_nt_stub_conn *c)
 		return 0;
 	if (c->last_nr != 3 /* close(2) */ || c->last_ret != 0)
 		return 0;
+	/* Skip closes issued from the binary's OWN text: /bin/login closes
+	 * its own files in loops (referee 40086019923: both armings were
+	 * rip=0x60030a05, the exe, and their 3000 steps were gone before
+	 * the pivot round arrived). The pivot's close came from libc
+	 * (rip=0x601ece65) — a different mapping than the entry. */
+	{
+		struct uml_nt_vma *ev = uml_nt_vma_find(c->mm, d->entry_va);
+		struct uml_nt_vma *rv = uml_nt_vma_find(c->mm, d->regs.rip);
+
+		if (ev != NULL && ev == rv)
+			return 0;
+	}
 	return 1;
 }
 
@@ -7226,12 +7246,13 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	    !(d->cmd == UML_STUB_CMD_FAULT &&
 	      d->fault_type == UML_NT_FAULT_STEP)) {
 		os_info("[pivot-trace] pid %lu %s trace ended by %s after %u "
-			"step(s) (last_nr=%llu) — a boundary arrived before a "
-			"pivot\n",
+			"step(s) (last_nr=%llu, stub_stop=%u) — a boundary arrived "
+			"before a pivot\n",
 			(unsigned long)c->pid, c->exec_path,
 			d->cmd == UML_STUB_CMD_SYSCALL ? "syscall" :
 			d->cmd == UML_STUB_CMD_FAULT ? "fault" : "op",
-			UML_NT_TF_STEPS_PER_ARM - c->tf_left, c->last_nr);
+			UML_NT_TF_STEPS_PER_ARM - c->tf_left, c->last_nr,
+			d->tf_stop);
 		d->tf_trace = 0;
 	}
 

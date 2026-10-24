@@ -1008,6 +1008,12 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			c->EFlags = (DWORD)uml_nt_ss_resume_flags(
 				(unsigned long long)c->EFlags);
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
+			/* v18 [pivot trace]: the re-execute goes through the
+			 * PLAIN trampoline (TF is spent), so a trace in
+			 * progress ends here — say so instead of dying
+			 * quietly (a TF trampoline would re-hop forever). */
+			if (d->tf_trace != 0)
+				d->tf_stop = 1;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 	}
