@@ -3470,6 +3470,12 @@ static int uml_nt_sample_should_arm(struct uml_nt_stub_conn *c)
 		return 0;
 	if (c->last_nr != 3 /* close(2) */ || c->last_ret != 0)
 		return 0;
+	/* Never arm on a round whose rsp is ALREADY in image text: the
+	 * pivot has happened (referee 40092427406 armed there once and
+	 * its only hit was the post-pivot chain) — the interesting window
+	 * is the one that STARTS clean. */
+	if (uml_nt_resume_rsp_wild(c, d->regs.rsp))
+		return 0;
 	{
 		struct uml_nt_vma *ev = uml_nt_vma_find(c->mm, d->entry_va);
 		struct uml_nt_vma *rv = uml_nt_vma_find(c->mm, d->regs.rip);
