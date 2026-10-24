@@ -187,8 +187,29 @@ void uml_nt_console_flush(void)
 	}
 }
 
-static unsigned long __attribute__((ms_abi)) nt_con_reader(void *arg)
+/* §4a feed alignment (M5.6a): agetty/login/bash flush the tty on
+ * prompt setup (TCSETSF = tcsetattr(TCSAFLUSH)) and on explicit
+ * TCFLSH. The tty core clears only the bytes it already received;
+ * the ring can still hold whole pre-prompt feed cycles, which then
+ * land on the NEXT prompt as a misaligned username/password/command
+ * sequence (the referees' "uml login: echo LOGIN-OK"). Drop the
+ * un-fed bytes at the same boundary so the feed restarts aligned. */
+void uml_nt_console_drop_input(void)
 {
+	static int feed_drop_budget = 16;
+	unsigned int n;
+
+	if (!g_con_live)
+		return;
+	n = uml_nt_con_ring_drop(&g_con_ring);
+	if (n != 0 && feed_drop_budget > 0) {
+		feed_drop_budget--;
+		os_info("[confeed] dropped %u pending byte(s) at a tty "
+			"input flush — the feed restarts aligned\n", n);
+	}
+}
+
+static unsigned long __attribute__((ms_abi)) nt_con_reader(void *arg){
 	static unsigned char buf[512];
 	static unsigned int status_seen[8][2]; /* status, count */
 	static unsigned int nstatus_seen;

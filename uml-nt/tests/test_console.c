@@ -111,6 +111,31 @@ static int test_ring(void)
 	CHECK(uml_nt_con_ring_pop(&r, (void *)0, 1) == 0);
 	CHECK(uml_nt_con_ring_pending((void *)0) == 0);
 
+	/* DROP — §4a feed alignment (M5.6a): a tty input flush
+	 * (TCSETSF/TCFLSH) discards the ring's unread feed bytes; the
+	 * next push works from the new tail and order is preserved. */
+	uml_nt_con_ring_init(&r);
+	CHECK(uml_nt_con_ring_push(&r, src, 300) == 300);
+	CHECK(uml_nt_con_ring_drop(&r) == 300);
+	CHECK(uml_nt_con_ring_pending(&r) == 0);
+	CHECK(uml_nt_con_ring_pop(&r, out, 16) == 0);
+	CHECK(uml_nt_con_ring_drop(&r) == 0); /* empty: no-op */
+	CHECK(uml_nt_con_ring_push(&r, src, 50) == 50);
+	CHECK(uml_nt_con_ring_pop(&r, out, 50) == 50);
+	CHECK(memcmp(out, src, 50) == 0);
+	/* drop across a wrapped ring: only the pending bytes go */
+	uml_nt_con_ring_init(&r);
+	CHECK(uml_nt_con_ring_push(&r, src, UML_NT_CON_RING_CAP - 8) ==
+	      UML_NT_CON_RING_CAP - 8);
+	CHECK(uml_nt_con_ring_pop(&r, out, 400) == 400);
+	CHECK(uml_nt_con_ring_push(&r, src, 100) == 100);
+	CHECK(uml_nt_con_ring_drop(&r) ==
+	      UML_NT_CON_RING_CAP - 8 - 400 + 100);
+	CHECK(uml_nt_con_ring_pending(&r) == 0);
+	CHECK(uml_nt_con_ring_push(&r, src + 7, 64) == 64);
+	CHECK(uml_nt_con_ring_pop(&r, out, 64) == 64);
+	CHECK(memcmp(out, src + 7, 64) == 0);
+
 	printf("test_console: ring ok\n");
 	return 0;
 }

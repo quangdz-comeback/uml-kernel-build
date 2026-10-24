@@ -44,6 +44,12 @@ unsigned int uml_nt_con_ring_push(struct uml_nt_con_ring *r,
 unsigned int uml_nt_con_ring_pop(struct uml_nt_con_ring *r,
 				 unsigned char *dst, unsigned int maxlen);
 
+/* Consumer: DISCARD every unread byte (the §4a tty-flush boundary —
+ * TCSETSF/TCFLSH). Returns the count dropped. A producer push racing
+ * the drop keeps the new bytes (they land at/after the observed
+ * head). */
+unsigned int uml_nt_con_ring_drop(struct uml_nt_con_ring *r);
+
 /* 1 when bytes wait (the cheap vCPU-side poll for the flush). */
 int uml_nt_con_ring_pending(const struct uml_nt_con_ring *r);
 

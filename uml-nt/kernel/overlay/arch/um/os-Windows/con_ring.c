@@ -78,3 +78,17 @@ int uml_nt_con_ring_pending(const struct uml_nt_con_ring *r)
 		return 0;
 	return r->head != r->tail;
 }
+
+unsigned int uml_nt_con_ring_drop(struct uml_nt_con_ring *r)
+{
+	unsigned int head, tail;
+
+	if (r == (struct uml_nt_con_ring *)0)
+		return 0;
+	head = r->head; /* producer-owned; bytes pushed after this read
+			 * stay queued (their indices are >= head) */
+	__sync_synchronize();
+	tail = r->tail;
+	r->tail = head;
+	return head - tail;
+}

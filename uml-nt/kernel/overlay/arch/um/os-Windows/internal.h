@@ -69,6 +69,10 @@ void uml_nt_sigio_flush(void);
 HANDLE uml_nt_console_wake_event(void);
 int uml_nt_console_pending(void);
 void uml_nt_console_flush(void);
+/* §4a feed alignment: drop the console ring's un-fed bytes at the
+ * tty's own input flush (TCSETSF/TCFLSH) so a queued feed cycle
+ * cannot land on the next prompt. */
+void uml_nt_console_drop_input(void);
 
 /* start_up.c (M5.1c.3 diagnosis): which aux thread is running — set
  * at thread entry, printed by the crash reporter. */

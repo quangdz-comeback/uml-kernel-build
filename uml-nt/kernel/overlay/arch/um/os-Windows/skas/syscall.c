@@ -4230,6 +4230,16 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		 * musl isatty sends. The console IS a real tty and the
 		 * net stack is real — the generic bridge serves both;
 		 * a non-tty fd gets the real ENOTTY. */
+		/* §4a feed alignment: TCSETSF (= tcsetattr TCSAFLUSH)
+		 * and TCFLSH with input are the tty's own flush
+		 * boundary — drop the console ring's un-fed bytes there
+		 * too, or a pre-prompt feed cycle lands on the next
+		 * prompt as username/password (the "uml login: echo
+		 * LOGIN-OK" desync). */
+		if (a[1] == 0x5404 /* TCSETSF */ ||
+		    (a[1] == 0x540b /* TCFLSH */ &&
+		     (a[2] == 0 /* TCIFLUSH */ || a[2] == 2 /* TCIOFLUSH */)))
+			uml_nt_console_drop_input();
 		ret = sys_vfs(nr, a);
 		if (!ioctl_once) {
 			ioctl_once = 1;
