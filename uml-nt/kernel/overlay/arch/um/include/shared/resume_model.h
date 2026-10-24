@@ -226,6 +226,17 @@ static inline int uml_nt_tf_trace_next(unsigned int left, int in_image,
  * of them: the store itself is the witness, and it names the
  * instruction, the frame (rbp = the pivot value) and the caller.
  *
+ * Referees 40114317847/40114325262 CAUGHT it — and corrected the
+ * shape: the four ruled qwords are only the MIDDLE of the footprint.
+ * The first hit was libc's `push %r13` at `__nss_passwd_lookup2+0`
+ * (post-rip 0x133252) with rsp ALREADY at 0x6001c518 — i.e. the
+ * guest was running with its STACK inside the interp's text, and what
+ * the ruled slots see is that stack descending. The footprint tops out
+ * just below base+0xc600, so the FIRST push onto the text stack lands
+ * at base+0xc5f8, and the four slots now sit on the top 32 bytes to
+ * catch it: the earliest push is the one whose return address names
+ * the function that switched rsp into text.
+ *
  * The interp is a DSO, so the watch addresses MUST be derived from
  * its load base — a fixed absolute address would watch the wrong
  * page at a different base. Offsets are interp-relative (the ruling
@@ -237,10 +248,10 @@ static inline int uml_nt_tf_trace_next(unsigned int left, int in_image,
 static inline unsigned int uml_nt_pwslot_off(int i)
 {
 	switch (i) {
-	case 0: return 0xc4b8u;
-	case 1: return 0xc4d0u;
-	case 2: return 0xc4e0u;
-	case 3: return 0xc510u;
+	case 0: return 0xc5e0u;
+	case 1: return 0xc5e8u;
+	case 2: return 0xc5f0u;
+	case 3: return 0xc5f8u;
 	}
 	return 0;
 }

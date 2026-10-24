@@ -3489,10 +3489,15 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 		v = *(const unsigned long long *)(const void *)
 			((char *)uml_boot.physmem_base + vo);
 	c->ws_hits++;
+	/* Where did the text stack get its top? The FIRST hit is the one
+	 * that matters; every later hit is the stack descending. */
 	os_info("[pivot-wslot] pid %lu %s HIT #%u slot=%d va=0x%llx "
-		"value=0x%llx post-rip=0x%llx rbp=0x%llx rsp=0x%llx\n",
+		"value=0x%llx post-rip=0x%llx rbp=0x%llx rsp=0x%llx "
+		"depth=0x%llx\n",
 		(unsigned long)c->pid, c->exec_path, c->ws_hits, slot,
-		d->fault_addr, v, d->regs.rip, d->regs.rbp, d->regs.rsp);
+		d->fault_addr, v, d->regs.rip, d->regs.rbp, d->regs.rsp,
+		(c->interp_base + 0xc600ull > d->regs.rsp) ?
+		(c->interp_base + 0xc600ull - d->regs.rsp) : 0);
 	os_info("[pivot-wslot]   rax=0x%llx rbx=0x%llx rcx=0x%llx "
 		"rdx=0x%llx rsi=0x%llx rdi=0x%llx\n",
 		d->regs.rax, d->regs.rbx, d->regs.rcx, d->regs.rdx,
@@ -3503,16 +3508,17 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 		d->regs.r8, d->regs.r9, d->regs.r10, d->regs.r11,
 		d->regs.r12, d->regs.r13, d->regs.r14, d->regs.r15,
 		d->regs.rflags);
-	/* The vfprintf frame: the array sits at -0x430/-0x428(%rbp), so
-	 * 0x440 below rbp reaches the frame base and 0x400 covers the
-	 * whole stride-16 array plus the saved slots above it. */
-	if (d->regs.rbp > 0x440)
-		dump_guest_bytes(c->mm, d->regs.rbp - 0x440, 0x400,
-				 "pivot-wslot-frame");
-	/* The caller's frame: where the value rbp came from. */
-	if (d->regs.rbp >= 0x100 && d->regs.rbp < 0x800000000000ull)
-		dump_guest_bytes(c->mm, d->regs.rbp, 0x100,
-				 "pivot-wslot-above-rbp");
+	/* THE TEXT STACK ITSELF: dump 0x300 from rsp upward. Once the
+	 * guest runs with rsp inside the interp's text, every frame
+	 * push leaves a return address there — so this dump IS the call
+	 * chain, in push order, and the highest non-zero qword is the
+	 * return address INTO the function that switched rsp into text
+	 * (the pivot). Referee 40114317847 #1 showed the shape plainly:
+	 * libc `push %r13` (`__nss_passwd_lookup2+0`) with
+	 * rsp=0x6001c510 already in text. */
+	if (d->regs.rsp >= 0x100 && d->regs.rsp < 0x800000000000ull)
+		dump_guest_bytes(c->mm, d->regs.rsp & ~0xfull, 0x300,
+				 "pivot-wslot-stack");
 }
 
 /* One execute-breakpoint round: the state at the ENTRY, before its

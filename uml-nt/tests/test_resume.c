@@ -242,14 +242,14 @@ static void test_pwslot(void)
 	unsigned long long b = 0x60010000ull;
 
 	/* the four ruled slots, in arm order */
-	CHECK(uml_nt_pwslot_index(b, b + 0xc4b8) == 0);
-	CHECK(uml_nt_pwslot_index(b, b + 0xc4d0) == 1);
-	CHECK(uml_nt_pwslot_index(b, b + 0xc4e0) == 2);
-	CHECK(uml_nt_pwslot_index(b, b + 0xc510) == 3);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc5e0) == 0);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc5e8) == 1);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc5f0) == 2);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc5f8) == 3);
 	/* everything else is NOT ours: a write elsewhere in text (or on
 	 * the stack) must keep the v13/tcache meaning */
-	CHECK(uml_nt_pwslot_index(b, b + 0xc4b9) == -1);
-	CHECK(uml_nt_pwslot_index(b, b + 0xc4c0) == -1);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc5f9) == -1);
+	CHECK(uml_nt_pwslot_index(b, b + 0xc4b8) == -1); /* mid-stack */
 	CHECK(uml_nt_pwslot_index(b, b + 0xc2c8) == -1);
 	CHECK(uml_nt_pwslot_index(b, b + 0xc228) == -1);
 	CHECK(uml_nt_pwslot_index(b, 0x6005c6a0ull) == -1);
@@ -258,7 +258,7 @@ static void test_pwslot(void)
 	/* the same offsets must hold at a different load base: this is a
 	 * DSO, and a fixed absolute address would silently watch the
 	 * wrong page */
-	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x7000c4b8ull) == 0);
-	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x7000c510ull) == 3);
-	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x6001c4b8ull) == -1);
+	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x7000c5e0ull) == 0);
+	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x7000c5f8ull) == 3);
+	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x6001c5e0ull) == -1);
 }
