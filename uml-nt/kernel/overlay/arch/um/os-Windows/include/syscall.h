@@ -428,6 +428,11 @@ struct uml_nt_stub_conn {
 	unsigned long long imgw_run[UML_NT_IMGWATCH_MAX];
 	unsigned long long imgw_gen[UML_NT_IMGWATCH_MAX];
 	unsigned long long imgw_hash[UML_NT_IMGWATCH_MAX];
+	/* Full-run FNV (every qword) captured once at exec — the cheap
+	 * 16-sample imgw_hash can miss a write between samples; the
+	 * death-time verdict uses this one (rf pair 40064950549/590:
+	 * the interp run held sigcontext-shaped bytes at 0xb560). */
+	unsigned long long imgw_full[UML_NT_IMGWATCH_MAX];
 	int imgw_n;
 	/* M5.6a writer-hunt follow-up: the resume-boundary audit. The
 	 * value the kernel EXPECTED the stub to resume at after the

@@ -2397,6 +2397,23 @@ unsigned long long uml_nt_imgw_hash(const void *run_base)
 	return h;
 }
 
+/* The full-run fingerprint (every qword) — captured once per image
+ * run at exec, recomputed only at death. The 16-sample hash above
+ * cannot see a write between its samples (the login-depth victims'
+ * interp content at 0xb560 sits between samples). */
+unsigned long long uml_nt_imgw_hash_full(const void *run_base)
+{
+	const unsigned long long *q = run_base;
+	unsigned long long h = 1469598103934665603ULL;
+	unsigned int i;
+
+	for (i = 0; i < UML_NT_PHYS_RUN_SIZE / 8; i++) {
+		h ^= q[i];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
 void uml_nt_imgwatch_capture(struct uml_nt_stub_conn *c,
 			     const struct uml_nt_elf_image *img, int reset)
 {
@@ -2421,6 +2438,9 @@ void uml_nt_imgwatch_capture(struct uml_nt_stub_conn *c,
 			c->imgw_gen[c->imgw_n] =
 				uml_nt_phys_gen(c->ph, (long long)run);
 			c->imgw_hash[c->imgw_n] = uml_nt_imgw_hash(
+				(const void *)((const char *)
+				uml_boot.physmem_base + run));
+			c->imgw_full[c->imgw_n] = uml_nt_imgw_hash_full(
 				(const void *)((const char *)
 				uml_boot.physmem_base + run));
 			c->imgw_n++;
@@ -2468,6 +2488,17 @@ void uml_nt_imgwatch_death_check(struct uml_nt_stub_conn *c,
 				"MATCHES the post-load image" :
 				"REWRITTEN after load",
 			c->imgw_hash[i], h);
+		{
+			unsigned long long hf = uml_nt_imgw_hash_full(
+				(const void *)((const char *)
+				uml_boot.physmem_base + run));
+
+			os_info("[imgwatch] death: run 0x%llx full %s "
+				"(post-load %016llx now %016llx)\n", run,
+				hf == c->imgw_full[i] ?
+					"MATCHES" : "REWRITTEN",
+				c->imgw_full[i], hf);
+		}
 		return;
 	}
 	os_info("[imgwatch] death: run 0x%llx not in this conn's "
@@ -7207,6 +7238,71 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 							rv->run_off);
 					else
 						os_info("[stubtest]   rax-vma: none\n");
+					/* M5.6a writer-hunt follow-up
+					 * (rf pair 40064950549/590):
+					 * the login victims die with
+					 * sigcontext-shaped bytes in
+					 * the interp run (saved
+					 * rip/eflags at 0xb560). Name
+					 * the run's epoch + the
+					 * funnel ledger for the RIP
+					 * run and the stack run — a
+					 * kernel frame write into an
+					 * aliased run appears here. */
+					{
+						long long ro2 =
+							uml_nt_vma_translate(
+								c->mm,
+								d->regs.rip, 1);
+						struct uml_nt_vma *sv =
+							uml_nt_vma_find(
+								c->mm,
+								d->regs.rsp);
+						long long so2 =
+							uml_nt_vma_translate(
+								c->mm,
+								d->regs.rsp, 1);
+
+						if (ro2 >= 0) {
+							unsigned long long rr =
+								((unsigned long long)ro2) &
+								~(UML_NT_PHYS_RUN_SIZE - 1);
+
+							os_info("[stubtest]   run(rip)=0x%llx gen=0x%llx refs=%lld\n",
+								rr,
+								uml_nt_phys_gen(
+									c->ph,
+									(long long)rr),
+								uml_nt_phys_refs(
+									c->ph,
+									(long long)rr));
+							uml_nt_uacc_towrite_dump(rr);
+							uml_nt_imgwatch_death_check(
+								c, rr);
+						}
+						if (sv != NULL)
+							os_info("[stubtest]   stack-vma 0x%llx-0x%llx prot=0x%x flags=0x%x off=0x%llx\n",
+								sv->start, sv->end,
+								sv->prot,
+								sv->flags,
+								sv->run_off);
+						if (so2 >= 0) {
+							unsigned long long sr =
+								((unsigned long long)so2) &
+								~(UML_NT_PHYS_RUN_SIZE - 1);
+
+							os_info("[stubtest]   run(rsp)=0x%llx gen=0x%llx refs=%lld\n",
+								sr,
+								uml_nt_phys_gen(
+									c->ph,
+									(long long)sr),
+								uml_nt_phys_refs(
+									c->ph,
+									(long long)sr));
+							if (so2 != ro2)
+								uml_nt_uacc_towrite_dump(sr);
+						}
+					}
 					dump_guest_bytes(c->mm,
 							 d->regs.rax &
 							 ~0xfULL, 32,
@@ -8506,6 +8602,7 @@ no_zero:
 			child->imgw_run[gi] = parent->imgw_run[gi];
 			child->imgw_gen[gi] = parent->imgw_gen[gi];
 			child->imgw_hash[gi] = parent->imgw_hash[gi];
+			child->imgw_full[gi] = parent->imgw_full[gi];
 		}
 	}
 	/* M5.4 c3 (map 057): arm the residue-watch — the per-round

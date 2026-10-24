@@ -10,13 +10,13 @@
  * names the RUN, not the writer — and the writer may sit in ANOTHER
  * mm (the run was freed/re-handed across processes), so the ledger is
  * keyed by the SECTION RUN OFFSET, the hardware's assembly key, not
- * by VA. The ring keeps the newest 64 writes; the fire scans it for
+ * by VA. The ring keeps the newest 512 writes; the fire scans it for
  * the watched run.
  */
 #ifndef UML_NT_WRITELEDGER_MODEL_H
 #define UML_NT_WRITELEDGER_MODEL_H
 
-#define UML_NT_WRITELEDGER_N 64
+#define UML_NT_WRITELEDGER_N 512
 
 struct uml_nt_write_ent {
 	unsigned long long run;	/* section run offset the write landed in */
