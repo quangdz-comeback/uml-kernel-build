@@ -3475,6 +3475,48 @@ static void uml_nt_pivot_wslot_arm(struct uml_nt_stub_conn *c)
 		c->interp_base);
 }
 
+/* [pivot-frame] (Shelley 152/153): rbp is STILL the real stack in every
+ * store we caught (0x6005c6a0) while rsp is text — so the ordinary
+ * frame-pointer chain is intact and can be WALKED BY READING. Each frame
+ * yields (rbp, saved return address); the return addresses name the
+ * callers, and the first one whose OWN frame lies in text is the frame
+ * whose caller introduced the text rsp. Pure reads, no traps. */
+static void uml_nt_frame_walk(struct uml_nt_stub_conn *c,
+			      unsigned long long rbp, int max)
+{
+	int i;
+
+	os_info("[pivot-frame] pid %lu %s walking the legit rbp chain from "
+		"0x%llx (rsp=0x%llx is %s)\n",
+		(unsigned long)c->pid, c->exec_path, rbp, c->d->regs.rsp,
+		(c->d->regs.rsp >= c->interp_base &&
+		 c->d->regs.rsp < c->interp_base + 0x40000) ? "TEXT" :
+		"legit");
+	for (i = 0; i < max && rbp >= 0x10000; i++) {
+		long long so = uml_nt_vma_translate(c->mm, rbp, 16);
+		unsigned long long saved = 0, ret = 0;
+		struct uml_nt_vma *rv;
+
+		if (so < 0) {
+			os_info("[pivot-frame]   frame %d rbp=0x%llx "
+				"untranslatable — chain ends\n", i, rbp);
+			return;
+		}
+		saved = *(const unsigned long long *)(const void *)
+			((char *)uml_boot.physmem_base + so);
+		ret = *(const unsigned long long *)(const void *)
+			((char *)uml_boot.physmem_base + so + 8);
+		rv = uml_nt_vma_find(c->mm, ret);
+		os_info("[pivot-frame]   #%d rbp=0x%llx saved-rbp=0x%llx "
+			"ret=0x%llx%s%s\n", i, rbp, saved, ret,
+			rv ? "" : " [ret NOT MAPPED]",
+			rv && (rv->prot & 0x40) ? "" : " [ret not exec]");
+		if (saved <= rbp || saved - rbp > 0x80000)
+			return;
+		rbp = saved;
+	}
+}
+
 /* [pivot-wslot] caller walk (Shelley 152(b)): an EXECUTE breakpoint at
  * ONE concrete address, moved up the call chain, at most four hops.
  *
@@ -3531,6 +3573,8 @@ static void uml_nt_chain_round(struct uml_nt_stub_conn *c)
 		(d->regs.rsp >= c->interp_base &&
 		 d->regs.rsp < c->interp_base + 0x40000) ?
 		" [rsp ALREADY IN TEXT]" : " [rsp legit]");
+	if (d->regs.rbp >= 0x10000)
+		uml_nt_frame_walk(c, d->regs.rbp, 4);
 	/* the code around this hop (the function that owns it) */
 	if (va > 0x200)
 		dump_guest_bytes(c->mm, va - 0x200, 0x200, "pivot-chain-code");
@@ -3556,6 +3600,8 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 		v = *(const unsigned long long *)(const void *)
 			((char *)uml_boot.physmem_base + vo);
 	c->ws_hits++;
+	if (c->ws_hits == 1 && c->d->regs.rbp >= 0x10000)
+		uml_nt_frame_walk(c, c->d->regs.rbp, 8);
 	if (c->ws_hits == 1 && c->chain_hops == 0 && v != ~0ull) {
 		struct uml_nt_vma *pv = uml_nt_vma_find(c->mm, v);
 
