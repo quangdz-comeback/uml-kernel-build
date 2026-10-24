@@ -28,6 +28,10 @@ jobs:
           # M5.6a D28 follow-up: the run-keyed kernel->guest write ledger
           # the [imgwatch] fire scans (writer identification).
           bash uml-nt/tests/test_writeledger.sh
+          # M5.6a writer-hunt follow-up (Shelley 148-UPDATE 3/4): the
+          # trap -> resume boundary contract — only the ud2 sentinel is
+          # a syscall; every resume lands on the claimed boundary.
+          bash uml-nt/tests/test_resume.sh
           # M3.7 uaccess walker (D15) over the vma tree
           bash uml-nt/tests/test_uaccess.sh
           # M4.1 bench stats — the pure math the freestanding kernel
@@ -72,4 +76,5 @@ jobs:
             uml-nt/tests/test_mm.sh uml-nt/tests/test_elf.sh \
             uml-nt/tests/test_uaccess.sh uml-nt/tests/test_bench.sh \
             uml-nt/tests/test_console.sh uml-nt/tests/test_ss.sh \
-            uml-nt/tests/test_lazyfile.sh uml-nt/tests/test_writeledger.sh
+            uml-nt/tests/test_lazyfile.sh uml-nt/tests/test_writeledger.sh \
+            uml-nt/tests/test_resume.sh
