@@ -59,13 +59,14 @@ unsigned long long uml_nt_elf_fill_off, uml_nt_elf_fill_len;
  * a mis-computed destination offset or an overlap between regions
  * would otherwise be baked into the imgwatch baseline and never seen.
  * Pure file: set the globals, binfmt.c logs them. Budgeted: the first
- * 128 image loads (both images per exec count once each). */
+ * 1024 image loads (both images per exec count once each) — the
+ * login-depth deaths sit at the END of a ~140-load boot. */
 int uml_nt_elf_verify_bad;
 int uml_nt_elf_verify_region;
 unsigned long long uml_nt_elf_verify_off, uml_nt_elf_verify_file_off;
 unsigned long long uml_nt_elf_verify_len, uml_nt_elf_verify_diff;
 unsigned long long uml_nt_elf_verify_want, uml_nt_elf_verify_got;
-static int uml_nt_elf_verify_left = 128;
+static int uml_nt_elf_verify_left = 1024;
 
 /*
  * D20 cluster 1: the PT_INTERP path of `image` — a dynamic binary
