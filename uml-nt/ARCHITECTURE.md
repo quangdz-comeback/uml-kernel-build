@@ -451,7 +451,7 @@ trang touched trong cùng syscall (như read()) và cho ảnh exec ELF
 ## 40063247914/40063260482)
 Console input là ring (stdin reader → con_ring → vCPU drain → tty
 flip). Khi guest flush input của tty — TCSETSF (`tcsetattr(TCSAFLUSH)`
-của agetty/login/bash) hoặc TCFLSH với TCIFLUSH/TCIOLFLUSH — kernel
+của agetty/login/bash) hoặc TCFLSH với TCIFLUSH/TCIOFLUSH — kernel
 PHẢI drop các byte CHƯA-DRAIN trong ring CÙNG LÚC với tty core flush.
 Không drop thì các cycle feed trước prompt còn sót trong ring rơi vào
 prompt kế tiếp: "uml login: echo LOGIN-OK" và M5.5b-1 MISS dù PAM auth
