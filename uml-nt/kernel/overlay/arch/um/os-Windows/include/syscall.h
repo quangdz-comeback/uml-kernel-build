@@ -440,6 +440,13 @@ struct uml_nt_stub_conn {
 	 * it. imgw_div marks a run already reported. */
 	unsigned int imgw_rr;
 	unsigned char imgw_div[UML_NT_IMGWATCH_MAX];
+	/* M5.6a writer-hunt follow-up: the wild-rsp witness — the last
+	 * real trap's rip/rsp, so the first trap whose rsp lands in an
+	 * image run names the interval that corrupted it ([rsp-image],
+	 * stub_ctl.c). */
+	unsigned long long last_trap_rip;
+	unsigned long long last_trap_rsp;
+	int last_trap_valid;
 	/* M5.6a writer-hunt follow-up: the resume-boundary audit. The
 	 * value the kernel EXPECTED the stub to resume at after the
 	 * previous real trap round; the stub publishes its actual

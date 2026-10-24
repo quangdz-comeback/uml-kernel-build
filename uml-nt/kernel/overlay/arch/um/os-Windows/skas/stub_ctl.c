@@ -6623,8 +6623,54 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * one image run per real trap park, round-robin — the first park
 	 * after a rewrite names the closing round. */
 	if (d->cmd == UML_STUB_CMD_SYSCALL ||
-	    d->cmd == UML_STUB_CMD_FAULT)
+	    d->cmd == UML_STUB_CMD_FAULT) {
 		uml_nt_imgwatch_park_check(c);
+
+		/* Wild-rsp witness: a trap whose guest stack pointer
+		 * lands in an image run means the stub's own Windows
+		 * dispatch context is about to be written BELOW that
+		 * rsp — into the loaded text (the rp1 pair's interp
+		 * run0 rewrite, trap rsp=0x6001c3a0 at newfstatat).
+		 * Print the previous trap too: the slip happened in
+		 * the interval between them. */
+		if (c->imgw_n > 0 && c->mm != NULL) {
+			long long ro = uml_nt_vma_translate(c->mm,
+					d->regs.rsp, 1);
+
+			if (ro >= 0 &&
+			    uml_nt_imgwatch_is_image(c,
+				((unsigned long long)ro) &
+				~(UML_NT_PHYS_RUN_SIZE - 1))) {
+				static int rspimg_budget = 8;
+
+				if (rspimg_budget > 0) {
+					rspimg_budget--;
+					os_info("[rsp-image] pid %lu %s "
+						"trap rip=0x%llx "
+						"rsp=0x%llx rax=0x%llx "
+						"last_nr=%llu "
+						"last_ret=%lld prev-trap "
+						"rip=0x%llx rsp=0x%llx — "
+						"the dispatch context "
+						"lands in the loaded "
+						"text\n",
+						(unsigned long)c->pid,
+						d->cmd == UML_STUB_CMD_SYSCALL ?
+							"syscall" : "fault",
+						d->regs.rip, d->regs.rsp,
+						d->regs.rax, c->last_nr,
+						c->last_ret,
+						c->last_trap_valid ?
+							c->last_trap_rip : 0,
+						c->last_trap_valid ?
+							c->last_trap_rsp : 0);
+				}
+			}
+		}
+		c->last_trap_rip = d->regs.rip;
+		c->last_trap_rsp = d->regs.rsp;
+		c->last_trap_valid = 1;
+	}
 	/* Resume-boundary audit (M5.6a writer-hunt follow-up): the
 	 * previous round's expected target vs the stub's own published
 	 * d->resume_rip. The fault-only form lived further down; this
