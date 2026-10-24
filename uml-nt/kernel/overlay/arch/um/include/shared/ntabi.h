@@ -396,7 +396,7 @@ static inline int uml_nt_inet_pton4(const char *s, unsigned int *out)
  * kernel accepts version == UML_NT_API_VERSION exactly (it fails loudly
  * otherwise — silent ABI drift is the failure mode we refuse).
  */
-#define UML_NT_API_VERSION 4u
+#define UML_NT_API_VERSION 5u
 
 /* ---- function prototypes (ms_abi) — the launcher resolves these ------
  * Kernel-ELF consumers need them declared here (nothing else will).
@@ -523,6 +523,13 @@ BOOL UML_NTABI_CC CreateProcessA(char *app_name, char *cmd_line,
 				 PVOID env, char *cwd, STARTUPINFOA *si,
 				 PROCESS_INFORMATION *pi);
 ULONG UML_NTABI_CC ResumeThread(HANDLE thread);
+/* D9 v5 (M5.6a [pivot-sample]): read a RUNNING stub thread's register
+ * file from the kernel — the pivot hunt's non-invasive sampler. The
+ * guest's rip/rsp/rbp live in the thread's user CONTEXT; SuspendThread
+ * + GetThreadContext + ResumeThread costs microseconds and touches no
+ * guest state (the kernel only samples BETWEEN two rounds). */
+ULONG UML_NTABI_CC SuspendThread(HANDLE thread);
+BOOL UML_NTABI_CC GetThreadContext(HANDLE thread, void *context);
 BOOL UML_NTABI_CC GetExitCodeProcess(HANDLE process, ULONG *exit_code);
 
 /* M5.6b additions (appended; table members above stay frozen). Job
@@ -763,6 +770,14 @@ struct uml_nt_api_table {
 	 * every later member's offset). */
 	DWORD (UML_NTABI_CC *GetEnvironmentVariableA)(LPCSTR name,
 			LPSTR buf, DWORD size);
+
+	/* ---- appended for D9 v5 ([pivot-sample]) ------------------------
+	 * The kernel samples the RUNNING stub thread's CONTEXT between two
+	 * rounds (SuspendThread → GetThreadContext → ResumeThread): the
+	 * pivot hunt needs the guest's live rip/rsp/rbp across the
+	 * close(3)→trap interval, and no trap-side witness can see it. */
+	ULONG (UML_NTABI_CC *SuspendThread)(HANDLE thread);
+	BOOL (UML_NTABI_CC *GetThreadContext)(HANDLE thread, void *context);
 };
 
 #endif /* __UML_NTABI_H */

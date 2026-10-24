@@ -163,6 +163,10 @@ static void resolve_api_table(void)
 	RESOLVE(AssignProcessToJobObject, k32, "AssignProcessToJobObject");
 	RESOLVE(CreateProcessA, k32, "CreateProcessA");
 	RESOLVE(ResumeThread, k32, "ResumeThread");
+	/* D9 v5: the pivot sampler (kernel reads a running stub
+	 * thread's CONTEXT between two rounds). */
+	RESOLVE(SuspendThread, k32, "SuspendThread");
+	RESOLVE(GetThreadContext, k32, "GetThreadContext");
 	RESOLVE(GetExitCodeProcess, k32, "GetExitCodeProcess");
 	RESOLVE(VirtualQueryEx, k32, "VirtualQueryEx");
 	RESOLVE(ReadProcessMemory, k32, "ReadProcessMemory");

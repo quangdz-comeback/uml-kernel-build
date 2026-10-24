@@ -3227,6 +3227,231 @@ static void uml_nt_tf_trace_step(struct uml_nt_stub_conn *c)
 	c->tf_prev_valid = 1;
 }
 
+/*
+ * M5.6a [pivot-sample] — Shelley's ruling on to-shelley/150.
+ *
+ * The [resume-regs] verdict exonerated the kernel and the stub: the
+ * answer carried the trap's OWN rsp and the stub restored exactly that,
+ * so the stack pointer moves in GUEST code between the close(3) return
+ * and the fstatat trap. TF single-step cannot witness it (the Windows
+ * exception dispatcher eats TF on every hop — referees 40089224944/
+ * 40089231217), and Shelley's static walk named the mechanism: the
+ * interp's `_dl_find_dso_for_object` (entry 0xb490) copies its `addr`
+ * argument into rbp at 0xb4a4 and then marshals a ~0x400-byte array
+ * BELOW rbp (`mov %rsi,-0x428(%rbp,%rcx,1)` at 0xc626, stride 16,
+ * counter `cmp $0x3f,%ebx` at 0xc610). With a byte-shifted addr —
+ * rbp≈0x6001c650 — that array lands in interp TEXT, exactly the sparse
+ * 258-byte footprint and the ≈0x6001c600 pivot rsp this hunt measured.
+ *
+ * So the sampler reads the RUNNING stub thread's CONTEXT between two
+ * rounds: SuspendThread → GetThreadContext → ResumeThread, ~5-20 us per
+ * probe, sampling right after the close(3) answer is released and
+ * stopping the moment the next round is published. A hit is a sample
+ * whose rsp landed in an image run (the pivot just happened) or whose
+ * rip is inside the `_dl_find_dso_for_object` window (the bad call is
+ * running); in both cases the PREVIOUS sample names the caller / the
+ * instruction that produced the bad pointer.
+ */
+static int uml_nt_sample_read(struct uml_nt_stub_conn *c,
+			      unsigned long long *rip, unsigned long long *rsp,
+			      unsigned long long *rbp, unsigned long long *rdi,
+			      unsigned long long *rsi, unsigned long long *rbx)
+{
+	/* x64 CONTEXT, 0x4d0 bytes; only CONTEXT_CONTROL is requested, and
+	 * ntabi.h's fixed offsets (Rip 0xf8, Rsp 0x98, Rbp 0xa0, ...) are
+	 * the documented winnt.h layout. The buffer is per-conn (two
+	 * kernel tasks can serve two stubs concurrently). */
+	unsigned char *ctx = c->smp_ctx;
+	int ok;
+
+	*(unsigned int *)(ctx + 0x30) = 0x00100001u; /* CONTEXT_CONTROL */
+	if (nt->SuspendThread(c->thread) == (ULONG)-1)
+		return -1;
+	ok = nt->GetThreadContext(c->thread, ctx);
+	nt->ResumeThread(c->thread);
+	if (!ok)
+		return -1;
+	*rip = UML_NT_X64_CTX_RIP(ctx);
+	*rsp = UML_NT_X64_CTX_RSP(ctx);
+	*rbp = UML_NT_X64_CTX_RBP(ctx);
+	*rdi = UML_NT_X64_CTX_REG(ctx, 0xb0);
+	*rsi = UML_NT_X64_CTX_REG(ctx, 0xa8);
+	*rbx = UML_NT_X64_CTX_REG(ctx, 0x90);
+	return 0;
+}
+
+/* Is `rip` inside the interp's image run(s)? Cheap: the conn's image
+ * runs are runs, not VAs — translate and match, like the rsp test. */
+static int uml_nt_sample_rip_in_image(struct uml_nt_stub_conn *c,
+				      unsigned long long rip)
+{
+	long long ro;
+
+	if (c->imgw_n <= 0 || c->mm == NULL)
+		return 0;
+	ro = uml_nt_vma_translate(c->mm, rip, 1);
+	if (ro < 0)
+		return 0;
+	return uml_nt_imgwatch_is_image(c,
+			((unsigned long long)ro) &
+			~(UML_NT_PHYS_RUN_SIZE - 1));
+}
+
+/* Shelley 150's mechanism, expressed as a LIVE signature (the VMAs do
+ * not carry file offsets, so the window is matched by shape, not by
+ * offset): `_dl_find_dso_for_object` copies its `addr` argument into
+ * rbp (0xb4a4) and marshals a ~0x400-byte array BELOW it
+ * (`-0x428(%rbp,%rcx,1)` at 0xc626). So the bad call looks like: rbp in
+ * image TEXT and rsp inside [rbp - 0x440, rbp). */
+static int uml_nt_sample_marshal_shape(struct uml_nt_stub_conn *c,
+				       unsigned long long rbp,
+				       unsigned long long rsp)
+{
+	if (rbp <= rsp)
+		return 0;
+	if (rbp - rsp > 0x440)
+		return 0;
+	return uml_nt_sample_rip_in_image(c, rbp);
+}
+
+unsigned int uml_nt_sample_burst(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	unsigned int n = 0;
+
+	if (c->smp_left == 0 || c->mm == NULL || c->thread == NULL || d == NULL)
+		return 0;
+	/* Never sample a round in flight: the pump released the answer, so
+	 * the stub must be back in guest code. A published request ends
+	 * the burst (the interval just closed). */
+	while (n < c->smp_left && d->req_seq == d->done_seq) {
+		unsigned long long rip = 0, rsp = 0, rbp = 0, rdi = 0,
+				   rsi = 0, rbx = 0;
+		int rsp_text, hit_dldso, arg_text;
+
+		if (uml_nt_sample_read(c, &rip, &rsp, &rbp, &rdi, &rsi,
+				       &rbx) < 0)
+			break;
+		n++;
+		c->smp_n++;
+		rsp_text = uml_nt_resume_rsp_wild(c, rsp);
+		hit_dldso = uml_nt_sample_marshal_shape(c, rbp, rsp);
+		arg_text = uml_nt_sample_rip_in_image(c, rdi) ||
+			   uml_nt_sample_rip_in_image(c, rsi);
+
+		/* Volume policy: the first 24 samples of an arm log whole,
+		 * then only the interesting ones (the interp window, a
+		 * text rsp, a text-shaped pointer in the argument
+		 * registers) plus a heartbeat every 32. */
+		if (n <= 24 || (n & 31) == 0 || hit_dldso || rsp_text ||
+		    arg_text ||
+		    uml_nt_sample_rip_in_image(c, c->smp_prev_rip) ||
+		    uml_nt_sample_marshal_shape(c, c->smp_prev_rbp,
+						c->smp_prev_rsp))
+			os_info("[pivot-sample] pid %lu %s n=%u/%u "
+				"rip=0x%llx rsp=0x%llx rbp=0x%llx "
+				"rdi=0x%llx rsi=0x%llx rbx=0x%llx%s%s\n",
+				(unsigned long)c->pid, c->exec_path, n,
+				c->smp_left, rip, rsp, rbp, rdi, rsi, rbx,
+				rsp_text ? " [RSP-IN-TEXT]" : "",
+				hit_dldso ? " [ARRAY-UNDER-TEXT-RBP]" :
+				arg_text ? " [TEXT-PTR-IN-ARG]" : "");
+
+		if (rsp_text || hit_dldso) {
+			/* The claim, checked live: print the sample BEFORE
+			 * (the caller / the instruction that produced the
+			 * bad pointer) and stop the burst. */
+			if (c->smp_prev_valid)
+				os_info("[pivot-sample] pid %lu %s HIT: previous "
+					"sample rip=0x%llx rsp=0x%llx "
+					"rbp=0x%llx rdi=0x%llx rsi=0x%llx "
+					"rbx=0x%llx — %s\n",
+					(unsigned long)c->pid, c->exec_path,
+					c->smp_prev_rip, c->smp_prev_rsp,
+					c->smp_prev_rbp, c->smp_prev_rdi,
+					c->smp_prev_rsi, c->smp_prev_rbx,
+					rsp_text ?
+					  "rsp landed in image text (the pivot ran)"
+					  : "the marshal array sits under a text rbp");
+			/* And the live stack top: the bad pointer's slot is
+			 * usually one or two qwords in. */
+			if (c->smp_prev_valid && c->smp_prev_rsp > 0x80)
+				dump_guest_bytes(c->mm,
+						 c->smp_prev_rsp - 0x40, 0x100,
+						 "sample-prev-stk");
+			break;
+		}
+		c->smp_prev_rip = rip;
+		c->smp_prev_rsp = rsp;
+		c->smp_prev_rbp = rbp;
+		c->smp_prev_rdi = rdi;
+		c->smp_prev_rsi = rsi;
+		c->smp_prev_rbx = rbx;
+		c->smp_prev_valid = 1;
+		c->smp_in_text = rsp_text ? 1u : 0u;
+	}
+	if (c->smp_left > n)
+		c->smp_left -= n;
+	else
+		c->smp_left = 0;
+	return n;
+}
+
+/* Arm the sampler on the same answer the TF trace used: a successful
+ * close(3) on a login conn, not issued from the binary's own text (the
+ * pivot's close came from libc). One arm per close, bounded per conn. */
+static void uml_nt_sample_arm(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	unsigned int n = UML_NT_SMP_PER_ARM;
+
+	if (c->smp_used + n > UML_NT_SMP_PER_CONN)
+		n = c->smp_used >= UML_NT_SMP_PER_CONN ?
+			0 : UML_NT_SMP_PER_CONN - c->smp_used;
+	if (n == 0)
+		return;
+	c->smp_used += n;
+	c->smp_arms++;
+	c->smp_left = n;
+	c->smp_n = 0;
+	c->smp_prev_valid = 0;
+	c->smp_in_text = 0;
+	os_info("[pivot-sample] pid %lu %s SAMPLER armed (%u sample(s), arm "
+		"%u): from rip=0x%llx rsp=0x%llx last_nr=%llu last_ret=%lld — "
+		"sampling the guest the [resume-regs] verdict proved moves its "
+		"own rsp\n",
+		(unsigned long)c->pid, c->exec_path, n, c->smp_arms,
+		d->regs.rip, d->regs.rsp, c->last_nr, c->last_ret);
+}
+
+/* Should this answer arm the sampler? (Same shape as the retired TF
+ * arm gate: a successful close(3) from a NON-exe mapping on a login
+ * conn — the pivot's close is libc's `__close_nocancel`.) */
+static int uml_nt_sample_should_arm(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+
+	if (c->imgw_n <= 0 || c->mm == NULL || !c->res_trap_valid)
+		return 0;
+	if (c->smp_left != 0 || c->smp_used >= UML_NT_SMP_PER_CONN)
+		return 0;
+	if (!uml_nt_conn_is_login(c))
+		return 0;
+	if (d->cmd == UML_STUB_CMD_FAULT &&
+	    d->fault_type == UML_NT_FAULT_STEP)
+		return 0;
+	if (c->last_nr != 3 /* close(2) */ || c->last_ret != 0)
+		return 0;
+	{
+		struct uml_nt_vma *ev = uml_nt_vma_find(c->mm, d->entry_va);
+		struct uml_nt_vma *rv = uml_nt_vma_find(c->mm, d->regs.rip);
+
+		if (ev != NULL && ev == rv)
+			return 0;
+	}
+	return 1;
+}
+
 /* Should this answer arm the trace? A successful close(3) on a login
  * conn, at a resume point, once the previous trace (if any) is spent. */
 static int uml_nt_tf_trace_should_arm(struct uml_nt_stub_conn *c)
@@ -10020,8 +10245,11 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * Armed before the release so the stub raises TF on THIS resume;
 	 * the resume record below still notes this round's own state,
 	 * and only the login class is ever traced. */
-	if (uml_nt_tf_trace_should_arm(c))
-		uml_nt_tf_trace_arm(c);
+	/* M5.6a [pivot-sample]: TF is retired (the Windows dispatcher eats
+	 * TF on every hop) — the sampler replaces it on the same arm
+	 * point. */
+	if (uml_nt_sample_should_arm(c))
+		uml_nt_sample_arm(c);
 	/* M5.6a login-depth follow-up (Shelley 149): the RESUME answer —
 	 * only a NONE answer releases the stub out of its VEH back into
 	 * guest code, and only a real trap (or the op drain that ends
@@ -10050,6 +10278,12 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			(unsigned long)c->exit_code);
 		return 1;
 	}
+	/* M5.6a [pivot-sample]: the answer is out — the stub is back in
+	 * guest code, so this is the one place the kernel may read the
+	 * running thread's CONTEXT. Bounded, and it stops the instant the
+	 * next round is published. */
+	if (c->smp_left != 0)
+		uml_nt_sample_burst(c);
 	return 0;
 }
 

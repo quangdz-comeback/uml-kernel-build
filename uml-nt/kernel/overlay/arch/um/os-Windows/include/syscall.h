@@ -49,6 +49,19 @@
  * single-stepping) before the instrument gives up. */
 #define UML_NT_TF_STEPS_PER_ARM 3000u
 #define UML_NT_TF_STEPS_PER_CONN 15000u
+/* M5.6a [pivot-sample] (Shelley's ruling on to-shelley/150): the TF
+ * single-step is retired — the Windows dispatcher eats TF on every
+ * hop. The sampler reads the RUNNING stub thread's CONTEXT between two
+ * rounds instead: per-arm / per-conn sample budgets (each sample is a
+ * SuspendThread/GetThreadContext/ResumeThread round-trip, ~5-20 us, so
+ * 400 samples cover several ms of guest execution). */
+#define UML_NT_SMP_PER_ARM 400u
+#define UML_NT_SMP_PER_CONN 2400u
+/* The claimed pivot entry (Shelley 150's static walk):
+ * _dl_find_dso_for_object's array-marshalling window in the interp
+ * (entry 0xb490, the '-0x428/-0x430(%rbp,%rcx,1)' marshal at 0xc626). */
+#define UML_NT_SMP_DLDSO_LO 0xb490ull
+#define UML_NT_SMP_DLDSO_HI 0xc650ull
 /* Longest exec path the conn records (gates the trace to the victim
  * binary class; also names the conn in the pivot lines). */
 #define UML_NT_EXEC_PATH_MAX 48
@@ -555,6 +568,24 @@ struct uml_nt_stub_conn {
 	struct uml_nt_rres_rec tf_ring[UML_NT_TF_RING];
 	unsigned int tf_rr;
 	unsigned int tf_n;
+	/* M5.6a [pivot-sample]: armed at the same close(3) answer the TF
+	 * trace used; a burst runs right after the release and stops the
+	 * moment the next round is published. smp_prev_* keep the last
+	 * sample so a hit can name the instruction and the state that
+	 * produced it. */
+	unsigned int smp_left;
+	unsigned int smp_used;
+	unsigned int smp_arms;
+	unsigned int smp_n;
+	unsigned long long smp_prev_rip, smp_prev_rsp, smp_prev_rbp;
+	unsigned long long smp_prev_rdi, smp_prev_rsi, smp_prev_rbx;
+	int smp_prev_valid;
+	unsigned int smp_in_text;
+	/* GetThreadContext target: 0x4d0 bytes (x64 CONTEXT), 16-aligned.
+	 * Per-conn because two kernel tasks may serve two stubs at once —
+	 * a shared static buffer would hand one conn's registers to the
+	 * other's log. */
+	unsigned char smp_ctx[0x4d0] __attribute__((aligned(16)));
 	/* D27 lazy file regions (see struct uml_nt_lazy_region). Cloned
 	 * on fork (a child's first touch materializes into its own mm),
 	 * dropped at mmctx destroy. */
@@ -689,6 +720,11 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child);
 void uml_nt_exec_path_set(const char *path);
 /* 1 when the conn's binary is the login class (basename "login"). */
 int uml_nt_conn_is_login(const struct uml_nt_stub_conn *c);
+
+/* M5.6a [pivot-sample]: one sampling burst of the conn's RUNNING
+ * stub thread - called by the pump right after the answer release.
+ * Returns the number of samples taken. */
+unsigned int uml_nt_sample_burst(struct uml_nt_stub_conn *c);
 
 /* [alias] census (M5.6a, decode 37095399220): walk every live conn's
  * VMA table for VMA run-ranges intersecting [run_off, run_off+len)
