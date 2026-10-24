@@ -39,6 +39,14 @@
  * record right before that trap (the round the referee question
  * names). */
 #define UML_NT_RRES_RING 16
+/* M5.6a [pivot trace]: steps kept for the pivot line's call-site view
+ * and the per-conn / per-arm step budgets (a bound on the boot cost). */
+#define UML_NT_TF_RING 8
+#define UML_NT_TF_STEPS_PER_ARM 1500u
+#define UML_NT_TF_STEPS_PER_CONN 3000u
+/* Longest exec path the conn records (gates the trace to the victim
+ * binary class; also names the conn in the pivot lines). */
+#define UML_NT_EXEC_PATH_MAX 48
 struct uml_nt_rres_rec {
 	unsigned long long seq;		/* the round's req_seq */
 	unsigned long long rip, rsp, rbp, rbx, rax;
@@ -525,6 +533,23 @@ struct uml_nt_stub_conn {
 	unsigned int res_rewrite_n;
 	unsigned int res_applied_bad;
 	unsigned int res_seen;
+	/* M5.6a [pivot trace] (Shelley 149's verdict: the resume carried
+	 * the trap's own rsp, so the pivot is guest code): a TF
+	 * single-step trace of the interval after a successful close(3)
+	 * on a login conn. tf_left = steps still allowed, the ring keeps
+	 * the last few steps so the pivot line can show the call site.
+	 * The binary name gates the trace to the victim class (the
+	 * login NSS/dlopen path) — a whole-boot TF trace of every close
+	 * would cost the boot its margin. */
+	char exec_path[UML_NT_EXEC_PATH_MAX];
+	unsigned int tf_left;
+	unsigned int tf_used;
+	unsigned int tf_arms;
+	unsigned long long tf_prev_rsp, tf_prev_rip;
+	int tf_prev_valid;
+	struct uml_nt_rres_rec tf_ring[UML_NT_TF_RING];
+	unsigned int tf_rr;
+	unsigned int tf_n;
 	/* D27 lazy file regions (see struct uml_nt_lazy_region). Cloned
 	 * on fork (a child's first touch materializes into its own mm),
 	 * dropped at mmctx destroy. */
@@ -650,6 +675,15 @@ void uml_nt_fork_disarm(void);
  * inherits the TLS base (D18). Returns 0, -ENOMEM on clone failure
  * (the mm — and with it the fork — aborts). */
 int uml_nt_fork_seed(struct uml_nt_stub_conn *child);
+
+/* M5.6a [pivot trace]: record the path being exec'd (sys_execve, right
+ * before kernel_execve) so the conn that birth creates names its
+ * binary — the TF trace arms only for the login class, and every
+ * pivot line can say WHICH binary pivoted. Fork children inherit the
+ * parent's name (same binary). */
+void uml_nt_exec_path_set(const char *path);
+/* 1 when the conn's binary is the login class (basename "login"). */
+int uml_nt_conn_is_login(const struct uml_nt_stub_conn *c);
 
 /* [alias] census (M5.6a, decode 37095399220): walk every live conn's
  * VMA table for VMA run-ranges intersecting [run_off, run_off+len)

@@ -58,6 +58,7 @@
 /* fault.h drags vma.h (kernel-side); the one constant the stub
  * needs is pinned here — keep in sync with fault.h. */
 #define UML_NT_FAULT_WATCHPT 0x10u
+#define UML_NT_FAULT_STEP 0x20u /* keep in sync with fault.h */
 
 /* Fixed stub_data placement: BELOW the guest span, mapped before
  * anything else — see the bootstrap comment. */
@@ -238,6 +239,33 @@ __attribute__((naked)) static void fs_trampoline_fault_tf(void)
 		"jmp	*fs_tramp_target(%rip)\n\t"
 		".globl fs_tramp_tf_end\n"
 		"fs_tramp_tf_end:\n\t"
+	);
+}
+
+/* Syscall-resume TF variant (stub_nt.h v18, the [pivot trace]): the
+ * same idea on the syscall path — d->tf_trace arms a single-step trace
+ * on THIS resume, so TF must rise AFTER the wrfsbase (a TF in the VEH
+ * context would #DB on wrfsbase, inside the trampoline). Flags live on
+ * a private slot for the same reason as the fault variant; r11 still
+ * ends as the guest's RFLAGS value (hardware contract), just after the
+ * flag flip instead of before. fs_tramp_sys_tf_end bounds the body for
+ * the VEH's hop window. */
+extern const unsigned char fs_tramp_sys_tf_end[];
+__attribute__((naked)) static void fs_trampoline_sys_tf(void)
+{
+	__asm__ volatile (
+		"movq\tfs_tramp_base(%rip), %r11\n\t"
+		"wrfsbase %r11\n\t"
+		"movq\t%rsp, fs_tramp_rsp(%rip)\n\t"
+		"leaq\tfs_tramp_tfslot+8(%rip), %rsp\n\t"
+		"pushfq\n\t"
+		"orq\t$0x100, (%rsp)\n\t"
+		"popfq\n\t"
+		"movq\tfs_tramp_rsp(%rip), %rsp\n\t"
+		"movq\tfs_tramp_eflags(%rip), %r11\n\t"
+		"jmp\t*fs_tramp_target(%rip)\n\t"
+		".globl fs_tramp_sys_tf_end\n"
+		"fs_tramp_sys_tf_end:\n\t"
 	);
 }
 
@@ -613,6 +641,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	int is_syscall = 0;
 	int is_fault = (er->ExceptionCode == STATUS_ACCESS_VIOLATION);
 	int is_watch = 0;
+	int is_step = 0;
 	unsigned long long watch_va = 0;
 	int verbatim;
 
@@ -634,13 +663,26 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	 * no round-trip); anything else = the tear — report it down
 	 * the FAULT flow with fault_type = UML_NT_FAULT_WATCHPT. */
 	if (er->ExceptionCode == STATUS_SINGLE_STEP) {
+		/* The hop window spans BOTH TF trampolines (the fault
+		 * replay and the v18 syscall trace): a #DB inside either
+		 * body is a hop, re-raise TF and go on. The two bodies are
+		 * emitted back to back; a bounding range is enough — a #DB
+		 * in the (empty) gap would simply be re-raised too. */
 		unsigned long long tf_lo = (unsigned long long)(uintptr_t)
 			&fs_trampoline_fault_tf;
 		unsigned long long tf_hi = (unsigned long long)(uintptr_t)
-			fs_tramp_tf_end;
+			fs_tramp_sys_tf_end;
 		unsigned long long dr6 = c->Dr6;
-		int cls = uml_nt_ss_classify(dr6, d->ss_page, c->Rip,
-					     fs_tramp_target, tf_lo, tf_hi);
+		int cls;
+
+		if ((unsigned long long)(uintptr_t)&fs_trampoline_sys_tf <
+		    tf_lo)
+			tf_lo = (unsigned long long)(uintptr_t)
+				&fs_trampoline_sys_tf;
+		if ((unsigned long long)(uintptr_t)fs_tramp_tf_end > tf_hi)
+			tf_hi = (unsigned long long)(uintptr_t)fs_tramp_tf_end;
+		cls = uml_nt_ss_classify(dr6, d->ss_page, c->Rip,
+					 fs_tramp_target, tf_lo, tf_hi);
 
 		if (cls == UML_NT_SS_DR_HIT) {
 			int slot = (dr6 & 1) ? 0 : (dr6 & 2) ? 1 :
@@ -702,7 +744,20 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			c->EFlags |= (DWORD)0x100;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
-		if (cls == UML_NT_SS_POST_STORE) {
+		if (d->tf_trace != 0) {
+			/* v18 TF trace (Shelley 149 [resume-regs] verdict):
+			 * a deliberate single step — the #DB this stub asked
+			 * for (TF raised by the resume trampoline), nothing
+			 * armed and nothing stray. The hops inside the
+			 * trampoline were already consumed above (HOP), so
+			 * this is one guest instruction past the target.
+			 * Publish it down the FAULT flow with fault_type =
+			 * STEP: the kernel logs rip/rsp and answers with the
+			 * remaining budget. TF is off in this context; the
+			 * resume path re-raises it while tf_trace lasts. */
+			is_step = 1;
+			c->EFlags &= ~(DWORD)0x100;
+		} else if (cls == UML_NT_SS_POST_STORE) {
 			/* The store JUST executed — read its target
 			 * through THIS view. The kernel compares against
 			 * the VMA table's run: a match-less pair is the
@@ -820,7 +875,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			}
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
-		if (cls == UML_NT_SS_STRAY) {
+		if (!is_step && cls == UML_NT_SS_STRAY) {
 			/* Nothing armed, or a rip the window does not
 			 * admit (the ntdll dispatcher after an AV inside
 			 * the window, the plain trampoline body, a far
@@ -834,7 +889,8 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			d->ss_page = 0;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
-		/* is_watch: fall through into the common report flow */
+		/* is_watch / is_step: fall through into the common
+		 * report flow */
 	}
 	/* The resume-boundary gate (resume_model.h): STATUS_ILLEGAL_
 	 * INSTRUCTION is a syscall ONLY at the D20 sentinel (0f 0b).
@@ -872,7 +928,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	 * WATCHPT); treating it as unowned returns CONTINUE_SEARCH and
 	 * Windows kills the process with 0x80000004 before the kernel
 	 * sees the tear. */
-	if (!is_syscall && !is_fault && !is_watch) {
+	if (!is_syscall && !is_fault && !is_watch && !is_step) {
 		report_unowned(er, c);
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
@@ -971,7 +1027,10 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		 * faulting VA. A v13 watchpoint report carries the
 		 * watched VA + the WATCHPT marker instead (the
 		 * ExceptionInformation of a #DB is meaningless). */
-		if (is_watch) {
+		if (is_step) {
+			d->fault_addr = 0;
+			d->fault_type = UML_NT_FAULT_STEP;
+		} else if (is_watch) {
 			d->fault_addr = watch_va;
 			d->fault_type = UML_NT_FAULT_WATCHPT;
 		} else {
@@ -1080,8 +1139,16 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = target;
 			fs_tramp_eflags = uml_nt_ss_resume_flags(c->EFlags);
-			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_sys;
+			/* v18 [pivot trace]: TF rises after the wrfsbase,
+			 * so the traced instruction runs with the guest's
+			 * TLS base live (the plain context flag would #DB
+			 * on wrfsbase itself). */
+			c->Rip = (DWORD64)(uintptr_t)
+				(d->tf_trace != 0 ? &fs_trampoline_sys_tf
+						  : &fs_trampoline_sys);
 		} else {
+			if (d->tf_trace != 0)
+				c->EFlags |= 0x100;
 			c->Rip = (DWORD64)target;
 		}
 		d->resume_rip = target;
@@ -1102,9 +1169,10 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = d->regs.rip;
 			c->Rip = (DWORD64)(uintptr_t)
-				(d->ss_page != 0 ? &fs_trampoline_fault_tf
-						 : &fs_trampoline_fault);
-		} else if (d->ss_page != 0) {
+				((d->ss_page != 0 || d->tf_trace != 0) ?
+				 &fs_trampoline_fault_tf
+					 : &fs_trampoline_fault);
+		} else if (d->ss_page != 0 || d->tf_trace != 0) {
 			c->EFlags |= 0x100; /* TF: #DB after the store */
 		}
 		d->resume_rip = d->regs.rip;

@@ -3079,6 +3079,166 @@ static void uml_nt_resume_regs_fire(struct uml_nt_stub_conn *c)
 	}
 }
 
+/*
+ * M5.6a [pivot trace] — the TF single-step trace of the interval the
+ * [resume-regs] verdict named.
+ *
+ * Two referees (40083772914, 40083780256) logged the resume right
+ * before the first wild-rsp trap: rip=0x601ece65 (libc close site),
+ * rsp=0x6005d258 — verdict SAME against the round's own trap capture,
+ * no stub-restore mismatch, every previous resume SAME. The kernel and
+ * the stub both handed the guest its own stack pointer, so the pivot
+ * is GUEST code between the close(3) return and the fstatat trap.
+ *
+ * TF is the only instrument that can name that instruction: the answer
+ * after a successful close(3) on a login conn arms d->tf_trace; the
+ * stub raises TF at the resume (fault trampoline, TLS base live) and
+ * every guest instruction then traps once as cmd FAULT /
+ * fault_type STEP. Each step logs rip/rsp/rbp/rbx/rax; the step whose
+ * rsp MOVED into an image run is the pivot's successor — the pivot is
+ * the previous step's rip, and its source slot is still fresh in the
+ * previous step's stack window (exactly one instruction has run since).
+ *
+ * Cost bound: per-arm 1500 steps, per-conn 3000, login conns only.
+ */
+static void uml_nt_tf_trace_arm(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	unsigned int n = UML_NT_TF_STEPS_PER_ARM;
+
+	if (c->tf_used + n > UML_NT_TF_STEPS_PER_CONN)
+		n = c->tf_used >= UML_NT_TF_STEPS_PER_CONN ?
+			0 : UML_NT_TF_STEPS_PER_CONN - c->tf_used;
+	if (n == 0)
+		return;
+	c->tf_used += n;
+	c->tf_arms++;
+	c->tf_left = n;
+	c->tf_prev_rsp = d->regs.rsp;
+	c->tf_prev_rip = d->regs.rip;
+	c->tf_prev_valid = 1;
+	c->tf_n = 0;
+	c->tf_rr = 0;
+	d->tf_trace = n;
+	os_info("[pivot-trace] pid %lu %s TF TRACE armed (%u step(s), arm "
+		"%u): from rip=0x%llx rsp=0x%llx last_nr=%llu last_ret=%lld — "
+		"single-stepping the interval the resume proved is guest code\n",
+		(unsigned long)c->pid, c->exec_path, n, c->tf_arms,
+		d->regs.rip, d->regs.rsp, c->last_nr, c->last_ret);
+}
+
+/* One step round: log it and answer. Never repairs anything — TF steps
+ * are pure observation. */
+static void uml_nt_tf_trace_step(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	unsigned long long rsp = d->regs.rsp;
+	unsigned long long rip = d->regs.rip;
+	int in_image = uml_nt_resume_rsp_wild(c, rsp);
+	int moved = c->tf_prev_valid && rsp != c->tf_prev_rsp;
+	int verdict = uml_nt_tf_trace_next(c->tf_left, in_image, moved);
+	struct uml_nt_rres_rec *r;
+
+	r = &c->tf_ring[c->tf_rr];
+	r->seq = d->req_seq;
+	r->rip = rip;
+	r->rsp = rsp;
+	r->rbp = d->regs.rbp;
+	r->rbx = d->regs.rbx;
+	r->rax = d->regs.rax;
+	r->last_nr = c->last_nr;
+	r->last_ret = c->last_ret;
+	r->cmd = d->fault_type;
+	c->tf_rr = (c->tf_rr + 1) % UML_NT_TF_RING;
+	if (c->tf_n < UML_NT_TF_RING)
+		c->tf_n++;
+
+	if (c->tf_left > 0)
+		c->tf_left--;
+
+	if (verdict == UML_NT_TF_PIVOT) {
+		int i;
+
+		os_info("[pivot-trace] pid %lu PIVOT: the instruction at "
+			"0x%llx moved rsp 0x%llx -> 0x%llx (into image text) — "
+			"step %u of arm %u, last_nr=%llu last_ret=%lld\n",
+			(unsigned long)c->pid, c->tf_prev_rip,
+			c->tf_prev_rsp, rsp,
+			UML_NT_TF_STEPS_PER_ARM - c->tf_left, c->tf_arms,
+			c->last_nr, c->last_ret);
+		/* The pivot instruction's own bytes (table view) and the
+		 * slot it loaded from: only ONE guest instruction has run
+		 * since, so [prev_rsp - 0x80, prev_rsp + 0x100) is still
+		 * the live frame. */
+		if (c->mm != NULL) {
+			dump_guest_bytes(c->mm, c->tf_prev_rip - 8, 32,
+					 "pivot-insn");
+			if (c->tf_prev_rsp > 0x80)
+				dump_guest_bytes(c->mm,
+						 c->tf_prev_rsp - 0x80, 0x180,
+						 "pivot-src");
+		}
+		for (i = (int)c->tf_n; i >= 1; i--) {
+			unsigned int idx = (c->tf_rr + UML_NT_TF_RING -
+					    (unsigned int)i) % UML_NT_TF_RING;
+			struct uml_nt_rres_rec *e = &c->tf_ring[idx];
+
+			os_info("[pivot-trace]   -%d seq=%llu rip=0x%llx "
+				"rsp=0x%llx rbp=0x%llx rbx=0x%llx rax=0x%llx\n",
+				i, e->seq, e->rip, e->rsp, e->rbp, e->rbx,
+				e->rax);
+		}
+		d->tf_trace = 0;
+	} else if (verdict == UML_NT_TF_EXHAUSTED) {
+		os_info("[pivot-trace] pid %lu budget spent (%u step(s), arm "
+			"%u) at rip=0x%llx rsp=0x%llx — no pivot in this "
+			"interval; the next close(3) arms again while the conn's "
+			"budget lasts\n",
+			(unsigned long)c->pid, c->tf_used, c->tf_arms,
+			rip, rsp);
+		d->tf_trace = 0;
+	} else {
+		os_info("[pivot-trace] pid %lu step %u rip=0x%llx "
+			"rsp=0x%llx rbp=0x%llx rbx=0x%llx rax=0x%llx "
+			"insn=%016llx\n",
+			(unsigned long)c->pid,
+			UML_NT_TF_STEPS_PER_ARM - c->tf_left, rip, rsp,
+			d->regs.rbp, d->regs.rbx, d->regs.rax, d->trap_insn);
+		if (c->tf_left == 0) {
+			os_info("[pivot-trace] pid %lu budget spent (%u step(s), "
+				"arm %u) at rip=0x%llx rsp=0x%llx — no pivot in "
+				"this interval; the next close(3) arms again while "
+				"the conn's budget lasts\n",
+				(unsigned long)c->pid, c->tf_used, c->tf_arms,
+				rip, rsp);
+		}
+		d->tf_trace = c->tf_left;
+	}
+	c->tf_prev_rsp = rsp;
+	c->tf_prev_rip = rip;
+	c->tf_prev_valid = 1;
+}
+
+/* Should this answer arm the trace? A successful close(3) on a login
+ * conn, at a resume point, once the previous trace (if any) is spent. */
+static int uml_nt_tf_trace_should_arm(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+
+	if (c->imgw_n <= 0 || c->mm == NULL || !c->res_trap_valid)
+		return 0;
+	if (d->tf_trace != 0 || c->tf_used >= UML_NT_TF_STEPS_PER_CONN)
+		return 0;
+	if (!uml_nt_conn_is_login(c))
+		return 0;
+	if (d->cmd == UML_STUB_CMD_FAULT &&
+	    d->fault_type == UML_NT_FAULT_STEP)
+		return 0;
+	if (c->last_nr != 3 /* close(2) */ || c->last_ret != 0)
+		return 0;
+	return 1;
+}
+
 void uml_nt_census(const char *tag, long long pid)
 {
 	struct task_struct *p;
@@ -7058,6 +7218,23 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		c->res_trap_valid = 1;
 	}
 
+	/* M5.6a [pivot trace]: any round that is NOT the trace's own
+	 * step ends the trace — the guest reached a syscall/fault/trap
+	 * boundary, so the interval is over (TF is dropped at this
+	 * round's answer, the stub stops raising it). */
+	if (d->tf_trace != 0 &&
+	    !(d->cmd == UML_STUB_CMD_FAULT &&
+	      d->fault_type == UML_NT_FAULT_STEP)) {
+		os_info("[pivot-trace] pid %lu %s trace ended by %s after %u "
+			"step(s) (last_nr=%llu) — a boundary arrived before a "
+			"pivot\n",
+			(unsigned long)c->pid, c->exec_path,
+			d->cmd == UML_STUB_CMD_SYSCALL ? "syscall" :
+			d->cmd == UML_STUB_CMD_FAULT ? "fault" : "op",
+			UML_NT_TF_STEPS_PER_ARM - c->tf_left, c->last_nr);
+		d->tf_trace = 0;
+	}
+
 	/* The stub-side half of the same contract: at the previous
 	 * real trap's resume the stub published the CONTEXT rsp it
 	 * carried out of the handler; the answer had put a DIFFERENT
@@ -7722,6 +7899,18 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		int rc;
 		static int cowbreak_seen;
 		static int watch_budget = 48;
+
+		/* M5.6a [pivot trace]: a TF single-step round — the guest
+		 * executed exactly one instruction since the last resume.
+		 * Log it, decide, resume (TF re-raised by the stub while the
+		 * budget lasts). Nothing here may repair: the step is pure
+		 * observation, and the guest state is the trap's own. */
+		if (d->fault_type == UML_NT_FAULT_STEP) {
+			uml_nt_tf_trace_step(c);
+			d->action = UML_STUB_ACTION_NONE;
+			d->err = 0;
+			return 0;
+		}
 
 		/* v13 DR-watchpoint report: a write to a watched tcache
 		 * entries[] qword landed with a NON-heap, non-zero
@@ -9065,6 +9254,63 @@ void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
 		release_vma_sweep(kind, off, nruns, owner);
 }
 
+/*
+ * M5.6a [pivot trace] — the conn's binary name.
+ *
+ * sys_execve records the path right before kernel_execve; the conn the
+ * exec birth creates (init_new_context → mmctx_init) adopts it, and a
+ * fork child inherits its parent's. The TF trace arms only for the
+ * login class (basename "login"): single-stepping every close(3) in the
+ * boot would cost the 900 s gate its margin, and the pivot class has
+ * only ever fired on /bin/login's NSS dlopen path.
+ */
+#define UML_NT_EXEC_PATH_MAX_LOCAL UML_NT_EXEC_PATH_MAX
+static char g_exec_path[UML_NT_EXEC_PATH_MAX_LOCAL];
+
+void uml_nt_exec_path_set(const char *path)
+{
+	int i = 0;
+
+	if (path == NULL) {
+		g_exec_path[0] = 0;
+		return;
+	}
+	while (path[i] != 0 && i < UML_NT_EXEC_PATH_MAX_LOCAL - 1) {
+		g_exec_path[i] = path[i];
+		i++;
+	}
+	g_exec_path[i] = 0;
+}
+
+/* The exec birth's name (called from uml_nt_fork_seed's exec branch). */
+static void uml_nt_exec_path_adopt(struct uml_nt_stub_conn *c)
+{
+	int i;
+
+	for (i = 0; i < UML_NT_EXEC_PATH_MAX_LOCAL; i++)
+		c->exec_path[i] = g_exec_path[i];
+}
+
+/* The binary's base name is "login" (path suffix /login or "login"). */
+int uml_nt_conn_is_login(const struct uml_nt_stub_conn *c)
+{
+	int n = 0, i;
+
+	if (c == NULL)
+		return 0;
+	while (n < UML_NT_EXEC_PATH_MAX_LOCAL && c->exec_path[n] != 0)
+		n++;
+	/* suffix "login" preceded by "/" or the whole name */
+	if (n < 5)
+		return 0;
+	i = n - 5;
+	if (c->exec_path[i] != 'l' || c->exec_path[i + 1] != 'o' ||
+	    c->exec_path[i + 2] != 'g' || c->exec_path[i + 3] != 'i' ||
+	    c->exec_path[i + 4] != 'n')
+		return 0;
+	return i == 0 || c->exec_path[i - 1] == '/';
+}
+
 int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 {
 	unsigned long long seed_rsp;
@@ -9072,9 +9318,12 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	int vi;
 	int rc_clone;
 
-	if (parent == NULL)
+	if (parent == NULL) {
+		/* exec/bprm birth: the binary comes from the execve that is
+		 * building this mm (sys_execve's hint). */
+		uml_nt_exec_path_adopt(child);
 		return 0; /* exec/bprm birth — nothing to seed */
-	/* Anti-stale guard (per-task handoff): the armed conn must
+	}	/* Anti-stale guard (per-task handoff): the armed conn must
 	 * still be THIS task's own mm conn. A recycled pid's stale
 	 * slot, or any foreign handoff, must never seed a foreign
 	 * mm — fail the fork loud instead. */
@@ -9160,7 +9409,13 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	 * a first touch in the child materializes into the child's own
 	 * mm (the file reference is shared). */
 	(void)uml_nt_lazy_clone(child, parent);
-	/* Contents of the eager (private) spans: everything whose
+	/* A forked child runs the parent's binary — same trace class. */
+	{
+		int ni;
+
+		for (ni = 0; ni < UML_NT_EXEC_PATH_MAX_LOCAL; ni++)
+			child->exec_path[ni] = parent->exec_path[ni];
+	}	/* Contents of the eager (private) spans: everything whose
 	 * run_off moved (the stack VMA — the COW-shared runs are the
 	 * same bytes by construction). */
 	/* TCACHE TRIP: the poison window opens post-fork — the
@@ -9738,6 +9993,14 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * audit point as the residue-watch (post-service, post-signal,
 	 * pre-release); the round identity on a hit = the writer. */
 	uml_nt_cowwatch_round(c);
+	/* M5.6a [pivot trace]: the close(3) answer is the arm point —
+	 * the next instruction the guest executes is the first step of
+	 * the interval the [resume-regs] verdict proved is guest code.
+	 * Armed before the release so the stub raises TF on THIS resume;
+	 * the resume record below still notes this round's own state,
+	 * and only the login class is ever traced. */
+	if (uml_nt_tf_trace_should_arm(c))
+		uml_nt_tf_trace_arm(c);
 	/* M5.6a login-depth follow-up (Shelley 149): the RESUME answer —
 	 * only a NONE answer releases the stub out of its VEH back into
 	 * guest code, and only a real trap (or the op drain that ends
@@ -9745,6 +10008,8 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * the state is exactly what the CONTEXT restore will apply. */
 	if (c->res_trap_valid &&
 	    c->d->action == UML_STUB_ACTION_NONE &&
+	    !(c->d->cmd == UML_STUB_CMD_FAULT &&
+	      c->d->fault_type == UML_NT_FAULT_STEP) &&
 	    (c->d->cmd == UML_STUB_CMD_SYSCALL ||
 	     c->d->cmd == UML_STUB_CMD_FAULT ||
 	     c->d->cmd == UML_STUB_CMD_PROT_DONE))

@@ -35,6 +35,10 @@
 #define UML_NT_FAULT_WATCHPT 0x10u /* v13 DR watchpoint report (no
 				    * repair; the store already
 				    * landed — pure witness) */
+#define UML_NT_FAULT_STEP 0x20u    /* v18 TF trace step (no repair:
+				    * the guest is being single-
+				    * stepped on purpose, one
+				    * instruction per round) */
 
 /* Stub ops in a plan — the codes ARE the stub actions (1:1 with
  * UML_STUB_ACTION_*; test_mm asserts the mirroring). */

@@ -2511,6 +2511,11 @@ static unsigned long long sys_execve(struct uml_nt_stub_conn *c,
 	kenvp[nev] = NULL;
 	os_info("[syscall] execve(%s): %llu argv, %llu envp — calling "
 		"kernel_execve\n", path, nav, nev);
+	/* M5.6a [pivot trace]: the conn this exec birth creates adopts
+	 * this name (mmctx_init → uml_nt_fork_seed) — the TF trace arms
+	 * for the login class only, and every pivot line names the
+	 * binary. */
+	uml_nt_exec_path_set(path);
 
 	rc = kernel_execve(path, kargv, kenvp);
 	kvfree(kargv);

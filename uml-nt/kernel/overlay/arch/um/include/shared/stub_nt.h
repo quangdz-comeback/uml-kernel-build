@@ -240,6 +240,21 @@ struct uml_nt_stub_data {
 	 * restore, not the guest. */
 	unsigned long long resume_rsp;
 
+	/* -- v18: the TF single-step trace (M5.6a, Shelley 149) --------
+	 * The [resume-regs] verdict (two referees, [40083772914] and
+	 * [40083780256]) proved the answer carried the trap's OWN rsp
+	 * after round close(3) and the stub restored exactly that — the
+	 * pivot is guest code in the interval close(3) return →
+	 * fstatat trap. This is the only instrument that can name the
+	 * instruction: nonzero makes the stub raise EFLAGS.TF at every
+	 * resume (fault trampoline, so the TLS base is live) and report
+	 * each #DB as cmd FAULT with fault_type = UML_NT_FAULT_STEP; the
+	 * kernel logs the step and decrements. 0 = not tracing. TF is
+	 * never visible to the guest: the capture and the resume both
+	 * strip it (ss_model.h), the trampoline raises it itself. */
+	u32_nt tf_trace;
+	u32_nt _pad_tf;
+
 	/* -- v9: the view readback (M5.6a, referee 37197703025) ------- */
 	/* The twin scan stayed ambiguous across same-VA-space fork
 	 * children (an inherited tcache copy at the same in-run offset
