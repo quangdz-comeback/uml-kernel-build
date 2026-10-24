@@ -2574,6 +2574,66 @@ void uml_nt_imgwatch_death_check(struct uml_nt_stub_conn *c,
 		"image set (%d watched run(s))\n", run, c->imgw_n);
 }
 
+/* glibc's x86-64 jmp_buf: qword 6 = PTR_MANGLE(rsp), qword 7 =
+ * PTR_MANGLE(rip), the guard at fs:0x30. At a wild-rsp fire, scan the
+ * previous stack run for that signature (demangled rsp inside a
+ * writable VMA, demangled rip inside a mapped VMA): a hit names the
+ * catch frame whose saved rsp the longjmp restored — the pivot
+ * source. */
+static void jmpbuf_scan(struct uml_nt_stub_conn *c,
+			struct uml_nt_stub_data *d, unsigned long long rsp)
+{
+	unsigned long long g;
+	long long go, ro;
+	struct uml_nt_vma *sv;
+	unsigned long long run, i;
+	const unsigned long long *q;
+	int hits = 0;
+
+	if (c->mm == NULL || d->fs_base == 0 || rsp < 8)
+		return;
+	go = uml_nt_vma_translate(c->mm, d->fs_base + 0x30, 8);
+	if (go < 0)
+		return;
+	memcpy(&g, (char *)uml_boot.physmem_base + go, 8);
+	sv = uml_nt_vma_find(c->mm, rsp - 1);
+	if (sv == NULL)
+		return;
+	ro = uml_nt_vma_translate(c->mm, rsp, 1);
+	if (ro < 0)
+		return;
+	run = ((unsigned long long)ro) & ~(UML_NT_PHYS_RUN_SIZE - 1);
+	q = (const unsigned long long *)((char *)uml_boot.physmem_base +
+					 run);
+	for (i = 0; i + 1 < UML_NT_PHYS_RUN_SIZE / 8 && hits < 4; i++) {
+		unsigned long long v0 = q[i] >> 17 |
+					q[i] << (64 - 17);
+		unsigned long long v1 = q[i + 1] >> 17 |
+					q[i + 1] << (64 - 17);
+		unsigned long long d0 = v0 ^ g, d1 = v1 ^ g;
+		unsigned long long sva;
+
+		if (d0 < sv->start || d0 >= sv->end)
+			continue;
+		if (uml_nt_vma_find(c->mm, d1) == NULL)
+			continue;
+		sva = sv->start + (run - sv->run_off) + i * 8;
+		if (sva < sv->start || sva >= sv->end)
+			continue;
+		hits++;
+		os_info("[jmpbuf] pid %lu slot=0x%llx raw=%016llx "
+			"%016llx saved-rsp=0x%llx saved-rip=0x%llx "
+			"guard=%016llx — a catch frame on the trap "
+			"stack\n",
+			(unsigned long)c->pid, sva, q[i], q[i + 1],
+			d0, d1, g);
+	}
+	if (hits == 0)
+		os_info("[jmpbuf] pid %lu: no PTR_MANGLEd catch frame in "
+			"the stack run (guard=%016llx)\n",
+			(unsigned long)c->pid, g);
+}
+
 int uml_nt_imgwatch_is_image(struct uml_nt_stub_conn *c,
 			     unsigned long long run)
 {
@@ -6706,6 +6766,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								"canary/guard dumped "
 								"at +0x28\n", d->fs_base);
 						}
+
+						jmpbuf_scan(c, d,
+							    c->last_trap_rsp);
 
 						if (po >= 0)
 							uml_nt_uacc_towrite_dump(
