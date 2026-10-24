@@ -464,17 +464,26 @@ static void test_stack(void)
 
 	rc = uml_nt_elf_stack_place(&out, &mm, &ph, &top);
 	CHECK(rc == UML_NT_ELF_OK);
-	CHECK(top == 0x62020000ull);
+	/* THE LINUX SHAPE (Shelley 154): the committed run sits
+	 * RLIMIT_STACK ABOVE the highest mapping, and [top - RLIMIT,
+	 * top - RUN) is the unmapped hole growth fills. The old shape —
+	 * one 64 KiB run directly on top of the interpreter — is what
+	 * let a deep stack excursion write into ld.so's text. */
+	CHECK(top == 0x62020000ull + UML_NT_STACK_RLIMIT);
 	CHECK(out.stack_top == top);
 	CHECK(mm.nvma == 2);
-	CHECK(uml_nt_vma_find(&mm, 0x62010000ull) == &mm.vma[1]);
+	CHECK(mm.stack_top == top);
+	CHECK(mm.stack_limit == 0x62020000ull);
+	CHECK(uml_nt_vma_find(&mm, 0x62010000ull) == NULL); /* the gap */
+	CHECK(uml_nt_vma_find(&mm, top - 1) == &mm.vma[1]);
 	CHECK(mm.vma[1].prot == 0x04u);
 	CHECK(mm.vma[1].end == top);
+	CHECK(mm.vma[1].start == top - UML_NT_PHYS_RUN_SIZE);
 
 	/* a second placement stacks above the first */
 	rc = uml_nt_elf_stack_place(&out, &mm, &ph, &top);
 	CHECK(rc == UML_NT_ELF_OK);
-	CHECK(top == 0x62030000ull);
+	CHECK(top == 0x62030000ull + 2 * UML_NT_STACK_RLIMIT);
 }
 
 /* ET_EXEC linked BELOW the guest window (S3: real static binaries
