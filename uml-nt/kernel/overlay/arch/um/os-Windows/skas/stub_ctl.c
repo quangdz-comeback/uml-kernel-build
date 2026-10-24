@@ -3444,8 +3444,17 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
 	unsigned long long rsi = d->regs.rsi;
 	unsigned long long ret = 0;
 	long long so;
-	int arg_text = uml_nt_resume_rsp_wild(c, rdi) ||
-		       uml_nt_resume_rsp_wild(c, rsi);
+	/* Shelley 150: the bad call hands _dl_find_dso_for_object a
+	 * BYTE-SHIFTED pointer into the interp's own text. Test against
+	 * the interp image span (interp_base .. +0x40000), which is where
+	 * every observed pivot value lives (0x6001b5xx/0x6001c2xx) —
+	 * tighter than "any image run" and independent of run capture. */
+	int arg_text = 0;
+
+	if (c->interp_base != 0 &&
+	    ((rdi >= c->interp_base && rdi < c->interp_base + 0x40000) ||
+	     (rsi >= c->interp_base && rsi < c->interp_base + 0x40000)))
+		arg_text = 1;
 	static int exec_budget = 64;
 
 	c->dr_exec_hits++;
@@ -3465,7 +3474,7 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
 	 * the interesting ones: a TEXT-shaped argument is the bad call
 	 * this hunt is about (a byte-shifted addr handed to the loader's
 	 * DSO lookup). */
-	if (exec_budget > 0 && (c->dr_exec_hits <= 8 || arg_text)) {
+	if (exec_budget > 0) {
 		exec_budget--;
 		os_info("[pivot-dr] pid %lu %s ENTRY hit #%u rip=0x%llx "
 			"rdi=0x%llx rsi=0x%llx rsp=0x%llx rbp=0x%llx "
@@ -10456,7 +10465,8 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * is ~1-2 us and a suspend/read probe is ~10 us, so it can never
 	 * land inside (referees 40094545095/40094551603). */
 	if (c->d->action == UML_STUB_ACTION_NONE && c->dr_exec_armed == 0 &&
-	    uml_nt_sample_should_arm(c))
+	    c->dr_exec_hits < UML_NT_DR_EXEC_MAX_HITS &&
+	    uml_nt_conn_is_login(c))
 		uml_nt_dr_exec_arm(c);
 	/* M5.6a login-depth follow-up (Shelley 149): the RESUME answer —
 	 * only a NONE answer releases the stub out of its VEH back into

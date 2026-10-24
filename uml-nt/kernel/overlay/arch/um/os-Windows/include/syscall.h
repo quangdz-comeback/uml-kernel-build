@@ -62,6 +62,11 @@
  * are retried, not charged: 400 tries is ~4 ms of probing, far past
  * the ~50 us wake latency and enough to cover a whole long interval. */
 #define UML_NT_SMP_TRIES 400u
+/* [pivot-dr]: the execute breakpoint is one-shot per hit (the resume
+ * re-executes the entry) and re-armed at the next release, so this is
+ * the number of calls observed per conn. The observed cadence is ~5
+ * per login, so the cap is generous. */
+#define UML_NT_DR_EXEC_MAX_HITS 400u
 /* The claimed pivot entry (Shelley 150's static walk):
  * _dl_find_dso_for_object's array-marshalling window in the interp
  * (entry 0xb490, the '-0x428/-0x430(%rbp,%rcx,1)' marshal at 0xc626). */
