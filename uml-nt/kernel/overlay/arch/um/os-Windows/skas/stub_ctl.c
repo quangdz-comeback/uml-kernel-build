@@ -3473,22 +3473,7 @@ static void uml_nt_pivot_wslot_arm(struct uml_nt_stub_conn *c)
 	 * resolver's save area lands in the interp's text (which our exec
 	 * setup maps RWX directly below the stack). Read it here so the
 	 * arithmetic is MEASURED, not inferred. */
-	{
-		long long so = uml_nt_vma_translate(c->mm,
-						   c->interp_base + 0x32c70, 16);
-		unsigned long long xsz = 0, xsz2 = 0;
 
-		if (so >= 0) {
-			xsz = *(const unsigned long long *)(const void *)
-				((char *)uml_boot.physmem_base + so);
-			xsz2 = *(const unsigned long long *)(const void *)
-				((char *)uml_boot.physmem_base + so + 8);
-		}
-		os_info("[pivot-xsav] pid %lu interp_base=0x%llx "
-			"_rtld_global_ro+0x1b0=0x%llx (+0x1b8=0x%llx) — the "
-			"resolver will `sub` that from rsp\n",
-			(unsigned long)c->pid, c->interp_base, xsz, xsz2);
-	}
 	os_info("[pivot-wslot] pid %lu %s: four DR WRITE slots on the "
 		"interp text at 0x%llx/0x%llx/0x%llx/0x%llx (interp base "
 		"0x%llx) — the pivot's vfprintf arg array lands here\n",
@@ -3625,6 +3610,23 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 		v = *(const unsigned long long *)(const void *)
 			((char *)uml_boot.physmem_base + vo);
 	c->ws_hits++;
+	if (c->ws_hits == 1) {
+		/* The resolver's XSAVE size, read AT the hit (the arm-time
+		 * read is 0 — ld.so fills it during its own init, which
+		 * runs after our arm). `rsp & -64 - this` must land on the
+		 * observed base+0xc600. */
+		long long xo = uml_nt_vma_translate(c->mm,
+						   c->interp_base + 0x32c70, 8);
+		unsigned long long xsz = ~0ull;
+
+		if (xo >= 0)
+			xsz = *(const unsigned long long *)(const void *)
+				((char *)uml_boot.physmem_base + xo);
+		os_info("[pivot-xsav] pid %lu interp_base=0x%llx "
+			"_rtld_global_ro+0x1b0 (ld.so 0x32c70) = 0x%llx — "
+			"the resolver's `sub` operand\n",
+			(unsigned long)c->pid, c->interp_base, xsz);
+	}
 	if (c->ws_hits == 1 && c->d->regs.rbp >= 0x10000)
 		uml_nt_frame_walk(c, c->d->regs.rbp, 8);
 	if (c->ws_hits == 1 && c->chain_hops == 0 && v != ~0ull) {
