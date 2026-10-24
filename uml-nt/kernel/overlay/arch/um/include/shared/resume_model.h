@@ -177,4 +177,43 @@ static inline const char *uml_nt_resume_regs_name(int cls)
 	}
 }
 
+/*
+ * ---- the TF single-step trace (the [resume-regs] verdict's follow-up) ----
+ *
+ * Two independent referees proved the resume before the first wild trap
+ * carried the trap's OWN rsp (SAME on every round; the stub's restored
+ * CONTEXT rsp matched the answer; no rewrite). So the stack pointer
+ * moved on the guest's own instructions between the close(3) return
+ * (rip=0x601ece67, rsp=0x6005d258) and the fstatat trap
+ * (rip=0x601e7868, rsp=0x6001c228). The only instrument that can name
+ * that instruction is TF: one step per guest instruction, one #DB round
+ * each, logged with rip/rsp/regs.
+ *
+ * The loop's ONE decision belongs here, pure: keep stepping, or stop
+ * because the PREVIOUS instruction is the pivot (the step's rsp landed
+ * in an image run and moved), or stop because the budget is spent. A
+ * wild rsp that did NOT move (the first step of a trace armed on an
+ * already-wild round) is not a pivot — it must not stop the trace.
+ */
+enum uml_nt_tf_verdict {
+	UML_NT_TF_STEP = 0,	/* one more instruction */
+	UML_NT_TF_PIVOT = 1,	/* the PREVIOUS instruction moved rsp into
+				 * image text: stop, the pivot is named */
+	UML_NT_TF_EXHAUSTED = 2,	/* the step budget ran out */
+	UML_NT_TF_OFF = 3,	/* not tracing (a foreign trap ended it) */
+};
+
+/* `left` = steps still allowed (0 = spent). `in_image` = the step's rsp
+ * landed in an image run. `moved` = that rsp differs from the previous
+ * step's (the instruction did it). */
+static inline int uml_nt_tf_trace_next(unsigned int left, int in_image,
+				       int moved)
+{
+	if (left == 0)
+		return UML_NT_TF_EXHAUSTED;
+	if (in_image && moved)
+		return UML_NT_TF_PIVOT;
+	return UML_NT_TF_STEP;
+}
+
 #endif /* UML_NT_RESUME_MODEL_H */

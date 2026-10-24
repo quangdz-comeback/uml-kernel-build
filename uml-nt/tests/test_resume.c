@@ -194,6 +194,30 @@ int main(void)
 		      0x6005d258ull - 0x6001c228ull);
 	}
 
+	/* 9. The TF single-step trace's ONE decision (Shelley 149's
+	 *    verdict: the resume carried the trap's own rsp, so the
+	 *    pivot is guest code). The witness arms TF on the round
+	 *    after close(3); every guest instruction then traps once.
+	 *    The loop must keep stepping over a wild-but-UNMOVED rsp
+	 *    (a trace armed late), and stop exactly on the step whose
+	 *    rsp moved into image text — that step's PREVIOUS 'instruction'
+	 *    is the pivot. The budget end is a separate verdict.
+	 *
+	 *    Witnessed values: close(3) resume rsp=0x6005d258 [stack],
+	 *    the trap after the pivot rsp=0x6001c228 [interp text]. */
+	CHECK(uml_nt_tf_trace_next(400, 0, 1) == UML_NT_TF_STEP);
+	CHECK(uml_nt_tf_trace_next(400, 1, 1) == UML_NT_TF_PIVOT);
+	/* A wild rsp that did not move this step is the trace's own
+	 * start state, never the pivot. */
+	CHECK(uml_nt_tf_trace_next(400, 1, 0) == UML_NT_TF_STEP);
+	/* A clean rsp that "moved" (a push/pop) is normal execution. */
+	CHECK(uml_nt_tf_trace_next(400, 0, 1) == UML_NT_TF_STEP);
+	/* Budget: the last allowed step still steps; then stop. */
+	CHECK(uml_nt_tf_trace_next(1, 0, 1) == UML_NT_TF_STEP);
+	CHECK(uml_nt_tf_trace_next(1, 1, 1) == UML_NT_TF_PIVOT);
+	CHECK(uml_nt_tf_trace_next(0, 0, 1) == UML_NT_TF_EXHAUSTED);
+	CHECK(uml_nt_tf_trace_next(0, 1, 1) == UML_NT_TF_EXHAUSTED);
+
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);
 		return 1;
