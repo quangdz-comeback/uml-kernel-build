@@ -6647,7 +6647,8 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					rspimg_budget--;
 					os_info("[rsp-image] pid %lu %s "
 						"trap rip=0x%llx "
-						"rsp=0x%llx rax=0x%llx "
+						"rsp=0x%llx rbp=0x%llx "
+						"rbx=0x%llx rax=0x%llx "
 						"last_nr=%llu "
 						"last_ret=%lld prev-trap "
 						"rip=0x%llx rsp=0x%llx — "
@@ -6658,6 +6659,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 						d->cmd == UML_STUB_CMD_SYSCALL ?
 							"syscall" : "fault",
 						d->regs.rip, d->regs.rsp,
+						d->regs.rbp, d->regs.rbx,
 						d->regs.rax, c->last_nr,
 						c->last_ret,
 						c->last_trap_valid ?
