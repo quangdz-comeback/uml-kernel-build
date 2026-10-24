@@ -3371,24 +3371,34 @@ static int uml_nt_run_is_elf_dyn(struct uml_nt_stub_conn *c,
 	return type == 3; /* ET_DYN */
 }
 
-/* The lowest ELF-DYN image VMA's base + the entry offset, or 0. */
+/* The lowest ELF-DYN image base + the entry offset, or 0.
+ *
+ * Referee 40099032156 armed slot 2 at 0x6008b490: the interp's VMA is
+ * NOT flagged UML_NT_VMA_FILE (die log: "rip in vma [0x60010000,
+ * 0x60050000) prot=0x40 flags=0x0"), so the flag filter skipped it and
+ * the lowest *library* won. The image test is the ELF header in the
+ * run itself — base = the VMA start whose run begins with "\x7fELF" +
+ * e_type ET_DYN — and the lowest such base wins (the interp is mapped
+ * below the exe and every library in this port's layout). */
 static unsigned long long uml_nt_interp_entry_va(struct uml_nt_stub_conn *c)
 {
 	unsigned long long best = 0;
-	int i;
+	int i, shown = 0;
 
 	if (c->mm == NULL)
 		return 0;
 	for (i = 0; i < c->mm->nvma; i++) {
 		struct uml_nt_vma *v = &c->mm->vma[i];
 
-		/* the entry must live inside this VMA */
-		if (v->start + UML_NT_DLDSO_ENTRY_OFF >= v->end)
-			continue;
-		if (!(v->flags & UML_NT_VMA_FILE))
-			continue;
 		if (!uml_nt_run_is_elf_dyn(c, v->start))
 			continue;
+		if (shown < 8) {
+			shown++;
+			os_info("[pivot-dr] image base candidate 0x%llx "
+				"(vma [0x%llx,0x%llx) prot=0x%x flags=0x%x)\n",
+				v->start, v->start, v->end, v->prot,
+				v->flags);
+		}
 		if (best == 0 || v->start < best)
 			best = v->start;
 	}
