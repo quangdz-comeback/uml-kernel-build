@@ -3508,6 +3508,42 @@ static void uml_nt_pivot_wslot_round(struct uml_nt_stub_conn *c, int slot)
 		d->regs.r8, d->regs.r9, d->regs.r10, d->regs.r11,
 		d->regs.r12, d->regs.r13, d->regs.r14, d->regs.r15,
 		d->regs.rflags);
+	/* WHICH MODULE is the store in? Referees 40116431479/40116439363
+	 * put the first push at base+0xc5f8 (rsp) with a store at
+	 * 0x607a1120 / 0x604b1120 — base+0x1120 in a module whose base
+	 * moves per boot — and a pushed code pointer at base+0x1347.
+	 * The VMA covering the store names the module; the whole table is
+	 * dumped once so the layout can be read offline. */
+	{
+		static int vt_done;
+		struct uml_nt_vma *vn = uml_nt_vma_find(c->mm, d->regs.rip);
+
+		if (vn != NULL)
+			os_info("[pivot-wslot]   store in vma [0x%llx,0x%llx) "
+				"prot=0x%x flags=0x%x run_off=0x%llx — off "
+				"0x%llx into its span\n",
+				vn->start, vn->end, vn->prot, vn->flags,
+				vn->run_off, d->regs.rip - vn->start);
+		else
+			os_info("[pivot-wslot]   store rip 0x%llx is in NO "
+				"vma of this mm\n", d->regs.rip);
+		if (!vt_done) {
+			int vi;
+
+			vt_done = 1;
+			os_info("[pivot-wslot]   login mm: %d vma(s)\n",
+				c->mm->nvma);
+			for (vi = 0; vi < c->mm->nvma; vi++) {
+				struct uml_nt_vma *v = &c->mm->vma[vi];
+
+				os_info("[pivot-wslot]     [0x%llx,0x%llx) "
+					"prot=0x%x flags=0x%x run=0x%llx "
+					"gen=0x%llx\n",
+					v->start, v->end, v->prot, v->flags,
+					v->run_off, v->gen);
+			}
+		}
+	}
 	/* THE TEXT STACK ITSELF: dump 0x300 from rsp upward. Once the
 	 * guest runs with rsp inside the interp's text, every frame
 	 * push leaves a return address there — so this dump IS the call
