@@ -3450,11 +3450,23 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
 	 * every observed pivot value lives (0x6001b5xx/0x6001c2xx) —
 	 * tighter than "any image run" and independent of run capture. */
 	int arg_text = 0;
+	int rbp_text = 0;
 
 	if (c->interp_base != 0 &&
 	    ((rdi >= c->interp_base && rdi < c->interp_base + 0x40000) ||
 	     (rsi >= c->interp_base && rsi < c->interp_base + 0x40000)))
 		arg_text = 1;
+	/* The decisive shape (referees 40107984279/40109916441 measured
+	 * the entry's first calls with a CLEAN rbp=0x6005cdb0): this
+	 * function builds its arg arrays at -0x430/-0x428(%rbp,%rcx,1),
+	 * so once rbp itself is inside the interp span, the arrays land
+	 * in TEXT — the sparse 258-byte footprint, the pivot's stack,
+	 * and then the wild-entry death in this very region. An entry hit
+	 * with a TEXT rbp is therefore the pivot's successor call. */
+	if (c->interp_base != 0 &&
+	    d->regs.rbp >= c->interp_base &&
+	    d->regs.rbp < c->interp_base + 0x40000)
+		rbp_text = 1;
 	static int exec_budget = 64;
 
 	c->dr_exec_hits++;
@@ -3474,7 +3486,7 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
 	 * the interesting ones: a TEXT-shaped argument is the bad call
 	 * this hunt is about (a byte-shifted addr handed to the loader's
 	 * DSO lookup). */
-	if (exec_budget > 0) {
+	if (exec_budget > 0 && rbp_text) {
 		exec_budget--;
 		os_info("[pivot-dr] pid %lu %s ENTRY hit #%u rip=0x%llx "
 			"rdi=0x%llx rsi=0x%llx rsp=0x%llx rbp=0x%llx "
@@ -3482,9 +3494,10 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
 			(unsigned long)c->pid, c->exec_path,
 			c->dr_exec_hits, d->regs.rip, rdi, rsi,
 			d->regs.rsp, d->regs.rbp, d->regs.rbx, ret,
-			arg_text ? " [TEXT-SHAPED ARG — the bad call]" : "");
+			rbp_text ? " [TEXT RBP — the arrays land in text]" :
+			arg_text ? " [TEXT-SHAPED ARG]" : "");
 	}
-	if (arg_text) {
+	if (arg_text || rbp_text) {
 		/* The caller's frame: the slot the bad value was loaded
 		 * from is in here (or in a register the caller still
 		 * holds — rbp/rbx of this frame). */
@@ -3493,8 +3506,8 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
 					 "dr-exec-caller");
 		os_info("[pivot-dr] pid %lu %s BAD CALL: entry 0x%llx with "
 			"rdi=0x%llx (text-shaped), caller ret=0x%llx "
-			"rbp=0x%llx rbx=0x%llx — the array this call marshals "
-			"lands in image text\n",
+			"rbp=0x%llx rbx=0x%llx — the arrays this call "
+			"marshals land in image text\n",
 			(unsigned long)c->pid, c->exec_path,
 			c->dr_exec_va, rdi, ret, d->regs.rbp, d->regs.rbx);
 	}

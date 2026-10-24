@@ -66,7 +66,7 @@
  * re-executes the entry) and re-armed at the next release, so this is
  * the number of calls observed per conn. The observed cadence is ~5
  * per login, so the cap is generous. */
-#define UML_NT_DR_EXEC_MAX_HITS 400u
+#define UML_NT_DR_EXEC_MAX_HITS 4000u
 /* The claimed pivot entry (Shelley 150's static walk):
  * _dl_find_dso_for_object's array-marshalling window in the interp
  * (entry 0xb490, the '-0x428/-0x430(%rbp,%rcx,1)' marshal at 0xc626). */
