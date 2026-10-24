@@ -2587,6 +2587,39 @@ int uml_nt_imgwatch_is_image(struct uml_nt_stub_conn *c,
 	return 0;
 }
 
+/* Park-time round-robin full-hash check (M5.6a writer-hunt follow-up:
+ * rf pair's interp run0 is rewritten after load with the funnel and
+ * the sigframe innocent). One image run per real trap park; the FIRST
+ * park after a divergence logs the round's last_nr/last_ret/trap rip —
+ * the write happened in the interval that round closes. A run is
+ * reported once (imgw_div). Gen-pinned: a re-handed run is skipped. */
+void uml_nt_imgwatch_park_check(struct uml_nt_stub_conn *c)
+{
+	unsigned long long h, g;
+	int i;
+
+	if (c == NULL || c->ph == NULL || c->mm == NULL || c->imgw_n <= 0)
+		return;
+	i = (int)(c->imgw_rr++ % (unsigned int)c->imgw_n);
+	if (c->imgw_div[i])
+		return;
+	g = uml_nt_phys_gen(c->ph, (long long)c->imgw_run[i]);
+	if (g != c->imgw_gen[i])
+		return;
+	h = uml_nt_imgw_hash_full((const void *)((const char *)
+			uml_boot.physmem_base + c->imgw_run[i]));
+	if (h == c->imgw_full[i])
+		return;
+	c->imgw_div[i] = 1;
+	os_info("[imgwatch-park] pid %lu run 0x%llx REWRITTEN: first "
+		"park after last_nr=%llu last_ret=%lld trap rip=0x%llx "
+		"rax=0x%llx rsp=0x%llx — the write sits in the interval "
+		"that round closes\n",
+		(unsigned long)c->pid, c->imgw_run[i], c->last_nr,
+		c->last_ret, c->d->regs.rip, c->d->regs.rax,
+		c->d->regs.rsp);
+}
+
 void uml_nt_census(const char *tag, long long pid)
 {
 	struct task_struct *p;
@@ -6586,6 +6619,12 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			}
 		}
 	}
+	/* Park-time image-integrity check (M5.6a writer-hunt follow-up):
+	 * one image run per real trap park, round-robin — the first park
+	 * after a rewrite names the closing round. */
+	if (d->cmd == UML_STUB_CMD_SYSCALL ||
+	    d->cmd == UML_STUB_CMD_FAULT)
+		uml_nt_imgwatch_park_check(c);
 	/* Resume-boundary audit (M5.6a writer-hunt follow-up): the
 	 * previous round's expected target vs the stub's own published
 	 * d->resume_rip. The fault-only form lived further down; this

@@ -434,6 +434,12 @@ struct uml_nt_stub_conn {
 	 * the interp run held sigcontext-shaped bytes at 0xb560). */
 	unsigned long long imgw_full[UML_NT_IMGWATCH_MAX];
 	int imgw_n;
+	/* M5.6a writer-hunt follow-up: the park-time round-robin full
+	 * hash (one image run per trap park) — the first park after a
+	 * rewrite names the round (last_nr/last_ret/trap rip) that did
+	 * it. imgw_div marks a run already reported. */
+	unsigned int imgw_rr;
+	unsigned char imgw_div[UML_NT_IMGWATCH_MAX];
 	/* M5.6a writer-hunt follow-up: the resume-boundary audit. The
 	 * value the kernel EXPECTED the stub to resume at after the
 	 * previous real trap round; the stub publishes its actual
@@ -455,6 +461,8 @@ void uml_nt_imgwatch_death_check(struct uml_nt_stub_conn *c,
 /* 1 when `run` is one of the conn's captured image runs. */
 int uml_nt_imgwatch_is_image(struct uml_nt_stub_conn *c,
 			     unsigned long long run);
+/* The park-time round-robin full-hash check (one run per call). */
+void uml_nt_imgwatch_park_check(struct uml_nt_stub_conn *c);
 
 /* D27: materialize the faulting run from the file. 1 = handled (the
  * plan carries the MAP op; the caller resumes), 0 = not a lazy
