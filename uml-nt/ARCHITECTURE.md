@@ -446,3 +446,19 @@ trang touched trong cùng syscall (như read()) và cho ảnh exec ELF
   register/demand/drop đếm touched-vs-file-runs.
 - CẤM: nới mem=120M để qua gate; bỏ qua fcache share; eager-fill lại
   file lớn "cho chắc".
+
+## D29 (2026-10-24, Qoder — M5.6a §4a console feed alignment; referees
+## 40063247914/40063260482)
+Console input là ring (stdin reader → con_ring → vCPU drain → tty
+flip). Khi guest flush input của tty — TCSETSF (`tcsetattr(TCSAFLUSH)`
+của agetty/login/bash) hoặc TCFLSH với TCIFLUSH/TCIOLFLUSH — kernel
+PHẢI drop các byte CHƯA-DRAIN trong ring CÙNG LÚC với tty core flush.
+Không drop thì các cycle feed trước prompt còn sót trong ring rơi vào
+prompt kế tiếp: "uml login: echo LOGIN-OK" và M5.5b-1 MISS dù PAM auth
+thành công (pair 40063247914/40063260482: M5.5a OK, "Last login" 4-5
+lần, không có LOGIN-OK).
+- Contract: feed open-loop của referee được align theo flush boundary;
+  một cycle bị drop giữa chừng thì cycle sau (25s) tự đồng bộ lại. Drop
+  race-safe với producer (push đồng thời sống sót — indice >= head).
+- CẤM: sửa workflow feed để đợi prompt (goalpost move) hoặc nới
+  timeout; ring drop tại flush là upstream parity (n_tty flush_buffer).
