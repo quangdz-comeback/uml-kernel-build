@@ -246,6 +246,24 @@ static long long uml_nt_patch_image(const struct uml_nt_elf_image *im)
 	return (long long)total;
 }
 
+/* FILL VERIFY (M5.6a writer-hunt follow-up): name a loader copy that
+ * did not land equal to the source image (elf.c compares after every
+ * PT_LOAD piece). The imgwatch baseline is captured later, so without
+ * this a fill bug would look like a post-load rewrite. */
+static void uml_nt_fill_verify_log(const char *what, const char *path)
+{
+	if (!uml_nt_elf_verify_bad)
+		return;
+	os_info("[fillverify] %s %s: PT_LOAD piece differs from the "
+		"source image after the loader copy — region %d "
+		"run_off=0x%llx file_off=0x%llx len=%llu first diff +%llu "
+		"want=0x%02llx got=0x%02llx\n", what, path,
+		uml_nt_elf_verify_region, uml_nt_elf_verify_off,
+		uml_nt_elf_verify_file_off, uml_nt_elf_verify_len,
+		uml_nt_elf_verify_diff, uml_nt_elf_verify_want,
+		uml_nt_elf_verify_got);
+}
+
 static struct linux_binfmt uml_nt_binfmt = {
 	.module      = THIS_MODULE,
 	.load_binary = uml_nt_load_binary,
@@ -386,6 +404,7 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 	}
 	os_info("binfmt_umlnt: elf mapped %d region(s), entry 0x%llx\n",
 		img.nseg, img.entry);
+	uml_nt_fill_verify_log("exe", bprm->filename);
 
 	/* D20 cluster 1: the interpreter loads as a SECOND image —
 	 * ET_DYN first-fit above the main regions (D12); the ENTRY
@@ -416,6 +435,7 @@ static int uml_nt_load_binary(struct linux_binprm *bprm)
 		}
 		os_info("binfmt_umlnt: interp loaded base 0x%llx entry "
 			"0x%llx\n", iimg.base, iimg.entry);
+		uml_nt_fill_verify_log("interp", interp_path);
 	}
 	entry = have_interp ? iimg.entry : img.entry;
 

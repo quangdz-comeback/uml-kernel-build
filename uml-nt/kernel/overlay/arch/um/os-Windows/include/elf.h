@@ -60,6 +60,13 @@
  * (the loader module is pure: no os_info of its own). */
 extern int uml_nt_elf_fill_region;
 extern unsigned long long uml_nt_elf_fill_off, uml_nt_elf_fill_len;
+/* FILL VERIFY (M5.6a writer-hunt follow-up): set when a post-copy
+ * comparison of a PT_LOAD piece against the source image differs —
+ * the loader's own copy was wrong/overlapped before any guest ran. */
+extern int uml_nt_elf_verify_bad, uml_nt_elf_verify_region;
+extern unsigned long long uml_nt_elf_verify_off, uml_nt_elf_verify_file_off;
+extern unsigned long long uml_nt_elf_verify_len, uml_nt_elf_verify_diff;
+extern unsigned long long uml_nt_elf_verify_want, uml_nt_elf_verify_got;
 
 /* One merged, run-aligned load region: [start, end) guest VA backed
  * by the contiguous span at run_off with `prot` (NT PAGE_*). */

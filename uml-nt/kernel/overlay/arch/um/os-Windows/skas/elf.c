@@ -54,6 +54,19 @@ _Static_assert(sizeof(elf_phdr) == 56, "ELF64 phdr layout");
 int uml_nt_elf_fill_region;
 unsigned long long uml_nt_elf_fill_off, uml_nt_elf_fill_len;
 
+/* FILL VERIFY (M5.6a writer-hunt follow-up): the loader's copy is
+ * checked against the source image AFTER every PT_LOAD piece landed —
+ * a mis-computed destination offset or an overlap between regions
+ * would otherwise be baked into the imgwatch baseline and never seen.
+ * Pure file: set the globals, binfmt.c logs them. Budgeted: the first
+ * 128 image loads (both images per exec count once each). */
+int uml_nt_elf_verify_bad;
+int uml_nt_elf_verify_region;
+unsigned long long uml_nt_elf_verify_off, uml_nt_elf_verify_file_off;
+unsigned long long uml_nt_elf_verify_len, uml_nt_elf_verify_diff;
+unsigned long long uml_nt_elf_verify_want, uml_nt_elf_verify_got;
+static int uml_nt_elf_verify_left = 128;
+
 /*
  * D20 cluster 1: the PT_INTERP path of `image` — a dynamic binary
  * names its interpreter there. Returns 0 = none, 1 = the path copied
@@ -198,6 +211,7 @@ int uml_nt_elf_load(struct uml_nt_elf_image *out, struct uml_nt_mm *mm,
 	out->base = 0;
 	out->phdr_va = 0;
 	out->phnum = 0;
+	uml_nt_elf_verify_bad = 0;
 
 	/* ---- header + phdr table validation (all bounds first) ---- */
 	if (len < sizeof(elf_ehdr) + sizeof(elf_phdr))
@@ -418,6 +432,64 @@ merged:
 		}
 		if (copied != p->p_filesz)
 			goto fail_copy;
+	}
+
+	/* ---- FILL VERIFY (M5.6a writer-hunt follow-up): every PT_LOAD
+	 * piece must still equal the source image now that all copies
+	 * landed. A wrong destination offset or a region overlap makes
+	 * the loaded text differ from the file BEFORE any guest runs —
+	 * the imgwatch baseline would capture the damage and later
+	 * comparisons would look clean. Budgeted; binfmt logs. */
+	if (uml_nt_elf_verify_left > 0) {
+		uml_nt_elf_verify_left--;
+		uml_nt_elf_verify_bad = 0;
+		for (i = 0; i < phn && !uml_nt_elf_verify_bad; i++) {
+			const elf_phdr *p = &phd[i];
+			unsigned long long va, seg_end;
+			int k;
+
+			if (p->p_type != PT_LOAD || p->p_filesz == 0)
+				continue;
+			va = p->p_vaddr + base;
+			seg_end = va + p->p_filesz;
+			for (k = 0; k < nreg; k++) {
+				unsigned long long rs = regs[k].rs + base;
+				unsigned long long re = regs[k].re + base;
+				unsigned long long cs = (va > rs) ? va : rs;
+				unsigned long long ce = (seg_end < re) ?
+							seg_end : re;
+				unsigned long long foff, d;
+
+				if (cs >= ce)
+					continue;
+				foff = p->p_offset + (cs - va);
+				if (__builtin_memcmp((char *)section +
+						     offs[k] + (cs - rs),
+						     img + foff,
+						     ce - cs) == 0)
+					continue;
+				for (d = 0; d < ce - cs; d++)
+					if (((const unsigned char *)section)
+					    [offs[k] + (cs - rs) + d] !=
+					    ((const unsigned char *)img)
+					    [foff + d])
+						break;
+				uml_nt_elf_verify_bad = 1;
+				uml_nt_elf_verify_region = k;
+				uml_nt_elf_verify_off =
+					offs[k] + (cs - rs);
+				uml_nt_elf_verify_file_off = foff;
+				uml_nt_elf_verify_len = ce - cs;
+				uml_nt_elf_verify_diff = d;
+				uml_nt_elf_verify_want =
+					((const unsigned char *)img)
+					[foff + d];
+				uml_nt_elf_verify_got =
+					((const unsigned char *)section)
+					[offs[k] + (cs - rs) + d];
+				break;
+			}
+		}
 	}
 
 	/* ---- publish out + one VMA per region (fresh, no COW) ---- */
