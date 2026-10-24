@@ -3338,6 +3338,139 @@ static int uml_nt_sample_marshal_shape(struct uml_nt_stub_conn *c,
 	return uml_nt_sample_rip_in_image(c, rbp);
 }
 
+/*
+ * M5.6a [pivot-dr] — the DR execute breakpoint on the interp's
+ * `_dl_find_dso_for_object` entry (Shelley 150's static walk; the
+ * sampler's evidence that the interval is ~1-2 us of guest time, i.e.
+ * unreachable by a suspend/read probe).
+ *
+ * The entry VA is derived from the conn's own VMA table: the interp is
+ * the LOWEST file-backed image whose run starts with the ELF magic and
+ * whose header is ET_DYN (self-validating — a wrong pick simply never
+ * arms). Slot 2 of the DR set carries the execute breakpoint; the v13
+ * write slots keep slots 0/1 (and 3 for the arena heads).
+ */
+#define UML_NT_DR_EXEC_SLOT 2
+#define UML_NT_DLDSO_ENTRY_OFF 0xb490ull
+
+static int uml_nt_run_is_elf_dyn(struct uml_nt_stub_conn *c,
+				 unsigned long long va)
+{
+	long long ro = uml_nt_vma_translate(c->mm, va, 1);
+	const unsigned char *p;
+	unsigned int magic, type;
+
+	if (ro < 0)
+		return 0;
+	p = (const unsigned char *)uml_boot.physmem_base + ro;
+	magic = (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+		((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+	if (magic != 0x464c457fu) /* "\x7fELF" */
+		return 0;
+	type = (unsigned int)p[16] | ((unsigned int)p[17] << 8); /* e_type */
+	return type == 3; /* ET_DYN */
+}
+
+/* The lowest ELF-DYN image VMA's base + the entry offset, or 0. */
+static unsigned long long uml_nt_interp_entry_va(struct uml_nt_stub_conn *c)
+{
+	unsigned long long best = 0;
+	int i;
+
+	if (c->mm == NULL)
+		return 0;
+	for (i = 0; i < c->mm->nvma; i++) {
+		struct uml_nt_vma *v = &c->mm->vma[i];
+
+		/* the entry must live inside this VMA */
+		if (v->start + UML_NT_DLDSO_ENTRY_OFF >= v->end)
+			continue;
+		if (!(v->flags & UML_NT_VMA_FILE))
+			continue;
+		if (!uml_nt_run_is_elf_dyn(c, v->start))
+			continue;
+		if (best == 0 || v->start < best)
+			best = v->start;
+	}
+	if (best == 0)
+		return 0;
+	return best + UML_NT_DLDSO_ENTRY_OFF;
+}
+
+/* Arm the execute breakpoint (idempotent; re-asserted every release so
+ * a v13 arm cannot steal the slot). */
+void uml_nt_dr_exec_arm(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+
+	if (d == NULL || c->mm == NULL || c->imgw_n <= 0 ||
+	    !uml_nt_conn_is_login(c))
+		return;
+	if (c->dr_exec_va == 0)
+		c->dr_exec_va = uml_nt_interp_entry_va(c);
+	if (c->dr_exec_va == 0)
+		return;
+	d->dr_watch[UML_NT_DR_EXEC_SLOT] = c->dr_exec_va;
+	d->dr_exec_mask |= 1u << UML_NT_DR_EXEC_SLOT;
+	if (!c->dr_exec_armed) {
+		c->dr_exec_armed = 1;
+		os_info("[pivot-dr] pid %lu %s EXEC BREAKPOINT armed at "
+			"0x%llx (interp _dl_find_dso_for_object entry, "
+			"file 0xb490) — every call reports its argument\n",
+			(unsigned long)c->pid, c->exec_path,
+			c->dr_exec_va);
+	}
+}
+
+/* One execute-breakpoint round: the state at the ENTRY, before its
+ * first instruction. rdi is the `addr` argument, [rsp] the caller's
+ * return address — the two facts the pivot hunt needs. */
+static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	unsigned long long rdi = d->regs.rdi;
+	unsigned long long rsi = d->regs.rsi;
+	unsigned long long ret = 0;
+	long long so;
+	int arg_text = uml_nt_resume_rsp_wild(c, rdi) ||
+		       uml_nt_resume_rsp_wild(c, rsi);
+	static int exec_budget = 64;
+
+	c->dr_exec_hits++;
+	so = uml_nt_vma_translate(c->mm, d->regs.rsp, 8);
+	if (so >= 0)
+		ret = *(const unsigned long long *)(const void *)
+			((char *)uml_boot.physmem_base + so);
+	/* Log every hit for the first few (the call cadence), then only
+	 * the interesting ones: a TEXT-shaped argument is the bad call
+	 * this hunt is about (a byte-shifted addr handed to the loader's
+	 * DSO lookup). */
+	if (exec_budget > 0 && (c->dr_exec_hits <= 8 || arg_text)) {
+		exec_budget--;
+		os_info("[pivot-dr] pid %lu %s ENTRY hit #%u rip=0x%llx "
+			"rdi=0x%llx rsi=0x%llx rsp=0x%llx rbp=0x%llx "
+			"rbx=0x%llx ret=0x%llx%s\n",
+			(unsigned long)c->pid, c->exec_path,
+			c->dr_exec_hits, d->regs.rip, rdi, rsi,
+			d->regs.rsp, d->regs.rbp, d->regs.rbx, ret,
+			arg_text ? " [TEXT-SHAPED ARG — the bad call]" : "");
+	}
+	if (arg_text) {
+		/* The caller's frame: the slot the bad value was loaded
+		 * from is in here (or in a register the caller still
+		 * holds — rbp/rbx of this frame). */
+		if (d->regs.rsp > 0x80 && c->mm != NULL)
+			dump_guest_bytes(c->mm, d->regs.rsp - 0x80, 0x200,
+					 "dr-exec-caller");
+		os_info("[pivot-dr] pid %lu %s BAD CALL: entry 0x%llx with "
+			"rdi=0x%llx (text-shaped), caller ret=0x%llx "
+			"rbp=0x%llx rbx=0x%llx — the array this call marshals "
+			"lands in image text\n",
+			(unsigned long)c->pid, c->exec_path,
+			c->dr_exec_va, rdi, ret, d->regs.rbp, d->regs.rbx);
+	}
+}
+
 unsigned int uml_nt_sample_burst(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
@@ -8185,6 +8318,16 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		static int cowbreak_seen;
 		static int watch_budget = 48;
 
+		/* M5.6a [pivot-dr]: a DR execute-breakpoint round — the
+		 * state at the interp's DSO-lookup entry, BEFORE its first
+		 * instruction. Pure observation: answer NONE. */
+		if (d->fault_type == UML_NT_FAULT_EXEC) {
+			uml_nt_dr_exec_round(c);
+			d->action = UML_STUB_ACTION_NONE;
+			d->err = 0;
+			return 0;
+		}
+
 		/* M5.6a [pivot trace]: a TF single-step round — the guest
 		 * executed exactly one instruction since the last resume.
 		 * Log it, decide, resume (TF re-raised by the stub while the
@@ -10289,6 +10432,11 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * point. */
 	if (uml_nt_sample_should_arm(c))
 		uml_nt_sample_arm(c);
+	/* M5.6a [pivot-dr]: the execute breakpoint is armed on the first
+	 * release of a login conn and re-asserted on every one (a v13
+	 * tcache arm may claim slots 0/1/3; slot 2 always comes back). */
+	if (c->imgw_n > 0 && c->d->action == UML_STUB_ACTION_NONE)
+		uml_nt_dr_exec_arm(c);
 	/* M5.6a login-depth follow-up (Shelley 149): the RESUME answer —
 	 * only a NONE answer releases the stub out of its VEH back into
 	 * guest code, and only a real trap (or the op drain that ends

@@ -358,6 +358,20 @@ struct uml_nt_stub_data {
 	 * the witness observes, never alters). */
 	unsigned long long dr_watch[4];
 	unsigned long long dr_heap_lo, dr_heap_hi;
+	/* -- v19: the EXECUTE breakpoint (M5.6a [pivot-dr]) -----------
+	 * The sampler proved the pivot interval is ~1-2 us of guest
+	 * time — far shorter than one SuspendThread/GetThreadContext
+	 * probe (~10 us) — so sampling cannot land inside it. A DR
+	 * EXECUTE breakpoint can: armed on the interp's
+	 * _dl_find_dso_for_object entry (file offset 0xb490), it fires
+	 * BEFORE the first instruction of every call, which is exactly
+	 * the state the pivot hunt needs (rdi = the addr argument, and
+	 * the caller's return address on the stack). dr_exec_mask = 1
+	 * bit per slot: set = that slot is an execute breakpoint
+	 * (Dr7 RW=00 LEN=00), clear = the v13 write watchpoint
+	 * (RW=01 LEN=10). */
+	u32_nt dr_exec_mask;
+	u32_nt _pad_dr_exec;
 	/* -- v14: the stray #DB ledger (M5.6a K7 slice D) --------------
 	 * A #DB the replay window does not admit — nothing armed, or a
 	 * rip neither inside the TF trampoline, at the store's door, nor

@@ -586,6 +586,15 @@ struct uml_nt_stub_conn {
 	unsigned long long smp_prev_rdi, smp_prev_rsi, smp_prev_rbx;
 	int smp_prev_valid;
 	unsigned int smp_in_text;
+	/* M5.6a [pivot-dr]: the interp's _dl_find_dso_for_object entry
+	 * VA (0xb490 in file terms) armed as a DR EXECUTE breakpoint on
+	 * slot 2. The sampler proved the interval is ~1-2 us of guest
+	 * time — shorter than one suspend/read probe — so the breakpoint
+	 * is the deterministic way in: it fires BEFORE the entry's first
+	 * instruction with rdi = the addr argument. */
+	unsigned long long dr_exec_va;
+	unsigned int dr_exec_armed;
+	unsigned int dr_exec_hits;
 	/* GetThreadContext target: 0x4d0 bytes (x64 CONTEXT), 16-aligned.
 	 * Per-conn because two kernel tasks may serve two stubs at once —
 	 * a shared static buffer would hand one conn's registers to the

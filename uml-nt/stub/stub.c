@@ -59,6 +59,9 @@
  * needs is pinned here — keep in sync with fault.h. */
 #define UML_NT_FAULT_WATCHPT 0x10u
 #define UML_NT_FAULT_STEP 0x20u /* keep in sync with fault.h */
+#define UML_NT_FAULT_EXEC 0x40u /* v19 DR execute breakpoint hit
+				 * (delivered BEFORE the instruction;
+				 * fault_addr = the entry rip) */
 
 /* Fixed stub_data placement: BELOW the guest span, mapped before
  * anything else — see the bootstrap comment. */
@@ -615,6 +618,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	int is_fault = (er->ExceptionCode == STATUS_ACCESS_VIOLATION);
 	int is_watch = 0;
 	int is_step = 0;
+	int is_exec = 0;
 	unsigned long long watch_va = 0;
 	int verbatim;
 
@@ -650,6 +654,19 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			unsigned long long v = 0, slot_va;
 
 			slot_va = d->dr_watch[slot];
+			/* v19 EXECUTE breakpoint ([pivot-dr]): the #DB is
+			 * delivered BEFORE the instruction executes, so
+			 * c->Rip IS the watched entry — publish this state
+			 * as its own round (fault_type EXEC) and let the
+			 * kernel decide. No qword read, no churn filter:
+			 * an execute hit has no value semantics. */
+			if (d->dr_exec_mask & (1u << slot)) {
+				d->fault_addr = (unsigned long long)
+					(uintptr_t)c->Rip;
+				d->fault_type = UML_NT_FAULT_EXEC;
+				is_exec = 1;
+				c->Dr6 = 0;
+			} else
 			if (veh_readable(slot_va)) {
 				guest_read_site = 3;
 				v = *(volatile unsigned long long *)
@@ -892,7 +909,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	 * WATCHPT); treating it as unowned returns CONTINUE_SEARCH and
 	 * Windows kills the process with 0x80000004 before the kernel
 	 * sees the tear. */
-	if (!is_syscall && !is_fault && !is_watch && !is_step) {
+	if (!is_syscall && !is_fault && !is_watch && !is_step && !is_exec) {
 		report_unowned(er, c);
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
@@ -997,7 +1014,10 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		 * faulting VA. A v13 watchpoint report carries the
 		 * watched VA + the WATCHPT marker instead (the
 		 * ExceptionInformation of a #DB is meaningless). */
-		if (is_step) {
+		if (is_exec) {
+			/* v19: fault_addr/fault_type already carry the
+			 * entry VA + the EXEC class. */
+		} else if (is_step) {
 			d->fault_addr = 0;
 			d->fault_type = UML_NT_FAULT_STEP;
 		} else if (is_watch) {
@@ -1025,18 +1045,27 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	/* v13: re-assert the watchpoints at every resume — the context
 	 * restore is wholesale, so a slot left over from an earlier
 	 * round without a fresh dr_watch would watch a stale VA.
-	 * DR7: L0-L3 local enable (0x55) + RWn=01 (write) +
-	 * LENn=10 (8 bytes) per slot -> 0x99990000. */
-	if (d->dr_watch[0] | d->dr_watch[1] | d->dr_watch[2] |
-	    d->dr_watch[3]) {
+	 * v19: a slot listed in dr_exec_mask is an EXECUTE breakpoint
+	 * (LEN/RW = 00); every other armed slot keeps the v13 write
+	 * watchpoint shape (RW=01 write, LEN=10 = 8 bytes). One Dr7
+	 * built from the slots keeps both instruments honest. */
+	{
+		unsigned long long dr7 = 0;
+		int si;
+
+		for (si = 0; si < 4; si++) {
+			if (d->dr_watch[si] == 0)
+				continue;
+			dr7 |= 1ull << (2 * si);	/* Ln: local enable */
+			if (!(d->dr_exec_mask & (1u << si)))
+				dr7 |= 0x9ull << (16 + 4 * si);
+		}
 		c->Dr0 = (DWORD64)d->dr_watch[0];
 		c->Dr1 = (DWORD64)d->dr_watch[1];
 		c->Dr2 = (DWORD64)d->dr_watch[2];
 		c->Dr3 = (DWORD64)d->dr_watch[3];
 		c->Dr6 = 0;
-		c->Dr7 = 0x99990055;
-	} else {
-		c->Dr7 = 0;
+		c->Dr7 = dr7;
 	}
 	c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
 
