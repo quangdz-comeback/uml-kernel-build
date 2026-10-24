@@ -242,33 +242,6 @@ __attribute__((naked)) static void fs_trampoline_fault_tf(void)
 	);
 }
 
-/* Syscall-resume TF variant (stub_nt.h v18, the [pivot trace]): the
- * same idea on the syscall path — d->tf_trace arms a single-step trace
- * on THIS resume, so TF must rise AFTER the wrfsbase (a TF in the VEH
- * context would #DB on wrfsbase, inside the trampoline). Flags live on
- * a private slot for the same reason as the fault variant; r11 still
- * ends as the guest's RFLAGS value (hardware contract), just after the
- * flag flip instead of before. fs_tramp_sys_tf_end bounds the body for
- * the VEH's hop window. */
-extern const unsigned char fs_tramp_sys_tf_end[];
-__attribute__((naked)) static void fs_trampoline_sys_tf(void)
-{
-	__asm__ volatile (
-		"movq\tfs_tramp_base(%rip), %r11\n\t"
-		"wrfsbase %r11\n\t"
-		"movq\t%rsp, fs_tramp_rsp(%rip)\n\t"
-		"leaq\tfs_tramp_tfslot+8(%rip), %rsp\n\t"
-		"pushfq\n\t"
-		"orq\t$0x100, (%rsp)\n\t"
-		"popfq\n\t"
-		"movq\tfs_tramp_rsp(%rip), %rsp\n\t"
-		"movq\tfs_tramp_eflags(%rip), %r11\n\t"
-		"jmp\t*fs_tramp_target(%rip)\n\t"
-		".globl fs_tramp_sys_tf_end\n"
-		"fs_tramp_sys_tf_end:\n\t"
-	);
-}
-
 /* FILE_MAP_* bits for a view with `prot` protection. FILE_MAP_EXECUTE
  * (0x20) must ride along on every executable view (M2.1 pitfall 9:
  * without it the first fetch dies with a DEP AV, info[0]=8).
@@ -663,26 +636,13 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	 * no round-trip); anything else = the tear — report it down
 	 * the FAULT flow with fault_type = UML_NT_FAULT_WATCHPT. */
 	if (er->ExceptionCode == STATUS_SINGLE_STEP) {
-		/* The hop window spans BOTH TF trampolines (the fault
-		 * replay and the v18 syscall trace): a #DB inside either
-		 * body is a hop, re-raise TF and go on. The two bodies are
-		 * emitted back to back; a bounding range is enough — a #DB
-		 * in the (empty) gap would simply be re-raised too. */
 		unsigned long long tf_lo = (unsigned long long)(uintptr_t)
 			&fs_trampoline_fault_tf;
 		unsigned long long tf_hi = (unsigned long long)(uintptr_t)
-			fs_tramp_sys_tf_end;
+			fs_tramp_tf_end;
 		unsigned long long dr6 = c->Dr6;
-		int cls;
-
-		if ((unsigned long long)(uintptr_t)&fs_trampoline_sys_tf <
-		    tf_lo)
-			tf_lo = (unsigned long long)(uintptr_t)
-				&fs_trampoline_sys_tf;
-		if ((unsigned long long)(uintptr_t)fs_tramp_tf_end > tf_hi)
-			tf_hi = (unsigned long long)(uintptr_t)fs_tramp_tf_end;
-		cls = uml_nt_ss_classify(dr6, d->ss_page, c->Rip,
-					 fs_tramp_target, tf_lo, tf_hi);
+		int cls = uml_nt_ss_classify(dr6, d->ss_page, c->Rip,
+					     fs_tramp_target, tf_lo, tf_hi);
 
 		if (cls == UML_NT_SS_DR_HIT) {
 			int slot = (dr6 & 1) ? 0 : (dr6 & 2) ? 1 :
@@ -744,7 +704,11 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			c->EFlags |= (DWORD)0x100;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
-		if (d->tf_trace != 0) {
+		if (d->tf_trace != 0 &&
+		    (unsigned long long)(uintptr_t)c->Rip >=
+			(unsigned long long)d->ram_base &&
+		    (unsigned long long)(uintptr_t)c->Rip <
+			(unsigned long long)d->ram_base + d->ram_size) {
 			/* v18 TF trace (Shelley 149 [resume-regs] verdict):
 			 * a deliberate single step — the #DB this stub asked
 			 * for (TF raised by the resume trampoline), nothing
@@ -1141,20 +1105,25 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		 * r11 as scratch and touches nothing else). Without
 		 * TLS this stays the plain resume the
 		 * M1.9–M3.7 gates have always run. */
-		if (d->fs_base != 0 && have_fsgsbase) {
+		if (d->tf_trace != 0) {
+			/* v18 [pivot trace]: the arming resume raises TF in the
+			 * CONTEXT and jumps straight to the target. A TF
+			 * TRAMPOLINE here (popfq on the private slot) killed the
+			 * stub deterministically at __close+2 — referees
+			 * 40087549677/40087556353 both died with an unhandled
+			 * STATUS_SINGLE_STEP right after the arming, so the hop
+			 * dance is not safe on this path. Cost: the one traced
+			 * instruction runs with the TLS base wiped; if it needs
+			 * fs it faults and the D18 fixup re-executes it (which
+			 * spends TF and ends the trace, logged via tf_stop). */
+			c->EFlags |= 0x100;
+			c->Rip = (DWORD64)target;
+		} else if (d->fs_base != 0 && have_fsgsbase) {
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = target;
 			fs_tramp_eflags = uml_nt_ss_resume_flags(c->EFlags);
-			/* v18 [pivot trace]: TF rises after the wrfsbase,
-			 * so the traced instruction runs with the guest's
-			 * TLS base live (the plain context flag would #DB
-			 * on wrfsbase itself). */
-			c->Rip = (DWORD64)(uintptr_t)
-				(d->tf_trace != 0 ? &fs_trampoline_sys_tf
-						  : &fs_trampoline_sys);
+			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_sys;
 		} else {
-			if (d->tf_trace != 0)
-				c->EFlags |= 0x100;
 			c->Rip = (DWORD64)target;
 		}
 		d->resume_rip = target;
