@@ -275,7 +275,7 @@ extern unsigned long raw_copy_to_user(void *to, const void *from,
  * The delivery here is the task's own — force_sig_fault (the fault
  * path's SIGSEGV) and the generic send-signal syscalls mark
  * TIF_SIGPENDING on THIS task; the POC conns never reach this. */
-void uml_nt_signal_check(struct uml_nt_stub_conn *c)
+int uml_nt_signal_check(struct uml_nt_stub_conn *c)
 {
 	struct uml_pt_regs *regs = c->owner_regs;
 	struct uml_nt_stub_data *d = c->d;
@@ -284,6 +284,7 @@ void uml_nt_signal_check(struct uml_nt_stub_conn *c)
 	struct uml_nt_uacc_sink prev_sink;
 	unsigned long long rip_before;
 	unsigned long long true_sp;
+	int pushed = 0;
 
 	if (!c->sig_regs_current) {
 		/* Syscall-shaped rounds resume past the ud2 (the stub
@@ -443,8 +444,10 @@ void uml_nt_signal_check(struct uml_nt_stub_conn *c)
 		g->rip = REGS_IP(regs->gp);
 		g->rflags = uml_nt_ss_resume_flags(REGS_EFLAGS(regs->gp));
 		d->xstate_flags |= UML_STUB_XS_VERBATIM;
+		pushed = 1;
 	}
 	c->push_verbatim = 0;
+	return pushed;
 }
 
 /* M4.2 fork prep: the generic fork's copy_thread memcpy's
@@ -612,6 +615,111 @@ void userspace(struct uml_pt_regs *regs)
 									uv->prot, uv->flags,
 									urun);
 							uml_nt_uacc_towrite_dump(urun);
+							/* Death-time imgwatch: is
+							 * this run still the loaded
+							 * image? MATCH = the wild
+							 * entry came from control
+							 * flow or a view/table
+							 * divergence; MISMATCH =
+							 * a rewritten page. */
+							uml_nt_imgwatch_death_check(c,
+										    urun);
+						}
+						/* v16 (resume-boundary
+						 * milestone): the state the
+						 * STUB itself saw. The
+						 * kernel's table view is
+						 * printed next to it — a
+						 * divergence names the
+						 * stale view; the stack
+						 * ledger names a funnel
+						 * write into the transfer's
+						 * return slot. */
+						if (c->d->unowned_v16 == 1) {
+							unsigned long long *r =
+								c->d->unowned_regs;
+							unsigned long long *sk =
+								c->d->unowned_stk;
+							unsigned long long tq0 = 0, tq1 = 0,
+								tq2 = 0, tq3 = 0;
+							unsigned long long tins = 0;
+
+							os_info("[stubtest] UNOWNED "
+								"regs(stub) rax=%llx "
+								"rcx=%llx rdx=%llx "
+								"rbx=%llx rbp=%llx "
+								"rsi=%llx rdi=%llx\n",
+								r[0], r[1], r[2], r[3],
+								r[5], r[6], r[7]);
+							os_info("[stubtest] UNOWNED "
+								"regs(stub) r8=%llx "
+								"r9=%llx r10=%llx "
+								"r11=%llx r12=%llx "
+								"r13=%llx r14=%llx "
+								"r15=%llx flags=%llx\n",
+								r[8], r[9], r[10], r[11],
+								r[12], r[13], r[14],
+								r[15],
+								c->d->unowned_flags);
+							if (c->mm != NULL) {
+								long long ti =
+									uml_nt_vma_translate(
+										c->mm,
+										c->d->unowned_rip, 8);
+
+								if (ti >= 0)
+									__builtin_memcpy(&tins,
+									       (char *)uml_boot.physmem_base +
+									       ti, 8);
+							}
+							os_info("[stubtest] UNOWNED "
+								"insn(stub)=%016llx "
+								"table=%016llx ok=%u\n",
+								c->d->unowned_insn, tins,
+								c->d->unowned_insn_ok);
+							if (c->mm != NULL) {
+								long long si =
+									uml_nt_vma_translate(
+										c->mm,
+										c->d->unowned_rsp, 8);
+
+								if (si >= 0) {
+									char *bp =
+										(char *)uml_boot.physmem_base + si;
+
+									__builtin_memcpy(&tq0, bp, 8);
+									__builtin_memcpy(&tq1, bp + 8, 8);
+									__builtin_memcpy(&tq2, bp + 16, 8);
+									__builtin_memcpy(&tq3, bp + 24, 8);
+								}
+							}
+							os_info("[stubtest] UNOWNED "
+								"stk(stub) 0x%llx (%u): "
+								"%016llx %016llx "
+								"%016llx %016llx "
+								"%016llx %016llx "
+								"%016llx %016llx\n",
+								c->d->unowned_rsp,
+								c->d->unowned_stk_n,
+								sk[0], sk[1], sk[2], sk[3],
+								sk[4], sk[5], sk[6], sk[7]);
+							os_info("[stubtest] UNOWNED "
+								"stk(table) 0x%llx: "
+								"%016llx %016llx "
+								"%016llx %016llx\n",
+								c->d->unowned_rsp,
+								tq0, tq1, tq2, tq3);
+							if (c->mm != NULL) {
+								long long so =
+									uml_nt_vma_translate(
+										c->mm,
+										c->d->unowned_rsp, 1);
+
+								if (so >= 0)
+									uml_nt_uacc_towrite_dump(
+										((unsigned long long)so) &
+										~(UML_NT_PHYS_RUN_SIZE - 1));
+							}
 						}
 					}
 					os_dump_core();

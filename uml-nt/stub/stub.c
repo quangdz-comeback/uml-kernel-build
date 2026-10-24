@@ -53,6 +53,7 @@
 #include <io.h>
 
 #include "../kernel/overlay/arch/um/include/shared/stub_nt.h"
+#include "resume_model.h"
 #include "../kernel/overlay/arch/um/include/shared/ss_model.h"
 /* fault.h drags vma.h (kernel-side); the one constant the stub
  * needs is pinned here — keep in sync with fault.h. */
@@ -430,6 +431,58 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 			(unsigned long long)er->ExceptionInformation[0] : 0;
 		d->unowned_addr = er->NumberParameters > 1 ?
 			(unsigned long long)er->ExceptionInformation[1] : 0;
+		/* v16 (resume-boundary milestone): the register file, the
+		 * 8 bytes at the trap RIP and the top of the stack — all
+		 * through the STUB's own view. A corrupted return slot
+		 * (or a view/table divergence) is invisible from the
+		 * kernel side alone. */
+		{
+			unsigned long long regs[16] = {
+				c->Rax, c->Rcx, c->Rdx, c->Rbx,
+				c->Rsp, c->Rbp, c->Rsi, c->Rdi,
+				c->R8, c->R9, c->R10, c->R11,
+				c->R12, c->R13, c->R14, c->R15 };
+			MEMORY_BASIC_INFORMATION mb;
+			unsigned long long va;
+			int i;
+
+			for (i = 0; i < 16; i++)
+				d->unowned_regs[i] = regs[i];
+			d->unowned_flags = (unsigned long long)c->EFlags;
+			d->unowned_insn = 0;
+			d->unowned_insn_ok = 0;
+			va = (unsigned long long)c->Rip;
+			memset(&mb, 0, sizeof(mb));
+			if (VirtualQuery((void *)(uintptr_t)va, &mb,
+					 sizeof(mb)) == sizeof(mb) &&
+			    mb.State == MEM_COMMIT &&
+			    !(mb.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+			    va + 8 <= (uintptr_t)mb.BaseAddress +
+					  mb.RegionSize) {
+				memcpy(&d->unowned_insn,
+				       (const void *)(uintptr_t)va, 8);
+				d->unowned_insn_ok = 1;
+			}
+			d->unowned_stk_n = 0;
+			for (i = 0; i < 16; i++) {
+				va = (unsigned long long)c->Rsp +
+				     (unsigned long long)i * 8;
+				memset(&mb, 0, sizeof(mb));
+				if (VirtualQuery((void *)(uintptr_t)va, &mb,
+						 sizeof(mb)) != sizeof(mb) ||
+				    mb.State != MEM_COMMIT ||
+				    (mb.Protect &
+				     (PAGE_NOACCESS | PAGE_GUARD)) ||
+				    va + 8 > (uintptr_t)mb.BaseAddress +
+					     mb.RegionSize)
+					continue;
+				memcpy(&d->unowned_stk[i],
+				       (const void *)(uintptr_t)va, 8);
+				d->unowned_stk_n = (unsigned int)i + 1;
+			}
+		}
+		MemoryBarrier();
+		d->unowned_v16 = 1;
 		MemoryBarrier();
 		d->unowned_seq = 1;
 	}
@@ -474,11 +527,11 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
  * the process dies 0xC0000005 (referee 37205147552: a leaked viewprobe
  * address read through a NOACCESS page). Every guest read the handler
  * performs on its own behalf goes through this first. */
-static int veh_readable(unsigned long long va)
+static int veh_readable_n(unsigned long long va, unsigned long long len)
 {
 	MEMORY_BASIC_INFORMATION mb;
 
-	if (va == 0 ||
+	if (va == 0 || len == 0 ||
 	    VirtualQuery((void *)(uintptr_t)va, &mb, sizeof(mb)) !=
 		    sizeof(mb))
 		return 0;
@@ -486,7 +539,49 @@ static int veh_readable(unsigned long long va)
 		return 0;
 	if (mb.Protect & (PAGE_NOACCESS | PAGE_GUARD))
 		return 0;
-	return va + 8 <= (uintptr_t)mb.BaseAddress + mb.RegionSize;
+	return va + len <= (uintptr_t)mb.BaseAddress + mb.RegionSize;
+}
+
+static int veh_readable(unsigned long long va)
+{
+	return veh_readable_n(va, 8);
+}
+
+/* The resume-boundary gate's loud line (M5.6a writer-hunt follow-up):
+ * an illegal instruction off the D20 sentinel (resume_model.h) is NOT
+ * a syscall. Before this gate the VEH dispatched it anyway — rax as
+ * the nr, resume at rip+2 — which turned one wild control transfer
+ * into a cascade (ab boot: nr=0x6001b560, then nr=-ENOSYS, then the
+ * store to -ENOSYS). The process dies unowned either way; the record
+ * names the trap site and the bytes the stub actually saw. */
+static void report_syscall_misclass(const EXCEPTION_RECORD *er,
+				    const CONTEXT *c,
+				    const unsigned char *ib)
+{
+	static int misclass_budget = 8;
+	static char line[384];
+	DWORD wrote;
+	int n;
+
+	if (misclass_budget <= 0)
+		return;
+	misclass_budget--;
+	n = snprintf(line, sizeof(line),
+		     "stub: SYSCALL-MISCLASS rip=%llx insn=%02x %02x %02x "
+		     "%02x %02x %02x %02x %02x rax=%llx rsp=%llx "
+		     "code=%08lx last_cmd=%u — illegal instruction off the "
+		     "ud2 sentinel; NOT dispatching a syscall\n",
+		     (unsigned long long)c->Rip,
+		     ib[0], ib[1], ib[2], ib[3], ib[4], ib[5], ib[6], ib[7],
+		     (unsigned long long)c->Rax,
+		     (unsigned long long)c->Rsp,
+		     (unsigned long)er->ExceptionCode,
+		     d != NULL ? (unsigned)d->cmd : 0);
+	if (n > 0)
+		WriteFile(GetStdHandle(STD_ERROR_HANDLE), line,
+			  (DWORD)(n < (int)sizeof(line) ? n :
+				  (int)sizeof(line) - 1),
+			  &wrote, NULL);
 }
 
 /* The stray #DB ledger (stub_nt.h v14): the event the kernel prints
@@ -514,7 +609,8 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	EXCEPTION_RECORD *er = ep->ExceptionRecord;
 	CONTEXT *c = ep->ContextRecord;
-	int is_syscall = (er->ExceptionCode == STATUS_ILLEGAL_INSTRUCTION);
+	int is_illegal = (er->ExceptionCode == STATUS_ILLEGAL_INSTRUCTION);
+	int is_syscall = 0;
 	int is_fault = (er->ExceptionCode == STATUS_ACCESS_VIOLATION);
 	int is_watch = 0;
 	unsigned long long watch_va = 0;
@@ -740,6 +836,37 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		}
 		/* is_watch: fall through into the common report flow */
 	}
+	/* The resume-boundary gate (resume_model.h): STATUS_ILLEGAL_
+	 * INSTRUCTION is a syscall ONLY at the D20 sentinel (0f 0b).
+	 * Any other illegal instruction is a WILD entry — the observed
+	 * login-depth class (ld-linux 0xb57d/0xb582/0xb5b8/0xb5bb are
+	 * all mid-instruction). Dispatching it would use rax as a
+	 * syscall nr and resume at rip+2, advancing further off the
+	 * boundary; report it unowned instead and never touch rip. */
+	if (is_illegal) {
+		unsigned char ib[8];
+		unsigned long long rip = (unsigned long long)c->Rip;
+		int readable = veh_readable_n(rip, 2);
+
+		memset(ib, 0, sizeof(ib));
+		if (veh_readable_n(rip, 8)) {
+			guest_read_site = 4;
+			memcpy(ib, (const void *)(uintptr_t)rip, 8);
+			guest_read_site = 0;
+		} else if (readable) {
+			guest_read_site = 4;
+			memcpy(ib, (const void *)(uintptr_t)rip, 2);
+			guest_read_site = 0;
+		}
+		if (uml_nt_resume_illegal_is_syscall(1, readable, ib)) {
+			is_syscall = 1;
+		} else {
+			report_syscall_misclass(er, c, ib);
+			report_unowned(er, c);
+			return EXCEPTION_CONTINUE_SEARCH;
+		}
+	}
+
 	/* A v13 watchpoint report arrives as STATUS_SINGLE_STEP, not an
 	 * access fault. It must take the FAULT flow below (fault_type =
 	 * WATCHPT); treating it as unowned returns CONTINUE_SEARCH and

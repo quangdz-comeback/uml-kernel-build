@@ -46,6 +46,7 @@
 #include <stub-panic.h>
 #include <stub_nt.h>
 #include <ss_model.h>
+#include <resume_model.h>
 
 #include <os.h>
 #include <syscall.h>
@@ -2430,6 +2431,48 @@ void uml_nt_imgwatch_capture(struct uml_nt_stub_conn *c,
 #define UML_NT_CENSUS_TOP 3
 static int census_pressure_left = 8;
 static int imgw_fire_left = 32;
+
+/* Death-time imgwatch check (M5.6a writer-hunt follow-up): the run
+ * the victim's unowned RIP translates through, re-hashed against the
+ * post-load fingerprint. The periodic census can miss a rewrite that
+ * lands after its last walk and kills before the next one (referee
+ * 40013998474: a death with zero imgwatch lines). MATCH exonerate
+ * the page — the death then came from a control transfer or a
+ * view/table divergence; MISMATCH names the rewritten-text class at
+ * the exact run the victim died on. */
+void uml_nt_imgwatch_death_check(struct uml_nt_stub_conn *c,
+				 unsigned long long run)
+{
+	int i;
+
+	if (c == NULL || c->ph == NULL || run == 0)
+		return;
+	for (i = 0; i < c->imgw_n; i++) {
+		unsigned long long h, g;
+
+		if (c->imgw_run[i] != run)
+			continue;
+		g = uml_nt_phys_gen(c->ph, (long long)run);
+		if (g != c->imgw_gen[i]) {
+			os_info("[imgwatch] death: run 0x%llx gen moved "
+				"(%llx -> %llx) — re-handout, not a "
+				"post-load rewrite\n", run,
+				c->imgw_gen[i], g);
+			return;
+		}
+		h = uml_nt_imgw_hash((const void *)((const char *)
+				uml_boot.physmem_base + run));
+		os_info("[imgwatch] death: run 0x%llx %s (post-load "
+			"%016llx now %016llx)\n", run,
+			h == c->imgw_hash[i] ?
+				"MATCHES the post-load image" :
+				"REWRITTEN after load",
+			c->imgw_hash[i], h);
+		return;
+	}
+	os_info("[imgwatch] death: run 0x%llx not in this conn's "
+		"image set (%d watched run(s))\n", run, c->imgw_n);
+}
 
 void uml_nt_census(const char *tag, long long pid)
 {
@@ -6398,6 +6441,32 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
 
+	/* Resume-boundary audit (M5.6a writer-hunt follow-up): the
+	 * previous round's expected target vs the stub's own published
+	 * d->resume_rip. The fault-only form lived further down; this
+	 * covers syscall rounds and signal pushes too — the
+	 * byte-shifted-entry class starts with a resume that did not
+	 * land where the kernel said. */
+	if (c->exp_resume_valid &&
+	    (d->cmd == UML_STUB_CMD_SYSCALL ||
+	     d->cmd == UML_STUB_CMD_FAULT)) {
+		static int rbd_budget = 8;
+
+		c->exp_resume_valid = 0;
+		if (rbd_budget > 0 && d->resume_rip != 0 &&
+		    d->resume_rip != c->exp_resume_rip) {
+			rbd_budget--;
+			os_info("[resume-diverge] pid %lu %s round: "
+				"expected resume 0x%llx but the stub resumed "
+				"at 0x%llx (trap rip=0x%llx rax=0x%llx)\n",
+				(unsigned long)c->pid,
+				d->cmd == UML_STUB_CMD_SYSCALL ?
+					"syscall" : "fault",
+				c->exp_resume_rip, d->resume_rip,
+				d->regs.rip, d->regs.rax);
+		}
+	}
+
 	/* D22 quarantine: this conn's previous round's plan ops have
 	 * applied (a new request only happens after the plan drained),
 	 * so blocks it parked at drop time can return to the backend;
@@ -8391,6 +8460,22 @@ no_zero:
 	child->fs_base = parent->fs_base;
 	if (child->d != NULL)
 		child->d->fs_base = parent->fs_base;
+	/* IMGWATCH inheritance (M5.6a writer-hunt follow-up): the fork
+	 * child's mm shares the parent's image runs, but the fingerprint
+	 * array was exec-only — every forked victim reported "not in
+	 * this conn's image set" at death (the login-depth victims are
+	 * forked helpers). Same runs, same gen, same post-load hashes:
+	 * clone instead of starting empty. */
+	child->imgw_n = parent->imgw_n;
+	{
+		int gi;
+
+		for (gi = 0; gi < parent->imgw_n; gi++) {
+			child->imgw_run[gi] = parent->imgw_run[gi];
+			child->imgw_gen[gi] = parent->imgw_gen[gi];
+			child->imgw_hash[gi] = parent->imgw_hash[gi];
+		}
+	}
 	/* M5.4 c3 (map 057): arm the residue-watch — the per-round
 	 * whole-stack-VMA scan that names the round re-introducing
 	 * the fork-resume value into the child's stack (seed proven
@@ -8691,8 +8776,10 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	if (c->task_backed && c->owner_regs != NULL &&
 	    (c->d->cmd == UML_STUB_CMD_SYSCALL ||
 	     c->d->cmd == UML_STUB_CMD_FAULT)) {
+		int pushed = 0;
+
 		if (c->plan_left == 0) {
-			uml_nt_signal_check(c);
+			pushed = uml_nt_signal_check(c);
 			/* Push only when signal_check pulled THIS trap's
 			 * xstate into regs->fp. With ops in flight the
 			 * pull never ran, so regs->fp is one trap round
@@ -8706,6 +8793,23 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			 * exception FP state — exactly right. */
 			uml_nt_fp_push(c, c->owner_regs);
 		}
+		/* The resume-boundary audit's expected target: the
+		 * stub's d->resume_rip (published at its own resume) is
+		 * compared against this at the next real trap. A verbatim
+		 * push (signal/sigreturn) carries the kernel's exact rip;
+		 * otherwise a syscall advances 2, a fault replays. */
+		c->exp_resume_rip = uml_nt_resume_expected(
+			c->d->cmd == UML_STUB_CMD_SYSCALL,
+			c->d->regs.rip, pushed, c->d->regs.rip);
+		c->exp_resume_valid = 1;
+	} else if (c->d->cmd == UML_STUB_CMD_SYSCALL ||
+		   c->d->cmd == UML_STUB_CMD_FAULT) {
+		/* POC conns (no task/signals): the stub resumes by the
+		 * same arithmetic — audit them too. */
+		c->exp_resume_rip = uml_nt_resume_expected(
+			c->d->cmd == UML_STUB_CMD_SYSCALL,
+			c->d->regs.rip, 0, 0);
+		c->exp_resume_valid = 1;
 	}
 	/* M5.4 c3 (map 057): residue-watch — after the round's service
 	 * AND signal delivery (a sigframe written by signal_check is

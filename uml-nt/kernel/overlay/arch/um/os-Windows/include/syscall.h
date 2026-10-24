@@ -422,17 +422,31 @@ struct uml_nt_stub_conn {
 	 * the zeroed-ld.so-page class that killed /bin/login. gen
 	 * pins the entry to the run's handout epoch so a recycled run
 	 * never false-fires; refs==0 entries are skipped (unmapped).
-	 * COW is content-preserving, fork children start with a fresh
-	 * (zeroed) watch — no false fires by construction. */
+	 * Fork children inherit the array (same runs/gen/hashes — the
+	 * writer-hunt follow-up: forked helpers were invisible at
+	 * death). */
 	unsigned long long imgw_run[UML_NT_IMGWATCH_MAX];
 	unsigned long long imgw_gen[UML_NT_IMGWATCH_MAX];
 	unsigned long long imgw_hash[UML_NT_IMGWATCH_MAX];
 	int imgw_n;
+	/* M5.6a writer-hunt follow-up: the resume-boundary audit. The
+	 * value the kernel EXPECTED the stub to resume at after the
+	 * previous real trap round; the stub publishes its actual
+	 * d->resume_rip, and the next trap compares them ([resume-
+	 * diverge], stub_ctl.c). Covers syscall rounds too — the old
+	 * check only watched faults. */
+	unsigned long long exp_resume_rip;
+	int exp_resume_valid;
 	/* D27 lazy file regions (see struct uml_nt_lazy_region). Cloned
 	 * on fork (a child's first touch materializes into its own mm),
 	 * dropped at mmctx destroy. */
 	struct uml_nt_lazy_region lazy[UML_NT_LAZY_MAX];
 };
+
+/* M5.6a writer-hunt follow-up (stub_ctl.c): re-hash the run the
+ * victim died on against the post-load fingerprint, at death. */
+void uml_nt_imgwatch_death_check(struct uml_nt_stub_conn *c,
+				 unsigned long long run);
 
 /* D27: materialize the faulting run from the file. 1 = handled (the
  * plan carries the MAP op; the caller resumes), 0 = not a lazy
@@ -579,8 +593,10 @@ void uml_nt_fp_push(struct uml_nt_stub_conn *c, struct uml_pt_regs *regs);
  * current->thread.regs this round's state, run the generic signal
  * machinery (get_signal → do_signal → the sigframe setup), and when
  * a signal was delivered push the rewritten regs verbatim + flag the
- * stub. POC conns never call this (no task, no signals). */
-void uml_nt_signal_check(struct uml_nt_stub_conn *c);
+ * stub. POC conns never call this (no task, no signals).
+ * Returns 1 when the verbatim push happened (the kernel's exact resume
+ * target is then regs->gp.ip — the resume audit uses it). */
+int uml_nt_signal_check(struct uml_nt_stub_conn *c);
 
 /* S4d: publish one plan op into the conn's stub slot (the static
  * issue_plan_op's export — the pump-side signal delivery queues

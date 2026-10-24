@@ -353,6 +353,23 @@ struct uml_nt_stub_data {
 	unsigned long long unowned_op;   /* ExceptionInformation[0] */
 	unsigned long long unowned_addr; /* ExceptionInformation[1] */
 	unsigned long long unowned_seq;
+	/* -- v16 (resume-boundary milestone): the state that produced
+	 * the unowned exception, from the STUB's own view. v15 named
+	 * the RIP; the byte-shifted-class investigation needs the
+	 * register file (which pointer produced the entry), the 8
+	 * bytes at that RIP as the stub actually sees them (0f 0b =
+	 * laundered syscall site; foreign bytes = view/table
+	 * divergence), and the top of the stack (a corrupted return
+	 * address names the transfer). unowned_v16 written LAST. */
+	unsigned long long unowned_regs[16]; /* rax rcx rdx rbx rsp rbp rsi
+					      * rdi r8 r9 r10 r11 r12 r13
+					      * r14 r15 */
+	unsigned long long unowned_flags;
+	unsigned long long unowned_insn;   /* [rip, rip+8), stub view */
+	unsigned long long unowned_stk[16];/* [rsp, rsp+128), stub view */
+	unsigned int unowned_insn_ok;
+	unsigned int unowned_stk_n;        /* readable qwords captured */
+	unsigned long long unowned_v16;
 };
 
 #endif /* __UML_STUB_NT_H */

@@ -4424,6 +4424,29 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			os_info("[fork-entry] nr=%llu hit the DEFAULT "
 				"dispatch — arm/seed will MISS (child "
 				"spawns unseeded)\n", nr);
+		/* M5.6a writer-hunt follow-up: a nr outside the table
+		 * cannot be a guest syscall — the stub's gate should have
+		 * refused it (resume_model.h). Record the trap site and
+		 * the table's bytes: the ab boot's cascade started exactly
+		 * here (nr=0x6001b560, a code address, then nr=-ENOSYS). */
+		if (nr >= (unsigned long long)syscall_table_size /
+			  sizeof(sys_call_ptr_t)) {
+			long long bo = -1;
+			unsigned long long bq = 0;
+
+			if (c->mm != NULL)
+				bo = uml_nt_vma_translate(c->mm,
+							  d->regs.rip, 8);
+			if (bo >= 0)
+				memcpy(&bq, (char *)uml_boot.physmem_base +
+				       bo, 8);
+			os_info("[syscall-BADNR] pid %lu nr=%llu (0x%llx) "
+				"rip=0x%llx rsp=0x%llx tbl_insn=%016llx "
+				"— an illegal instruction off the ud2 "
+				"sentinel reached the dispatch\n",
+				(unsigned long)c->pid, nr, nr, d->regs.rip,
+				d->regs.rsp, bq);
+		}
 		os_info("[syscall] nr=%llu not implemented → ENOSYS "
 			"(add it: STATUS M3.7 order)\n", nr);
 		ret = SC_RET(SC_ENOSYS);
