@@ -452,6 +452,9 @@ struct uml_nt_stub_conn {
  * victim died on against the post-load fingerprint, at death. */
 void uml_nt_imgwatch_death_check(struct uml_nt_stub_conn *c,
 				 unsigned long long run);
+/* 1 when `run` is one of the conn's captured image runs. */
+int uml_nt_imgwatch_is_image(struct uml_nt_stub_conn *c,
+			     unsigned long long run);
 
 /* D27: materialize the faulting run from the file. 1 = handled (the
  * plan carries the MAP op; the caller resumes), 0 = not a lazy

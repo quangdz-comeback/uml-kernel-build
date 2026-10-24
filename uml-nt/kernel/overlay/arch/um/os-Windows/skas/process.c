@@ -384,6 +384,37 @@ int uml_nt_signal_check(struct uml_nt_stub_conn *c)
 			os_info("[stubtest] signal frame rsp fixup "
 				"EFAULT (frame %llx)\n",
 				(unsigned long long)REGS_SP(regs->gp));
+
+		/* M5.6a writer-hunt follow-up: the frame (GP snapshot +
+		 * fpstate, ~1KiB) must NEVER land in an image run. A
+		 * stack/image run alias puts it into read-only text;
+		 * the guest then executes the sigcontext as code — the
+		 * login-depth wild entries (saved rip/eflags found at
+		 * ld-linux 0xb560). Log-only, budgeted. */
+		{
+			static int sigimg_budget = 16;
+			long long fo = uml_nt_vma_translate(c->mm,
+					REGS_SP(regs->gp), 1);
+
+			if (fo >= 0 && sigimg_budget > 0) {
+				unsigned long long fr =
+					((unsigned long long)fo) &
+					~(UML_NT_PHYS_RUN_SIZE - 1);
+
+				if (uml_nt_imgwatch_is_image(c, fr)) {
+					sigimg_budget--;
+					os_info("[sigframe-image] pid %lu "
+						"frame=0x%llx run=0x%llx "
+						"true-sp=0x%llx nr=%llu — "
+						"the sigframe landed in "
+						"an image run (stack/"
+						"image alias)\n",
+						(unsigned long)c->pid,
+						REGS_SP(regs->gp), fr,
+						true_sp, c->last_nr);
+				}
+			}
+		}
 	}
 
 	uml_nt_uacc_set_mm(prev_mm);

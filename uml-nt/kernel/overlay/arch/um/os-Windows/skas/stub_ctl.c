@@ -2505,6 +2505,19 @@ void uml_nt_imgwatch_death_check(struct uml_nt_stub_conn *c,
 		"image set (%d watched run(s))\n", run, c->imgw_n);
 }
 
+int uml_nt_imgwatch_is_image(struct uml_nt_stub_conn *c,
+			     unsigned long long run)
+{
+	int i;
+
+	if (c == NULL)
+		return 0;
+	for (i = 0; i < c->imgw_n; i++)
+		if (c->imgw_run[i] == run)
+			return 1;
+	return 0;
+}
+
 void uml_nt_census(const char *tag, long long pid)
 {
 	struct task_struct *p;
