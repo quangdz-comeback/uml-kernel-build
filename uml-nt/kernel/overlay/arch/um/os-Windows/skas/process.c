@@ -583,6 +583,107 @@ void userspace(struct uml_pt_regs *regs)
 			if (w == 258u /*WAIT_TIMEOUT*/) {
 				code = 0;
 				nt->GetExitCodeProcess(c->proc, &code);
+					/* v21 (Shelley 155, witness-first): the
+					 * LAST-CHANCE record. Classification
+					 * happens HERE because only the kernel
+					 * owns the VMA tree and the view
+					 * ledger. Three branches, three
+					 * different fixes:
+					 *  (a) inside a guest VMA + no such
+					 *      view in the ledger = VIEW-HOLE
+					 *  (b) outside every VMA = a guest
+					 *      garbage pointer
+					 *  (c) outside the guest span = a
+					 *      real stub-code bug            */
+					if (c->d->unhandled_seq == 1) {
+						unsigned long long ua =
+							c->d->unhandled_addr;
+						unsigned long long ur =
+							c->d->unhandled_rip;
+						struct uml_nt_vma *uv =
+							uml_nt_vma_find(c->mm, ua);
+						struct uml_nt_vma *rv =
+							uml_nt_vma_find(c->mm, ur);
+						int vi, have_view = 0;
+
+						for (vi = 0; vi < c->nviews; vi++)
+							if (ua >= c->views[vi].va &&
+							    ua < c->views[vi].va +
+								 c->views[vi].len)
+								have_view = 1;
+						os_info("[unhandled] pid %d "
+							"code=%08llx type=%llu "
+							"addr=0x%llx rip=0x%llx "
+							"rsp=0x%llx tid=%llu "
+							"cmd=%llu args0=%llu "
+							"a1=0x%llx a2=0x%llx\n",
+							mm_id->pid,
+							c->d->unhandled_code,
+							c->d->unhandled_type,
+							ua, ur,
+							c->d->unhandled_rsp,
+							c->d->unhandled_tid,
+							c->d->unhandled_cmd,
+							c->d->unhandled_nr,
+							c->d->unhandled_args[1],
+							c->d->unhandled_args[2]);
+						os_info("[unhandled] insn "
+							"0x%llx: %016llx %016llx "
+							"(rip in %s)\n",
+							ur, c->d->unhandled_insn,
+							c->d->unhandled_insn2,
+							rv ? "a guest VMA" :
+							"NO guest VMA (stub "
+							"code or table hole)");
+						if (uv != NULL) {
+							os_info("[unhandled] "
+								"CLASS=VIEW-HOLE "
+								"addr 0x%llx is in "
+								"vma [0x%llx,0x%llx"
+								") prot=0x%x "
+								"flags=0x%x run=0x%llx "
+								"gen=0x%llx — "
+								"ledger says %s "
+								"(%d/%d views, "
+								"plan_left=%d, "
+								"nvma=%d)\n",
+								ua, uv->start,
+								uv->end, uv->prot,
+								uv->flags,
+								uv->run_off, uv->gen,
+								have_view ?
+								"a view EXISTS (stale/wrong prot?)" :
+								"NO VIEW was issued",
+								c->nviews,
+								(int)UML_NT_VIEW_MAX,
+								c->plan_left,
+								c->mm->nvma);
+						} else if (ua < (1ull << 47)) {
+							os_info("[unhandled] "
+								"CLASS=GUEST-PTR "
+								"addr 0x%llx is "
+								"outside every VMA "
+								"(guest passed a bad "
+								"pointer) — %d/%d "
+								"views, plan_left=%d, "
+								"nvma=%d\n",
+								ua, c->nviews,
+								(int)UML_NT_VIEW_MAX,
+								c->plan_left,
+								c->mm->nvma);
+						} else {
+							os_info("[unhandled] "
+								"CLASS=STUB-BUG "
+								"addr 0x%llx is "
+								"outside the guest "
+								"span — stub code "
+								"faulted; %d/%d "
+								"views, plan_left=%d\n",
+								ua, c->nviews,
+								(int)UML_NT_VIEW_MAX,
+								c->plan_left);
+						}
+					}
 				if (code != UML_NT_STILL_ACTIVE) {
 					/* The last published trap is the
 					 * last state the kernel handed or

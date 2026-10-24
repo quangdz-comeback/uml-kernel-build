@@ -410,6 +410,56 @@ static void action_chain(void)
  * exit code ("died silently"). Say where it happened, once — a static
  * buffer and one WriteFile, because the stack under us may be the
  * reason. */
+/* v21 (Shelley 155): the LAST-CHANCE record. The unowned path above
+ * runs only if the VEH sees the exception; an AV in the handler itself,
+ * on a thread without the VEH, or a second-chance AV leaves nothing at
+ * all behind ("died silently"). This filter never returns anything but
+ * EXECUTE_HANDLER, but before the process dies it publishes the raw
+ * facts: access type, faulting VA, the STUB's own rip/rsp (not the
+ * guest's), 16 instruction bytes, and the round that was in flight. */
+static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
+{
+	EXCEPTION_RECORD *er = ep ? ep->ExceptionRecord : NULL;
+	CONTEXT *c = ep ? ep->ContextRecord : NULL;
+
+	if (er != NULL && d != NULL && d->unhandled_seq == 0) {
+		d->unhandled_code = er->ExceptionCode;
+		d->unhandled_type = er->NumberParameters > 0 ?
+			(unsigned long long)er->ExceptionInformation[0] : 0;
+		d->unhandled_addr = er->NumberParameters > 1 ?
+			(unsigned long long)er->ExceptionInformation[1] : 0;
+		if (c != NULL) {
+			MEMORY_BASIC_INFORMATION mb;
+			uintptr_t va = (uintptr_t)c->Rip;
+
+			d->unhandled_rip = (unsigned long long)c->Rip;
+			d->unhandled_rsp = (unsigned long long)c->Rsp;
+			d->unhandled_flags = (unsigned long long)c->EFlags;
+			memset(&mb, 0, sizeof(mb));
+			if (VirtualQuery((void *)va, &mb, sizeof(mb)) ==
+					sizeof(mb) &&
+			    mb.State == MEM_COMMIT &&
+			    !(mb.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+			    va + 16 <= (uintptr_t)mb.BaseAddress +
+					mb.RegionSize) {
+				memcpy(&d->unhandled_insn,
+				       (const void *)va, 8);
+				memcpy(&d->unhandled_insn2,
+				       (const void *)(va + 8), 8);
+			}
+		}
+		d->unhandled_cmd = d->cmd;
+		d->unhandled_nr = d->args[0]; /* nr lives in args[0] for CMD_SYSCALL */
+		d->unhandled_args[0] = d->args[0];
+		d->unhandled_args[1] = d->args[1];
+		d->unhandled_args[2] = d->args[2];
+		d->unhandled_args[3] = d->args[3];
+		d->unhandled_tid = (unsigned long long)GetCurrentThreadId();
+		d->unhandled_seq = 1;	/* LAST */
+	}
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+
 static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 {
 	static volatile LONG reported;
@@ -1349,6 +1399,7 @@ int main(int argc, char **argv)
 		ExitProcess(111);
 	}
 
+	SetUnhandledExceptionFilter(unhandled_filter);
 	if (!AddVectoredExceptionHandler(1, veh_handler))
 		die("AddVectoredExceptionHandler", GetLastError());
 

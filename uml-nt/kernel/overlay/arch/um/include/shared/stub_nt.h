@@ -444,6 +444,32 @@ struct uml_nt_stub_data {
 	unsigned long long trap_insn;
 	unsigned int trap_insn_ok;
 	unsigned int trap_pad;
+	/* -- v21: the UNHANDLED-exception record (M5.6a STOP-POINT 155,
+	 * Shelley's witness-first ruling). "died silently (0xC0000005)"
+	 * names no address: the AV that killed the stub never reached
+	 * the VEH's unowned path. A SetUnhandledExceptionFilter hook
+	 * (last chance, any thread, including an AV inside a handler)
+	 * publishes the raw facts here and the KERNEL classifies them,
+	 * because only the kernel has the VMA tree and the view ledger:
+	 *   (a) faulting VA inside a guest VMA but no stub view
+	 *       -> VIEW-HOLE, with the VMA's run/prot/gen and the
+	 *          ledger/window occupancy,
+	 *   (b) outside every VMA   -> a guest garbage pointer,
+	 *   (c) outside the guest span -> a real stub code bug.
+	 * seq is written LAST. */
+	volatile u64_nt unhandled_seq;
+	unsigned long long unhandled_code;      /* NTSTATUS of the AV */
+	unsigned long long unhandled_type;      /* ExceptionInformation[0] */
+	unsigned long long unhandled_addr;      /* ExceptionInformation[1] */
+	unsigned long long unhandled_rip;       /* STUB-side rip */
+	unsigned long long unhandled_rsp;       /* STUB-side rsp */
+	unsigned long long unhandled_insn;      /* 16 bytes at that rip */
+	unsigned long long unhandled_insn2;
+	unsigned long long unhandled_cmd;       /* the round in flight */
+	unsigned long long unhandled_nr;        /* its syscall number */
+	unsigned long long unhandled_args[4];   /* its first four args */
+	unsigned long long unhandled_tid;
+	unsigned long long unhandled_flags;
 };
 
 #endif /* __UML_STUB_NT_H */
