@@ -370,6 +370,14 @@ struct uml_nt_stub_data {
 	unsigned int unowned_insn_ok;
 	unsigned int unowned_stk_n;        /* readable qwords captured */
 	unsigned long long unowned_v16;
+	/* v16 trap-site witness: the 8 bytes at THIS trap's RIP through
+	 * the stub's own view, published on every accepted syscall/
+	 * fault round. The kernel diffs them against its table view at
+	 * the same VA — a mismatch is a stale view at the exact place
+	 * the guest executed. */
+	unsigned long long trap_insn;
+	unsigned int trap_insn_ok;
+	unsigned int trap_pad;
 };
 
 #endif /* __UML_STUB_NT_H */

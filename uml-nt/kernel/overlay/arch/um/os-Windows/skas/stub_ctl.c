@@ -6441,6 +6441,38 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
 
+	/* Trap-site view/table diff (v16): the stub publishes the 8
+	 * bytes it actually executed at the trap RIP; the table holds
+	 * its own run's bytes at the same VA. A mismatch is a stale
+	 * view — the class that lets the guest run a foreign library's
+	 * text at an image VA (and misclassifies wild entries as
+	 * syscalls when the foreign bytes happen to be a sentinel). */
+	if ((d->cmd == UML_STUB_CMD_SYSCALL ||
+	     d->cmd == UML_STUB_CMD_FAULT) &&
+	    d->trap_insn_ok && c->mm != NULL) {
+		long long ti = uml_nt_vma_translate(c->mm, d->regs.rip, 8);
+
+		if (ti >= 0) {
+			static int vd_budget = 8;
+			unsigned long long tq;
+
+			memcpy(&tq, (char *)uml_boot.physmem_base + ti, 8);
+			if (tq != d->trap_insn && vd_budget > 0) {
+				vd_budget--;
+				os_info("[view-diverge] pid %lu %s trap "
+					"rip=0x%llx stub_insn=%016llx "
+					"tbl_insn=%016llx last_nr=%llu "
+					"last_ret=%lld — the stub's view "
+					"is not the table's run at the "
+					"trap site\n",
+					(unsigned long)c->pid,
+					d->cmd == UML_STUB_CMD_SYSCALL ?
+						"syscall" : "fault",
+					d->regs.rip, d->trap_insn, tq,
+					c->last_nr, c->last_ret);
+			}
+		}
+	}
 	/* Resume-boundary audit (M5.6a writer-hunt follow-up): the
 	 * previous round's expected target vs the stub's own published
 	 * d->resume_rip. The fault-only form lived further down; this

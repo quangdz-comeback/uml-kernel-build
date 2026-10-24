@@ -903,6 +903,25 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		ss_stray_record(c, c->Dr6, 1, (unsigned int)er->ExceptionCode);
 	gp_from_context(c, &d->regs);
 
+	/* v16 trap-site witness: publish the 8 bytes at the trap RIP
+	 * through THIS process's view. The kernel diffs them against
+	 * its table view at the same VA — a mismatch means the view
+	 * the guest executed is not the run the VMA table owns (the
+	 * stale-view class, caught at the exact trap rather than at a
+	 * later census). */
+	d->trap_insn_ok = 0;
+	{
+		unsigned long long trip = (unsigned long long)c->Rip;
+
+		if (veh_readable_n(trip, 8)) {
+			guest_read_site = 4;
+			memcpy(&d->trap_insn, (const void *)(uintptr_t)trip,
+			       8);
+			guest_read_site = 0;
+			d->trap_insn_ok = 1;
+		}
+	}
+
 	/* D18 fast path: an fs-prefixed guest access that faults below
 	 * the guest span — or WRAPPED — means the TLS base was wiped
 	 * while the guest ran. The trampoline re-applies the base at
