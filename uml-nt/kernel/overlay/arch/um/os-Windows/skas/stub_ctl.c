@@ -6666,6 +6666,25 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 							c->last_trap_rip : 0,
 						c->last_trap_valid ?
 							c->last_trap_rsp : 0);
+					/* The slip sits in the interval that just
+					 * closed: the kernel writes that round
+					 * made are still in the ledger. Dump the
+					 * previous trap rsp run's entries (a
+					 * stack writeback with a bad length/va
+					 * names itself here). */
+					if (c->last_trap_valid &&
+					    c->mm != NULL) {
+						long long po =
+							uml_nt_vma_translate(
+								c->mm,
+								c->last_trap_rsp,
+								1);
+
+						if (po >= 0)
+							uml_nt_uacc_towrite_dump(
+								((unsigned long long)po) &
+								~(UML_NT_PHYS_RUN_SIZE - 1));
+					}
 				}
 			}
 		}
