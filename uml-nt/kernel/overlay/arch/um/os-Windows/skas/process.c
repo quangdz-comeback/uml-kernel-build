@@ -91,6 +91,45 @@ int start_userspace(struct mm_id *mm_id)
  * continue path, with the VMA verdict for rip and rsp (resuming into an
  * unmapped page, or at a non-executable rip, is OUR bug, not the
  * guest's) and the CONTEXT_EX header the dispatcher itself built. */
+/* [ripvma] Where was the GUEST when the stub died? "no VMA" is a
+ * verdict, not a detail: executing in a hole is a loader/mapping bug on
+ * our side, executing in a mapped-but-non-exec page is a permission
+ * bug, and either one explains a death with no user-mode dispatch
+ * without any more guessing. */
+static void uml_nt_guestsite(const char *what, unsigned long long va,
+			     struct uml_nt_stub_conn *c)
+{
+	int i;
+	int found = 0;
+	unsigned long long nb = 0, ne = 0;
+
+	if (c->mm != NULL) {
+		for (i = 0; i < c->mm->nvma; i++) {
+			struct uml_nt_vma *v = &c->mm->vma[i];
+
+			if (va >= v->start && va < v->end) {
+				os_info("[site] %s=0x%llx in [0x%llx,"
+					"0x%llx) prot=0x%x flags=0x%x "
+					"off=0x%llx\n", what, va,
+					v->start, v->end, v->prot,
+					v->flags, v->run_off);
+				found = 1;
+				break;
+			}
+			if (v->end <= va) {
+				nb = v->end;
+				ne = v->end;
+			} else if (nb == 0 && v->start > va) {
+				ne = v->start;
+			}
+		}
+	}
+	if (!found)
+		os_info("[site] %s=0x%llx NO VMA (gap after 0x%llx, "
+			"before 0x%llx) nvma=%d\n", what, va, nb, ne,
+			c->mm != NULL ? c->mm->nvma : -1);
+}
+
 static void uml_nt_ctx_ring_dump(struct uml_nt_stub_conn *c)
 {
 	unsigned long long n = c->d->ctx_ring_at;
@@ -751,6 +790,12 @@ void userspace(struct uml_pt_regs *regs)
 						  c->d->stub_sp_lim ?
 						  c->d->stub_sp -
 						  c->d->stub_sp_lim : 0);
+					uml_nt_guestsite("rip", c->d->regs.rip, c);
+					uml_nt_guestsite("rsp", c->d->regs.rsp, c);
+					os_info("[site] last rax=0x%llx a0=0x%llx a1=0x%llx "
+					        "a2=0x%llx nr=%llu\n",
+					        c->d->regs.rax, c->d->args[0], c->d->args[1],
+					        c->d->args[2], c->d->req_seq);
 					os_info("[crumbs] pid %d "
 						"round_step=%llu veh_entries=%llu "
 						"unhandled_calls=%llu "
