@@ -818,6 +818,10 @@ static void veh_stk_selfcheck(void)
 	veh_stk_init();
 	d->veh_phase = 1;
 	d->veh_sc_sp_in = sp_before;
+	/* what we are ABOUT to hand the thunk (read back on a death) */
+	d->veh_sc_sp_body = veh_stk.sp;
+	d->veh_sc_sp_out = veh_stk.buf;
+	d->veh_sc_r10 = veh_stk.size;
 	d->veh_sc_want = (unsigned long long)(uintptr_t)want;
 	__asm__ volatile("mov %0, %%r10" : : "r"(r10w) : "r10");
 	__asm__ volatile("mov %0, %%r11" : : "r"(r11w) : "r11");
