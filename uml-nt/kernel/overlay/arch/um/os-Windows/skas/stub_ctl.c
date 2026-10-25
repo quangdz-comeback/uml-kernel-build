@@ -11303,6 +11303,7 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		c->ans_regs[14] = g->r14; c->ans_regs[15] = g->r15;
 		c->ans_regs[16] = g->rip;
 	}
+	c->ans_pub = c->d->pub_seq;
 	c->ans_rip = c->d->regs.rip;
 	c->ans_rsp = c->d->regs.rsp;
 	c->ans_rax = c->d->regs.rax;

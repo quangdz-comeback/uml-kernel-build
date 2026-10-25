@@ -201,6 +201,7 @@ struct uml_nt_stub_conn {
 	unsigned drex_armed, drex_used;
 	/* Shelley 164: the slot ledger — one owner per debug slot, all
 	 * four decided here instead of by whichever instrument ran last. */
+	unsigned long long ans_pub; /* publish count when we answered */
 	struct uml_nt_drslots drs;
 	int drex_slot; /* slot the probe holds, -1 when none */
 	unsigned long long ans_step;

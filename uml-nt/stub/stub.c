@@ -169,6 +169,7 @@ static void sample_stub_stack(void)
 static void publish(unsigned cmd)
 {
 	sample_stub_stack();
+	d->pub_seq++;
 	d->cmd = cmd;
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->req_seq,

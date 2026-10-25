@@ -1021,6 +1021,20 @@ void userspace(struct uml_pt_regs *regs)
 		for (i = 0; i < 17; i++)
 			if (c->ans_regs[i] != now[i])
 				nmoved++;
+		if (nmoved >= 0 && c->d->pub_seq == c->ans_pub)
+			nmoved = nmoved; /* same round: the count is real */
+		if (c->d->pub_seq != c->ans_pub) {
+			/* a NEW round was published after our answer: the
+			 * block holds that round's trap state, and "moved"
+			 * says nothing about who wrote what. */
+			os_info("[regs-16] pid %d ans_cmd=%u now_cmd=%u "
+				"STALE ans_pub=%llu now_pub=%llu — the block "
+				"moved on to a later round; these are that "
+				"round's registers, NOT a torn write\n",
+				c->pid, c->ans_cmd, (unsigned)c->d->cmd,
+				c->ans_pub, c->d->pub_seq);
+			nmoved = -1;
+		}
 		os_info("[regs-16] pid %d ans_cmd=%u now_cmd=%u moved=%d\n",
 			c->pid, c->ans_cmd, (unsigned)c->d->cmd, nmoved);
 		for (i = 0; i < 17; i++)

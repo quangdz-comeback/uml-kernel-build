@@ -547,6 +547,14 @@ struct uml_nt_stub_data {
 	u32_nt fs_tramp_off;
 	unsigned long long fs_tramp_skipped; /* resumes that would have used it */
 	unsigned long long drex_hits; /* execute-breakpoint hits */
+	/* Shelley 164 (3): the block is a ONE-slot register file. Every
+	 * publish overwrites d->regs wholesale, so a register snapshot
+	 * taken at answer time is only meaningful until the next one.
+	 * The stub bumps this at every publish; the death dump compares
+	 * it with the answer's copy and says STALE instead of reporting
+	 * 17 "MOVED" registers that are simply the NEXT round's trap
+	 * state (referee 40236214578 read exactly that way). */
+	unsigned long long pub_seq;
 	unsigned long long dr_applied; /* resumes that carried DR state */
 	unsigned long long d20_guarded; /* answers whose rip held 0f 05 */
 	unsigned long long xstate_cleared;
