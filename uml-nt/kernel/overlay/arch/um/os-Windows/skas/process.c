@@ -692,14 +692,25 @@ void userspace(struct uml_pt_regs *regs)
 					os_info("userspace: stub pid %d "
 						"died silently (%lu) — last "
 						"cmd=%u rip=%llx rsp=%llx "
-						"rax=%llx xs_flags=%x\n",
+						"rax=%llx xs_flags=%x "
+						"stub-stk=[%llx,%llx) "
+						"sp=0x%llx min=0x%llx "
+						"headroom=0x%llx\n",
 						mm_id->pid,
 						(unsigned long)code,
 						(unsigned)c->d->cmd,
 						c->d->regs.rip,
 						c->d->regs.rsp,
 						c->d->regs.rax,
-						(unsigned)c->d->xstate_flags);
+						(unsigned)c->d->xstate_flags,
+						c->d->stub_sp_lim,
+						c->d->stub_sp_base,
+						c->d->stub_sp,
+						c->d->stub_sp_min,
+						c->d->stub_sp >
+						  c->d->stub_sp_lim ?
+						  c->d->stub_sp -
+						  c->d->stub_sp_lim : 0);
 					/* v15 (D28 follow-up): the complete
 					 * unowned-exception record — the
 					 * console line that named it was cut

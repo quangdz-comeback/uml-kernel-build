@@ -470,6 +470,16 @@ struct uml_nt_stub_data {
 	unsigned long long unhandled_args[4];   /* its first four args */
 	unsigned long long unhandled_tid;
 	unsigned long long unhandled_flags;
+	/* The STUB's own stack, sampled on every published round: the
+	 * death in 40147747626 leaves no exception record at all, which
+	 * on Windows is what a stack exhausted enough to prevent the
+	 * dispatcher from pushing a frame looks like (the process dies
+	 * with the raw exception code and NO handler runs — not even
+	 * SetUnhandledExceptionFilter). 0/0 = never sampled. */
+	unsigned long long stub_sp;      /* rsp of the stub thread */
+	unsigned long long stub_sp_lim;  /* TEB stack limit */
+	unsigned long long stub_sp_base; /* TEB stack base */
+	unsigned long long stub_sp_min;  /* lowest rsp seen */
 };
 
 #endif /* __UML_STUB_NT_H */

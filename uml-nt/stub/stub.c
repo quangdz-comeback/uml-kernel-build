@@ -116,8 +116,28 @@ static void gp_to_context(CONTEXT *c, const struct uml_nt_gp_regs *g)
 	c->Rip = g->rip;
 }
 
+/* v21 (Shelley 156): the stub's OWN stack headroom, on every round.
+ * The password-phase death publishes no exception record and no handler
+ * runs — the signature of a dispatcher that could not push a frame
+ * because this thread's stack was gone. */
+static void sample_stub_stack(void)
+{
+	unsigned long long teb, base, limit, sp;
+
+	__asm__ volatile("mov %%gs:0x30, %0" : "=r"(teb));
+	__asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+	base = *(unsigned long long *)(teb + 0x08);
+	limit = *(unsigned long long *)(teb + 0x10);
+	d->stub_sp = sp;
+	d->stub_sp_base = base;
+	d->stub_sp_lim = limit;
+	if (d->stub_sp_min == 0 || sp < d->stub_sp_min)
+		d->stub_sp_min = sp;
+}
+
 static void publish(unsigned cmd)
 {
+	sample_stub_stack();
 	d->cmd = cmd;
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->req_seq,

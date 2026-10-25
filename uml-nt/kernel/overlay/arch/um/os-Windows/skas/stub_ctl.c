@@ -4281,7 +4281,7 @@ void uml_nt_census_classes(struct uml_nt_phys *ph)
 			else if (v->prot & 0x04)
 				c = 1;			/* file-dirty */
 			else if ((v->prot & 0x30) &&
-				 uml_nt_phys_refs(ph,
+				 uml_nt_phys_refs(pc->ph ? pc->ph : ph,
 					(long long)v->run_off) > 1)
 				c = 2;			/* shared-exec */
 			for (r = 0; r < span; r += UML_NT_PHYS_RUN_SIZE) {
