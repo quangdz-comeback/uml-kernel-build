@@ -491,6 +491,8 @@ struct uml_nt_stub_data {
 	unsigned long long veh_sc_r11;
 	unsigned long long veh_sc_ret;
 	unsigned long long veh_sc_want;
+	unsigned long long veh_sc_buf;
+	unsigned long long veh_sc_size;
 };
 
 #endif /* __UML_STUB_NT_H */

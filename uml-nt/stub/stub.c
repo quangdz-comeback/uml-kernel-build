@@ -745,8 +745,7 @@ __asm__(
 "	call *%rax\n"
 "	addq $40, %rsp\n"
 "	popq %rbx\n"                 /* the save block, from safe memory */
-"	movq 128(%rbx), %rax\n"      /* the answer (the original rax cannot survive
-				      * a value return — documented) */
+"	movq %rax, 128(%rbx)\n"      /* stash the answer before restoring */
 "	movq  16(%rbx), %rcx\n"
 "	movq  24(%rbx), %rdx\n"
 "	movq  32(%rbx), %r8\n"
@@ -760,6 +759,8 @@ __asm__(
 "	movq 104(%rbx), %r13\n"
 "	movq 112(%rbx), %r14\n"
 "	movq 120(%rbx), %r15\n"
+"	movq 128(%rbx), %rax\n"      /* the answer (a value return cannot also
+				      * restore the caller's rax — documented) */
 "	movq   0(%rbx), %rsp\n"      /* exact restore */
 "	movq  64(%rbx), %rbx\n"      /* last: the block is still addressable */
 "	ret\n"
@@ -828,8 +829,8 @@ static void veh_stk_selfcheck(void)
 	d->veh_sc_sp_in = sp_before;
 	/* what we are ABOUT to hand the thunk (read back on a death) */
 	d->veh_sc_sp_body = veh_stk.sp;
-	d->veh_sc_sp_out = veh_stk.buf;
-	d->veh_sc_r10 = veh_stk.size;
+	d->veh_sc_buf = veh_stk.buf;
+	d->veh_sc_size = veh_stk.size;
 	d->veh_sc_want = (unsigned long long)(uintptr_t)want;
 	__asm__ volatile("mov %0, %%r10" : : "r"(r10w) : "r10");
 	__asm__ volatile("mov %0, %%r11" : : "r"(r11w) : "r11");
