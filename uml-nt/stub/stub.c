@@ -417,11 +417,8 @@ static void action_chain(void)
  * EXECUTE_HANDLER, but before the process dies it publishes the raw
  * facts: access type, faulting VA, the STUB's own rip/rsp (not the
  * guest's), 16 instruction bytes, and the round that was in flight. */
-static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
+static void publish_unhandled(const EXCEPTION_RECORD *er, const CONTEXT *c)
 {
-	EXCEPTION_RECORD *er = ep ? ep->ExceptionRecord : NULL;
-	CONTEXT *c = ep ? ep->ContextRecord : NULL;
-
 	if (er != NULL && d != NULL && d->unhandled_seq == 0) {
 		d->unhandled_code = er->ExceptionCode;
 		d->unhandled_type = er->NumberParameters > 0 ?
@@ -457,6 +454,12 @@ static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
 		d->unhandled_tid = (unsigned long long)GetCurrentThreadId();
 		d->unhandled_seq = 1;	/* LAST */
 	}
+}
+
+static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
+{
+	publish_unhandled(ep ? ep->ExceptionRecord : NULL,
+			  ep ? ep->ContextRecord : NULL);
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -659,7 +662,35 @@ static void ss_stray_record(const CONTEXT *c, unsigned long long dr6,
 	MemoryBarrier();
 	d->ss_stray_n++;
 }
+/* v21 (Shelley 155): an AV raised INSIDE the VEH is the one class that
+ * leaves nothing behind — Windows aborts the process with the inner
+ * exception code (0xC0000005 at the death site in 40144153610) and the
+ * unhandled filter never runs, because the exception happened while one
+ * was being dispatched. Detect the re-entry, publish the INNER record
+ * (its rip/VA is the faulting stub instruction — exactly what the hunt
+ * needs) and let the process die. */
+static __thread int in_veh;
+static void publish_unhandled(const EXCEPTION_RECORD *er, const CONTEXT *c);
+
+static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep);
+
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
+{
+	LONG r;
+
+	if (in_veh) {
+		if (ep != NULL)
+			publish_unhandled(ep->ExceptionRecord,
+					  ep->ContextRecord);
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	in_veh = 1;
+	r = veh_body(ep);
+	in_veh = 0;
+	return r;
+}
+
+static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 {
 	EXCEPTION_RECORD *er = ep->ExceptionRecord;
 	CONTEXT *c = ep->ContextRecord;
