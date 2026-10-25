@@ -3458,6 +3458,15 @@ static void uml_nt_pivot_wslot_arm(struct uml_nt_stub_conn *c)
 		return;
 	if (c->interp_base == 0 || !uml_nt_conn_is_login(c))
 		return;
+	/* RETIRED (Shelley 162/163): this instrument answered its question
+	 * (the pivot was CLEARED by the stack class fix, to-shelley/155)
+	 * and it owns all four hardware slots — it stomps slot 2 and
+	 * clears dr_exec_mask, which silently disarmed the one-shot
+	 * execute probe ("armed but never fired" while the conn lived 540
+	 * more rounds, referee 40226282548). A retired instrument must not
+	 * hold a live one's slot. */
+	if (c->drex_armed || c->drex_used)
+		return;
 	for (i = 0; i < (int)UML_NT_PWSLOT_N; i++)
 		d->dr_watch[i] = c->interp_base + uml_nt_pwslot_off(i);
 	/* write watchpoints, not execute ones */
@@ -11141,6 +11150,11 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * hypothesis and cost 20000 round trips. The four WRITE slots on
 	 * the observed array qwords replace it: text is never written by
 	 * a correct guest, so the first hit is the pivot itself. */
+	/* Shelley 162: the one-shot execute probe is armed FIRST, so the
+	 * retired write-slot instrument can never take its hardware slot
+	 * (that is exactly how the first attempt measured nothing). */
+	if (c->d->action == UML_STUB_ACTION_NONE)
+		uml_nt_drexec_arm(c);
 	if (c->d->action == UML_STUB_ACTION_NONE && !c->ws_armed)
 		uml_nt_pivot_wslot_arm(c);
 	/* M5.6a login-depth follow-up (Shelley 149): the RESUME answer —
