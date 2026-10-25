@@ -737,31 +737,31 @@ __asm__(
 "	movq %r13,104(%r9)\n"
 "	movq %r14,112(%r9)\n"
 "	movq %r15,120(%r9)\n"
-"	movq %r9, %rbx\n"            /* keep the save block (r9 is volatile) */
-"	movq %rcx, %rax\n"           /* fn -> volatile scratch */
+"	movq %rcx, %rax\n"           /* fn -> rax (rcx saved) */
 "	movq %rdx, %rcx\n"           /* ep -> first argument */
-"	movq %r8, %rsp\n"            /* the private stack top */
-"	subq $32, %rsp\n"            /* shadow space; keeps 16-byte alignment */
+"	movq %r8, %rsp\n"            /* the private stack top, 16-aligned */
+"	pushq %r9\n"                 /* keep the save block on the PRIVATE stack */
+"	subq $32, %rsp\n"            /* shadow space; rsp stays 16-aligned */
 "	call *%rax\n"
-"	movq %rax, 128(%rbx)\n"      /* the handler's answer */
+"	addq $32, %rsp\n"
+"	popq %rbx\n"                 /* the save block, from safe memory */
+"	movq 128(%rbx), %rax\n"      /* the answer (the original rax cannot survive
+				      * a value return — documented) */
+"	movq  16(%rbx), %rcx\n"
+"	movq  24(%rbx), %rdx\n"
+"	movq  32(%rbx), %r8\n"
+"	movq  40(%rbx), %r9\n"
+"	movq  48(%rbx), %r10\n"
+"	movq  56(%rbx), %r11\n"
 "	movq  72(%rbx), %rbp\n"
 "	movq  80(%rbx), %rsi\n"
 "	movq  88(%rbx), %rdi\n"
-"	movq  64(%rbx), %rcx\n"      /* rbx last-but-one: we still need it */
 "	movq  96(%rbx), %r12\n"
 "	movq 104(%rbx), %r13\n"
 "	movq 112(%rbx), %r14\n"
 "	movq 120(%rbx), %r15\n"
-"	movq  16(%rbx), %rax\n"      /* rcx must be restored before rbx */
-"	movq   0(%rbx), %rsp\n"      /* exact restore, before anything else */
-"	movq  %rax, %rcx\n"
-"	movq   8(%rbx), %rax\n"
-"	movq  48(%rbx), %r10\n"
-"	movq  56(%rbx), %r11\n"
-"	movq  24(%rbx), %rdx\n"
-"	movq  32(%rbx), %r8\n"
-"	movq  40(%rbx), %r9\n"
-"	movq 128(%rbx), %rax\n"      /* ... and the answer wins in rax */
+"	movq   0(%rbx), %rsp\n"      /* exact restore */
+"	movq  64(%rbx), %rbx\n"      /* last: the block is still addressable */
 "	ret\n"
 ".p2align 4\n");
 
@@ -822,6 +822,15 @@ static void veh_stk_selfcheck(void)
 			      (void *)(unsigned long)veh_stk.sp, veh_save);
 	__asm__ volatile("mov %%r10, %0" : "=r"(r10w));
 	__asm__ volatile("mov %%r11, %0" : "=r"(r11w));
+	if (!((unsigned long long)got == (unsigned long long)(uintptr_t)want
+	      && veh_probe_sp >= veh_stk.buf
+	      && veh_probe_sp < veh_stk.buf + veh_stk.size
+	      && veh_now_sp() == sp_before)) {
+		/* the thunk is not trustworthy on this platform build: fall
+		 * back to the pre-157 behaviour rather than run guest code
+		 * on a broken trampoline */
+		veh_stk.size = 0;
+	}
 	fprintf(stderr, "[stubtest] veh-stack self-check %s: "
 		"body-sp=0x%llx buf=[0x%llx,0x%llx) align=%llu "
 		"ret=%d r10=%s r11=%s rsp-restore=%s\n",
