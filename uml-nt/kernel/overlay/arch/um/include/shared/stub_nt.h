@@ -480,6 +480,17 @@ struct uml_nt_stub_data {
 	unsigned long long stub_sp_lim;  /* TEB stack limit */
 	unsigned long long stub_sp_base; /* TEB stack base */
 	unsigned long long stub_sp_min;  /* lowest rsp seen */
+	/* The dispatch-stack self-check, published so the KERNEL prints it
+	 * (the stub's own stderr is not in the referee log): phase 1 =
+	 * entered, 2 = thunk returned, 3 = disarmed (see veh_model.h). */
+	unsigned long long veh_phase;
+	unsigned long long veh_sc_sp_in;
+	unsigned long long veh_sc_sp_out;
+	unsigned long long veh_sc_sp_body;
+	unsigned long long veh_sc_r10;
+	unsigned long long veh_sc_r11;
+	unsigned long long veh_sc_ret;
+	unsigned long long veh_sc_want;
 };
 
 #endif /* __UML_STUB_NT_H */

@@ -816,12 +816,21 @@ static void veh_stk_selfcheck(void)
 	long got;
 
 	veh_stk_init();
+	d->veh_phase = 1;
+	d->veh_sc_sp_in = sp_before;
+	d->veh_sc_want = (unsigned long long)(uintptr_t)want;
 	__asm__ volatile("mov %0, %%r10" : : "r"(r10w) : "r10");
 	__asm__ volatile("mov %0, %%r11" : : "r"(r11w) : "r11");
 	got = veh_switch_call(veh_probe, want,
 			      (void *)(unsigned long)veh_stk.sp, veh_save);
 	__asm__ volatile("mov %%r10, %0" : "=r"(r10w));
 	__asm__ volatile("mov %%r11, %0" : "=r"(r11w));
+	d->veh_sc_sp_out = veh_now_sp();
+	d->veh_sc_sp_body = veh_probe_sp;
+	d->veh_sc_r10 = r10w;
+	d->veh_sc_r11 = r11w;
+	d->veh_sc_ret = (unsigned long long)got;
+	d->veh_phase = 2;
 	if (!((unsigned long long)got == (unsigned long long)(uintptr_t)want
 	      && veh_probe_sp >= veh_stk.buf
 	      && veh_probe_sp < veh_stk.buf + veh_stk.size
@@ -830,6 +839,7 @@ static void veh_stk_selfcheck(void)
 		 * back to the pre-157 behaviour rather than run guest code
 		 * on a broken trampoline */
 		veh_stk.size = 0;
+		d->veh_phase = 3;
 	}
 	fprintf(stderr, "[stubtest] veh-stack self-check %s: "
 		"body-sp=0x%llx buf=[0x%llx,0x%llx) align=%llu "

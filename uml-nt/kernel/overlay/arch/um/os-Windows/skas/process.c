@@ -695,7 +695,11 @@ void userspace(struct uml_pt_regs *regs)
 						"rax=%llx xs_flags=%x "
 						"stub-stk=[%llx,%llx) "
 						"sp=0x%llx min=0x%llx "
-						"headroom=0x%llx\n",
+						"headroom=0x%llx "
+						"veh=[phase=%llu in=0x%llx "
+						"body=0x%llx out=0x%llx "
+						"r10=0x%llx r11=0x%llx "
+						"ret=0x%llx want=0x%llx]\n",
 						mm_id->pid,
 						(unsigned long)code,
 						(unsigned)c->d->cmd,
@@ -710,7 +714,15 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->stub_sp >
 						  c->d->stub_sp_lim ?
 						  c->d->stub_sp -
-						  c->d->stub_sp_lim : 0);
+						  c->d->stub_sp_lim : 0,
+						c->d->veh_phase,
+						c->d->veh_sc_sp_in,
+						c->d->veh_sc_sp_body,
+						c->d->veh_sc_sp_out,
+						c->d->veh_sc_r10,
+						c->d->veh_sc_r11,
+						c->d->veh_sc_ret,
+						c->d->veh_sc_want);
 					/* v15 (D28 follow-up): the complete
 					 * unowned-exception record — the
 					 * console line that named it was cut
