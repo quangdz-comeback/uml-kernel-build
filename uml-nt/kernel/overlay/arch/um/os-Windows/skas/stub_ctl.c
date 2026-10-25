@@ -8895,6 +8895,15 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		/* M5.6a [pivot-dr]: a DR execute-breakpoint round — the
 		 * state at the interp's DSO-lookup entry, BEFORE its first
 		 * instruction. Pure observation: answer NONE. */
+		/* Shelley 163/164: OUR one-shot probe owns its hit FIRST —
+		 * the retired pivot-dr handler below would otherwise eat the
+		 * round and return, which is the second way this instrument
+		 * measured nothing (first: the write-slot instrument stole
+		 * the hardware slot; now: a retired handler consumed the
+		 * #DB). Order: live instruments, then retired ones. */
+		if (uml_nt_drexec_round(c))
+			return 0;
+
 		if (d->fault_type == UML_NT_FAULT_DREXEC) {
 			if (c->chain_armed)
 				uml_nt_chain_round(c);
@@ -8910,8 +8919,6 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * Log it, decide, resume (TF re-raised by the stub while the
 		 * budget lasts). Nothing here may repair: the step is pure
 		 * observation, and the guest state is the trap's own. */
-		if (uml_nt_drexec_round(c))
-			return 0;
 
 		if (d->fault_type == UML_NT_FAULT_STEP) {
 			uml_nt_tf_trace_step(c);
