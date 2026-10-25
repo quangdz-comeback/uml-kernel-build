@@ -17,6 +17,7 @@
 #include "resume_model.h"
 #include "veh_model.h"
 #include "deathsit_model.h"
+#include "d20sweep_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -91,6 +92,33 @@ static void section12(void)
 	CHECK(uml_nt_deathsit_near_retval(dead, dead + 0x10001, 0x10000) == 0);
 
 	printf("section 12 (death-site discriminator): all ok\n");
+}
+
+/* section 13 — when must the D20 sweep re-patch a run? (referee
+ * 40197441363). The password death is libc+0xfce65, the `syscall` of
+ * __close_nocancel, in a conn whose sweeps reported "0 patched" while
+ * another conn's sweep of the same library patched 526. The physical
+ * runs are shared and a later file fill restores the pristine bytes,
+ * so a plain "already swept" bit lies forever.
+ */
+static void section13(void)
+{
+	/* a. never swept, executable => patch it */
+	CHECK(uml_nt_sweep_needed(1, 0, 7) == 1);
+	/* b. swept at the generation the content still has => skip */
+	CHECK(uml_nt_sweep_needed(1, 7, 7) == 0);
+	/* c. content was re-created (a file fill, a COW copy, a re-home)
+	 *    => the patch went with the old bytes, patch again */
+	CHECK(uml_nt_sweep_needed(1, 7, 8) == 1);
+	CHECK(uml_nt_sweep_needed(1, 7, 0) == 1);
+	/* d. data is never patched: the sweep is a code instrument */
+	CHECK(uml_nt_sweep_needed(0, 0, 7) == 0);
+	CHECK(uml_nt_sweep_needed(0, 7, 8) == 0);
+	/* e. the exact death shape: run swept once, then rewritten by a
+	 *    fill that forgot the mark — the model must say "patch" */
+	CHECK(uml_nt_sweep_needed(1, 0 /* forgotten by the fill */, 7) == 1);
+
+	printf("section 13 (D20 sweep re-arm): all ok\n");
 }
 
 int main(void)
@@ -276,6 +304,7 @@ int main(void)
 
 	sec11_veh_stack();
 	section12();
+	section13();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);

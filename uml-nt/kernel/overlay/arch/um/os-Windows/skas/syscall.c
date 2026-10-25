@@ -816,7 +816,51 @@ struct uml_nt_fcache_entry {
 static struct uml_nt_fcache_entry g_fcache[UML_NT_FCACHE_MAX];
 static struct uml_nt_phys *g_fcache_ph;
 static unsigned long long g_fcache_tick;
-static unsigned char fcache_run_swept[UML_NT_PHYS_MAX_RUNS];
+/* D20 sweep bookkeeping — M5.6a (referee 40197441363): a plain bit is
+ * a lie once the content changes underneath it. Runs are SHARED (the
+ * read-only file cache) and a later file fill memcpy's pristine bytes
+ * over a patched run, restoring the guest's 0f 05 — which is a REAL
+ * host syscall, i.e. a silent death with no dispatch and no record.
+ * Record the generation the sweep patched instead of a bit, so any
+ * re-created content re-arms the patch by construction. */
+static unsigned long long fcache_run_swept_gen[UML_NT_PHYS_MAX_RUNS];
+
+static int run_already_swept(struct uml_nt_stub_conn *c,
+			     unsigned long long off, int exec_vma)
+{
+	unsigned int i = (unsigned int)(off / UML_NT_PHYS_RUN_SIZE);
+	unsigned long long g;
+
+	if (i >= UML_NT_PHYS_MAX_RUNS)
+		return 0;
+	g = (unsigned long long)uml_nt_phys_gen(c->ph, (long long)off);
+	return !uml_nt_sweep_needed(exec_vma, fcache_run_swept_gen[i], g);
+}
+
+static void run_mark_swept(struct uml_nt_stub_conn *c,
+			   unsigned long long off, int exec_vma)
+{
+	unsigned int i = (unsigned int)(off / UML_NT_PHYS_RUN_SIZE);
+
+	if (i >= UML_NT_PHYS_MAX_RUNS)
+		return;
+	fcache_run_swept_gen[i] = exec_vma ?
+		(unsigned long long)uml_nt_phys_gen(c->ph, (long long)off) : 0;
+}
+
+/* content was rewritten under the patch: forget, never carry the lie */
+static void run_forget_swept(unsigned long long off, unsigned long long len)
+{
+	unsigned long long ro;
+
+	for (ro = off & ~(unsigned long long)(UML_NT_PHYS_RUN_SIZE - 1);
+	     ro < off + len; ro += UML_NT_PHYS_RUN_SIZE) {
+		unsigned int i = (unsigned int)(ro / UML_NT_PHYS_RUN_SIZE);
+
+		if (i < UML_NT_PHYS_MAX_RUNS)
+			fcache_run_swept_gen[i] = 0;
+	}
+}
 
 struct uml_nt_elf64_ehdr {
 	unsigned char e_ident[16];
@@ -979,7 +1023,7 @@ int uml_nt_fcache_reclaim_one(void)
 					(sp / UML_NT_PHYS_RUN_SIZE) + r;
 
 				if (r_idx < UML_NT_PHYS_MAX_RUNS)
-					fcache_run_swept[r_idx] = 0;
+					fcache_run_swept_gen[r_idx] = 0;
 				uml_nt_phys_unref_for(ph,
 					(long long)(sp +
 					(unsigned long long)r *
@@ -1084,7 +1128,7 @@ static struct uml_nt_fcache_entry *uml_nt_fcache_get(
 					       UML_NT_PHYS_RUN_SIZE) + r;
 
 			if (r_idx < UML_NT_PHYS_MAX_RUNS)
-				fcache_run_swept[r_idx] = 0;
+				fcache_run_swept_gen[r_idx] = 0;
 		}
 		clen = (unsigned long long)want * UML_NT_PHYS_RUN_SIZE;
 		memset((char *)uml_boot.physmem_base + sp, 0, clen);
@@ -1244,6 +1288,33 @@ static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
 			uml_nt_flatwr_check(c,
 				UML_NT_FLATWR_SITE_MMAP_FILL, cur,
 				piece - cur, dst, fg, (long long)dst);
+			/* D20 re-arm (M5.6a, referee 40197441363): the
+			 * bytes we just wrote came from the FILE, not from
+			 * a patched run — any earlier sweep of this run is
+			 * void. Forget the mark, and if this VMA is code,
+			 * patch the piece NOW: an unpatched guest syscall
+			 * is a real host syscall and a silent death. */
+			run_forget_swept(dst, piece - cur);
+			if (uml_nt_prot_execable(v->prot)) {
+				unsigned long long ro;
+				unsigned long long np;
+
+				np = uml_nt_patch_syscalls(
+					(char *)uml_boot.physmem_base + dst,
+					piece - cur, 0, NULL);
+				for (ro = dst &
+					 ~(unsigned long long)
+					 (UML_NT_PHYS_RUN_SIZE - 1);
+				     ro < dst + (piece - cur);
+				     ro += UML_NT_PHYS_RUN_SIZE)
+					run_mark_swept(c, ro, 1);
+				if (np > 0)
+					os_info("[d20-repatch] va=0x%llx "
+						"len=%llu run=0x%llx: %llu "
+						"syscall(s) re-patched after a "
+						"file fill\n", cur,
+						piece - cur, dst, np);
+			}
 		}
 		cur = piece;
 	}
@@ -1269,15 +1340,10 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 		}
 		piece = (end < v->end) ? end : v->end;
 		off = v->run_off + (cur - v->start);
-		if (!uml_nt_prot_writable(v->prot)) {
-			unsigned int r_idx =
-				(unsigned int)(off / UML_NT_PHYS_RUN_SIZE);
-
-			if (r_idx < UML_NT_PHYS_MAX_RUNS &&
-			    fcache_run_swept[r_idx]) {
-				cur = piece;
-				continue;
-			}
+		if (!uml_nt_prot_writable(v->prot) &&
+		    run_already_swept(c, off, uml_nt_prot_execable(v->prot))) {
+			cur = piece;
+			continue;
 		}
 		/* K6 [flatwr]: the sweep PATCHES guest code in place —
 		 * zero-alloc in-place decode (no kvmalloc/kvfree). */
@@ -1300,14 +1366,10 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
 
 				for (ro = off & ~(UML_NT_PHYS_RUN_SIZE - 1);
 				     ro < off + (piece - cur);
-				     ro += UML_NT_PHYS_RUN_SIZE) {
-					unsigned int r_idx =
-						(unsigned int)(ro /
-							UML_NT_PHYS_RUN_SIZE);
-
-					if (r_idx < UML_NT_PHYS_MAX_RUNS)
-						fcache_run_swept[r_idx] = 1;
-				}
+				     ro += UML_NT_PHYS_RUN_SIZE)
+					run_mark_swept(c, ro,
+						       uml_nt_prot_execable(
+							       v->prot));
 			}
 		}
 		cur = piece;
