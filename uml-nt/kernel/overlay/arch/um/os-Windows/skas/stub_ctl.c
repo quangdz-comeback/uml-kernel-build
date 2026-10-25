@@ -3551,6 +3551,76 @@ static void uml_nt_chain_arm(struct uml_nt_stub_conn *c,
 		(unsigned long)c->pid, c->exec_path, c->chain_hops, va);
 }
 
+/* [dr-exec] (Shelley 162): DOES THE GUEST EXECUTE THE FIRST
+ * INSTRUCTION AFTER THE RESUME? Everything else is measured — the
+ * CONTEXT is sane, the answer's target (rip+2) holds the real
+ * instruction, the VMA and the ledger agree, and the fs hop completes
+ * (pre == post). The one thing never observed is the guest itself.
+ *
+ * So arm ONE execute breakpoint at rip+2 — the address the hop jumps
+ * to — for one round of the login conn. An execute breakpoint fires
+ * BEFORE the instruction, so:
+ *   #DB arrives  => the resume carried the guest all the way to its
+ *                   first instruction; the death is AFTER it, inside
+ *                   guest code, and we get a live CONTEXT there.
+ *   no #DB, dead => the death is BEFORE the guest's first instruction,
+ *                   i.e. in the resume/hop path, with hard evidence.
+ * The chain instrument proved this mechanism reports cleanly (never
+ * killed a stub), so this is a measurement, not new machinery. */
+static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+	unsigned long long va;
+
+	if (d == NULL || c->mm == NULL || c->imgw_n <= 0)
+		return;
+	if (c->drex_used || c->drex_armed || !uml_nt_conn_is_login(c))
+		return;
+	if (d->cmd != UML_STUB_CMD_SYSCALL)
+		return;
+	va = d->regs.rip + 2; /* the real resume target (stub advances) */
+	if (uml_nt_vma_find(c->mm, va) == NULL)
+		return;
+	c->drex_va = va;
+	c->drex_armed = 1;
+	d->dr_watch[UML_NT_DR_EXEC_SLOT] = va;
+	d->dr_exec_mask |= 1u << UML_NT_DR_EXEC_SLOT;
+	os_info("[dr-exec] pid %lu %s ONE-SHOT execute breakpoint at "
+		"0x%llx (the guest's first instruction after this resume) "
+		"— a hit proves the resume reached guest code\n",
+		(unsigned long)c->pid, c->exec_path, va);
+}
+
+/* A DR hit at the armed address: the guest got there. Observation
+ * only — disarm, log the live state, resume verbatim (an execute
+ * breakpoint fires before the instruction, so rip still points at
+ * it and re-executing is exactly right). */
+static int uml_nt_drexec_round(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_stub_data *d = c->d;
+
+	if (!c->drex_armed)
+		return 0;
+	/* the stub publishes the accessed address and its type (8 =
+	 * execute) — no raw dr6 in the shared block, and none needed */
+	if (d->dr_hit_va != c->drex_va && d->regs.rip != c->drex_va)
+		return 0;
+	c->drex_armed = 0;
+	c->drex_used = 1;
+	d->dr_watch[UML_NT_DR_EXEC_SLOT] = 0;
+	d->dr_exec_mask &= ~(1u << UML_NT_DR_EXEC_SLOT);
+	d->drex_hits++;
+	os_info("[dr-exec] HIT pid %lu rip=0x%llx rsp=0x%llx rax=0x%llx "
+		"rflags=0x%llx hit_type=%llu ==> THE GUEST RAN: the resume "
+		"reached guest code at 0x%llx; whatever kills it is at or "
+		"after this instruction\n",
+		(unsigned long)c->pid, d->regs.rip, d->regs.rsp,
+		d->regs.rax, d->regs.rflags, d->dr_hit_type, c->drex_va);
+	d->action = UML_STUB_ACTION_NONE;
+	d->err = 0;
+	return 1;
+}
+
 /* One walk hop: the state at a chain address, then the next hop taken
  * from the text stack's own return address ([rsp] = the caller's
  * continuation, planted by the call that entered this frame). */
@@ -8831,6 +8901,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * Log it, decide, resume (TF re-raised by the stub while the
 		 * budget lasts). Nothing here may repair: the step is pure
 		 * observation, and the guest state is the trap's own. */
+		if (uml_nt_drexec_round(c))
+			return 0;
+
 		if (d->fault_type == UML_NT_FAULT_STEP) {
 			uml_nt_tf_trace_step(c);
 			d->action = UML_STUB_ACTION_NONE;
@@ -11115,6 +11188,10 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		else if (cls == 2)
 			c->ans_other++;
 	}
+	/* Shelley 162: the one-shot execute breakpoint on the real resume
+	 * target — armed with this answer, sized to the next round. */
+	if (c->d->action == UML_STUB_ACTION_NONE)
+		uml_nt_drexec_arm(c);
 	c->ans_cmd = c->d->cmd; /* which round kind the yardstick belongs to */
 	c->ans_rip = c->d->regs.rip;
 	c->ans_rsp = c->d->regs.rsp;

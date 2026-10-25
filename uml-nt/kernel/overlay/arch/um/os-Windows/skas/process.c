@@ -993,6 +993,15 @@ void userspace(struct uml_pt_regs *regs)
 						c->ans_cls_ring[7],
 						c->res_trap_valid ?
 						c->res_trap_rip : 0ull);
+					os_info("[dr-exec] pid %d hits=%llu "
+						"armed=%u va=0x%llx ==> %s\n",
+						c->pid, c->d->drex_hits,
+						c->drex_armed, c->drex_va,
+						c->d->drex_hits ?
+						"the guest RAN (death is at or after its first instruction)" :
+						c->drex_armed ?
+						"ARMED but never fired: the death happened BEFORE the guest executed anything" :
+						"not armed this round");
 					os_info("[d20-guard] pid %d guarded=%llu "
 						"checks=%llu last rip=0x%llx "
 						"vma=%u prot=0x%x off=0x%llx "
