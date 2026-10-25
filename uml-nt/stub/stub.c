@@ -741,9 +741,9 @@ __asm__(
 "	movq %rdx, %rcx\n"           /* ep -> first argument */
 "	movq %r8, %rsp\n"            /* the private stack top, 16-aligned */
 "	pushq %r9\n"                 /* keep the save block on the PRIVATE stack */
-"	subq $32, %rsp\n"            /* shadow space; rsp stays 16-aligned */
+"	subq $40, %rsp\n"            /* 32 shadow + pad: 16-aligned at the call */
 "	call *%rax\n"
-"	addq $32, %rsp\n"
+"	addq $40, %rsp\n"
 "	popq %rbx\n"                 /* the save block, from safe memory */
 "	movq 128(%rbx), %rax\n"      /* the answer (the original rax cannot survive
 				      * a value return — documented) */
