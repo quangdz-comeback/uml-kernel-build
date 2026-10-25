@@ -515,6 +515,10 @@ struct uml_nt_stub_data {
 		unsigned long long all_size, all_area, all_off;
 		unsigned long long leg_size, leg_area, leg_off;
 		unsigned long long xsa_size, xsa_area, xsa_off;
+		unsigned long long host_xcr0;	/* what this CPU can save */
+		unsigned long long host_xs_max;	/* CPUID.0xD:0 sizes */
+		unsigned long long host_xs_lo;
+		unsigned long long ex_back;	/* bytes before the context */
 	} ctx_ring[16];
 	unsigned long long ctx_ring_at;
 	unsigned long long veh_sc_size;

@@ -428,6 +428,10 @@ struct nt_context_ex {
 
 #define NT_CONTEXT_X64_SIZE 0x4d0
 
+static unsigned long long host_xcr0;
+static unsigned long long host_xstate_max;
+static unsigned long long host_xstate_lo;
+
 static void note_resume(CONTEXT *c, unsigned long long kind)
 {
 	struct uml_nt_ctx_ring *r;
@@ -436,6 +440,23 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 
 	if (d == NULL || c == NULL)
 		return;
+	if (host_xstate_max == 0) {
+		/* What the HOST can save/restore — the yardstick for any
+		 * mask the dispatcher's xstate area carries. */
+		unsigned int a = 0, dd = 0;
+
+		__asm__ volatile("cpuid" : "=a"(a), "=d"(dd)
+				 : "a"(0xd), "c"(0));
+		host_xstate_max = a;
+		host_xstate_lo = dd;
+		if (a != 0) {
+			unsigned int lo = 0, hi = 0;
+
+			__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi)
+					 : "c"(0));
+			host_xcr0 = ((unsigned long long)hi << 32) | lo;
+		}
+	}
 	at = (unsigned long long)d->ctx_ring_at % 16;
 	r = &d->ctx_ring[at];
 	r->seq = (unsigned long long)d->ctx_ring_at;
@@ -450,14 +471,38 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 	r->ctx_flags = (unsigned long long)c->ContextFlags;
 	r->mxcsr = (unsigned long long)(unsigned int)c->MxCsr;
 	r->have_ex = 0;
+	r->ex_back = 0;
+	r->host_xcr0 = host_xcr0;
+	r->host_xs_max = host_xstate_max;
+	r->host_xs_lo = host_xstate_lo;
 	/* Only trust the header when its legacy block names exactly this
 	 * context: legacy.size is the CONTEXT size, and the area must lie
 	 * before the header itself. */
-	ex = (const struct nt_context_ex *)((const unsigned char *)c -
-					    sizeof(struct nt_context_ex));
-	if (ex->legacy.size == NT_CONTEXT_X64_SIZE &&
-	    ex->all.size >= NT_CONTEXT_X64_SIZE &&
-	    ex->xstate.area_size < 0x10000u) {
+	/* The dispatcher's CONTEXT_EX is not necessarily immediately
+	 * before the context (that guess failed: every referee printed
+	 * ex=0 while ContextFlags still claimed CONTEXT_XSTATE). Scan
+	 * back over 16-byte candidates for the header signature: the
+	 * legacy block must name exactly one x64 CONTEXT. */
+	ex = NULL;
+	{
+		unsigned off;
+
+		for (off = 16; off <= 0x80; off += 16) {
+			const struct nt_context_ex *cand;
+
+			cand = (const struct nt_context_ex *)
+				((const unsigned char *)c - off);
+			if (cand->legacy.size == NT_CONTEXT_X64_SIZE &&
+			    cand->all.size >= NT_CONTEXT_X64_SIZE &&
+			    cand->all.size < 0x4000u &&
+			    cand->xstate.area_size < 0x10000u) {
+				ex = cand;
+				r->ex_back = off;
+				break;
+			}
+		}
+	}
+	if (ex != NULL) {
 		r->have_ex = 1;
 		r->all_size = ex->all.size;
 		r->all_area = ex->all.area_size;

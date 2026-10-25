@@ -115,13 +115,15 @@ static void uml_nt_ctx_ring_dump(struct uml_nt_stub_conn *c)
 			"(vma=%d) rsp=0x%llx(vma=%d) fl=0x%llx cs=%llu "
 			"ss=%llu cf=0x%llx mxcsr=0x%llx ex=%llu "
 			"all=[%llu/%llu/%llu] leg=[%llu/%llu/%llu] "
-			"xsa=[%llu/%llu/%llu]\n",
+			"xsa=[%llu/%llu/%llu] back=%llu "
+			"xcr0=0x%llx xsmax=%llu\n",
 			r->seq, r->step, r->kind, r->rip, rip_ok,
 			r->rsp, rsp_ok, r->eflags, r->cs, r->ss,
 			r->ctx_flags, r->mxcsr, r->have_ex,
 			r->all_size, r->all_area, r->all_off,
 			r->leg_size, r->leg_area, r->leg_off,
-			r->xsa_size, r->xsa_area, r->xsa_off);
+			r->xsa_size, r->xsa_area, r->xsa_off,
+			r->ex_back, r->host_xcr0, r->host_xs_max);
 	}
 }
 
