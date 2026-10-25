@@ -204,13 +204,18 @@ static void uml_nt_death_site(struct uml_nt_stub_conn *c)
 		ri >= 0 ? c->d->ctx_ring[ri].grip : 0ull,
 		ri >= 0 ? c->d->ctx_ring[ri].gseq : 0ull,
 		xor_ans);
-	os_info("[hop-entry] ent_rsp=0x%llx ctx_rsp=0x%llx ent_fl=0x%llx "
-		"ctx_fl=0x%llx ==> %s\n",
+	os_info("[hop-entry] ent_id=%llu ring_seq=%llu ent_rsp=0x%llx "
+		"ctx_rsp=0x%llx ent_fl=0x%llx ctx_fl=0x%llx ==> %s\n",
+		ri >= 0 ? c->d->ctx_ring[ri].ent_id : 0ull,
+		ri >= 0 ? c->d->ctx_ring[ri].seq : 0ull,
 		ri >= 0 ? c->d->ctx_ring[ri].ent_rsp : 0ull,
 		ri >= 0 ? c->d->ctx_ring[ri].gsp : 0ull,
 		ri >= 0 ? c->d->ctx_ring[ri].ent_fl : 0ull,
 		ri >= 0 ? c->d->ctx_ring[ri].eflags : 0ull,
 		(ri < 0) ? "no ring entry" :
+		(c->d->ctx_ring[ri].ent_id != c->d->ctx_ring[ri].seq) ?
+		 "the hop that ran last belongs to ANOTHER round — not "
+		 "comparable" :
 		((c->d->ctx_ring[ri].ent_rsp !=
 		  c->d->ctx_ring[ri].gsp) ?
 		 "the HOP changed rsp — fix the hop" :

@@ -217,6 +217,11 @@ static volatile unsigned long long fs_tramp_pre, fs_tramp_post;
 static volatile unsigned long long fs_tramp_tfslot[2]; /* private scratch */
 extern const unsigned char fs_tramp_tf_end[];
 static volatile unsigned long long fs_tramp_ent_rsp, fs_tramp_ent_fl;
+/* which round's hop this is — the ring entry and the hop can otherwise
+ * belong to different rounds (a fault hop runs after a sys ring entry),
+ * and a comparison across rounds invents a mismatch, exactly like the
+ * [verdict] false positive in 161. */
+static volatile unsigned long long fs_tramp_snap_id, fs_tramp_ent_id;
 
 /* Shelley 161 verification, done BEFORE touching the line: the
  * `movq fs_tramp_eflags(%rip), %r11` was not merely dead — it was the
@@ -242,8 +247,9 @@ __attribute__((naked)) static void fs_trampoline_sys(void)
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
 		"incq	fs_tramp_post(%rip)\n\t"
-		/* snapshot: rsp as the guest will see it, rflags via the
-		 * private slot (r11 is scratch here and restored below) */
+		/* snapshot (id first, so a cross-round compare is impossible) */
+		"movq	fs_tramp_snap_id(%rip), %r11\n\t"
+		"movq	%r11, fs_tramp_ent_id(%rip)\n\t"
 		"movq	%rsp, fs_tramp_ent_rsp(%rip)\n\t"
 		"leaq	fs_tramp_tfslot+8(%rip), %rsp\n\t"
 		"pushfq\n\t"
@@ -263,6 +269,14 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
 	__asm__ volatile (
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
+		"movq	fs_tramp_snap_id(%rip), %r11\n\t"
+		"movq	%r11, fs_tramp_ent_id(%rip)\n\t"
+		"movq	%rsp, fs_tramp_ent_rsp(%rip)\n\t"
+		"leaq	fs_tramp_tfslot+8(%rip), %rsp\n\t"
+		"pushfq\n\t"
+		"popq	%r11\n\t"
+		"movq	%r11, fs_tramp_ent_fl(%rip)\n\t"
+		"movq	fs_tramp_ent_rsp(%rip), %rsp\n\t"
 		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
@@ -293,6 +307,14 @@ __attribute__((naked)) static void fs_trampoline_fault_tf(void)
 	__asm__ volatile (
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
+		"movq	fs_tramp_snap_id(%rip), %r11\n\t"
+		"movq	%r11, fs_tramp_ent_id(%rip)\n\t"
+		"movq	%rsp, fs_tramp_ent_rsp(%rip)\n\t"
+		"leaq	fs_tramp_tfslot+8(%rip), %rsp\n\t"
+		"pushfq\n\t"
+		"popq	%r11\n\t"
+		"movq	%r11, fs_tramp_ent_fl(%rip)\n\t"
+		"movq	fs_tramp_ent_rsp(%rip), %rsp\n\t"
 		"movq	%rsp, fs_tramp_rsp(%rip)\n\t"
 		"leaq	fs_tramp_tfslot+8(%rip), %rsp\n\t"
 		"pushfq\n\t"
@@ -575,6 +597,7 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 	r->hop_post = fs_tramp_post;
 	r->ent_rsp = fs_tramp_ent_rsp;
 	r->ent_fl = fs_tramp_ent_fl;
+	r->ent_id = fs_tramp_ent_id;
 	r->gsp = (unsigned long long)d->regs.rsp;
 	r->gseq = (unsigned long long)d->done_seq;
 	r->have_ex = 0;
@@ -1402,6 +1425,10 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			d->ss_page = 0;
 			if (d->fs_base != 0 && have_fsgsbase) {
 				fs_save_r11 = c->R11;
+		fs_tramp_snap_id = (unsigned long long)d->done_seq;
+			fs_tramp_snap_id = (unsigned long long)d->done_seq;
+				fs_tramp_snap_id =
+					(unsigned long long)d->done_seq;
 				fs_tramp_base = d->fs_base;
 				fs_tramp_target =
 					(unsigned long long)c->Rip;
@@ -1539,6 +1566,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			    0x64 /* fs: */) {
 			fs_tramp_base = d->fs_base;
 			fs_save_r11 = c->R11;
+		fs_tramp_snap_id = (unsigned long long)d->done_seq;
+			fs_tramp_snap_id = (unsigned long long)d->done_seq;
 			fs_tramp_target = c->Rip;
 			c->EFlags = (DWORD)uml_nt_ss_resume_flags(
 				(unsigned long long)c->EFlags);
@@ -1664,6 +1693,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		 * trampoline (r11 is guest-live here, preserved). */
 		if (d->fs_base != 0 && have_fsgsbase) {
 			fs_save_r11 = c->R11;
+		fs_tramp_snap_id = (unsigned long long)d->done_seq;
+			fs_tramp_snap_id = (unsigned long long)d->done_seq;
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = d->regs.rip;
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_fault;
@@ -1736,6 +1767,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		 * and replays the same rip with the base live. */
 		if (d->fs_base != 0 && have_fsgsbase) {
 			fs_save_r11 = c->R11;
+		fs_tramp_snap_id = (unsigned long long)d->done_seq;
+			fs_tramp_snap_id = (unsigned long long)d->done_seq;
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = d->regs.rip;
 			c->Rip = (DWORD64)(uintptr_t)
