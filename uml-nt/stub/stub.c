@@ -1665,6 +1665,11 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			 * spends TF and ends the trace, logged via tf_stop). */
 			c->EFlags |= 0x100;
 			c->Rip = (DWORD64)target;
+		} else if (d->fs_tramp_off != 0) {
+			/* A/B (Shelley 161): resume PLAIN — the guest's own
+			 * rip+2, no native hop on the guest stack. */
+			d->fs_tramp_skipped++;
+			c->Rip = (DWORD64)target;
 		} else if (d->fs_base != 0 && have_fsgsbase) {
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = target;

@@ -9804,6 +9804,8 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	 * half — the seed rcx is ABI garbage that would ride every
 	 * VEH dispatch CONTEXT back onto the guest stack. */
 	k->d->init_regs.rcx = 0;
+	/* A/B (Shelley 161 item 4): every child resumes plain too. */
+	k->d->fs_tramp_off = 1;
 	os_info("[stubtest] fork seed pid %lu: child rip=0x%llx "
 		"rcx=0x%llx rbx=0x%llx r12=0x%llx r13=0x%llx\n",
 		(unsigned long)k->pid, k->d->init_regs.rip,

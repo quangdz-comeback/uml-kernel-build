@@ -920,6 +920,10 @@ void userspace(struct uml_pt_regs *regs)
 						(unsigned)c->d->action,
 						(unsigned)c->d->cmd);
 					uml_nt_ctx_ring_dump(c);
+					os_info("[fs-tramp] pid %d off=%u "
+						"skipped=%llu\n", c->pid,
+						(unsigned)c->d->fs_tramp_off,
+						c->d->fs_tramp_skipped);
 					os_info("[ans-shape] pid %d cls=%u "
 						"restarts=%llu other=%llu "
 						"ring=%u%u%u%u%u%u%u%u trap=0x%llx\n",

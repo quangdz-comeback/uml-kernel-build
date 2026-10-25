@@ -532,6 +532,15 @@ struct uml_nt_stub_data {
 	unsigned long long xstate_api;
 	unsigned long long xstate_want;
 	unsigned long long xstate_mask;
+	/* M5.6a A/B (Shelley 161 item 4, sharper than a sampler): the last
+	 * hop between the answer and the guest is the stub's own
+	 * fs_trampoline (wrfsbase + jmp *target) running on the GUEST
+	 * stack. Everything before it is now measured clean — target
+	 * patched, VMA exec, three rips equal — so the hop itself is what
+	 * is left. 1 = kernel asks the stub to resume PLAIN (no
+	 * trampoline), logging every resume that would have used it. */
+	u32_nt fs_tramp_off;
+	unsigned long long fs_tramp_skipped; /* resumes that would have used it */
 	unsigned long long d20_guarded; /* answers whose rip held 0f 05 */
 	unsigned long long xstate_cleared;
 	unsigned long long xstate_kept;
