@@ -191,6 +191,11 @@ struct uml_nt_stub_conn {
 	 * on the last syscall answer (the death line prints it, so a guard
 	 * that never fires is a measurement, not a silent pass). */
 	unsigned long long gd_rip, gd_off, gd_voff, gd_n;
+	/* [ans-shape] the answer contract: 0 = advance past the sentinel,
+	 * 1 = restart onto it, 2 = neither. Counted, and the last eight
+	 * kept, so a death can be read against the shape it happened on. */
+	unsigned ans_cls, ans_cls_ring[8], ans_cls_at;
+	unsigned long long ans_restarts, ans_other;
 	unsigned gd_prot, gd_b0, gd_b1, gd_view, gd_vb0, gd_vma;
 	struct uml_nt_view views[UML_NT_VIEW_MAX];
 	int nviews;

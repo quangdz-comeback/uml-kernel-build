@@ -11077,6 +11077,31 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * is later found holding something else, this is the yardstick
 	 * that separates corruption-in-transit from a guest that really
 	 * was at the death rip. */
+	/* Which SHAPE is this answer? A normal syscall resumes at trap+2
+	 * (past the ud2 sentinel); a RESTART puts rip back ONTO the
+	 * sentinel so the guest re-executes it. The two are different
+	 * contracts with the dispatcher, so count them and keep the last
+	 * eight, instead of inferring the shape from a hex difference
+	 * after a death. */
+	{
+		unsigned long long trap = c->res_trap_valid ?
+			c->res_trap_rip : 0;
+		unsigned cls = 0; /* 0 = advance (+2), 1 = restart, 2 = other */
+
+		if (trap != 0 && c->d->regs.rip == trap)
+			cls = 1;
+		else if (trap != 0 && c->d->regs.rip == trap + 2)
+			cls = 0;
+		else
+			cls = 2;
+		c->ans_cls = cls;
+		c->ans_cls_ring[c->ans_cls_at % 8] = cls;
+		c->ans_cls_at++;
+		if (cls == 1)
+			c->ans_restarts++;
+		else if (cls == 2)
+			c->ans_other++;
+	}
 	c->ans_rip = c->d->regs.rip;
 	c->ans_rsp = c->d->regs.rsp;
 	c->ans_rax = c->d->regs.rax;

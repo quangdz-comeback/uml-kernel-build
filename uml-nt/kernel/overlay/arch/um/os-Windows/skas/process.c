@@ -920,6 +920,21 @@ void userspace(struct uml_pt_regs *regs)
 						(unsigned)c->d->action,
 						(unsigned)c->d->cmd);
 					uml_nt_ctx_ring_dump(c);
+					os_info("[ans-shape] pid %d cls=%u "
+						"restarts=%llu other=%llu "
+						"ring=%u%u%u%u%u%u%u%u trap=0x%llx\n",
+						c->pid, c->ans_cls,
+						c->ans_restarts, c->ans_other,
+						c->ans_cls_ring[0],
+						c->ans_cls_ring[1],
+						c->ans_cls_ring[2],
+						c->ans_cls_ring[3],
+						c->ans_cls_ring[4],
+						c->ans_cls_ring[5],
+						c->ans_cls_ring[6],
+						c->ans_cls_ring[7],
+						c->res_trap_valid ?
+						c->res_trap_rip : 0ull);
 					os_info("[d20-guard] pid %d guarded=%llu "
 						"checks=%llu last rip=0x%llx "
 						"vma=%u prot=0x%x off=0x%llx "
