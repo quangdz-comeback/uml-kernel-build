@@ -789,7 +789,7 @@ static void veh_stk_init(void)
 {
 	if (veh_stk_ready)
 		return;
-	veh_stk.buf = (unsigned long long)(unsigned long)veh_buf;
+	veh_stk.buf = (unsigned long long)(uintptr_t)veh_buf;
 	veh_stk.size = sizeof(veh_buf);
 	veh_stk.depth = 0;
 	veh_stk_ready = 1;
@@ -822,7 +822,7 @@ static void veh_stk_selfcheck(void)
 	__asm__ volatile("mov %0, %%r10" : : "r"(r10w) : "r10");
 	__asm__ volatile("mov %0, %%r11" : : "r"(r11w) : "r11");
 	got = veh_switch_call(veh_probe, want,
-			      (void *)(unsigned long)veh_stk.sp, veh_save);
+			      (void *)(uintptr_t)veh_stk.sp, veh_save);
 	__asm__ volatile("mov %%r10, %0" : "=r"(r10w));
 	__asm__ volatile("mov %%r11, %0" : "=r"(r11w));
 	d->veh_sc_sp_out = veh_now_sp();
@@ -878,7 +878,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		 * land on a guest PROT_NONE/PAGE_GUARD page */
 		r = (LONG)veh_switch_call((long (*)(EXCEPTION_POINTERS *))
 					  veh_body, ep,
-					  (void *)(unsigned long)veh_stk.sp,
+					  (void *)(uintptr_t)veh_stk.sp,
 					  veh_save);
 		(void)uml_nt_veh_leave(&veh_stk, &sp_out);
 		if (sp_out != veh_now_sp()) {
