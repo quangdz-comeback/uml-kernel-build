@@ -920,6 +920,8 @@ void userspace(struct uml_pt_regs *regs)
 						(unsigned)c->d->action,
 						(unsigned)c->d->cmd);
 					uml_nt_ctx_ring_dump(c);
+					os_info("[d20-guard] pid %d guarded=%llu\n",
+						c->pid, c->d->d20_guarded);
 					os_info("[xstate] pid %d api=%llu want=%llu "
 					        "mask=0x%llx cleared=%llu kept=%llu\n",
 					        c->pid, c->d->xstate_api,

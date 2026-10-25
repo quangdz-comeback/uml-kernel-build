@@ -531,6 +531,7 @@ struct uml_nt_stub_data {
 	unsigned long long xstate_api;
 	unsigned long long xstate_want;
 	unsigned long long xstate_mask;
+	unsigned long long d20_guarded; /* answers whose rip held 0f 05 */
 	unsigned long long xstate_cleared;
 	unsigned long long xstate_kept;
 	unsigned long long veh_sc_size;

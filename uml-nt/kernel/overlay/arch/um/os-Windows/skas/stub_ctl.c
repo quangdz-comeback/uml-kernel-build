@@ -10882,6 +10882,44 @@ fail:
  * restarts on the new conn), -1 on protocol error.
  * EXPORT (S2): the real userspace() loop serves through this — same
  * machinery as the probe's service loop, one protocol. */
+/* [d20-guard] (M5.6a, referee 40200361737): an ANSWER must never hand
+ * the guest a REAL syscall instruction. The restart shape is the trap:
+ * do_signal's restart sets rip = post_rip - 2, i.e. back ONTO the guest's
+ * syscall site, expecting the D20 sentinel (0f 0b) to trap again. If the
+ * page still holds the original 0f 05 — a file fill restored it, a sweep
+ * skipped the run, a mapping was never swept — the guest executes a real
+ * Windows system call: it leaves user mode through the host kernel, no
+ * VEH ever runs, no record is published, and the process dies with a raw
+ * 0xC0000005. Measured: guest rip libc+0xfce65, the `syscall` of
+ * __close_nocancel, answered as a restart, dead with no dispatch.
+ *
+ * So verify the instruction at every syscall-class answer, and patch it
+ * if it is real. One VMA lookup and one 2-byte compare per round. */
+static void uml_nt_d20_guard_answer(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_vma *v;
+	unsigned long long rip = c->d->regs.rip, off;
+	unsigned char *p;
+
+	if (c->mm == NULL)
+		return;
+	v = uml_nt_vma_find(c->mm, rip);
+	if (v == NULL || !uml_nt_prot_execable(v->prot))
+		return;
+	if (rip + 2 > v->end)
+		return;
+	off = v->run_off + (rip - v->start);
+	p = (unsigned char *)uml_boot.physmem_base + off;
+	if (p[0] != 0x0f || p[1] != 0x05)
+		return;
+	p[1] = 0x0b;
+	c->d->d20_guarded++;
+	os_info("[d20-guard] pid %lu answer rip=0x%llx held a REAL syscall "
+		"(0f 05) — patched to the sentinel before the resume (%llu "
+		"guard(s))\n", (unsigned long)c->pid, rip,
+		c->d->d20_guarded);
+}
+
 int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 {
 	int rc;
@@ -11012,6 +11050,8 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	     c->d->cmd == UML_STUB_CMD_FAULT ||
 	     c->d->cmd == UML_STUB_CMD_PROT_DONE))
 		uml_nt_resume_regs_record(c, pushed);
+	if (c->d->cmd == UML_STUB_CMD_SYSCALL)
+		uml_nt_d20_guard_answer(c);
 	/* Shelley 159 (i): freeze what we believe we published, in our
 	 * own memory, BEFORE the event releases the stub. If the block
 	 * is later found holding something else, this is the yardstick
