@@ -10829,6 +10829,10 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	d->stack_va = stack_va;
 	d->init_regs = *init;
 	d->halt = 0;
+	/* A/B (Shelley 161 item 4): resume plain, no native hop on the
+	 * guest stack — the last step between the answer and the guest
+	 * that no measurement has cleared yet. */
+	d->fs_tramp_off = 1;
 
 	phys_h = (unsigned long long)(uintptr_t)uml_boot.physmem_section;
 	dsec_h = (unsigned long long)(uintptr_t)dsec;
