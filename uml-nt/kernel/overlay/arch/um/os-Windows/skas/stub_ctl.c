@@ -3609,8 +3609,13 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 		return;
 	if (!uml_nt_conn_is_login(c))
 		return;
-	if (c->drex_armed)
-		return;
+	/* Already armed? Then MOVE the breakpoint to this round's target
+	 * instead of returning: keeping a stale address armed was the
+	 * fourth way this probe measured nothing (referee 40243638730:
+	 * armed=1, hundreds of rounds, hits=0 — the address armed on the
+	 * first round was simply never executed again, and the early
+	 * return meant no later round was ever bracketed). */
+
 	/* Shelley 164: one-shot per ROUND, continuous across the conn.
 	 *
 	 * A single one-shot at the first syscall's target proved nothing:
@@ -3645,8 +3650,17 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 		return;
 	{
 		int got[UML_NT_DRS_SLOTS];
-		int n = uml_nt_drs_reserve(&c->drs, UML_NT_DRS_EXEC, 1, got);
+		int n;
 
+		/* a moving target keeps the same slot: only reserve when the
+		 * ledger has none (the first round, or after a hit) */
+		if (c->drex_slot >= 0) {
+			got[0] = c->drex_slot;
+			n = 1;
+		} else {
+			n = uml_nt_drs_reserve(&c->drs, UML_NT_DRS_EXEC, 1,
+					       got);
+		}
 		if (n <= 0) {
 			os_info("[dr-exec] pid %lu slot ledger full:\n",
 				(unsigned long)c->pid);
