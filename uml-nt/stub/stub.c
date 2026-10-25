@@ -1712,10 +1712,18 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * AVX/AVX-512 state above the legacy area is no longer carried
 	 * through a resume on this host. That is the honest trade, and
 	 * the counter below makes it visible rather than silent. */
-	if (c->ContextFlags & CONTEXT_XSTATE) {
-		c->ContextFlags &= ~(DWORD)CONTEXT_XSTATE;
-		d->xstate_cleared++;
-	}
+	/* MEASURED, then REVERTED (to-shelley 160): clearing the claim did
+	 * stop the silent death — and broke the guest instead: systemd
+	 * aborted with "Assertion 'q' failed at src/basic/hash-funcs.c:26"
+	 * right after a fork round, three referees running, boot dead at
+	 * ~19k log lines, never reaching the password. So the OS really
+	 * does need that claim (it is what keeps the thread's extended
+	 * state - AVX on this host - working across a restore). The claim
+	 * stays; the counters stay, so every death line still says which
+	 * state it was in. One variable at a time: the death is back, and
+	 * the discriminator is what we came for. */
+	if (c->ContextFlags & CONTEXT_XSTATE)
+		d->xstate_kept++;
 	d->round_step = 10;
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);
