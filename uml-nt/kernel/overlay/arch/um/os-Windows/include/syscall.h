@@ -199,6 +199,8 @@ struct uml_nt_stub_conn {
 	 * resume?" — armed with one answer, spent by one hit. */
 	unsigned long long drex_va;
 	unsigned drex_armed, drex_used;
+	unsigned long drex_rounds;    /* resumes actually armed */
+	unsigned long drex_hits_seen; /* hits observed */
 	/* Shelley 164: the slot ledger — one owner per debug slot, all
 	 * four decided here instead of by whichever instrument ran last. */
 	unsigned long long ans_pub; /* publish count when we answered */

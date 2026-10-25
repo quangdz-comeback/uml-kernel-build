@@ -3598,6 +3598,8 @@ static int dr_probe_owns_slots(struct uml_nt_stub_conn *c)
  *                   i.e. in the resume/hop path, with hard evidence.
  * The chain instrument proved this mechanism reports cleanly (never
  * killed a stub), so this is a measurement, not new machinery. */
+#define UML_NT_DREX_MAX_ROUNDS 4000ul /* safety cap, not a budget */
+
 static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
@@ -3605,7 +3607,20 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 
 	if (d == NULL || c->mm == NULL || c->imgw_n <= 0)
 		return;
-	if (c->drex_used || c->drex_armed || !uml_nt_conn_is_login(c))
+	if (!uml_nt_conn_is_login(c))
+		return;
+	if (c->drex_armed)
+		return;
+	/* Shelley 164: one-shot per ROUND, continuous across the conn.
+	 *
+	 * A single one-shot at the first syscall's target proved nothing:
+	 * that address may simply never execute, and "hits=0" then says
+	 * nothing about the resume path (it is not evidence of (B), it is
+	 * absence of evidence). Armed on EVERY round at that round's own
+	 * resume target, the instrument answers per-round: the guest
+	 * demonstrably ran after N resumes, and whether the LAST resume
+	 * before the death was executed. That is the (A)/(B) question. */
+	if (c->drex_rounds >= UML_NT_DREX_MAX_ROUNDS)
 		return;
 	if (d->cmd != UML_STUB_CMD_SYSCALL)
 		return;
@@ -3653,6 +3668,7 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 	}
 	c->drex_va = va;
 	c->drex_armed = 1;
+	c->drex_rounds++;
 	os_info("[dr-exec] pid %lu %s ONE-SHOT execute breakpoint at "
 		"0x%llx (the guest's first instruction after this resume) "
 		"— a hit proves the resume reached guest code\n",
@@ -3675,6 +3691,7 @@ static int uml_nt_drexec_round(struct uml_nt_stub_conn *c)
 		return 0;
 	c->drex_armed = 0;
 	c->drex_used = 1;
+	c->drex_hits_seen++;
 	if (c->drex_slot >= 0) {
 		d->dr_watch[c->drex_slot] = 0;
 		d->dr_exec_mask &= ~(1u << c->drex_slot);
@@ -3682,12 +3699,14 @@ static int uml_nt_drexec_round(struct uml_nt_stub_conn *c)
 		c->drex_slot = -1;
 	}
 	d->drex_hits++;
-	os_info("[dr-exec] HIT pid %lu rip=0x%llx rsp=0x%llx rax=0x%llx "
-		"rflags=0x%llx hit_type=%llu ==> THE GUEST RAN: the resume "
-		"reached guest code at 0x%llx; whatever kills it is at or "
-		"after this instruction\n",
-		(unsigned long)c->pid, d->regs.rip, d->regs.rsp,
-		d->regs.rax, d->regs.rflags, d->dr_hit_type, c->drex_va);
+	if (c->drex_hits_seen <= 5 || !(c->drex_hits_seen % 100))
+		os_info("[dr-exec] HIT n=%lu of %lu resumes pid %lu "
+			"rip=0x%llx rsp=0x%llx rax=0x%llx rflags=0x%llx "
+			"hit_type=%llu ==> THE GUEST RAN after this resume\n",
+			(unsigned long)c->drex_hits_seen,
+			(unsigned long)c->drex_rounds, (unsigned long)c->pid,
+			d->regs.rip, d->regs.rsp, d->regs.rax, d->regs.rflags,
+			d->dr_hit_type);
 	d->action = UML_STUB_ACTION_NONE;
 	d->err = 0;
 	return 1;

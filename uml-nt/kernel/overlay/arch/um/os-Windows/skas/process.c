@@ -1043,6 +1043,11 @@ void userspace(struct uml_pt_regs *regs)
 				c->ans_regs[i], now[i],
 				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
 	}
+	os_info("[dr-exec] pid %d armed=%lu hits=%lu last_target=0x%llx "
+		"==> %s\n", c->pid, c->drex_rounds, c->drex_hits_seen,
+		c->drex_va,
+		c->drex_hits_seen ? "the guest ran after at least one resume"
+				  : "no armed resume was ever executed");
 	os_info("[dr-exec] pid %d hits=%llu "
 						"armed=%u va=0x%llx ==> %s\n",
 						c->pid, c->d->drex_hits,
