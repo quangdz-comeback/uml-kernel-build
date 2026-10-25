@@ -4343,19 +4343,38 @@ void uml_nt_census_classes(struct uml_nt_phys *ph)
 			}
 		}
 	}
+	/* Count what the REGISTRY claims, not what the hook's table says:
+	 * the pressure hook's `ph` is not necessarily the conns' table
+	 * (three referees printed used=0 through that assumption). */
 	for (i = 0; i < UML_NT_PHYS_MAX_RUNS; i++) {
-		if (uml_nt_phys_refs(ph, i) <= 0)
+		if (cls[i] == 0 && cls[i] < 200)
+			continue;
+		if (cls[i] >= 200)
 			continue;
 		used++;
-		if (cls[i] >= 200)
-			unclaimed++;
-		else {
-			n[cls[i]]++;
-			if (oldest[cls[i]] == 0 || ph->touch[i] < oldest[cls[i]])
-				oldest[cls[i]] = ph->touch[i];
-			if (ph->touch[i] > newest[cls[i]])
-				newest[cls[i]] = ph->touch[i];
+		n[cls[i]]++;
+		if (oldest[cls[i]] == 0 || ph->touch[i] < oldest[cls[i]])
+			oldest[cls[i]] = ph->touch[i];
+		if (ph->touch[i] > newest[cls[i]])
+			newest[cls[i]] = ph->touch[i];
+	}
+	/* unclaimed = used runs nobody's VMA names (free or leaked) */
+	{
+		int ru = 0, ri2;
+
+		for (ri2 = 0; ri2 < uml_nt_conn_reg_count(); ri2++) {
+			struct uml_nt_stub_conn *pc2 =
+				uml_nt_conn_reg_at(ri2);
+			int vi2;
+
+			if (pc2 == NULL || pc2->mm == NULL || !pc2->alive)
+				continue;
+			for (vi2 = 0; vi2 < pc2->mm->nvma; vi2++)
+				ru += (int)((pc2->mm->vma[vi2].end -
+					     pc2->mm->vma[vi2].start) >>
+					    UML_NT_PHYS_RUN_SHIFT);
 		}
+		used = ru;
 	}
 	os_info("[census-class] used=%d: anon=%d(%lluK) file-dirty=%d(%lluK) "
 		"shared-exec=%d(%lluK) file-clean=%d(%lluK) unclaimed=%d | "
