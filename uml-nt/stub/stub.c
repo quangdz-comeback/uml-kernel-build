@@ -523,6 +523,14 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 	r->ss = (unsigned long long)c->SegSs;
 	r->ctx_flags = (unsigned long long)c->ContextFlags;
 	r->mxcsr = (unsigned long long)(unsigned int)c->MxCsr;
+	/* Shelley 159 (i): the rip/rsp the STUB itself reads out of the
+	 * shared block at push time, under the seq it read them — the
+	 * third value in the three-way comparison. Three equal values =
+	 * nothing went wrong in transit (the guest really was there); a
+	 * differing one = the write path, not the guest. */
+	r->grip = (unsigned long long)d->regs.rip;
+	r->gsp = (unsigned long long)d->regs.rsp;
+	r->gseq = (unsigned long long)d->done_seq;
 	r->have_ex = 0;
 	r->ex_back = 0;
 	r->host_xcr0 = host_xcr0;

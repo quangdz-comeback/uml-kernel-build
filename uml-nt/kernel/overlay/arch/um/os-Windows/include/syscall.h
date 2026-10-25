@@ -176,6 +176,17 @@ struct uml_nt_stub_conn {
 	 * 37539992560 conviction (the tcache_put pair in the
 	 * abandoned source run), never again silent. kzalloc init =
 	 * empty. */
+	/* Shelley 159 (i)/(iii): the ANSWER the kernel believes it
+	 * published, kept in the kernel's OWN memory (never in the shared
+	 * block, so a corrupted block cannot corrupt the yardstick).
+	 * answered vs shared vs the stub's own read decides
+	 * corruption-in-transit; ans_retval is the value the guest just
+	 * received — a death rip that equals it is a jump to a return
+	 * value (branch iii). req_* is the same snapshot at request
+	 * arrival, which catches a torn read at the other end. */
+	unsigned long long ans_rip, ans_rsp, ans_rax, ans_retval, ans_seq;
+	unsigned long long ans_step;
+	unsigned long long req_rip, req_rsp, req_seq_seen;
 	struct uml_nt_view views[UML_NT_VIEW_MAX];
 	int nviews;
 	/* M3.7: a syscall response may carry ops (mmap/munmap/

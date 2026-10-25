@@ -16,6 +16,7 @@
 #include <string.h>
 #include "resume_model.h"
 #include "veh_model.h"
+#include "deathsit_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -41,6 +42,56 @@ resume_target(int cls, unsigned long long rip, unsigned long long verbatim)
 static void test_pwslot(void);
 
 static void sec11_veh_stack(void);
+
+/* section 12 — the DEATH-SITE discriminator (Shelley 159).
+ *
+ * Real numbers from the hunt, so the test is not a toy: the stub dies
+ * at rip 0x601dce65 while the module that should hold it starts at
+ * 0x601ec000 (one 64K above the hole) — i.e. the two live hypotheses
+ * differ by a single bit (0x601dce65 ^ 0x601ece65 == 0x10000), which is
+ * exactly the shape a copy-path bug takes and exactly the shape a
+ * wildly-computed jump target does NOT (that one lands anywhere).
+ */
+static void section12(void)
+{
+	const unsigned long long dead = 0x601dce65ull;
+	const unsigned long long text = 0x601ece65ull;
+
+	/* a. block and kernel agree, table has it, stub has it => SANE */
+	CHECK(uml_nt_deathsit_verdict(dead, dead, 1, 1) == UML_NT_DS_SANE);
+	/* b. the table says hole but the process still maps it => STALE */
+	CHECK(uml_nt_deathsit_verdict(dead, dead, 0, 1) == UML_NT_DS_STALE);
+	/* c. both empty => the guest jumped into a hole */
+	CHECK(uml_nt_deathsit_verdict(dead, dead, 0, 0) == UML_NT_DS_JUMP);
+	/* d. the block no longer holds the answer => TRANSIT, and it WINS
+	 *    over every geometric branch (a stale view cannot be diagnosed
+	 *    on a value we never wrote) */
+	CHECK(uml_nt_deathsit_verdict(text, dead, 1, 1) == UML_NT_DS_TRANSIT);
+	CHECK(uml_nt_deathsit_verdict(text, dead, 0, 0) == UML_NT_DS_TRANSIT);
+	/* e. the +64K relation, told exactly: as ARITHMETIC the two
+	 *    addresses are 0x10000 apart (Shelley's observation), as a BIT
+	 *    VECTOR they differ in TWO bits (0x30000) — a single-bit flip
+	 *    is a different animal, and only the arithmetic difference
+	 *    survives a page-shift story. Both facts, so nobody re-derives
+	 *    the wrong one from the log. */
+	CHECK(text - dead == 0x10000ull);
+	CHECK((text ^ dead) == 0x30000ull);
+	CHECK(uml_nt_deathsit_verdict(text, dead, 0, 1) == UML_NT_DS_TRANSIT);
+
+	/* f. the jump-source test: a rip equal to the syscall return value
+	 *    (or within 64K of it) names the producer of the target */
+	CHECK(uml_nt_deathsit_near_retval(dead, dead, 0x10000) == 1);
+	CHECK(uml_nt_deathsit_near_retval(dead, 0x601d0000ull, 0x10000) == 1);
+	/* ... and the module base one 64K up is NOT "near": the distance
+	 * is 0x1ce65, which is why the bit-flip observation is a TRANSIT
+	 * signal and not a jump-source signal */
+	CHECK(uml_nt_deathsit_near_retval(dead, 0x6085d000ull, 0x10000) == 0);
+	/* symmetric: a retval BELOW the rip is measured too */
+	CHECK(uml_nt_deathsit_near_retval(dead, dead + 0xfff, 0x10000) == 1);
+	CHECK(uml_nt_deathsit_near_retval(dead, dead + 0x10001, 0x10000) == 0);
+
+	printf("section 12 (death-site discriminator): all ok\n");
+}
 
 int main(void)
 {
@@ -224,6 +275,7 @@ int main(void)
 	CHECK(uml_nt_tf_trace_next(0, 1, 1) == UML_NT_TF_EXHAUSTED);
 
 	sec11_veh_stack();
+	section12();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);

@@ -10888,6 +10888,11 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	int pushed = 0;
 
 	mb();
+	/* Shelley 159 (i): what the block held the moment the request
+	 * arrived — the other end of the transit window. */
+	c->req_rip = c->d->regs.rip;
+	c->req_rsp = c->d->regs.rsp;
+	c->req_seq_seen = c->d->req_seq;
 	if (c->d->req_seq != c->d->done_seq + 1) {
 		os_info("[stubtest] seq desync pid %lu req=%llu done=%llu\n",
 			(unsigned long)c->pid, c->d->req_seq,
@@ -11007,6 +11012,17 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	     c->d->cmd == UML_STUB_CMD_FAULT ||
 	     c->d->cmd == UML_STUB_CMD_PROT_DONE))
 		uml_nt_resume_regs_record(c, pushed);
+	/* Shelley 159 (i): freeze what we believe we published, in our
+	 * own memory, BEFORE the event releases the stub. If the block
+	 * is later found holding something else, this is the yardstick
+	 * that separates corruption-in-transit from a guest that really
+	 * was at the death rip. */
+	c->ans_rip = c->d->regs.rip;
+	c->ans_rsp = c->d->regs.rsp;
+	c->ans_rax = c->d->regs.rax;
+	c->ans_retval = c->d->retval;
+	c->ans_seq = c->d->req_seq;
+	c->ans_step = c->d->round_step;
 	mb();
 	nt->NtSetEvent(c->evt_out, NULL);
 	if (c->d->halt || c->d->action == UML_STUB_ACTION_KILL) {

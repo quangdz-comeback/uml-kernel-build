@@ -36,6 +36,7 @@
 #include <longjmp.h>
 #include <mm_id.h>
 #include <skas.h>
+#include <deathsit_model.h>
 #include <user.h>
 #include <stub-panic.h>
 #include <stub_nt.h>
@@ -128,6 +129,116 @@ static void uml_nt_guestsite(const char *what, unsigned long long va,
 		os_info("[site] %s=0x%llx NO VMA (gap after 0x%llx, "
 			"before 0x%llx) nvma=%d\n", what, va, nb, ne,
 			c->mm != NULL ? c->mm->nvma : -1);
+}
+
+/* [death-site] (Shelley 159): three hypotheses, three different fixes,
+ * and exactly one set of numbers separates them.
+ *
+ *   (i)   corruption in transit — the answer the kernel published, the
+ *         block as it stands now, and the value the stub itself read
+ *         under its seq disagree. Fix = the copy path (length,
+ *         overlap, torn write), never the guest.
+ *   (ii)  stale view — the kernel's table calls the VA a hole while the
+ *         STUB still has it mapped (VirtualQueryEx on the live
+ *         process), i.e. the guest kept running in a range the table
+ *         already unmapped. Fix = the unmap lifecycle (never release a
+ *         range the guest's rip still sits in).
+ *   (iii) guest jump — table AND process both empty, and the rip equals
+ *         (or sits next to) the value the kernel just returned: the
+ *         guest jumped to a return value. Fix = whoever computed the
+ *         target.
+ */
+static void uml_nt_death_site(struct uml_nt_stub_conn *c)
+{
+	unsigned long long rip = c->d->regs.rip;
+	unsigned long long xor_ans = c->ans_rip ^ rip;
+	int vi = uml_nt_vp_view_find(c->views, c->nviews, rip);
+	int ri = (c->d->ctx_ring_at > 0) ?
+		(int)((c->d->ctx_ring_at - 1) % 16) : -1;
+	int stub_has = 0;
+
+	/* (ii) the ledger, then the live process itself */
+	if (vi >= 0)
+		os_info("[ledger] rip=0x%llx VIEW #%d base=0x%llx len=0x%llx "
+			"off=0x%llx prot=0x%x (%d views)\n", rip, vi,
+			c->views[vi].va, c->views[vi].len,
+			c->views[vi].off, (unsigned)c->views[vi].prot,
+			c->nviews);
+	else
+		os_info("[ledger] rip=0x%llx NO VIEW (%d views)\n",
+			rip, c->nviews);
+
+	if (c->proc != NULL) {
+		MEMORY_BASIC_INFORMATION mbi;
+
+		{
+			unsigned char *z = (unsigned char *)&mbi;
+			unsigned i;
+
+			for (i = 0; i < sizeof(mbi); i++)
+				z[i] = 0;
+		}
+		if (nt->VirtualQueryEx(c->proc, (void *)(uintptr_t)rip,
+				       &mbi, sizeof(mbi)) > 0) {
+			stub_has = (mbi.State == MEM_COMMIT);
+			os_info("[stubview] rip=0x%llx state=0x%lx prot=0x%lx "
+				"type=0x%lx base=0x%llx alloc=0x%llx ==> %s\n",
+				rip, (unsigned long)mbi.State,
+				(unsigned long)mbi.Protect,
+				(unsigned long)mbi.Type,
+				(unsigned long long)(uintptr_t)mbi.BaseAddress,
+				(unsigned long long)mbi.AllocationBase,
+				stub_has ? "the STUB still maps it" :
+				"the stub does NOT map it");
+		} else {
+			os_info("[stubview] rip=0x%llx QUERY FAILED\n", rip);
+		}
+	}
+
+	/* (i) the three rips */
+	os_info("[rip3] answered=0x%llx(seq=%llu step=%llu) "
+		"shared=0x%llx(req_seq=%llu step=%llu) "
+		"stub_read=0x%llx(seq=%llu) xor=0x%llx\n",
+		c->ans_rip, c->ans_seq, c->ans_step,
+		rip, c->d->req_seq, c->d->round_step,
+		ri >= 0 ? c->d->ctx_ring[ri].grip : 0ull,
+		ri >= 0 ? c->d->ctx_ring[ri].gseq : 0ull,
+		xor_ans);
+	os_info("[rip3] req=0x%llx(seq=%llu) ans_rsp=0x%llx "
+		"ans_rax=0x%llx ans_retval=0x%llx\n",
+		c->req_rip, c->req_seq_seen, c->ans_rsp,
+		c->ans_rax, c->ans_retval);
+
+	/* the verdicts, one line each, so the class is never inferred from
+	 * a reader's arithmetic again (the choice itself is pure logic,
+	 * red-first in test_resume.c section 12) */
+	switch (uml_nt_deathsit_verdict(c->ans_rip, rip, vi >= 0, stub_has)) {
+	case UML_NT_DS_TRANSIT:
+		os_info("[verdict] (i) TRANSIT-CORRUPT: the block no longer "
+			"holds what we answered (xor=0x%llx) — fix the copy "
+			"path\n", xor_ans);
+		break;
+	case UML_NT_DS_STALE:
+		os_info("[verdict] (ii) STALE VIEW: table says hole, the "
+			"stub still maps it — the guest ran in a released "
+			"range; fix the unmap lifecycle\n");
+		break;
+	case UML_NT_DS_JUMP:
+		os_info("[verdict] (iii) GUEST JUMP: no table entry, no "
+			"view, and the answer we gave was rip=0x%llx / "
+			"retval=0x%llx%s — trace the target's source\n",
+			c->ans_rip, c->ans_retval,
+			uml_nt_deathsit_near_retval(rip, c->ans_retval,
+						    0x10000) ?
+			" (rip is WITHIN 64K of the retval we just "
+			"returned)" : "");
+		break;
+	default:
+		os_info("[verdict] SANE: guest rip sits in a mapped VMA "
+			"AND a live view (prot=0x%x) — the death is not a "
+			"mapping hole\n", (unsigned)c->views[vi].prot);
+		break;
+	}
 }
 
 static void uml_nt_ctx_ring_dump(struct uml_nt_stub_conn *c)
@@ -790,6 +901,7 @@ void userspace(struct uml_pt_regs *regs)
 						  c->d->stub_sp_lim ?
 						  c->d->stub_sp -
 						  c->d->stub_sp_lim : 0);
+					uml_nt_death_site(c);
 					uml_nt_guestsite("rip", c->d->regs.rip, c);
 					uml_nt_guestsite("rsp", c->d->regs.rsp, c);
 					os_info("[site] last rax=0x%llx a0=0x%llx a1=0x%llx "

@@ -511,6 +511,9 @@ struct uml_nt_stub_data {
 		unsigned long long kind;	/* 0 syscall 1 fault 2 verbatim */
 		unsigned long long rip, rsp, eflags, cs, ss, ctx_flags;
 		unsigned long long mxcsr;
+	unsigned long long grip; /* guest rip the stub resumes to */
+	unsigned long long gsp;  /* guest rsp the stub resumes on */
+	unsigned long long gseq; /* done_seq the stub read it under */
 		unsigned long long have_ex;
 		unsigned long long all_size, all_area, all_off;
 		unsigned long long leg_size, leg_area, leg_off;
