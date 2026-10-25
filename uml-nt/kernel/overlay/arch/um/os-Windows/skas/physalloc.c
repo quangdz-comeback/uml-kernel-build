@@ -143,8 +143,10 @@ long long uml_nt_phys_alloc_span(struct uml_nt_phys *p, int nruns)
 	 * the first stamp makes every live run's epoch >= 1, so
 	 * gen==0 stays the "unchecked claim" sentinel. */
 	p->epoch++;
-	for (k = 0; k < nruns; k++)
+	for (k = 0; k < nruns; k++) {
 		p->gen[i + k] = p->epoch;
+		p->touch[i + k] = p->epoch;
+	}
 	/* THE ZERO-PAGE CONTRACT (M5.6a — the hunt's endgame): guest
 	 * RAM is one pagefile-backed NT section; NtExtendSection does
 	 * NOT zero the extension and the run recycling hands a freed

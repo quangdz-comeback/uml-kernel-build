@@ -89,12 +89,22 @@ struct uml_nt_phys {
 	 * immediately, the pre-D22 behavior. */
 	struct uml_nt_phys_park park[UML_NT_PHYS_PARK_MAX];
 	int npark;
+	/* [census-class] (Shelley 156 (a)+(d)): when was each run last
+	 * known to be TOUCHED by its guest — stamped at handout and at
+	 * every fault repair that lands in the run. Page-cache reclaim
+	 * needs an LRU order, and a fault is the only touch the kernel
+	 * itself observes (the guest's ordinary accesses run natively
+	 * through the stub's views). 0 = never. */
+	unsigned long long touch[UML_NT_PHYS_MAX_RUNS];
 	const void *drop_owner; /* the view performing current drops */
 };
 
 /* Initialize the refcount layer over a section of `size` bytes.
  * Returns 0, or -1 if size exceeds UML_NT_PHYS_MAX_RUNS runs. */
 int uml_nt_phys_init(struct uml_nt_phys *p, unsigned long long size);
+
+/* [census-class] (Shelley 156): per-class run census at pressure. */
+void uml_nt_census_classes(struct uml_nt_phys *ph);
 
 /* Backend hooks (skas/physbackend.c kernel-side, mocked in tests):
  * hand out ONE CONTIGUOUS block of `nruns` 64 KiB runs (kernel-side:

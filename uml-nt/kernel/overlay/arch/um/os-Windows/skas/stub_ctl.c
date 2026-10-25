@@ -4237,11 +4237,96 @@ void uml_nt_census(const char *tag, long long pid)
 		top_pid[2], top_runs[2]);
 }
 
+/* [census-class] (Shelley 156 (a)+(d)): classify every USED run so the
+ * reclaim decision has numbers and the leak hunt has a target:
+ *   anon-private   no file VMA claims it (heap/stack/brk) — never
+ *                  evictable
+ *   file-dirty     a WRITABLE file VMA claims it — not evictable
+ *                  without writeback
+ *   shared-exec    an executable file VMA with refs > 1 — evictable
+ *                  only when every mapper is idle
+ *   file-clean     only read-only file VMAs claim it — page cache,
+ *                  re-faultable byte-identically from the image (D28)
+ * Hardest-to-evict wins when several VMAs claim one run. */
+void uml_nt_census_classes(struct uml_nt_phys *ph)
+{
+	static unsigned char cls[UML_NT_PHYS_MAX_RUNS];
+	static unsigned long long oldest[4], newest[4];
+	int i, n[4] = { 0, 0, 0, 0 }, unclaimed = 0, used = 0;
+	struct task_struct *p;
+	static int class_left = 24;
+
+	if (ph == NULL || class_left-- <= 0)
+		return;
+	memset(cls, 0, sizeof(cls));
+	memset(oldest, 0, sizeof(oldest));
+	memset(newest, 0, sizeof(newest));
+	for_each_process(p) {
+		struct uml_nt_stub_conn *pc;
+		int vi;
+
+		if (p->mm == NULL)
+			continue;
+		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (pc == NULL || pc->mm == NULL || pc->ph != ph ||
+		    pc->dead_magic == UML_NT_CONN_DEAD || !pc->alive)
+			continue;
+		for (vi = 0; vi < pc->mm->nvma; vi++) {
+			struct uml_nt_vma *v = &pc->mm->vma[vi];
+			unsigned long long r, span = v->end - v->start;
+			int c = 3;	/* file-clean by default */
+
+			if (!(v->flags & 0x2))
+				c = 0;			/* anon-private */
+			else if (v->prot & 0x04)
+				c = 1;			/* file-dirty */
+			else if ((v->prot & 0x30) &&
+				 uml_nt_phys_refs(ph,
+					(long long)v->run_off) > 1)
+				c = 2;			/* shared-exec */
+			for (r = 0; r < span; r += UML_NT_PHYS_RUN_SIZE) {
+				unsigned long long run = v->run_off + r;
+
+				if (run >= UML_NT_PHYS_MAX_RUNS)
+					break;
+				if (cls[run] < 200 && c > cls[run])
+					cls[run] = (unsigned char)c;
+				else if (cls[run] == 0)
+					cls[run] = (unsigned char)c;
+			}
+		}
+	}
+	for (i = 0; i < UML_NT_PHYS_MAX_RUNS; i++) {
+		if (uml_nt_phys_refs(ph, i) <= 0)
+			continue;
+		used++;
+		if (cls[i] >= 200)
+			unclaimed++;
+		else {
+			n[cls[i]]++;
+			if (oldest[cls[i]] == 0 || ph->touch[i] < oldest[cls[i]])
+				oldest[cls[i]] = ph->touch[i];
+			if (ph->touch[i] > newest[cls[i]])
+				newest[cls[i]] = ph->touch[i];
+		}
+	}
+	os_info("[census-class] used=%d: anon=%d(%lluK) file-dirty=%d(%lluK) "
+		"shared-exec=%d(%lluK) file-clean=%d(%lluK) unclaimed=%d | "
+		"touch-epoch anon[%llu..%llu] dirty[%llu..%llu] "
+		"exec[%llu..%llu] clean[%llu..%llu]\n",
+		used, n[0], (unsigned long long)n[0] * 64, n[1],
+		(unsigned long long)n[1] * 64, n[2],
+		(unsigned long long)n[2] * 64, n[3],
+		(unsigned long long)n[3] * 64, unclaimed,
+		oldest[0], newest[0], oldest[1], newest[1],
+		oldest[2], newest[2], oldest[3], newest[3]);
+}
+
 void uml_nt_pressure_census(struct uml_nt_phys *p)
 {
 	/* the census walks the live conns' (shared) table itself */
-	(void)p;
 	uml_nt_census("pressure", -1);
+	uml_nt_census_classes(p);
 }
 
 /* [alloc-alias] (M5.6a, map 121 + to-shelley 119): the allocator's
