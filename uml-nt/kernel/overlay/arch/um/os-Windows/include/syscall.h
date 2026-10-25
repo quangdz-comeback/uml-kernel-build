@@ -187,6 +187,11 @@ struct uml_nt_stub_conn {
 	unsigned long long ans_rip, ans_rsp, ans_rax, ans_retval, ans_seq;
 	unsigned long long ans_step;
 	unsigned long long req_rip, req_rsp, req_seq_seen;
+	/* [d20-guard] self-measurement: what the guard actually looked at
+	 * on the last syscall answer (the death line prints it, so a guard
+	 * that never fires is a measurement, not a silent pass). */
+	unsigned long long gd_rip, gd_off, gd_voff, gd_n;
+	unsigned gd_prot, gd_b0, gd_b1, gd_view, gd_vb0, gd_vma;
 	struct uml_nt_view views[UML_NT_VIEW_MAX];
 	int nviews;
 	/* M3.7: a syscall response may carry ops (mmap/munmap/

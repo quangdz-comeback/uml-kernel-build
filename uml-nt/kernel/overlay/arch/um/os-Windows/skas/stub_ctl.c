@@ -10910,6 +10910,26 @@ static void uml_nt_d20_guard_answer(struct uml_nt_stub_conn *c)
 		return;
 	off = v->run_off + (rip - v->start);
 	p = (unsigned char *)uml_boot.physmem_base + off;
+	/* MEASURE the guard itself: if it never sees 0f 05 while the guest
+	 * demonstrably executes one, the translation is wrong, not the
+	 * guest. Record what we looked at (and the ledger's own answer for
+	 * the same VA) so the death line can say which side is lying. */
+	{
+		int vi = uml_nt_vp_view_find(c->views, c->nviews, rip);
+
+		c->gd_rip = rip;
+		c->gd_vma = 1;
+		c->gd_prot = (unsigned)v->prot;
+		c->gd_off = off;
+		c->gd_b0 = p[0];
+		c->gd_b1 = p[1];
+		c->gd_view = vi;
+		c->gd_voff = vi >= 0 ?
+			uml_nt_vp_view_off(&c->views[vi], rip) : 0;
+		c->gd_vb0 = vi >= 0 ? *(unsigned char *)
+			((char *)uml_boot.physmem_base + c->gd_voff) : 0;
+		c->gd_n++;
+	}
 	if (p[0] != 0x0f || p[1] != 0x05)
 		return;
 	p[1] = 0x0b;
