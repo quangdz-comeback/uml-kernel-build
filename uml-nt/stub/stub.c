@@ -207,11 +207,21 @@ static void fsgsbase_detect(void)
  * across syscall — the VEH snapshot's EFlags IS that value, so
  * reload it here for exact parity (the S4c2a overflow bans pushing
  * on the guest stack, hence the third global). */
+/* M5.6a canary (Shelley 161 follow-up): the hop is the last thing that
+ * runs before the guest, and with it removed the guest gets FURTHER
+ * (its first password round completes) — so the hop is where the first
+ * death happens. Count each half so a death inside it is a measurement
+ * instead of a suspicion: pre=1 lands before wrfsbase, post=1 after it
+ * (therefore before the jmp). */
+static volatile unsigned long long fs_tramp_pre, fs_tramp_post;
+
 __attribute__((naked)) static void fs_trampoline_sys(void)
 {
 	__asm__ volatile (
+		"incq	fs_tramp_pre(%rip)\n\t"
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
+		"incq	fs_tramp_post(%rip)\n\t"
 		"movq	fs_tramp_eflags(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
@@ -532,6 +542,8 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 	/* the address the trampoline will actually jump to (rip+2 for a
 	 * syscall answer) — the value the guest's next fetch comes from */
 	r->gtgt = (unsigned long long)d->regs.rip + 2;
+	r->hop_pre = fs_tramp_pre;
+	r->hop_post = fs_tramp_post;
 	r->gsp = (unsigned long long)d->regs.rsp;
 	r->gseq = (unsigned long long)d->done_seq;
 	r->have_ex = 0;

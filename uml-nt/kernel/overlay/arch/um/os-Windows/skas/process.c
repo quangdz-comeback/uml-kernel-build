@@ -204,6 +204,16 @@ static void uml_nt_death_site(struct uml_nt_stub_conn *c)
 		ri >= 0 ? c->d->ctx_ring[ri].grip : 0ull,
 		ri >= 0 ? c->d->ctx_ring[ri].gseq : 0ull,
 		xor_ans);
+	os_info("[hop] entered=%llu cleared_wrfsbase=%llu (last ring "
+		"entry: pre=%llu post=%llu) ==> %s\n",
+		ri >= 0 ? c->d->ctx_ring[ri].hop_pre : 0ull,
+		ri >= 0 ? c->d->ctx_ring[ri].hop_post : 0ull,
+		ri >= 0 ? c->d->ctx_ring[ri].hop_pre : 0ull,
+		ri >= 0 ? c->d->ctx_ring[ri].hop_post : 0ull,
+		(ri >= 0 && c->d->ctx_ring[ri].hop_pre !=
+		 c->d->ctx_ring[ri].hop_post) ?
+		"died INSIDE the hop (after wrfsbase, before the jmp)" :
+		"the hop completed; the death is at or after the jmp target");
 	os_info("[rip3] req=0x%llx(seq=%llu) ans_rsp=0x%llx "
 		"ans_rax=0x%llx ans_retval=0x%llx\n",
 		c->req_rip, c->req_seq_seen, c->ans_rsp,
@@ -212,7 +222,22 @@ static void uml_nt_death_site(struct uml_nt_stub_conn *c)
 	/* the verdicts, one line each, so the class is never inferred from
 	 * a reader's arithmetic again (the choice itself is pure logic,
 	 * red-first in test_resume.c section 12) */
-	switch (uml_nt_deathsit_verdict(c->ans_rip, rip, vi >= 0, stub_has)) {
+	/* MY OWN correction (Shelley 161): ans_rip belongs to the round kind
+	 * we answered. A PROT_DONE round legitimately carries the PREVIOUS
+	 * fault round's regs in the block (the stub does not republish them
+	 * for an op), so comparing across kinds invents a TRANSIT that
+	 * never happened — it did, once, in referee 40214141627. Only
+	 * compare when the block still holds the round we answered. */
+	if (c->ans_cmd != c->d->cmd || c->ans_seq != c->d->req_seq) {
+		os_info("[verdict] (i) not comparable: the block holds a "
+			"%u round (seq %llu), we answered a %u round (seq "
+			"%llu) — the rip difference is the round kind, not a "
+			"corruption\n", (unsigned)c->d->cmd, c->d->req_seq,
+			c->ans_cmd, c->ans_seq);
+		xor_ans = 0;
+	}
+	switch (uml_nt_deathsit_verdict(xor_ans == 0 ? rip : c->ans_rip,
+					rip, vi >= 0, stub_has)) {
 	case UML_NT_DS_TRANSIT:
 		os_info("[verdict] (i) TRANSIT-CORRUPT: the block no longer "
 			"holds what we answered (xor=0x%llx) — fix the copy "

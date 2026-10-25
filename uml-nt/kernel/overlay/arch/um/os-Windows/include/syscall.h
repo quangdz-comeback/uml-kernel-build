@@ -185,6 +185,7 @@ struct uml_nt_stub_conn {
 	 * value (branch iii). req_* is the same snapshot at request
 	 * arrival, which catches a torn read at the other end. */
 	unsigned long long ans_rip, ans_rsp, ans_rax, ans_retval, ans_seq;
+	unsigned ans_cmd; /* the round kind the answer belongs to */
 	unsigned long long ans_step;
 	unsigned long long req_rip, req_rsp, req_seq_seen;
 	/* [d20-guard] self-measurement: what the guard actually looked at

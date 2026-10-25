@@ -9804,8 +9804,7 @@ void uml_nt_sys_fork(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d)
 	 * half — the seed rcx is ABI garbage that would ride every
 	 * VEH dispatch CONTEXT back onto the guest stack. */
 	k->d->init_regs.rcx = 0;
-	/* A/B (Shelley 161 item 4): every child resumes plain too. */
-	k->d->fs_tramp_off = 1;
+	k->d->fs_tramp_off = 0; /* see the bootstrap note: hop stays ON */
 	os_info("[stubtest] fork seed pid %lu: child rip=0x%llx "
 		"rcx=0x%llx rbx=0x%llx r12=0x%llx r13=0x%llx\n",
 		(unsigned long)k->pid, k->d->init_regs.rip,
@@ -10829,10 +10828,13 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	d->stack_va = stack_va;
 	d->init_regs = *init;
 	d->halt = 0;
-	/* A/B (Shelley 161 item 4): resume plain, no native hop on the
-	 * guest stack — the last step between the answer and the guest
-	 * that no measurement has cleared yet. */
-	d->fs_tramp_off = 1;
+	/* A/B (Shelley 161 item 4): MEASURED, and the answer is that the
+	 * hop is load-bearing — with it disabled the guest got FURTHER
+	 * (its first password round completed, "Login incorrect", second
+	 * prompt) and then faulted on `sub %fs:0x28`: the hop is what
+	 * re-applies the FS base after the CONTEXT restore. Default
+	 * stays ON; the switch and the canary stay as instruments. */
+	d->fs_tramp_off = 0;
 
 	phys_h = (unsigned long long)(uintptr_t)uml_boot.physmem_section;
 	dsec_h = (unsigned long long)(uintptr_t)dsec;
@@ -11113,6 +11115,7 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		else if (cls == 2)
 			c->ans_other++;
 	}
+	c->ans_cmd = c->d->cmd; /* which round kind the yardstick belongs to */
 	c->ans_rip = c->d->regs.rip;
 	c->ans_rsp = c->d->regs.rsp;
 	c->ans_rax = c->d->regs.rax;
