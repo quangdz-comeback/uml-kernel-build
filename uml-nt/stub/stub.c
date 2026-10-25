@@ -409,6 +409,68 @@ static int do_action(void)
 
 /* The request → answer → action-chain loop shared by the VEH handler
  * and the pre-entry INIT stream. */
+
+/* ---- [ctx-ring] the CONTEXT we hand back (Shelley 158 step 1) -------- */
+
+/* The dispatcher's CONTEXT is preceded by its own CONTEXT_EX: three
+ * XSTATE_HEADERs (Size/AlignedSize/AreaSize/AreaOffset) describing the
+ * legacy block and the xstate area. KI_USER_EXCEPTION_DISPATCHER builds
+ * that header next to the context it hands the vector handler; reading
+ * it back tells us whether the area we are about to continue into is
+ * the one this CPU/OS actually expects — without guessing. */
+struct nt_xstate_header {
+	unsigned int size, aligned_size, area_size, area_offset;
+};
+
+struct nt_context_ex {
+	struct nt_xstate_header all, legacy, xstate;
+};
+
+#define NT_CONTEXT_X64_SIZE 0x4d0
+
+static void note_resume(CONTEXT *c, unsigned long long kind)
+{
+	struct uml_nt_ctx_ring *r;
+	const struct nt_context_ex *ex;
+	unsigned long long at;
+
+	if (d == NULL || c == NULL)
+		return;
+	at = (unsigned long long)d->ctx_ring_at % 16;
+	r = &d->ctx_ring[at];
+	r->seq = (unsigned long long)d->ctx_ring_at;
+	d->ctx_ring_at++;
+	r->step = d->round_step;
+	r->kind = kind;
+	r->rip = (unsigned long long)c->Rip;
+	r->rsp = (unsigned long long)c->Rsp;
+	r->eflags = (unsigned long long)c->EFlags;
+	r->cs = (unsigned long long)c->SegCs;
+	r->ss = (unsigned long long)c->SegSs;
+	r->ctx_flags = (unsigned long long)c->ContextFlags;
+	r->mxcsr = (unsigned long long)(unsigned int)c->MxCsr;
+	r->have_ex = 0;
+	/* Only trust the header when its legacy block names exactly this
+	 * context: legacy.size is the CONTEXT size, and the area must lie
+	 * before the header itself. */
+	ex = (const struct nt_context_ex *)((const unsigned char *)c -
+					    sizeof(struct nt_context_ex));
+	if (ex->legacy.size == NT_CONTEXT_X64_SIZE &&
+	    ex->all.size >= NT_CONTEXT_X64_SIZE &&
+	    ex->xstate.area_size < 0x10000u) {
+		r->have_ex = 1;
+		r->all_size = ex->all.size;
+		r->all_area = ex->all.area_size;
+		r->all_off = ex->all.area_offset;
+		r->leg_size = ex->legacy.size;
+		r->leg_area = ex->legacy.area_size;
+		r->leg_off = ex->legacy.area_offset;
+		r->xsa_size = ex->xstate.size;
+		r->xsa_area = ex->xstate.area_size;
+		r->xsa_off = ex->xstate.area_offset;
+	}
+}
+
 static void action_chain(void)
 {
 	d->round_step = 1;	/* published INIT/answer, waiting */
@@ -1372,6 +1434,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * re-executes on the now-fixed view (the kernel-pushed SIGSEGV
 	 * handler state from S4d rides the same verbatim shape). */
 	gp_to_context(c, &d->regs);
+	d->round_step = 7;
 
 	/* v13: re-assert the watchpoints at every resume — the context
 	 * restore is wholesale, so a slot left over from an earlier
@@ -1399,6 +1462,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		c->Dr7 = dr7;
 	}
 	c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+	d->round_step = 8;
 
 	/* S4d: apply the kernel's FP/XSTATE (upstream parity:
 	 * put_fp_registers before every continue). Today the bytes
@@ -1413,6 +1477,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	}
 	d->xstate_flags &= ~(u32_nt)(UML_STUB_XS_RESTORE |
 				     UML_STUB_XS_VERBATIM);
+	d->round_step = 9;
 
 	if (verbatim) {
 		/* A signal delivery rewrote the register file INCLUDING
@@ -1450,6 +1515,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		 * rsp it answered: equal + clean = the guest's own stack
 		 * arithmetic; a mismatch is OUR restore, not the guest. */
 		d->resume_rsp = (unsigned long long)c->Rsp;
+		d->round_step = 12;
+		note_resume(c, 2);
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
@@ -1516,8 +1583,11 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * verbatim branch above). The TF trampoline swaps rsp out and
 	 * back around its popfq, so this is the guest's own value. */
 	d->resume_rsp = (unsigned long long)c->Rsp;
+	d->round_step = 10;
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);
+	d->round_step = 11;
+	note_resume(c, is_syscall ? 0 : 1);
 
 	if (is_syscall && d->halt)
 		park_forever(); /* guest exit(): kernel terminates us */

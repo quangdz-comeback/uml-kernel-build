@@ -499,6 +499,24 @@ struct uml_nt_stub_data {
 	unsigned long long round_step;
 	unsigned long long veh_entries;
 	unsigned long long unhandled_calls;
+	/* [ctx-ring] (Shelley 158 step 1): the CONTEXT handed to
+	 * KiUserExceptionDispatcher's continue path, last
+	 * UML_NT_CTX_RING resumes, with the dispatcher's own
+	 * CONTEXT_EX header numbers read back verbatim. If the death
+	 * carries no exception record, this is the last thing WE
+	 * pushed — the only evidence left. */
+	struct uml_nt_ctx_ring {
+		unsigned long long seq;
+		unsigned long long step;	/* round_step at push */
+		unsigned long long kind;	/* 0 syscall 1 fault 2 verbatim */
+		unsigned long long rip, rsp, eflags, cs, ss, ctx_flags;
+		unsigned long long mxcsr;
+		unsigned long long have_ex;
+		unsigned long long all_size, all_area, all_off;
+		unsigned long long leg_size, leg_area, leg_off;
+		unsigned long long xsa_size, xsa_area, xsa_off;
+	} ctx_ring[16];
+	unsigned long long ctx_ring_at;
 	unsigned long long veh_sc_size;
 };
 

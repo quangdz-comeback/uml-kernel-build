@@ -87,6 +87,44 @@ int start_userspace(struct mm_id *mm_id)
 /* First round bootstrap: the task's pt_regs (binfmt wrote the guest
  * entry there) become the stub's jump state — the stub applies
  * init_regs and jumps AFTER its INIT plan streams back. */
+/* [ctx-ring] (Shelley 158 step 1): the last CONTEXTs we handed to the
+ * continue path, with the VMA verdict for rip and rsp (resuming into an
+ * unmapped page, or at a non-executable rip, is OUR bug, not the
+ * guest's) and the CONTEXT_EX header the dispatcher itself built. */
+static void uml_nt_ctx_ring_dump(struct uml_nt_stub_conn *c)
+{
+	unsigned long long n = c->d->ctx_ring_at;
+	unsigned long long first = n > 16 ? n - 16 : 0;
+	unsigned long long k;
+
+	for (k = first; k < n; k++) {
+		struct uml_nt_ctx_ring *r = &c->d->ctx_ring[k % 16];
+		int rip_ok = 0, rsp_ok = 0, i;
+
+		if (c->mm != NULL) {
+			for (i = 0; i < c->mm->nvma; i++) {
+				struct uml_nt_vma *v = &c->mm->vma[i];
+
+				if (r->rip >= v->start && r->rip < v->end)
+					rip_ok = (v->prot & 0xf0u) ? 1 : 3;
+				if (r->rsp >= v->start && r->rsp < v->end)
+					rsp_ok = (v->prot & 0x0fu) ? 1 : 3;
+			}
+		}
+		os_info("[ctx] #%llu step=%llu kind=%llu rip=0x%llx"
+			"(vma=%d) rsp=0x%llx(vma=%d) fl=0x%llx cs=%llu "
+			"ss=%llu cf=0x%llx mxcsr=0x%llx ex=%llu "
+			"all=[%llu/%llu/%llu] leg=[%llu/%llu/%llu] "
+			"xsa=[%llu/%llu/%llu]\n",
+			r->seq, r->step, r->kind, r->rip, rip_ok,
+			r->rsp, rsp_ok, r->eflags, r->cs, r->ss,
+			r->ctx_flags, r->mxcsr, r->have_ex,
+			r->all_size, r->all_area, r->all_off,
+			r->leg_size, r->leg_area, r->leg_off,
+			r->xsa_size, r->xsa_area, r->xsa_off);
+	}
+}
+
 static void conn_bootstrap(struct uml_nt_stub_conn *c,
 			   struct uml_pt_regs *regs)
 {
@@ -722,6 +760,7 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->unhandled_seq,
 						(unsigned)c->d->action,
 						(unsigned)c->d->cmd);
+					uml_nt_ctx_ring_dump(c);
 					os_info("[veh] pid %d phase=%llu "
 						"in=0x%llx body=0x%llx "
 						"out=0x%llx buf=0x%llx "
