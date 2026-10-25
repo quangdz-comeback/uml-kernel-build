@@ -214,7 +214,27 @@ static void fsgsbase_detect(void)
  * instead of a suspicion: pre=1 lands before wrfsbase, post=1 after it
  * (therefore before the jmp). */
 static volatile unsigned long long fs_tramp_pre, fs_tramp_post;
+static volatile unsigned long long fs_tramp_tfslot[2]; /* private scratch */
+extern const unsigned char fs_tramp_tf_end[];
+static volatile unsigned long long fs_tramp_ent_rsp, fs_tramp_ent_fl;
 
+/* Shelley 161 verification, done BEFORE touching the line: the
+ * `movq fs_tramp_eflags(%rip), %r11` was not merely dead — it was the
+ * WRONG GLOBAL. The two sibling hops both end with
+ * `movq fs_save_r11(%rip), %r11` (the guest's r11 captured at the
+ * trap), because wrfsbase burns r11 and the guest must get its own
+ * value back. The sys hop instead loaded an eflags snapshot into it and
+ * nothing anywhere consumes r11 (objdump: the next instruction is a
+ * memory-indirect jmp; no popfq, no mov %r11,%rflags in this hop —
+ * eflags are carried by the CONTEXT restore, and by pushfq/popfq on
+ * the private slot in the TF hop). So the intent was the restore and
+ * the code lost it: every syscall resume through the hop handed the
+ * guest r11 = an eflags qword.
+ *
+ * Fix + snapshot: restore r11 from fs_save_r11, and record rsp and
+ * rflags immediately before the jmp (on the private slot, never on the
+ * guest stack) so the last unmeasured state — guest entry AFTER the
+ * hop — is in the ring on the next death. */
 __attribute__((naked)) static void fs_trampoline_sys(void)
 {
 	__asm__ volatile (
@@ -222,7 +242,15 @@ __attribute__((naked)) static void fs_trampoline_sys(void)
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
 		"incq	fs_tramp_post(%rip)\n\t"
-		"movq	fs_tramp_eflags(%rip), %r11\n\t"
+		/* snapshot: rsp as the guest will see it, rflags via the
+		 * private slot (r11 is scratch here and restored below) */
+		"movq	%rsp, fs_tramp_ent_rsp(%rip)\n\t"
+		"leaq	fs_tramp_tfslot+8(%rip), %rsp\n\t"
+		"pushfq\n\t"
+		"popq	%r11\n\t"
+		"movq	%r11, fs_tramp_ent_fl(%rip)\n\t"
+		"movq	fs_tramp_ent_rsp(%rip), %rsp\n\t"
+		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
 }
@@ -258,6 +286,7 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
  * fs_tramp_tf_end bounds the body for the VEH's hop window. */
 static volatile unsigned long long fs_tramp_rsp;
 static volatile unsigned long long fs_tramp_tfslot[2];
+
 extern const unsigned char fs_tramp_tf_end[];
 __attribute__((naked)) static void fs_trampoline_fault_tf(void)
 {
@@ -544,6 +573,8 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 	r->gtgt = (unsigned long long)d->regs.rip + 2;
 	r->hop_pre = fs_tramp_pre;
 	r->hop_post = fs_tramp_post;
+	r->ent_rsp = fs_tramp_ent_rsp;
+	r->ent_fl = fs_tramp_ent_fl;
 	r->gsp = (unsigned long long)d->regs.rsp;
 	r->gseq = (unsigned long long)d->done_seq;
 	r->have_ex = 0;

@@ -517,6 +517,8 @@ struct uml_nt_stub_data {
 	unsigned long long gtgt; /* rip+2: where the trampoline jumps */
 	unsigned long long hop_pre;  /* entered the fs hop */
 	unsigned long long hop_post; /* cleared wrfsbase, about to jmp */
+	unsigned long long ent_rsp;  /* rsp at guest entry (after the hop) */
+	unsigned long long ent_fl;   /* rflags at guest entry */
 		unsigned long long have_ex;
 		unsigned long long all_size, all_area, all_off;
 		unsigned long long leg_size, leg_area, leg_off;
