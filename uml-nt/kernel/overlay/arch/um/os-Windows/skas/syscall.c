@@ -40,6 +40,7 @@
 #include <bench.h>
 #include <uaccess_walk.h>
 #include <lazyfile_model.h>
+#include <d20sweep_model.h>
 
 #define UML_NT_SYSCALLS_BASE UML_STUB_RAM_BASE
 
