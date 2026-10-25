@@ -816,6 +816,14 @@ static void veh_stk_selfcheck(void)
 	long got;
 
 	veh_stk_init();
+	/* the model decides WHERE (and whether) — the thunk only moves
+	 * rsp; without the enter() call veh_stk.sp is still 0 and the
+	 * thunk would load a NULL stack pointer */
+	if (uml_nt_veh_enter(&veh_stk, sp_before) != 0) {
+		veh_stk.size = 0;
+		d->veh_phase = 3;
+		return;
+	}
 	d->veh_phase = 1;
 	d->veh_sc_sp_in = sp_before;
 	/* what we are ABOUT to hand the thunk (read back on a death) */
@@ -829,6 +837,11 @@ static void veh_stk_selfcheck(void)
 			      (void *)(uintptr_t)veh_stk.sp, veh_save);
 	__asm__ volatile("mov %%r10, %0" : "=r"(r10w));
 	__asm__ volatile("mov %%r11, %0" : "=r"(r11w));
+	{
+		unsigned long long sp_lv = 0;
+
+		(void)uml_nt_veh_leave(&veh_stk, &sp_lv);
+	}
 	d->veh_sc_sp_out = veh_now_sp();
 	d->veh_sc_sp_body = veh_probe_sp;
 	d->veh_sc_r10 = r10w;
