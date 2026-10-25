@@ -11294,8 +11294,14 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 	if (uml_nt_spawn_stub(&conn_parent, entry_va, stack_top,
 			      &init_regs) < 0)
 		return 0;
-	os_info("[stubtest] parent stub pid %lu — resuming\n",
-		(unsigned long)conn_parent.pid);
+	os_info("[stubtest] parent stub pid %lu — resuming (veh phase=%llu "
+		"in=0x%llx body=0x%llx out=0x%llx ret=0x%llx want=0x%llx "
+		"r10=0x%llx r11=0x%llx)\n",
+		(unsigned long)conn_parent.pid,
+		conn_parent.d->veh_phase, conn_parent.d->veh_sc_sp_in,
+		conn_parent.d->veh_sc_sp_body, conn_parent.d->veh_sc_sp_out,
+		conn_parent.d->veh_sc_ret, conn_parent.d->veh_sc_want,
+		conn_parent.d->veh_sc_r10, conn_parent.d->veh_sc_r11);
 	nt->ResumeThread(conn_parent.thread);
 
 	/* Service loop: wait on ALL live stubs' evt_in (the per-stub
