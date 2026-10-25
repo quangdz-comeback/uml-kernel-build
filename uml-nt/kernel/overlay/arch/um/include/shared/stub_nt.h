@@ -547,6 +547,7 @@ struct uml_nt_stub_data {
 	u32_nt fs_tramp_off;
 	unsigned long long fs_tramp_skipped; /* resumes that would have used it */
 	unsigned long long drex_hits; /* execute-breakpoint hits */
+	unsigned long long dr_applied; /* resumes that carried DR state */
 	unsigned long long d20_guarded; /* answers whose rip held 0f 05 */
 	unsigned long long xstate_cleared;
 	unsigned long long xstate_kept;

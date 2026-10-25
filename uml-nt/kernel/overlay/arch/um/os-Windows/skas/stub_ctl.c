@@ -11207,6 +11207,19 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	if (c->d->action == UML_STUB_ACTION_NONE)
 		uml_nt_drexec_arm(c);
 	c->ans_cmd = c->d->cmd; /* which round kind the yardstick belongs to */
+	{
+		const struct uml_nt_gp_regs *g = &c->d->regs;
+
+		c->ans_regs[0] = g->rax;  c->ans_regs[1] = g->rcx;
+		c->ans_regs[2] = g->rdx;  c->ans_regs[3] = g->rbx;
+		c->ans_regs[4] = g->rsp;  c->ans_regs[5] = g->rbp;
+		c->ans_regs[6] = g->rsi;  c->ans_regs[7] = g->rdi;
+		c->ans_regs[8] = g->r8;   c->ans_regs[9] = g->r9;
+		c->ans_regs[10] = g->r10; c->ans_regs[11] = g->r11;
+		c->ans_regs[12] = g->r12; c->ans_regs[13] = g->r13;
+		c->ans_regs[14] = g->r14; c->ans_regs[15] = g->r15;
+		c->ans_regs[16] = g->rip;
+	}
 	c->ans_rip = c->d->regs.rip;
 	c->ans_rsp = c->d->regs.rsp;
 	c->ans_rax = c->d->regs.rax;

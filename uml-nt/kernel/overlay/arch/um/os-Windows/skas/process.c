@@ -993,7 +993,37 @@ void userspace(struct uml_pt_regs *regs)
 						c->ans_cls_ring[7],
 						c->res_trap_valid ?
 						c->res_trap_rip : 0ull);
-					os_info("[dr-exec] pid %d hits=%llu "
+					{
+		/* [regs-16] (Shelley 163): all sixteen, answered vs shared.
+		 * A PROT_DONE round keeps the block invariant (no republish),
+		 * so a register that MOVED between answer and death was
+		 * written by somebody else — the op stream, a torn write, or
+		 * the restore. '*' marks the movers. */
+		const struct uml_nt_gp_regs *g = &c->d->regs;
+		unsigned long long now[17];
+		const char *nm[17] = { "rax", "rcx", "rdx", "rbx", "rsp",
+			"rbp", "rsi", "rdi", "r8", "r9", "r10", "r11",
+			"r12", "r13", "r14", "r15", "rip" };
+		int i, nmoved = 0;
+
+		now[0] = g->rax;  now[1] = g->rcx;  now[2] = g->rdx;
+		now[3] = g->rbx;  now[4] = g->rsp;  now[5] = g->rbp;
+		now[6] = g->rsi;  now[7] = g->rdi;  now[8] = g->r8;
+		now[9] = g->r9;   now[10] = g->r10; now[11] = g->r11;
+		now[12] = g->r12; now[13] = g->r13; now[14] = g->r14;
+		now[15] = g->r15; now[16] = g->rip;
+		for (i = 0; i < 17; i++)
+			if (c->ans_regs[i] != now[i])
+				nmoved++;
+		os_info("[regs-16] pid %d ans_cmd=%u now_cmd=%u moved=%d\n",
+			c->pid, c->ans_cmd, (unsigned)c->d->cmd, nmoved);
+		for (i = 0; i < 17; i++)
+			os_info("[regs-16] %s %-4s ans=0x%llx now=0x%llx%s\n",
+				c->ans_regs[i] != now[i] ? "*" : " ", nm[i],
+				c->ans_regs[i], now[i],
+				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
+	}
+	os_info("[dr-exec] pid %d hits=%llu "
 						"armed=%u va=0x%llx ==> %s\n",
 						c->pid, c->d->drex_hits,
 						c->drex_armed, c->drex_va,

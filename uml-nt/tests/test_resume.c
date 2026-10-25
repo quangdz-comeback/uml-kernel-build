@@ -19,6 +19,7 @@
 #include "deathsit_model.h"
 #include "d20sweep_model.h"
 #include "fillrehome_model.h"
+#include "dr7_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -143,6 +144,37 @@ static void section14(void)
 	CHECK(uml_nt_fill_needs_rehome(0, 0) == 0);
 
 	printf("section 14 (fill re-home): all ok\n");
+}
+
+/* section 15 — the DR state rides EVERY resume (Shelley 163).
+ *
+ * The application of dr7 used to live on one resume branch, so the
+ * verbatim branch (signal push, fault verbatim) dropped every kernel
+ * watchpoint — and the one-shot execute probe, which is why it reported
+ * "armed but never fired" while the conn demonstrably kept running. The
+ * shape is pure: a slot with a VA gets Ln; only exec slots omit the
+ * write fields.
+ */
+static void section15(void)
+{
+	/* a. nothing armed => no bits at all (a resume with no DR state) */
+	CHECK(uml_nt_dr7_build(0, 0, 0, 0, 0) == 0);
+	/* b. one EXECUTE slot: Ln only (bit 2), no RW/LEN fields */
+	CHECK(uml_nt_dr7_build(1u << 2, 0, 0, 0x601dce67ull, 0) ==
+	      (1ull << 4));
+	/* c. one WRITE slot: Ln + RW=01 LEN=10 at 16 + 4*i */
+	CHECK(uml_nt_dr7_build(0, 0x60a20000ull, 0, 0, 0) ==
+	      (1ull | (0x9ull << 16)));
+	CHECK(uml_nt_dr7_build(0, 0, 0, 0, 0x60a20000ull) ==
+	      ((1ull << 6) | (0x9ull << 28)));
+	/* d. mixed: the exec slot keeps its shape, the writes keep theirs */
+	CHECK(uml_nt_dr7_build(1u << 2, 0x60a20000ull, 0, 0x601dce67ull, 0) ==
+	      (1ull | (0x9ull << 16) | (1ull << 4)));
+	/* e. an armed slot with a zero VA contributes nothing (the kernel
+	 *    disarms a slot by zeroing it, not by clearing the mask) */
+	CHECK(uml_nt_dr7_build(1u << 2, 0, 0, 0, 0) == 0);
+
+	printf("section 15 (DR state on every resume): all ok\n");
 }
 
 int main(void)
@@ -330,6 +362,7 @@ int main(void)
 	section12();
 	section13();
 	section14();
+	section15();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);

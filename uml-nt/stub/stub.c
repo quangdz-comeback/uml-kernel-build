@@ -57,6 +57,7 @@
 #include "resume_model.h"
 #include "../kernel/overlay/arch/um/include/shared/veh_model.h"
 #include "../kernel/overlay/arch/um/include/shared/ss_model.h"
+#include "../kernel/overlay/arch/um/include/shared/dr7_model.h"
 /* fault.h drags vma.h (kernel-side); the one constant the stub
  * needs is pinned here — keep in sync with fault.h. */
 #define UML_NT_FAULT_WATCHPT 0x10u
@@ -116,6 +117,34 @@ static void gp_to_context(CONTEXT *c, const struct uml_nt_gp_regs *g)
 	 * it itself, after this restore (ss_model.h). */
 	c->EFlags = (DWORD)uml_nt_ss_resume_flags(g->rflags);
 	c->Rip = g->rip;
+}
+
+/* Apply the kernel's debug-register state to a resume CONTEXT.
+ *
+ * Shelley 163: this must run on EVERY resume path, no exceptions. It
+ * used to sit only on the normal branch, so the VERBATIM branch
+ * (signal push, fault verbatim) returned before it — every such round
+ * silently dropped the kernel's watchpoints AND the one-shot execute
+ * probe, which is why the probe reported "armed but never fired" while
+ * the conn demonstrably kept running. The shape itself is pure logic
+ * (dr7_model.h): a slot with a VA gets Ln, and only slots listed in
+ * dr_exec_mask keep the write shape (RW=01, LEN=8). */
+static void apply_watchpoints(CONTEXT *c)
+{
+	unsigned long long dr7 = uml_nt_dr7_build(d->dr_exec_mask,
+						  d->dr_watch[0],
+						  d->dr_watch[1],
+						  d->dr_watch[2],
+						  d->dr_watch[3]);
+
+	c->Dr0 = (DWORD64)d->dr_watch[0];
+	c->Dr1 = (DWORD64)d->dr_watch[1];
+	c->Dr2 = (DWORD64)d->dr_watch[2];
+	c->Dr3 = (DWORD64)d->dr_watch[3];
+	c->Dr6 = 0;
+	c->Dr7 = dr7;
+	c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+	d->dr_applied++;
 }
 
 /* v21 (Shelley 156): the stub's OWN stack headroom, on every round.
@@ -1633,25 +1662,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * (LEN/RW = 00); every other armed slot keeps the v13 write
 	 * watchpoint shape (RW=01 write, LEN=10 = 8 bytes). One Dr7
 	 * built from the slots keeps both instruments honest. */
-	{
-		unsigned long long dr7 = 0;
-		int si;
-
-		for (si = 0; si < 4; si++) {
-			if (d->dr_watch[si] == 0)
-				continue;
-			dr7 |= 1ull << (2 * si);	/* Ln: local enable */
-			if (!(d->dr_exec_mask & (1u << si)))
-				dr7 |= 0x9ull << (16 + 4 * si);
-		}
-		c->Dr0 = (DWORD64)d->dr_watch[0];
-		c->Dr1 = (DWORD64)d->dr_watch[1];
-		c->Dr2 = (DWORD64)d->dr_watch[2];
-		c->Dr3 = (DWORD64)d->dr_watch[3];
-		c->Dr6 = 0;
-		c->Dr7 = dr7;
-	}
-	c->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+	apply_watchpoints(c);
 	d->round_step = 8;
 
 	/* S4d: apply the kernel's FP/XSTATE (upstream parity:
@@ -1709,6 +1720,9 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		d->resume_rsp = (unsigned long long)c->Rsp;
 		if (c->ContextFlags & CONTEXT_XSTATE)
 			d->xstate_kept++;
+		/* Shelley 163: DR state rides EVERY resume — including this
+		 * one, which used to return without it. */
+		apply_watchpoints(c);
 		d->round_step = 12;
 		note_resume(c, 2);
 		return EXCEPTION_CONTINUE_EXECUTION;

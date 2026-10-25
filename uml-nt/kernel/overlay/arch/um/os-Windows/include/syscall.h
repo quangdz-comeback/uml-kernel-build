@@ -186,6 +186,13 @@ struct uml_nt_stub_conn {
 	 * arrival, which catches a torn read at the other end. */
 	unsigned long long ans_rip, ans_rsp, ans_rax, ans_retval, ans_seq;
 	unsigned ans_cmd; /* the round kind the answer belongs to */
+	/* [regs-16] (Shelley 163): the FULL register set as we answered it.
+	 * ans_rip alone cannot say WHICH register was clobbered when a
+	 * death shows nonsense like rax = 0x4802000000000000 — the dump at
+	 * death prints all 16 answered-vs-shared and marks the ones that
+	 * moved. */
+	unsigned long long ans_regs[17]; /* rax rcx rdx rbx rsp rbp rsi rdi
+					  * r8..r15 rip rflags */
 	/* [dr-exec] (Shelley 162): the one-shot execute breakpoint that
 	 * answers "did the guest execute its first instruction after the
 	 * resume?" — armed with one answer, spent by one hit. */
