@@ -433,6 +433,51 @@ static unsigned long long host_xcr0;
 static unsigned long long host_xstate_max;
 static unsigned long long host_xstate_lo;
 
+/* ---- [xstate] what does this OS expect for CONTEXT_XSTATE? ---------- */
+
+/* The outgoing CONTEXT advertises CONTEXT_XSTATE (0x10005f includes bit
+ * 0x40) while no CONTEXT_EX header sits anywhere near it — and the host
+ * XCR0 says AVX-512 is enabled. Before touching that claim, ask the OS
+ * itself: InitializeContext tells us the buffer it wants and
+ * GetXStateFeaturesMask the mask it will honour. Deaths here have no
+ * user-mode dispatch left to explain them, so the continue path is the
+ * suspect the numbers have to clear or convict. */
+static void xstate_probe_once(void)
+{
+	typedef BOOL(WINAPI * init_ctx_t)(PVOID, DWORD, PVOID, DWORD *,
+					  PVOID *);
+	typedef BOOL(WINAPI * mask_t)(PVOID, PDWORD64);
+	static int done;
+	init_ctx_t init_ctx;
+	mask_t get_mask;
+	unsigned char buf[8192];
+	DWORD want = 0;
+	PVOID ctx = NULL;
+	DWORD64 mask = 0;
+
+	if (done)
+		return;
+	done = 1;
+	init_ctx = (init_ctx_t)(uintptr_t)GetProcAddress(
+		GetModuleHandleA("kernel32.dll"), "InitializeContext");
+	get_mask = (mask_t)(uintptr_t)GetProcAddress(
+		GetModuleHandleA("kernel32.dll"), "GetXStateFeaturesMask");
+	memset(buf, 0, sizeof(buf));
+	if (init_ctx == NULL || get_mask == NULL) {
+		d->xstate_api = 0;
+		return;
+	}
+	if (!init_ctx(buf, CONTEXT_ALL | CONTEXT_XSTATE, NULL, &want, &ctx)) {
+		d->xstate_api = 2;
+		d->xstate_want = (unsigned long long)want;
+		return;
+	}
+	d->xstate_api = 1;
+	d->xstate_want = (unsigned long long)want;
+	if (ctx != NULL && get_mask(ctx, &mask))
+		d->xstate_mask = (unsigned long long)mask;
+}
+
 static void note_resume(CONTEXT *c, unsigned long long kind)
 {
 	struct uml_nt_ctx_ring *r;
@@ -441,6 +486,7 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 
 	if (d == NULL || c == NULL)
 		return;
+	xstate_probe_once();
 	if (host_xstate_max == 0) {
 		/* What the HOST can save/restore — the yardstick for any
 		 * mask the dispatcher's xstate area carries. Intrinsics,
@@ -1576,6 +1622,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		 * rsp it answered: equal + clean = the guest's own stack
 		 * arithmetic; a mismatch is OUR restore, not the guest. */
 		d->resume_rsp = (unsigned long long)c->Rsp;
+		if (c->ContextFlags & CONTEXT_XSTATE)
+			d->xstate_kept++;
 		d->round_step = 12;
 		note_resume(c, 2);
 		return EXCEPTION_CONTINUE_EXECUTION;
@@ -1644,6 +1692,22 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * verbatim branch above). The TF trampoline swaps rsp out and
 	 * back around its popfq, so this is the guest's own value. */
 	d->resume_rsp = (unsigned long long)c->Rsp;
+	/* Shelley 158 step 2, narrowed by measurement: the CONTEXT we get
+	 * back advertises CONTEXT_XSTATE with no CONTEXT_EX anywhere near
+	 * it (back=0 on every round, host XCR0 = 0xe7), and the death it
+	 * produces has no user-mode dispatch at all — i.e. the continue
+	 * path, not the guest. Drop the claim on the resume paths.
+	 *
+	 * What this does NOT cost: CONTEXT_FLOATING_POINT stays set, so
+	 * the legacy 512-byte area (x87, XMM, MxCsr) we already save and
+	 * restore per round is untouched. What it does cost: the
+	 * AVX/AVX-512 state above the legacy area is no longer carried
+	 * through a resume on this host. That is the honest trade, and
+	 * the counter below makes it visible rather than silent. */
+	if (c->ContextFlags & CONTEXT_XSTATE) {
+		c->ContextFlags &= ~(DWORD)CONTEXT_XSTATE;
+		d->xstate_cleared++;
+	}
 	d->round_step = 10;
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);

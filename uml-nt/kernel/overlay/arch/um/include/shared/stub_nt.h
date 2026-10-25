@@ -521,6 +521,15 @@ struct uml_nt_stub_data {
 		unsigned long long ex_back;	/* bytes before the context */
 	} ctx_ring[16];
 	unsigned long long ctx_ring_at;
+	/* [xstate] (Shelley 158 step 2): what the OS wants for a CONTEXT
+	 * with CONTEXT_XSTATE (InitializeContext: 1 ok / 2 failed / 0 no
+	 * API), the mask it will honour, and how many resume paths we
+	 * took with the claim dropped (cleared) or kept (kept). */
+	unsigned long long xstate_api;
+	unsigned long long xstate_want;
+	unsigned long long xstate_mask;
+	unsigned long long xstate_cleared;
+	unsigned long long xstate_kept;
 	unsigned long long veh_sc_size;
 };
 
