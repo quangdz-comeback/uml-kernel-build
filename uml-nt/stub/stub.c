@@ -453,8 +453,16 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 		__cpuidex(regs, 0xd, 0);
 		host_xstate_max = (unsigned long long)(unsigned int)regs[0];
 		host_xstate_lo = (unsigned long long)(unsigned int)regs[3];
-		if (regs[0] != 0)
-			host_xcr0 = (unsigned long long)_xgetbv(0);
+		if (regs[0] != 0) {
+			/* xgetbv writes only eax/edx (the stub is not
+			 * built with -mxsave, so the intrinsic is out of
+			 * reach); no other register is touched. */
+			unsigned int lo = 0, hi = 0;
+
+			__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi)
+					 : "c"(0));
+			host_xcr0 = ((unsigned long long)hi << 32) | lo;
+		}
 	}
 	at = (unsigned long long)d->ctx_ring_at % 16;
 	r = &d->ctx_ring[at];
