@@ -51,6 +51,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <io.h>
+#include <intrin.h>
 
 #include "../kernel/overlay/arch/um/include/shared/stub_nt.h"
 #include "resume_model.h"
@@ -442,20 +443,18 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 		return;
 	if (host_xstate_max == 0) {
 		/* What the HOST can save/restore — the yardstick for any
-		 * mask the dispatcher's xstate area carries. */
-		unsigned int a = 0, dd = 0;
+		 * mask the dispatcher's xstate area carries. Intrinsics,
+		 * not hand-rolled asm: the first version omitted the ebx
+		 * clobber (cpuid writes it) and broke the caller — the
+		 * native boot test caught it as "M2 round-trip never
+		 * completed". */
+		int regs[4] = { 0, 0, 0, 0 };
 
-		__asm__ volatile("cpuid" : "=a"(a), "=d"(dd)
-				 : "a"(0xd), "c"(0));
-		host_xstate_max = a;
-		host_xstate_lo = dd;
-		if (a != 0) {
-			unsigned int lo = 0, hi = 0;
-
-			__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi)
-					 : "c"(0));
-			host_xcr0 = ((unsigned long long)hi << 32) | lo;
-		}
+		__cpuidex(regs, 0xd, 0);
+		host_xstate_max = (unsigned long long)(unsigned int)regs[0];
+		host_xstate_lo = (unsigned long long)(unsigned int)regs[3];
+		if (regs[0] != 0)
+			host_xcr0 = (unsigned long long)_xgetbv(0);
 	}
 	at = (unsigned long long)d->ctx_ring_at % 16;
 	r = &d->ctx_ring[at];
@@ -487,9 +486,18 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 	{
 		unsigned off;
 
+		/* Stay inside the page that holds the CONTEXT: that page
+		 * is mapped by construction, the one below it may not be
+		 * (a scan crossing a guard page would fault inside the
+		 * handler — the very class we are chasing). */
+		unsigned long long page = (unsigned long long)c &
+			~(unsigned long long)0xfff;
+
 		for (off = 16; off <= 0x80; off += 16) {
 			const struct nt_context_ex *cand;
 
+			if ((unsigned long long)c - off < page)
+				break;
 			cand = (const struct nt_context_ex *)
 				((const unsigned char *)c - off);
 			if (cand->legacy.size == NT_CONTEXT_X64_SIZE &&
