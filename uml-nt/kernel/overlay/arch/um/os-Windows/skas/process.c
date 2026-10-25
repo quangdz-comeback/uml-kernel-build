@@ -763,6 +763,11 @@ void userspace(struct uml_pt_regs *regs)
 						(unsigned)c->d->action,
 						(unsigned)c->d->cmd);
 					uml_nt_ctx_ring_dump(c);
+					os_info("[xstate] pid %d api=%llu want=%llu "
+					        "mask=0x%llx cleared=%llu kept=%llu\n",
+					        c->pid, c->d->xstate_api,
+					        c->d->xstate_want, c->d->xstate_mask,
+					        c->d->xstate_cleared, c->d->xstate_kept);
 					os_info("[veh] pid %d phase=%llu "
 						"in=0x%llx body=0x%llx "
 						"out=0x%llx buf=0x%llx "
