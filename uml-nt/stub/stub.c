@@ -529,6 +529,9 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 	 * nothing went wrong in transit (the guest really was there); a
 	 * differing one = the write path, not the guest. */
 	r->grip = (unsigned long long)d->regs.rip;
+	/* the address the trampoline will actually jump to (rip+2 for a
+	 * syscall answer) — the value the guest's next fetch comes from */
+	r->gtgt = (unsigned long long)d->regs.rip + 2;
 	r->gsp = (unsigned long long)d->regs.rsp;
 	r->gseq = (unsigned long long)d->done_seq;
 	r->have_ex = 0;

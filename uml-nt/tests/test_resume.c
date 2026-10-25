@@ -18,6 +18,7 @@
 #include "veh_model.h"
 #include "deathsit_model.h"
 #include "d20sweep_model.h"
+#include "fillrehome_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -119,6 +120,29 @@ static void section13(void)
 	CHECK(uml_nt_sweep_needed(1, 0 /* forgotten by the fill */, 7) == 1);
 
 	printf("section 13 (D20 sweep re-arm): all ok\n");
+}
+
+/* section 14 — must a fill re-home before writing? (Shelley 161).
+ *
+ * A fill writes physmem directly, bypassing every stub view. On a run
+ * with a second claimer that is the memory-safety bug; on an executable
+ * one it is the silent-death bug (a 0f 05 restored under a guest that
+ * is executing). The decision is the refcount.
+ */
+static void section14(void)
+{
+	/* a. the shared executable run: never written in place */
+	CHECK(uml_nt_fill_needs_rehome(1, 2) == 1);
+	CHECK(uml_nt_fill_needs_rehome(1, 7) == 1);
+	/* b. a private executable run: the fill owns it */
+	CHECK(uml_nt_fill_needs_rehome(1, 1) == 0);
+	/* c. shared data is corruption too, same answer */
+	CHECK(uml_nt_fill_needs_rehome(0, 2) == 1);
+	/* d. private data: plain fill */
+	CHECK(uml_nt_fill_needs_rehome(0, 1) == 0);
+	CHECK(uml_nt_fill_needs_rehome(0, 0) == 0);
+
+	printf("section 14 (fill re-home): all ok\n");
 }
 
 int main(void)
@@ -305,6 +329,7 @@ int main(void)
 	sec11_veh_stack();
 	section12();
 	section13();
+	section14();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);

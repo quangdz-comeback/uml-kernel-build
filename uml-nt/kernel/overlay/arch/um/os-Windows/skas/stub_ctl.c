@@ -10898,7 +10898,12 @@ fail:
 static void uml_nt_d20_guard_answer(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_vma *v;
-	unsigned long long rip = c->d->regs.rip, off;
+	/* THE REAL TARGET IS rip+2, not rip: the kernel deliberately
+	 * leaves the trap rip on the sentinel and the STUB advances past
+	 * it (stub.c: target = d->regs.rip + 2). Checking rip measured
+	 * the ud2 we already patched — true but useless. Shelley 161
+	 * caught the label; check what the guest will actually fetch. */
+	unsigned long long rip = c->d->regs.rip + 2, off;
 	unsigned char *p;
 
 	if (c->mm == NULL)
@@ -10934,9 +10939,9 @@ static void uml_nt_d20_guard_answer(struct uml_nt_stub_conn *c)
 		return;
 	p[1] = 0x0b;
 	c->d->d20_guarded++;
-	os_info("[d20-guard] pid %lu answer rip=0x%llx held a REAL syscall "
-		"(0f 05) — patched to the sentinel before the resume (%llu "
-		"guard(s))\n", (unsigned long)c->pid, rip,
+	os_info("[d20-guard] pid %lu resume TARGET 0x%llx held a REAL "
+		"syscall (0f 05) — patched to the sentinel before the resume "
+		"(%llu guard(s))\n", (unsigned long)c->pid, rip,
 		c->d->d20_guarded);
 }
 

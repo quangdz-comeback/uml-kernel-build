@@ -41,6 +41,7 @@
 #include <uaccess_walk.h>
 #include <lazyfile_model.h>
 #include <d20sweep_model.h>
+#include <fillrehome_model.h>
 
 #define UML_NT_SYSCALLS_BASE UML_STUB_RAM_BASE
 
@@ -1200,6 +1201,40 @@ static int uml_nt_mmap_fill(struct uml_nt_stub_conn *c,
 			continue;
 		}
 		dst = v->run_off + (cur - v->start);
+		/* Shelley 161: never write into a run with a second
+		 * claimer. Re-home this run into a private one, leave the
+		 * siblings on the old backing, and remap the piece so the
+		 * stub sees the new run. */
+		if (uml_nt_fill_needs_rehome(
+			    uml_nt_prot_execable(v->prot),
+			    (int)uml_nt_phys_refs(c->ph, (long long)dst))) {
+			unsigned long long run_va =
+				cur & ~(unsigned long long)
+				(UML_NT_PHYS_RUN_SIZE - 1);
+			long long nr = uml_nt_phys_alloc(c->ph);
+
+			if (nr < 0)
+				return -1;
+			if (uml_nt_vma_cow_split(c->mm, c->ph, v, run_va,
+						 (unsigned long long)nr) < 0) {
+				uml_nt_phys_unref(c->ph, nr);
+				return -1;
+			}
+			v = uml_nt_vma_find(c->mm, cur);
+			if (v == NULL) {
+				uml_nt_phys_unref(c->ph, nr);
+				return -1;
+			}
+			dst = v->run_off + (cur - v->start);
+			if (uml_nt_sc_plan_add(c, UML_NT_FOP_MAP, v->prot,
+					       run_va, UML_NT_PHYS_RUN_SIZE,
+					       dst) < 0)
+				return -1;
+			os_info("[fill-rehome] va=0x%llx run=0x%llx -> "
+				"0x%llx (run was shared: never write "
+				"another conn's bytes)\n",
+				cur, v->run_off, dst);
+		}
 		/* KCOPY WITNESS (M5.6a, referees 37089977192 +
 		 * 37091284391 decode): the [tctrip] negative witness
 		 * PROVED the poison writer never faults — it writes
@@ -1980,6 +2015,23 @@ static unsigned long long sys_mmap_file(struct uml_nt_stub_conn *c,
 							c, UML_NT_FOP_MAP,
 							UML_NT_PAGE_EXECUTE_READ,
 							cur, clen_c, sp_c);
+						/* D20 at the ONE place that was
+						 * missing it: the sharing cache
+						 * hands this conn EXECUTE_READ
+						 * runs that no sweep in THIS
+						 * conn ever touched. The runs
+						 * are shared, so another conn
+						 * usually patched them — but
+						 * "usually" is how an unpatched
+						 * 0f 05 survives a cache
+						 * eviction and becomes a real
+						 * host syscall. Sweep what we
+						 * hand out, every time; the
+						 * generation check makes the
+						 * repeat pass free. */
+						if (uml_nt_mmap_sweep(c, cur,
+								      clen_c) < 0)
+							goto rollback_chunks;
 						cur += clen_c;
 					}
 				}
