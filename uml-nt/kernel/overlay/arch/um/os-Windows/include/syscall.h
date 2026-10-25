@@ -22,6 +22,7 @@
 #define __UM_OS_WINDOWS_SYSCALL_H
 
 #include <ntabi.h>
+#include "drslot_model.h"
 #include <vma.h>
 #include <fault.h>
 #include <uaccess_walk.h>
@@ -198,6 +199,10 @@ struct uml_nt_stub_conn {
 	 * resume?" — armed with one answer, spent by one hit. */
 	unsigned long long drex_va;
 	unsigned drex_armed, drex_used;
+	/* Shelley 164: the slot ledger — one owner per debug slot, all
+	 * four decided here instead of by whichever instrument ran last. */
+	struct uml_nt_drslots drs;
+	int drex_slot; /* slot the probe holds, -1 when none */
 	unsigned long long ans_step;
 	unsigned long long req_rip, req_rsp, req_seq_seen;
 	/* [d20-guard] self-measurement: what the guard actually looked at

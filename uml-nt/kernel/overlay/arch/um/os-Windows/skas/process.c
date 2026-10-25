@@ -336,6 +336,12 @@ static void conn_bootstrap(struct uml_nt_stub_conn *c,
 {
 	struct uml_nt_gp_regs *g = &c->d->init_regs;
 
+	/* Shelley 164: the slot ledger starts empty, and "no slot" is -1,
+	 * not 0 — a conn that has never armed must not look like it owns
+	 * slot 0. */
+	uml_nt_drs_init(&c->drs);
+	c->drex_slot = -1;
+
 	/* No guest code yet: entry/stack/init stay zero until the
 	 * owning task hands the conn its first state. __builtin_memset:
 	 * linux/string.h collides with user.h's sized_strscpy here. */

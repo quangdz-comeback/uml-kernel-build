@@ -20,6 +20,7 @@
 #include "d20sweep_model.h"
 #include "fillrehome_model.h"
 #include "dr7_model.h"
+#include "drslot_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -175,6 +176,55 @@ static void section15(void)
 	CHECK(uml_nt_dr7_build(1u << 2, 0, 0, 0, 0) == 0);
 
 	printf("section 15 (DR state on every resume): all ok\n");
+}
+
+/* section 16 — ONE owner per debug slot (Shelley 164).
+ *
+ * The three incidents that blinded a live measurement, as regressions:
+ * (1) the write-slot instrument took all four slots and left the live
+ *     probe nothing; (2) the arena instrument rewrote slots 2/3 under a
+ *     live probe; (3) a retired owner kept re-arming forever.
+ */
+static void section16(void)
+{
+	struct uml_nt_drslots s;
+	int got[UML_NT_DRS_SLOTS];
+
+	uml_nt_drs_init(&s);
+	/* a. a live EXEC reserve gets a slot even when a lower-priority
+	 *    owner holds all four (incident 1) */
+	CHECK(uml_nt_drs_reserve(&s, UML_NT_DRS_WSLOT, 4, got) == 4);
+	CHECK(uml_nt_drs_reserve(&s, UML_NT_DRS_EXEC, 1, got) == 1);
+	CHECK(uml_nt_drs_holds(&s, UML_NT_DRS_EXEC) == 1);
+	CHECK(uml_nt_drs_holds(&s, UML_NT_DRS_WSLOT) == 3); /* evicted one */
+	/* b. a lower-priority owner can never take the exec slot
+	 *    (incident 2) */
+	{
+		int i, exec_slot = -1;
+
+		for (i = 0; i < UML_NT_DRS_SLOTS; i++)
+			if (s.owner[i] == UML_NT_DRS_EXEC)
+				exec_slot = i;
+		CHECK(exec_slot >= 0);
+		CHECK(uml_nt_drs_holds(&s, UML_NT_DRS_ARENA) == 0);
+		CHECK(uml_nt_drs_reserve(&s, UML_NT_DRS_ARENA, 2, got) == 0);
+		CHECK(s.owner[exec_slot] == UML_NT_DRS_EXEC);
+	}
+	/* c. a retired owner never reserves again (incident 3) */
+	uml_nt_drs_release(&s, UML_NT_DRS_WSLOT);
+	CHECK(uml_nt_drs_reserve(&s, UML_NT_DRS_WSLOT, 1, got) == 1);
+	uml_nt_drs_retire(&s, UML_NT_DRS_WSLOT);
+	CHECK(uml_nt_drs_holds(&s, UML_NT_DRS_WSLOT) == 0); /* dropped */
+	CHECK(uml_nt_drs_reserve(&s, UML_NT_DRS_WSLOT, 1, got) == 0);
+	/* d. release frees exactly the owner's slots, nothing else */
+	uml_nt_drs_init(&s);
+	CHECK(uml_nt_drs_reserve(&s, UML_NT_DRS_TCACHE, 2, got) == 2);
+	CHECK(uml_nt_drs_reserve(&s, UML_NT_DRS_EXEC, 1, got) == 1);
+	uml_nt_drs_release(&s, UML_NT_DRS_EXEC);
+	CHECK(uml_nt_drs_holds(&s, UML_NT_DRS_TCACHE) == 2);
+	CHECK(uml_nt_drs_holds(&s, UML_NT_DRS_EXEC) == 0);
+
+	printf("section 16 (one owner per DR slot): all ok\n");
 }
 
 int main(void)
@@ -363,6 +413,7 @@ int main(void)
 	section13();
 	section14();
 	section15();
+	section16();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);

@@ -43,6 +43,7 @@
 #include <ntabi.h>
 #include <fault.h>
 #include <elf.h>
+#include "drslot_model.h"
 #include <stub-panic.h>
 #include <stub_nt.h>
 #include <ss_model.h>
@@ -3575,8 +3576,10 @@ static void uml_nt_chain_arm(struct uml_nt_stub_conn *c,
  */
 static int dr_probe_owns_slots(struct uml_nt_stub_conn *c)
 {
-	return c != NULL && uml_nt_conn_is_login(c) &&
-	       (!c->drex_used || c->drex_armed);
+	/* Shelley 164: the allocator decides now — this predicate is the
+	 * instruments' cheap pre-check and mirrors the ledger's answer. */
+	return c != NULL && c->drs.owner[0] != UML_NT_DRS_FREE &&
+	       uml_nt_drs_holds(&c->drs, UML_NT_DRS_EXEC) > 0;
 }
 
 /* [dr-exec] (Shelley 162): DOES THE GUEST EXECUTE THE FIRST
@@ -3606,13 +3609,50 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 		return;
 	if (d->cmd != UML_STUB_CMD_SYSCALL)
 		return;
-	va = d->regs.rip + 2; /* the real resume target (stub advances) */
+	/* Shelley 164: arm where the answer will ACTUALLY resume.
+	 *
+	 * Two resume shapes exist and they do not share a rip:
+	 *  - a plain syscall resume advances past the trap (stub +2);
+	 *  - a VERBATIM answer (signal delivery, fault re-run) leaves
+	 *    the kernel's pushed rip in place — arming at rip+2 there
+	 *    watches an address the guest never reaches, which is one
+	 *    more way this probe could report "armed but never fired"
+	 *    while the conn ran for hundreds of rounds.
+	 * d->regs.rip is read AFTER the answer is built, so it already
+	 * carries whichever shape applies: for a plain answer the stub
+	 * has not advanced yet (it advances at release), so +2; for a
+	 * verbatim answer the kernel's rip IS the target. */
+	if (d->xstate_flags & UML_STUB_XS_VERBATIM)
+		va = d->regs.rip;
+	else
+		va = d->regs.rip + 2;
 	if (uml_nt_vma_find(c->mm, va) == NULL)
 		return;
+	{
+		int got[UML_NT_DRS_SLOTS];
+		int n = uml_nt_drs_reserve(&c->drs, UML_NT_DRS_EXEC, 1, got);
+
+		if (n <= 0) {
+			os_info("[dr-exec] pid %lu slot ledger full:\n",
+				(unsigned long)c->pid);
+			return;
+		}
+		/* the probe is the live instrument: the retired tear-hunt
+		 * owners lose their claims for this conn */
+		uml_nt_drs_retire(&c->drs, UML_NT_DRS_TCACHE);
+		uml_nt_drs_retire(&c->drs, UML_NT_DRS_ARENA);
+		uml_nt_drs_retire(&c->drs, UML_NT_DRS_WSLOT);
+		c->drex_slot = got[0];
+		d->dr_watch[c->drex_slot] = va;
+		d->dr_exec_mask |= 1u << c->drex_slot;
+		os_info("[dr-exec] slot=%d shape=%s (ledger: exec=%d)\n",
+			c->drex_slot,
+			(d->xstate_flags & UML_STUB_XS_VERBATIM) ?
+			"verbatim" : "plain",
+			uml_nt_drs_holds(&c->drs, UML_NT_DRS_EXEC));
+	}
 	c->drex_va = va;
 	c->drex_armed = 1;
-	d->dr_watch[UML_NT_DR_EXEC_SLOT] = va;
-	d->dr_exec_mask |= 1u << UML_NT_DR_EXEC_SLOT;
 	os_info("[dr-exec] pid %lu %s ONE-SHOT execute breakpoint at "
 		"0x%llx (the guest's first instruction after this resume) "
 		"— a hit proves the resume reached guest code\n",
@@ -3635,8 +3675,12 @@ static int uml_nt_drexec_round(struct uml_nt_stub_conn *c)
 		return 0;
 	c->drex_armed = 0;
 	c->drex_used = 1;
-	d->dr_watch[UML_NT_DR_EXEC_SLOT] = 0;
-	d->dr_exec_mask &= ~(1u << UML_NT_DR_EXEC_SLOT);
+	if (c->drex_slot >= 0) {
+		d->dr_watch[c->drex_slot] = 0;
+		d->dr_exec_mask &= ~(1u << c->drex_slot);
+		uml_nt_drs_release(&c->drs, UML_NT_DRS_EXEC);
+		c->drex_slot = -1;
+	}
 	d->drex_hits++;
 	os_info("[dr-exec] HIT pid %lu rip=0x%llx rsp=0x%llx rax=0x%llx "
 		"rflags=0x%llx hit_type=%llu ==> THE GUEST RAN: the resume "
@@ -4828,12 +4872,17 @@ static void binwatch(struct uml_nt_stub_conn *c,
 		 * slots the poison lands in). The stub's legit-churn
 		 * filter passes 0 / heap-shaped / the empty-bin self
 		 * value (slot-0x10 / slot-0x18 = the head itself). */
-		if (c->tctrip_want && !witness_off() &&
-		    !dr_probe_owns_slots(c)) {
-			c->d->dr_watch[2] = c->bw_arena + 0x50 +
-				16 * 2 + 0x18;
-			c->d->dr_watch[3] = c->bw_arena + 0x50 +
-				16 * 3 + 0x18;
+		if (c->tctrip_want && !witness_off()) {
+			int got[UML_NT_DRS_SLOTS];
+			int n = uml_nt_drs_reserve(&c->drs, UML_NT_DRS_ARENA,
+						   2, got);
+
+			if (n > 0)
+				c->d->dr_watch[got[0]] = c->bw_arena + 0x50 +
+					16 * 2 + 0x18;
+			if (n > 1)
+				c->d->dr_watch[got[1]] = c->bw_arena + 0x50 +
+					16 * 3 + 0x18;
 		}
 		os_info("[binwatch] pid %lu main_arena=0x%llx "
 			"discovered\n", (unsigned long)c->pid,
@@ -5754,9 +5803,15 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 		 * slots 2/3: the arena bin heads' bk — armed at
 		 * binwatch discovery (bw_arena known only then);
 		 * keep heap-range for the churn filter either way. */
-		for (wi = 0; wi < 2; wi++)
-			c->d->dr_watch[wi] = mm->heap_start + 0x90 +
-				(unsigned long long)wi * 8;
+		{
+			int got[UML_NT_DRS_SLOTS];
+			int n = uml_nt_drs_reserve(&c->drs, UML_NT_DRS_TCACHE,
+						   2, got);
+
+			for (wi = 0; wi < n; wi++)
+				c->d->dr_watch[got[wi]] = mm->heap_start +
+					0x90 + (unsigned long long)wi * 8;
+		}
 		c->d->dr_heap_lo = mm->heap_start;
 		c->d->dr_heap_hi = mm->heap_end;
 	}
