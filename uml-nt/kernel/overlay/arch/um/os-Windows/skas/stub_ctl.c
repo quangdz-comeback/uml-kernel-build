@@ -3560,6 +3560,25 @@ static void uml_nt_chain_arm(struct uml_nt_stub_conn *c,
 		(unsigned long)c->pid, c->exec_path, c->chain_hops, va);
 }
 
+/* THE DR SLOTS HAVE ONE OWNER AT A TIME (Shelley 164).
+ *
+ * Three instruments arm hardware breakpoints through the same four
+ * slots: the tcache tear watch (0/1), the arena bin-head watch (2/3),
+ * the write-slot pivot watch (0..3), and now the one-shot execute
+ * probe (2). Every contention bug today came from that: the write-slot
+ * instrument zeroed dr_exec_mask and took slot 2, and the bin-head
+ * instrument rewrites slots 2/3 every 64 rounds — between them they
+ * silently disarmed the probe twice while it reported "armed but never
+ * fired". (A central slot allocator is the real fix and is the next
+ * slice; this predicate is the honest stop-gap: while the probe is
+ * live, the retired tear-hunt instruments stand down.)
+ */
+static int dr_probe_owns_slots(struct uml_nt_stub_conn *c)
+{
+	return c != NULL && uml_nt_conn_is_login(c) &&
+	       (!c->drex_used || c->drex_armed);
+}
+
 /* [dr-exec] (Shelley 162): DOES THE GUEST EXECUTE THE FIRST
  * INSTRUCTION AFTER THE RESUME? Everything else is measured — the
  * CONTEXT is sane, the answer's target (rip+2) holds the real
@@ -4809,7 +4828,8 @@ static void binwatch(struct uml_nt_stub_conn *c,
 		 * slots the poison lands in). The stub's legit-churn
 		 * filter passes 0 / heap-shaped / the empty-bin self
 		 * value (slot-0x10 / slot-0x18 = the head itself). */
-		if (c->tctrip_want && !witness_off()) {
+		if (c->tctrip_want && !witness_off() &&
+		    !dr_probe_owns_slots(c)) {
 			c->d->dr_watch[2] = c->bw_arena + 0x50 +
 				16 * 2 + 0x18;
 			c->d->dr_watch[3] = c->bw_arena + 0x50 +
@@ -5726,7 +5746,8 @@ static void tcache_watch(struct uml_nt_stub_conn *c)
 	 * storm; the stub filters legit put/get churn in place and
 	 * reports only non-heap landings. (Supersedes the tctrip RO
 	 * arm — dl6's storm killed that design.) */
-	if (c->tctrip_want && !witness_off() && !c->ws_armed) {
+	if (c->tctrip_want && !witness_off() && !c->ws_armed &&
+	    !dr_probe_owns_slots(c)) {
 		int wi;
 
 		/* slots 0/1: tcache entries[0..1] (the dl5 family);
