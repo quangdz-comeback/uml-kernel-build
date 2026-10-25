@@ -140,6 +140,7 @@ int uml_nt_mmctx_init(struct mm_id *id)
 	}
 
 	id->nt_conn = c;
+	uml_nt_conn_register(c);
 	id->pid = (int)c->pid;
 	/* [fork-entry] audit (107/108): the two birth classes must be
 	 * tellable apart in the log — a fork-seeded conn carries the
@@ -267,6 +268,7 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * injection class). The dispatch entry does NOT check this —
 	 * that check ran out of order with the fork seed (d9808b9,
 	 * reverted). */
+	uml_nt_conn_unregister(c);
 	c->dead_magic = UML_NT_CONN_DEAD;
 	kvfree(c);
 	id->nt_conn = NULL;

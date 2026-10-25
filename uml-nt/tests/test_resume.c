@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "resume_model.h"
+#include "veh_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -38,6 +39,8 @@ resume_target(int cls, unsigned long long rip, unsigned long long verbatim)
 	}
 }
 static void test_pwslot(void);
+
+static void sec11_veh_stack(void);
 
 int main(void)
 {
@@ -220,6 +223,8 @@ int main(void)
 	CHECK(uml_nt_tf_trace_next(0, 0, 1) == UML_NT_TF_EXHAUSTED);
 	CHECK(uml_nt_tf_trace_next(0, 1, 1) == UML_NT_TF_EXHAUSTED);
 
+	sec11_veh_stack();
+
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);
 		return 1;
@@ -262,3 +267,80 @@ static void test_pwslot(void)
 	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x7000c5f8ull) == 3);
 	CHECK(uml_nt_pwslot_index(0x70000000ull, 0x6001c5e0ull) == -1);
 }
+
+/* Section 11 — the VEH dispatch stack (Shelley 157 (a), v1).
+ * RED FIRST: written before the model existed; every CHECK below is
+ * the semantics the asm thunk will be held to. */
+static void sec11_veh_stack(void)
+{
+	static unsigned char buf[64 * 1024] __attribute__((aligned(16)));
+	struct uml_nt_veh_stack s;
+	unsigned long long sp_out = 0;
+	unsigned long long guest_sp = 0x6085c6a8ULL;
+
+	memset(&s, 0, sizeof(s));
+	s.buf = (unsigned long long)(unsigned long)buf;
+	s.size = sizeof(buf);
+
+	/* 1. the outermost entry switches somewhere INSIDE the buffer,
+	 *    16-byte aligned, with real room left for a dispatch */
+	CHECK(uml_nt_veh_enter(&s, guest_sp) == 0);
+	CHECK(s.depth == 1);
+	CHECK(s.sp >= s.buf && s.sp < s.buf + s.size);
+	CHECK((s.sp & 15) == 0);
+	CHECK(s.sp - s.buf >= UML_NT_VEH_MIN_SIZE);
+	CHECK(s.guest_sp == guest_sp);
+
+	/* 2. nested entries keep the private stack — never a second
+	 *    switch, never a return to the guest stack mid-dispatch */
+	{
+		unsigned long long sp1 = s.sp;
+
+		CHECK(uml_nt_veh_enter(&s, 0x6085a000ULL) == 1);
+		CHECK(s.depth == 2);
+		CHECK(s.sp == sp1);
+		CHECK(uml_nt_veh_leave(&s, &sp_out) == 1);
+		CHECK(sp_out == sp1);		/* nested leave: unchanged */
+		CHECK(s.guest_sp == guest_sp);	/* and untouched */
+	}
+
+	/* 3. the outermost leave restores the guest sp BIT-EXACTLY — the
+	 *    CONTINUE_EXECUTION path returns to the faulting instruction
+	 *    with this rsp */
+	CHECK(uml_nt_veh_leave(&s, &sp_out) == 0);
+	CHECK(sp_out == guest_sp);
+	CHECK(s.depth == 0);
+
+	/* 4. a second outermost cycle works (handlers are re-entered for
+	 *    each new exception) and records the NEW guest sp */
+	CHECK(uml_nt_veh_enter(&s, 0x60001234ULL) == 0);
+	CHECK(s.guest_sp == 0x60001234ULL);
+	CHECK(uml_nt_veh_leave(&s, &sp_out) == 0);
+	CHECK(sp_out == 0x60001234ULL);
+
+	/* 5. a buffer too small to dispatch is refused rather than run
+	 *    off the end of it */
+	memset(&s, 0, sizeof(s));
+	s.buf = (unsigned long long)(unsigned long)buf;
+	s.size = 512;
+	CHECK(uml_nt_veh_enter(&s, guest_sp) == -1);
+	CHECK(s.depth == 0);
+	/* no buffer at all is refused too */
+	memset(&s, 0, sizeof(s));
+	CHECK(uml_nt_veh_enter(&s, guest_sp) == -1);
+
+	/* 5b. the alignment contract must hold for an UNALIGNED buffer
+	 *     too — the real TLS buffer's top need not be 16-aligned */
+	memset(&s, 0, sizeof(s));
+	s.buf = (unsigned long long)(unsigned long)buf + 8;
+	s.size = sizeof(buf) - 20;	/* top is now 4 mod 16 */
+	CHECK(uml_nt_veh_enter(&s, guest_sp) == 0);
+	CHECK((s.sp & 15) == 0);
+	CHECK(uml_nt_veh_leave(&s, &sp_out) == 0 && sp_out == guest_sp);
+
+	/* 6. unbalanced leaves are refused, not silently ignored */
+	memset(&s, 0, sizeof(s));
+	CHECK(uml_nt_veh_leave(&s, &sp_out) == -1);
+	printf("section 11 (VEH dispatch stack): all ok\n");
+}
+

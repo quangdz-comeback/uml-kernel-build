@@ -109,6 +109,13 @@ struct uml_nt_lazy_region {
 
 /* One guest process (stub side of the D10 protocol). Lives in the
  * kernel — the conn table is owned by stub_ctl.c (spawn/fork machinery). */
+/* [conn-reg] (Shelley 157 (b)): the census registry. */
+struct uml_nt_stub_conn;
+void uml_nt_conn_register(struct uml_nt_stub_conn *c);
+void uml_nt_conn_unregister(struct uml_nt_stub_conn *c);
+int uml_nt_conn_reg_count(void);
+struct uml_nt_stub_conn *uml_nt_conn_reg_at(int i);
+
 struct uml_nt_stub_conn {
 	struct uml_nt_stub_data *d;
 	HANDLE evt_in, evt_out;

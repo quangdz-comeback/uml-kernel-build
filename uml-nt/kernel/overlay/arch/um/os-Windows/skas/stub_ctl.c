@@ -4248,12 +4248,62 @@ void uml_nt_census(const char *tag, long long pid)
  *   file-clean     only read-only file VMAs claim it — page cache,
  *                  re-faultable byte-identically from the image (D28)
  * Hardest-to-evict wins when several VMAs claim one run. */
+
+/* [conn-reg] (Shelley 157 (b)): the census must not depend on
+ * for_each_process seeing the conn through mm->context at whatever
+ * instant the allocator calls the pressure hook — three referees in a
+ * row printed used=0 from inside that walk. Every conn joins this
+ * registry at birth and leaves it at teardown; the census walks the
+ * registry instead. */
+#define UML_NT_CONN_REG_MAX 256
+static struct uml_nt_stub_conn *conn_reg[UML_NT_CONN_REG_MAX];
+static int conn_reg_n;
+
+void uml_nt_conn_register(struct uml_nt_stub_conn *c)
+{
+	int i;
+
+	if (c == NULL)
+		return;
+	for (i = 0; i < conn_reg_n; i++) {
+		if (conn_reg[i] == c)
+			return;
+	}
+	if (conn_reg_n < UML_NT_CONN_REG_MAX)
+		conn_reg[conn_reg_n++] = c;
+	else
+		os_warn("[conn-reg] registry full (%d)\n", conn_reg_n);
+}
+
+void uml_nt_conn_unregister(struct uml_nt_stub_conn *c)
+{
+	int i;
+
+	for (i = 0; i < conn_reg_n; i++) {
+		if (conn_reg[i] != c)
+			continue;
+		conn_reg[i] = conn_reg[--conn_reg_n];
+		conn_reg[conn_reg_n] = NULL;
+		return;
+	}
+}
+
+int uml_nt_conn_reg_count(void)
+{
+	return conn_reg_n;
+}
+
+struct uml_nt_stub_conn *uml_nt_conn_reg_at(int i)
+{
+	return i >= 0 && i < conn_reg_n ? conn_reg[i] : NULL;
+}
+
 void uml_nt_census_classes(struct uml_nt_phys *ph)
 {
 	static unsigned char cls[UML_NT_PHYS_MAX_RUNS];
 	static unsigned long long oldest[4], newest[4];
 	int i, n[4] = { 0, 0, 0, 0 }, unclaimed = 0, used = 0;
-	struct task_struct *p;
+	int ri;
 	static int class_left = 24;
 
 	if (ph == NULL || class_left-- <= 0)
@@ -4261,14 +4311,11 @@ void uml_nt_census_classes(struct uml_nt_phys *ph)
 	memset(cls, 0, sizeof(cls));
 	memset(oldest, 0, sizeof(oldest));
 	memset(newest, 0, sizeof(newest));
-	for_each_process(p) {
-		struct uml_nt_stub_conn *pc;
+	for (ri = 0; ri < uml_nt_conn_reg_count(); ri++) {
+		struct uml_nt_stub_conn *pc = uml_nt_conn_reg_at(ri);
 		int vi;
 
-		if (p->mm == NULL)
-			continue;
-		pc = ((struct mm_id *)&p->mm->context.id)->nt_conn;
-		if (pc == NULL || pc->mm == NULL || pc->ph != ph ||
+		if (pc == NULL || pc->mm == NULL || pc->ph == NULL ||
 		    pc->dead_magic == UML_NT_CONN_DEAD || !pc->alive)
 			continue;
 		for (vi = 0; vi < pc->mm->nvma; vi++) {
@@ -4281,7 +4328,7 @@ void uml_nt_census_classes(struct uml_nt_phys *ph)
 			else if (v->prot & 0x04)
 				c = 1;			/* file-dirty */
 			else if ((v->prot & 0x30) &&
-				 uml_nt_phys_refs(pc->ph ? pc->ph : ph,
+				 uml_nt_phys_refs(pc->ph,
 					(long long)v->run_off) > 1)
 				c = 2;			/* shared-exec */
 			for (r = 0; r < span; r += UML_NT_PHYS_RUN_SIZE) {

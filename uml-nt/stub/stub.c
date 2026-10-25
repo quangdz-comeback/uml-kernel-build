@@ -54,6 +54,7 @@
 
 #include "../kernel/overlay/arch/um/include/shared/stub_nt.h"
 #include "resume_model.h"
+#include "../kernel/overlay/arch/um/include/shared/veh_model.h"
 #include "../kernel/overlay/arch/um/include/shared/ss_model.h"
 /* fault.h drags vma.h (kernel-side); the one constant the stub
  * needs is pinned here — keep in sync with fault.h. */
@@ -692,10 +693,156 @@ static void ss_stray_record(const CONTEXT *c, unsigned long long dr6,
 static __thread int in_veh;
 static void publish_unhandled(const EXCEPTION_RECORD *er, const CONTEXT *c);
 
+/* ---- The VEH dispatch stack (Shelley 157 (a)) ----------------------
+ *
+ * veh_switch_call(fn, ep, stack_top, save) runs fn(ep) with rsp set to
+ * `stack_top` (16-byte aligned, inside a stub-private buffer) and
+ * returns fn's value in rax. Requirements this thunk is held to:
+ *
+ *  (1) EVERY register is preserved — the volatile ones (rax/rcx/rdx/
+ *      r8-r11) because the CONTINUE_EXECUTION path returns into guest
+ *      code that may still hold live values, and the callee-saved ones
+ *      because we are a callee too;
+ *  (2) rsp is restored BIT-EXACTLY, so the return lands where the
+ *      exception was taken from;
+ *  (3) 32 bytes of shadow space + 16-byte alignment, per the Windows
+ *      x64 call boundary;
+ *  (4) the thunk carries no unwind info — acceptable because nothing
+ *      between it and the body installs a frame handler (the stub is
+ *      plain C; a nested exception is published by the re-entry path
+ *      and CONTINUE_SEARCH'd, which terminates without unwinding).
+ *
+ * save[] layout (8 bytes each): 0 rsp, 1 rax, 2 rcx, 3 rdx, 4 r8,
+ * 5 r9, 6 r10, 7 r11, 8 rbx, 9 rbp, 10 rsi, 11 rdi, 12 r12, 13 r13,
+ * 14 r14, 15 r15, 16 result.
+ */
+__asm__(
+".text\n"
+".globl veh_switch_call\n"
+".def veh_switch_call; .scl 2; .type 32; .endef\n"
+"veh_switch_call:\n"
+"	movq %rsp,  0(%r9)\n"
+"	movq %rax,  8(%r9)\n"
+"	movq %rcx, 16(%r9)\n"
+"	movq %rdx, 24(%r9)\n"
+"	movq %r8,  32(%r9)\n"
+"	movq %r9,  40(%r9)\n"
+"	movq %r10, 48(%r9)\n"
+"	movq %r11, 56(%r9)\n"
+"	movq %rbx, 64(%r9)\n"
+"	movq %rbp, 72(%r9)\n"
+"	movq %rsi, 80(%r9)\n"
+"	movq %rdi, 88(%r9)\n"
+"	movq %r12, 96(%r9)\n"
+"	movq %r13,104(%r9)\n"
+"	movq %r14,112(%r9)\n"
+"	movq %r15,120(%r9)\n"
+"	movq %r9, %rbx\n"            /* keep the save block (r9 is volatile) */
+"	movq %rcx, %rax\n"           /* fn -> volatile scratch */
+"	movq %rdx, %rcx\n"           /* ep -> first argument */
+"	movq %r8, %rsp\n"            /* the private stack top */
+"	subq $32, %rsp\n"            /* shadow space; keeps 16-byte alignment */
+"	call *%rax\n"
+"	movq %rax, 128(%rbx)\n"      /* the handler's answer */
+"	movq  72(%rbx), %rbp\n"
+"	movq  80(%rbx), %rsi\n"
+"	movq  88(%rbx), %rdi\n"
+"	movq  64(%rbx), %rcx\n"      /* rbx last-but-one: we still need it */
+"	movq  96(%rbx), %r12\n"
+"	movq 104(%rbx), %r13\n"
+"	movq 112(%rbx), %r14\n"
+"	movq 120(%rbx), %r15\n"
+"	movq  16(%rbx), %rax\n"      /* rcx must be restored before rbx */
+"	movq   0(%rbx), %rsp\n"      /* exact restore, before anything else */
+"	movq  %rax, %rcx\n"
+"	movq   8(%rbx), %rax\n"
+"	movq  48(%rbx), %r10\n"
+"	movq  56(%rbx), %r11\n"
+"	movq  24(%rbx), %rdx\n"
+"	movq  32(%rbx), %r8\n"
+"	movq  40(%rbx), %r9\n"
+"	movq 128(%rbx), %rax\n"      /* ... and the answer wins in rax */
+"	ret\n"
+".p2align 4\n");
+
+extern long veh_switch_call(long (*fn)(EXCEPTION_POINTERS *),
+			   EXCEPTION_POINTERS *ep, void *stack_top,
+			   unsigned long long *save);
+
+/* One private dispatch stack per thread: 64 KiB, 16-byte aligned, no
+ * stack guard of its own (it is TLS storage, not a thread stack). */
+static __thread unsigned long long veh_save[17];
+static __thread struct uml_nt_veh_stack veh_stk;
+static __thread unsigned char veh_buf[64 * 1024]
+	__attribute__((aligned(16)));
+static __thread int veh_stk_ready;
+
+static unsigned long long veh_now_sp(void)
+{
+	unsigned long long sp;
+
+	__asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+	return sp;
+}
+
+static void veh_stk_init(void)
+{
+	if (veh_stk_ready)
+		return;
+	veh_stk.buf = (unsigned long long)(unsigned long)veh_buf;
+	veh_stk.size = sizeof(veh_buf);
+	veh_stk.depth = 0;
+	veh_stk_ready = 1;
+}
+
+
+/* Self-check for the asm thunk (Shelley 157 (1)(2)(3)): the target is
+ * the only place this asm ever runs, so prove it here — a body that
+ * sees rsp inside the private buffer, at a correct call boundary, with
+ * the volatile registers intact and rsp restored exactly afterwards. */
+static __thread unsigned long long veh_probe_sp;
+
+static long veh_probe(EXCEPTION_POINTERS *ep)
+{
+	__asm__ volatile("mov %%rsp, %0" : "=r"(veh_probe_sp));
+	return (long)(long long)(uintptr_t)ep;
+}
+
+static void veh_stk_selfcheck(void)
+{
+	unsigned long long r10w = 0xdeadbeefULL, r11w = 0xfeedfaceULL;
+	unsigned long long sp_before = veh_now_sp();
+	EXCEPTION_POINTERS *want = (EXCEPTION_POINTERS *)(uintptr_t)0x1234567ULL;
+	long got;
+
+	veh_stk_init();
+	__asm__ volatile("mov %0, %%r10" : : "r"(r10w) : "r10");
+	__asm__ volatile("mov %0, %%r11" : : "r"(r11w) : "r11");
+	got = veh_switch_call(veh_probe, want,
+			      (void *)(unsigned long)veh_stk.sp, veh_save);
+	__asm__ volatile("mov %%r10, %0" : "=r"(r10w));
+	__asm__ volatile("mov %%r11, %0" : "=r"(r11w));
+	fprintf(stderr, "[stubtest] veh-stack self-check %s: "
+		"body-sp=0x%llx buf=[0x%llx,0x%llx) align=%llu "
+		"ret=%d r10=%s r11=%s rsp-restore=%s\n",
+		((unsigned long long)got == (unsigned long long)(uintptr_t)want
+		 && veh_probe_sp >= veh_stk.buf
+		 && veh_probe_sp < veh_stk.buf + veh_stk.size
+		 && veh_now_sp() == sp_before) ? "ok" : "FAIL",
+		veh_probe_sp, veh_stk.buf, veh_stk.buf + veh_stk.size,
+		(veh_probe_sp + 8) & 15,
+		(int)(got != (long)(uintptr_t)want),
+		r10w == 0xdeadbeefULL ? "ok" : "CLOBBERED",
+		r11w == 0xfeedfaceULL ? "ok" : "CLOBBERED",
+		veh_now_sp() == sp_before ? "exact" : "MISMATCH");
+}
+
 static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep);
 
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
+	unsigned long long sp_in = veh_now_sp();
+	unsigned long long sp_out = sp_in;
 	LONG r;
 
 	if (in_veh) {
@@ -705,7 +852,27 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
 	in_veh = 1;
-	r = veh_body(ep);
+	veh_stk_init();
+	if (uml_nt_veh_enter(&veh_stk, sp_in) == 0) {
+		/* the outermost entry runs on the stub's own buffer, never
+		 * on the guest's stack: a dispatcher frame can no longer
+		 * land on a guest PROT_NONE/PAGE_GUARD page */
+		r = (LONG)veh_switch_call((long (*)(EXCEPTION_POINTERS *))
+					  veh_body, ep,
+					  (void *)(unsigned long)veh_stk.sp,
+					  veh_save);
+		(void)uml_nt_veh_leave(&veh_stk, &sp_out);
+		if (sp_out != veh_now_sp()) {
+			static int shout;
+
+			if (!shout++)
+				fprintf(stderr, "stub: veh stack restore "
+					"mismatch want=%llx have=%llx\n",
+					sp_out, veh_now_sp());
+		}
+	} else {
+		r = veh_body(ep);	/* refused: old behaviour */
+	}
 	in_veh = 0;
 	return r;
 }
@@ -1453,6 +1620,8 @@ int main(int argc, char **argv)
 	SetUnhandledExceptionFilter(unhandled_filter);
 	if (!AddVectoredExceptionHandler(1, veh_handler))
 		die("AddVectoredExceptionHandler", GetLastError());
+
+	veh_stk_selfcheck();
 
 	fsgsbase_detect();
 
