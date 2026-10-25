@@ -11336,8 +11336,22 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 					conn_parent.exit_code = code;
 					conn_parent.alive = 0;
 					os_info("[stubtest] parent died "
-						"silently: %lu\n",
-						(unsigned long)code);
+						"silently: %lu veh=[phase=%llu "
+						"in=0x%llx body=0x%llx "
+						"out=0x%llx ret=0x%llx "
+						"want=0x%llx r10=0x%llx "
+						"r11=0x%llx] cmd=%u rip=0x%llx\n",
+						(unsigned long)code,
+						conn_parent.d->veh_phase,
+						conn_parent.d->veh_sc_sp_in,
+						conn_parent.d->veh_sc_sp_body,
+						conn_parent.d->veh_sc_sp_out,
+						conn_parent.d->veh_sc_ret,
+						conn_parent.d->veh_sc_want,
+						conn_parent.d->veh_sc_r10,
+						conn_parent.d->veh_sc_r11,
+						(unsigned)conn_parent.d->cmd,
+						conn_parent.d->regs.rip);
 				} else {
 					any = 1;
 				}
