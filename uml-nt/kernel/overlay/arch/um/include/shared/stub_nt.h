@@ -492,6 +492,13 @@ struct uml_nt_stub_data {
 	unsigned long long veh_sc_ret;
 	unsigned long long veh_sc_want;
 	unsigned long long veh_sc_buf;
+	/* [crumbs] (Shelley 157 follow-up): where the stub was when it
+	 * died, and whether the VEH saw anything at all. round_step walks
+	 * the serve loop 1..6; veh_entries counts every VEH entry (normal
+	 * and nested); unhandled_calls counts last-chance publishes. */
+	unsigned long long round_step;
+	unsigned long long veh_entries;
+	unsigned long long unhandled_calls;
 	unsigned long long veh_sc_size;
 };
 

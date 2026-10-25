@@ -411,15 +411,21 @@ static int do_action(void)
  * and the pre-entry INIT stream. */
 static void action_chain(void)
 {
+	d->round_step = 1;	/* published INIT/answer, waiting */
 	wait_answer();
+	d->round_step = 2;
 	for (;;) {
 		if (d->action == UML_STUB_ACTION_KILL)
 			park_forever();
 		if (d->action != UML_STUB_ACTION_NONE) {
+			d->round_step = 3;	/* applying an action */
 			d->retval = do_action() ? 1 : 0;
+			d->round_step = 4;	/* action done */
 			d->err = d->retval ? 0 : 1;
 			publish(UML_STUB_CMD_PROT_DONE);
+			d->round_step = 5;	/* prot done, waiting */
 			wait_answer();
+			d->round_step = 6;
 			continue; /* answer: NONE (resume) or next op */
 		}
 		break; /* ACTION_NONE: handled */
@@ -440,6 +446,7 @@ static void action_chain(void)
  * guest's), 16 instruction bytes, and the round that was in flight. */
 static void publish_unhandled(const EXCEPTION_RECORD *er, const CONTEXT *c)
 {
+	d->unhandled_calls++;
 	if (er != NULL && d != NULL && d->unhandled_seq == 0) {
 		d->unhandled_code = er->ExceptionCode;
 		d->unhandled_type = er->NumberParameters > 0 ?
@@ -879,6 +886,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep);
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	unsigned long long sp_in = veh_now_sp();
+
+	d->veh_entries++;
 	unsigned long long sp_out = sp_in;
 	LONG r;
 

@@ -711,6 +711,17 @@ void userspace(struct uml_pt_regs *regs)
 						  c->d->stub_sp_lim ?
 						  c->d->stub_sp -
 						  c->d->stub_sp_lim : 0);
+					os_info("[crumbs] pid %d "
+						"round_step=%llu veh_entries=%llu "
+						"unhandled_calls=%llu "
+						"unhandled_seq=%llu "
+						"action=%u cmd=%u\n",
+						c->pid, c->d->round_step,
+						c->d->veh_entries,
+						c->d->unhandled_calls,
+						c->d->unhandled_seq,
+						(unsigned)c->d->action,
+						(unsigned)c->d->cmd);
 					os_info("[veh] pid %d phase=%llu "
 						"in=0x%llx body=0x%llx "
 						"out=0x%llx buf=0x%llx "
