@@ -24,6 +24,10 @@ name: "uml-nt M5.5a systemd boot (native referee)"
 on:
   workflow_dispatch:
     inputs:
+      debugger:
+        description: "uml_nt_dbg=1 (run stub.exe under the launcher's own mini-debugger)"
+        type: boolean
+        default: false
       probe_off:
         description: "append uml_nt_drexec=0 (A/B: the DR-execute probe off)"
         type: boolean
@@ -244,6 +248,10 @@ jobs:
           if [ "${{ inputs.probe_off }}" = "true" ]; then
             PROBE_ARG="uml_nt_drexec=0"
           fi
+          DBG_ARG=""
+          if [ "${{ inputs.debugger }}" = "true" ]; then
+            DBG_ARG="uml_nt_dbg=1"
+          fi
           {
             i=0
             while [ $i -lt 36 ]; do
@@ -261,6 +269,7 @@ jobs:
             "SYSTEMD_LOG_TARGET=console" "SYSTEMD_LOG_LOCATION=1" \
             ${WITNESS_ARG:+$WITNESS_ARG} \
             ${PROBE_ARG:+$PROBE_ARG} \
+            ${DBG_ARG:+$DBG_ARG} \
             > systemd.log 2>&1
           code=$?
           set -e

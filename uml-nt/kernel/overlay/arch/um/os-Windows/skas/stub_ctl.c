@@ -10593,6 +10593,132 @@ void uml_nt_exec_path_set(const char *path)
 }
 
 /* The exec birth's name (called from uml_nt_fork_seed's exec branch). */
+/* Shelley 189: MINI-DEBUGGER. WaitForDebugEvent delivers an exception
+ * BEFORE any user-mode dispatch — including the class where the OS aborts
+ * the process without ever running a filter or the VEH. That is the only
+ * window this hunt has left, and it costs one thread: the debugger only
+ * watches. First-chance events are continued as NOT_HANDLED so the stub's
+ * own handlers behave exactly as they always have.
+ */
+#define UML_NT_DBG_CONTINUE	0x00010002u
+#define UML_NT_DBG_NOT_HANDLED	0x80010001u
+
+static volatile int dbg_stop;
+static unsigned long dbg_events;
+
+/* The kernel is a freestanding ELF: no windows.h, so DEBUG_EVENT and
+ * EXCEPTION_RECORD are spelled out here from the documented x64 layout
+ * (asserted by the fact that the fields we read are the ones the CI log
+ * shows). dwDebugEventCode/ProcessId/ThreadId occupy 12 bytes, the union
+ * starts at 16 (8-byte alignment), EXCEPTION_DEBUG_INFO is a 152-byte
+ * EXCEPTION_RECORD followed by dwFirstChance.
+ */
+#define UML_NT_DE_CODE		0	/* DWORD */
+#define UML_NT_DE_PID		4
+#define UML_NT_DE_TID		8
+#define UML_NT_DE_U		16
+#define UML_NT_U_EXC_CODE	0	/* within the union */
+#define UML_NT_U_EXC_FLAGS	4
+#define UML_NT_U_EXC_ADDR	16
+#define UML_NT_U_EXC_NPARAMS	24
+#define UML_NT_U_EXC_INFO	32
+#define UML_NT_U_EXC_FIRSTCH	152
+#define UML_NT_U_EXIT_CODE	0
+#define UML_NT_DE_SIZE		176
+#define UML_NT_EXCEPTION_DEBUG	1u
+#define UML_NT_EXIT_PROCESS	5u
+
+#define UML_NT_DBG_CONTINUE	0x00010002u
+#define UML_NT_DBG_NOT_HANDLED	0x80010001u
+
+static volatile int dbg_stop;
+static unsigned long dbg_events;
+
+static unsigned int de_u32(const unsigned char *b, unsigned int off)
+{
+	unsigned int v;
+
+	__builtin_memcpy(&v, b + off, 4);
+	return v;
+}
+
+static unsigned long long de_u64(const unsigned char *b, unsigned int off)
+{
+	unsigned long long v;
+
+	__builtin_memcpy(&v, b + off, 8);
+	return v;
+}
+
+static unsigned long UML_NTABI_CC dbg_pump(void *arg)
+{
+	unsigned long pid = (unsigned long)(uintptr_t)arg;
+	unsigned char de[UML_NT_DE_SIZE];
+	int budget = 2000;
+
+	while (!dbg_stop && budget-- > 0) {
+		unsigned int code, tid, st;
+		const unsigned char *u = de + UML_NT_DE_U;
+
+		if (!nt->WaitForDebugEvent(de, 200))
+			continue;
+		dbg_events++;
+		code = de_u32(de, UML_NT_DE_CODE);
+		tid = de_u32(de, UML_NT_DE_TID);
+		st = UML_NT_DBG_CONTINUE;
+		if (code == UML_NT_EXCEPTION_DEBUG) {
+			unsigned int np = de_u32(u, UML_NT_U_EXC_NPARAMS);
+			unsigned int k;
+			char info[160];
+			int n = 0;
+
+			info[0] = 0;
+			for (k = 0; k < np && k < 4; k++)
+				n += snprintf(info + n, sizeof(info) - n,
+					      " info[%u]=0x%llx", k,
+					      de_u64(u, UML_NT_U_EXC_INFO + 8 * k));
+			os_info("[dbg] pid %lu EXC%s code=0x%08x addr=0x%llx "
+				"nparams=%u%s tid=%u\n",
+				pid,
+				de_u32(u, UML_NT_U_EXC_FIRSTCH) ? "1" : "2",
+				de_u32(u, UML_NT_U_EXC_CODE),
+				de_u64(u, UML_NT_U_EXC_ADDR), np, info, tid);
+			/* never steal: the stub's own handlers see it
+			 * exactly as they would without us */
+			st = UML_NT_DBG_NOT_HANDLED;
+		} else if (code == UML_NT_EXIT_PROCESS) {
+			os_info("[dbg] pid %lu EXIT_PROCESS code=0x%x "
+				"(GetExitCodeProcess will agree)\n",
+				pid, de_u32(u, UML_NT_U_EXIT_CODE));
+			nt->ContinueDebugEvent(de_u32(de, UML_NT_DE_PID), tid, st);
+			os_info("[dbg] pump ended after %lu event(s)\n",
+				dbg_events);
+			return 0;
+		}
+		nt->ContinueDebugEvent(de_u32(de, UML_NT_DE_PID), tid, st);
+	}
+	os_info("[dbg] pump ended after %lu event(s)\n", dbg_events);
+	return 0;
+}
+
+int uml_nt_dbg_on = -1;
+static int dbg_on(void)
+{
+	int i;
+
+	if (uml_nt_dbg_on >= 0)
+		return uml_nt_dbg_on;
+	uml_nt_dbg_on = 0;
+	for (i = 0; i < uml_boot.argc; i++)
+		if (uml_boot.argv[i] != NULL &&
+		    __builtin_strcmp(uml_boot.argv[i], "uml_nt_dbg=1") == 0)
+			uml_nt_dbg_on = 1;
+	if (uml_nt_dbg_on)
+		os_info("[dbg] uml_nt_dbg=1 — the stub runs under our own "
+			"debugger (watch only, first-chance NOT_HANDLED)\n");
+	return uml_nt_dbg_on;
+}
+
 static void uml_nt_exec_path_adopt(struct uml_nt_stub_conn *c)
 {
 	int i;
@@ -11183,9 +11309,19 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	si.cb = sizeof(si); /* 104 on x64 — pitfall 10 */
 	memset(&pi, 0, sizeof(pi));
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
-				0x4 /*CREATE_SUSPENDED*/, NULL, NULL,
-				&si, &pi))
+				(unsigned long)(0x4 /*CREATE_SUSPENDED*/ |
+				(dbg_on() ? 0x2 /*DEBUG_ONLY_THIS_PROCESS*/ : 0)),
+				NULL, NULL, &si, &pi))
 		goto fail;
+	if (dbg_on()) {
+		unsigned int tid = 0;
+
+		if (nt->CreateThread(NULL, 0, dbg_pump,
+				     (void *)(uintptr_t)pi.dwProcessId,
+				     0, &tid) == NULL)
+			os_info("[dbg] debug pump thread FAILED — the "
+				"stub still runs, unattended\n");
+	}
 
 	c->proc = pi.hProcess;
 	c->thread = pi.hThread;

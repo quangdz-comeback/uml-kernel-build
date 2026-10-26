@@ -128,6 +128,9 @@ static void resolve_api_table(void)
 	RESOLVE(NtSetEvent, ntdll, "NtSetEvent");
 
 	RESOLVE(QueryPerformanceCounter, k32, "QueryPerformanceCounter");
+	/* Shelley 189: mini-debugger exports (diagnostics only) */
+	RESOLVE(WaitForDebugEvent, k32, "WaitForDebugEvent");
+	RESOLVE(ContinueDebugEvent, k32, "ContinueDebugEvent");
 	RESOLVE(QueryPerformanceFrequency, k32, "QueryPerformanceFrequency");
 	RESOLVE(GetSystemTimePreciseAsFileTime, k32,
 		"GetSystemTimePreciseAsFileTime");

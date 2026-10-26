@@ -718,6 +718,13 @@ struct uml_nt_api_table {
 			SIZE_T len);
 	BOOL (UML_NTABI_CC *ReadProcessMemory)(HANDLE process,
 			PVOID addr, PVOID buf, SIZE_T len, SIZE_T *got);
+	/* Shelley 189: the mini-debugger. WaitForDebugEvent delivers the
+	 * exception BEFORE any user-mode dispatch — including the class the
+	 * OS aborts without ever calling a filter — which is the only
+	 * window this hunt has left. */
+	BOOL (UML_NTABI_CC *WaitForDebugEvent)(void *ev, ULONG ms);
+	BOOL (UML_NTABI_CC *ContinueDebugEvent)(ULONG pid, ULONG tid,
+						ULONG status);
 
 	/* ---- appended for M3.3 ------------------------------------------ */
 	ULONG (UML_NTABI_CC *WaitForMultipleObjects)(ULONG count,
