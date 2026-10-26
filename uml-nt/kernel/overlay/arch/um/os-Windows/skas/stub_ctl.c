@@ -11581,6 +11581,20 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		/* Kernel owns the kill (upstream parity, M2.2): halt =
 		 * guest exit; KILL = the stub parked on a fatal fault/
 		 * failed op — terminate it now, never wait it out. */
+		/* Shelley 188: NAME the kill. A process that dies with
+		 * 0xC0000005 but never runs its unhandled filter did not
+		 * crash — someone terminated it. If this line fires with the
+		 * dying pid, the "AV with no handler" of the last dozen
+		 * slices was our own NtTerminateProcess carrying a stale
+		 * retval, and the whole exception hunt was chasing a value
+		 * that was never an exception at all. */
+		os_info("[kill] pid %lu TERMINATING stub: halt=%u action=%u "
+			"retval=0x%llx (this becomes the exit code) "
+			"cmd=%u rip=0x%llx\n",
+			(unsigned long)c->pid, (unsigned)c->d->halt,
+			(unsigned)c->d->action,
+			c->d->retval, (unsigned)c->d->cmd,
+			c->d->regs.rip);
 		nt->NtTerminateProcess(c->proc,
 				       (NTSTATUS)c->d->retval);
 		c->exit_code = c->d->retval;
