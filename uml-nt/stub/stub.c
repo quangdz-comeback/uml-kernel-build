@@ -1005,6 +1005,8 @@ static int nt_continue_resume(CONTEXT *c)
 
 	if (c == NULL || d == NULL)
 		return 0;
+	if (!d->ntc_enable)
+		return 0;
 	if (nt_continue == NULL) {
 		nt_continue = (nt_continue_t)(uintptr_t)GetProcAddress(
 			GetModuleHandleA("ntdll.dll"), "NtContinue");

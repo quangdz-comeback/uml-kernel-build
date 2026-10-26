@@ -3674,6 +3674,11 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 		uml_nt_drs_retire(&c->drs, UML_NT_DRS_ARENA);
 		uml_nt_drs_retire(&c->drs, UML_NT_DRS_WSLOT);
 		c->drex_slot = got[0];
+		/* Shelley 175: the explicit resume is scoped to the conn we
+		 * are chasing — the unconditional version broke the native
+		 * boot test (stdin c000014b), so every other round keeps the
+		 * path that has carried 200k rounds. */
+		d->ntc_enable = 1;
 		d->dr_watch[c->drex_slot] = va;
 		d->dr_exec_mask |= 1u << c->drex_slot;
 		os_info("[dr-exec] slot=%d shape=%s (ledger: exec=%d)\n",
