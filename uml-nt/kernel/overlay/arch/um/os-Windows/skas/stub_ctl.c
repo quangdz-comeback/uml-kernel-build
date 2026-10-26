@@ -11300,7 +11300,7 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 						c->d->stack_alloc_hint,
 						&c->plan);
 
-		if (sg == 0 && c->sg_logged < 4) {
+		if (sg == 0 && c->d->stack_bottom != 0 && c->sg_logged < 4) {
 			/* why did it not grow? the inputs, once per conn —
 			 * "no line" must never be the answer to "why". */
 			c->sg_logged++;
@@ -11314,7 +11314,7 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				 c->d->regs.rsp > c->d->stack_bottom) ?
 				c->d->regs.rsp - c->d->stack_bottom : 0);
 		}
-		if (sg > 0 && c->sg_logged < 8) {
+		if (sg > 0 && c->sg_logged < 16) {
 			c->sg_logged++;
 			os_info("[stack-pre] pid %lu rsp=0x%llx grew to "
 				"[0x%llx,+0x%llx) — the dispatcher needs "

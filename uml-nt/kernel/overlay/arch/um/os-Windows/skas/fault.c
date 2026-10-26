@@ -205,8 +205,14 @@ int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	if (d <= 0)
 		return d;
 	off = uml_nt_phys_alloc_span(ph, UML_NT_SG_RUN / UML_NT_PHYS_RUN_SIZE);
-	if (off < 0)
+	if (off < 0) {
+		/* silence here would look like "headroom was fine" — the
+		 * one thing a grow must never do is fail quietly */
+		os_info("[stack-pre] grow DECLINED: no free phys span for one "
+			"run (rsp=0x%llx bottom=0x%llx)\n", rsp,
+			committed);
 		return 0;
+	}
 	if (uml_nt_vma_add_gen(mm, start, start + UML_NT_SG_RUN,
 			       (unsigned long long)off, 0x04u /* RW */, 0,
 			       (unsigned long long)uml_nt_phys_gen(ph, off)) < 0) {
