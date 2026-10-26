@@ -660,6 +660,28 @@ static void record_ask(const CONTEXT *c)
 	d->ask_dr7 = (unsigned long long)c->Dr7;
 	d->ask_flags = (unsigned long long)c->ContextFlags;
 	d->ask_round++;
+	/* Shelley 172: the whole returned context, ring 8 — the live #DB
+	 * rounds and the fatal one can then be diffed field by field. */
+	{
+		struct uml_nt_ret_ring *r = &d->ret_ring[d->ret_ring_at & 7u];
+
+		d->ret_ring_at++;
+		r->seq = d->done_seq;
+		r->rip = (unsigned long long)c->Rip;
+		r->rsp = (unsigned long long)c->Rsp;
+		r->eflags = (unsigned long long)c->EFlags;
+		r->cs = (unsigned long long)c->SegCs;
+		r->ss = (unsigned long long)c->SegSs;
+		r->dr0 = (unsigned long long)c->Dr0;
+		r->dr1 = (unsigned long long)c->Dr1;
+		r->dr2 = (unsigned long long)c->Dr2;
+		r->dr3 = (unsigned long long)c->Dr3;
+		r->dr6 = (unsigned long long)c->Dr6;
+		r->dr7 = (unsigned long long)c->Dr7;
+		r->ctx_flags = (unsigned long long)c->ContextFlags;
+		r->cmd = (unsigned long long)d->cmd;
+		r->action = (unsigned long long)d->action;
+	}
 }
 
 /* And compare at the next entry: if the dispatcher applied our context,

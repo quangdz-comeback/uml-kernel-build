@@ -375,6 +375,21 @@ struct uml_nt_stub_data {
 	/* Shelley 171 [map-truth]: every run-backed MAP must leave Windows
 	 * holding the whole run the ledger claims. */
 	unsigned long long map_truth_ok, map_truth_bad;
+	/* Shelley 172: the CONTEXT we actually hand the dispatcher back —
+	 * Rip/Rsp/EFlags and the whole debug state — ring 8, dumped at
+	 * death. The question it answers: what distinguishes the 449 #DB
+	 * rounds that survive from the one that does not. Alpha = we keep
+	 * the breakpoint armed at the very rip we are resuming to (it
+	 * would fire again at once); beta = the returned EFlags still has
+	 * TF set or RF clear, so the kernel-side resume raises the #DB
+	 * itself before user mode can dispatch.
+	 */
+	struct uml_nt_ret_ring {
+		unsigned long long seq, rip, rsp, eflags, cs, ss;
+		unsigned long long dr0, dr1, dr2, dr3, dr6, dr7, ctx_flags;
+		unsigned long long cmd, action, resuming; /* resuming=1 nac */
+	} ret_ring[8];
+	unsigned ret_ring_at;
 	/* -- v13: DR watchpoints on the tcache entries[] (M5.6a) ------
 	 * Page traps can't isolate the tcache struct from its page-mate
 	 * chunks (the dl6 storm: 38k faults on ONE hot qword, 19.4M

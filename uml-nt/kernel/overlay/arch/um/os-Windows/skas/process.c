@@ -1044,6 +1044,29 @@ void userspace(struct uml_pt_regs *regs)
 				c->ans_regs[i], now[i],
 				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
 	}
+	/* Shelley 172: the returned contexts, newest first — TF/RF and the
+	 * DR state at each resume. The live #DB rounds and the fatal one are
+	 * in here; the diff is the answer. */
+	{
+		unsigned at = c->d->ret_ring_at;
+		unsigned i, n = at < 8 ? at : 8;
+
+		os_info("[ret-ring] pid %d rounds=%u\n", c->pid, at);
+		for (i = 0; i < n; i++) {
+			struct uml_nt_ret_ring *r =
+				&c->d->ret_ring[(at - 1 - i) & 7u];
+
+			os_info("[ret-ring] #%u seq=%llu cmd=%llu act=%llu "
+				"rip=0x%llx rsp=0x%llx rflags=0x%llx TF=%d RF=%d "
+				"IF=%d dr0=0x%llx dr2=0x%llx dr6=0x%llx "
+				"dr7=0x%llx ctx=0x%llx\n",
+				i, r->seq, r->cmd, r->action, r->rip, r->rsp,
+				r->eflags, (int)((r->eflags >> 8) & 1),
+				(int)((r->eflags >> 16) & 1),
+				(int)((r->eflags >> 9) & 1), r->dr0, r->dr2,
+				r->dr6, r->dr7, r->ctx_flags);
+		}
+	}
 	/* Shelley 170: the last grow decisions, in order — the one that
 	 * matters is the round that died. */
 	{
