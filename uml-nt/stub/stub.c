@@ -72,11 +72,6 @@
 #define STUB_DATA_VA 0x10000000ULL
 
 static struct uml_nt_stub_data *d;
-
-/* Shelley 176: the landing pad's state (see arm_landing below). */
-static CONTEXT landing_ctx;
-static volatile int landing_armed;
-static unsigned char landing_stack[0x8000] __attribute__((aligned(64)));
 static HANDLE evt_in, evt_out; /* stub->kernel, kernel->stub */
 static HANDLE phys_sec; /* physmem section (per-VMA views, do_action) */
 static volatile unsigned char *flat_view; /* RO whole-section view */
@@ -1047,60 +1042,6 @@ static int nt_continue_resume(CONTEXT *c)
 				  (DWORD)n, &wrote, NULL);
 	}
 	return 1;
-}
-
-static void landing_pad(void)
-{
-	if (!landing_armed) {
-		/* nothing armed: this cannot be reached by design, and a
-		 * silent loop here would be worse than a loud stop */
-		park_forever();
-		return;
-	}
-	landing_armed = 0;
-	/* ONE resume, on the private stack, with the context the kernel
-	 * answered — success never returns. */
-	if (!nt_continue_resume(&landing_ctx))
-		park_forever();
-	/* NtContinue refused (it returned): the status and the context are
-	 * already in the shared block. Do not resume a third time. */
-	park_forever();
-}
-
-
-/* Shelley 176 (D-level, ARCHITECTURE.md): WHERE THE RESUME LIVES.
- *
- * The dispatcher's CONTINUE_EXECUTION restores the ContextRecord we hand
- * it, so that IS a resume — and if the dispatch loop resumed as well we
- * would resume twice. The way out: hand the dispatcher a context that
- * lands in OUR code, on OUR stack, at a single instruction boundary, and
- * let the pad perform the one and only guest resume with NtContinue.
- *
- * So: veh_body saves the real context here and returns CONTINUE with
- * Rip = landing_pad and Rsp = the pad's own stack. The dispatcher
- * unwinds to the pad (resume #1 — into the stub, which is harmless and
- * exactly what a clean frame unwind needs), the pad calls
- * NtContinue(saved, FALSE) — resume #2, the only one that touches the
- * guest — and a success never returns. If it does return, the status is
- * the diagnosis and we log it (and park, rather than resume a third
- * time).
- */
-static void landing_pad(void);
-static int nt_continue_resume(CONTEXT *c);
-
-static void arm_landing(CONTEXT *c)
-{
-	if (c == NULL || d == NULL || !d->ntc_enable)
-		return;
-	memcpy(&landing_ctx, c, sizeof(landing_ctx));
-	landing_armed = 1;
-	/* the dispatcher resumes at the pad, on the pad's stack: the
-	 * unwound dispatcher frame is left behind exactly as if we had
-	 * returned normally */
-	c->Rip = (DWORD64)(uintptr_t)&landing_pad;
-	c->Rsp = (DWORD64)(uintptr_t)(landing_stack + sizeof(landing_stack)
-				      - 0x40);
-	c->Rbp = 0;
 }
 
 /* [prot-truth] (Shelley 166): the ledger is our bookkeeping; Windows
@@ -2333,11 +2274,14 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	if (is_syscall && d->halt)
 		park_forever(); /* guest exit(): kernel terminates us */
 
-	/* Shelley 176: the dispatcher resumes to the landing pad (in the
-	 * stub, on the pad's own stack) and the pad performs the ONE guest
-	 * resume. Never resume from inside the handler: that skips the
-	 * protocol and the next trap arrives with no one waiting. */
-	arm_landing(ep->ContextRecord);
+	/* Shelley 175: resume through NtContinue so a refusal comes back as
+	 * a STATUS instead of a silent death. Success never returns. */
+	{
+		CONTEXT *rc = ep->ContextRecord;
+
+		if (nt_continue_resume(rc))
+			return EXCEPTION_CONTINUE_EXECUTION;
+	}
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
 
