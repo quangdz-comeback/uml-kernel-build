@@ -44,6 +44,7 @@
 #include <fault.h>
 #include <elf.h>
 #include "drslot_model.h"
+#include "prot_restore_model.h"
 #include <stub-panic.h>
 #include <stub_nt.h>
 #include <ss_model.h>
@@ -5366,8 +5367,21 @@ static void replay_check_arm(struct uml_nt_stub_conn *c)
 		 * live arm. */
 		if (d->ss_page != 0 && tctrip_conn == c &&
 		    d->fault_addr >= tctrip_page &&
-		    d->fault_addr < tctrip_page + UML_NT_FAULT_PAGE_SIZE)
+		    d->fault_addr < tctrip_page + UML_NT_FAULT_PAGE_SIZE) {
+			struct uml_nt_vma *tv =
+				uml_nt_vma_find(c->mm, tctrip_page);
+
 			d->ss_rearm_ro = tctrip_page;
+			/* Shelley 166: the re-arm puts back the VMA's
+			 * protection. PAGE_READONLY on a text page made
+			 * the next fetch fault — indistinguishable from a
+			 * resume that never reached the guest, and the
+			 * reason 440 of 984 armed resumes fired while the
+			 * dying one did not. */
+			d->ss_rearm_prot = tv != NULL ?
+				uml_nt_prot_restore(tv->prot)
+				: UML_NT_PROT_RO;
+		}
 	}
 	d->ss_va = d->fault_addr;
 	d->ss_got = ~0ull;

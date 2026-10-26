@@ -838,6 +838,36 @@ static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
+/* [prot-truth] (Shelley 166): the ledger is our bookkeeping; Windows
+ * is the truth. A fault round is the moment to compare them at the two
+ * pages that decide the story — the address we were asked to resume at
+ * (c->Rip for an AV, i.e. the fetch that faulted) and the fs trampoline
+ * the hop runs from. If the ledger says PAGE_EXECUTE_READ and the page
+ * is not executable, the death is a protection downgrade and no resume
+ * instrument could ever have seen it: a fetch fault is delivered BEFORE
+ * the CPU checks DR execute breakpoints. */
+static void prot_truth_sample(uintptr_t resume_va)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+	uintptr_t tva = (uintptr_t)(const void *)&fs_trampoline_sys;
+
+	if (d == NULL)
+		return;
+	memset(&mbi, 0, sizeof(mbi));
+	if (VirtualQuery((void *)resume_va, &mbi, sizeof(mbi)) ==
+	    sizeof(mbi)) {
+		d->fault_page_prot = (unsigned)mbi.Protect;
+		d->fault_page_state = (unsigned)mbi.State;
+	}
+	memset(&mbi, 0, sizeof(mbi));
+	if (VirtualQuery((void *)tva, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+		d->tramp_page_prot = (unsigned)mbi.Protect;
+		d->tramp_page_state = (unsigned)mbi.State;
+	}
+	/* the kernel decides against the ledger — it is the side that owns
+	 * the VMA — and counts the disagreement here. */
+}
+
 static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 {
 	static volatile LONG reported;
@@ -1287,6 +1317,11 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * dispatcher apply the context we asked for last round? */
 	check_apply(c);
 
+	/* Shelley 166: an AV is the moment the ledger and Windows can be
+	 * compared at the page that actually decided it. */
+	if (er->ExceptionCode == STATUS_ACCESS_VIOLATION)
+		prot_truth_sample((uintptr_t)c->Rip);
+
 	/* The #DB owner (ss_model.h, M5.6a K7 slice D): every
 	 * STATUS_SINGLE_STEP is classified first and NO verdict is
 	 * fatal — the unowned path below never sees a #DB again.
@@ -1520,10 +1555,24 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 				 * the page writable for this store; put
 				 * the tripwire back now. */
 				DWORD oldp;
+				/* Shelley 166: restore the VMA's protection.
+				 * This used to be PAGE_READONLY always — on a
+				 * text page that makes the NEXT FETCH fault,
+				 * and a fetch fault arrives before the CPU
+				 * checks DR execute breakpoints, so it reads
+				 * exactly like "the resume never reached the
+				 * guest". */
 				VirtualProtect(
 					(LPVOID)(uintptr_t)d->ss_rearm_ro,
-					(SIZE_T)0x1000, PAGE_READONLY,
+					(SIZE_T)0x1000,
+					d->ss_rearm_prot != 0 ?
+						(DWORD)d->ss_rearm_prot :
+						(DWORD)PAGE_READONLY,
 					&oldp);
+				d->prot_op_va = d->ss_rearm_ro;
+				d->prot_op_prot = d->ss_rearm_prot != 0 ?
+					d->ss_rearm_prot : PAGE_READONLY;
+				d->prot_op_seq = d->done_seq;
 				d->ss_rearm_ro = 0;
 			}
 			c->EFlags &= ~(DWORD)0x100;

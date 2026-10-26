@@ -342,6 +342,20 @@ struct uml_nt_stub_data {
 	 * READONLY to it before continuing — the free-run hole shrinks
 	 * from "until the next serve round" to "one store". 0 = none. */
 	unsigned long long ss_rearm_ro;
+	/* Shelley 166: the protection the re-arm must put back — the
+	 * VMA's, not a constant. Restoring PAGE_READONLY on a text page
+	 * makes the next fetch fault, which is indistinguishable from a
+	 * lost resume. 0 means "legacy: PAGE_READONLY". */
+	unsigned ss_rearm_prot;
+	/* [prot-truth]: what Windows ACTUALLY has at the two pages that
+	 * matter when a fault round arrives — the resume target and the
+	 * fs trampoline — against what the ledger claims. */
+	unsigned fault_page_prot, fault_page_state;
+	unsigned tramp_page_prot, tramp_page_state;
+	unsigned long long prot_truth_bad; /* ledger exec but actual is not */
+	/* the last protection operation this run performed, for decoding
+	 * a downgrade offline */
+	unsigned long long prot_op_va, prot_op_prot, prot_op_seq;
 	/* -- v13: DR watchpoints on the tcache entries[] (M5.6a) ------
 	 * Page traps can't isolate the tcache struct from its page-mate
 	 * chunks (the dl6 storm: 38k faults on ONE hot qword, 19.4M

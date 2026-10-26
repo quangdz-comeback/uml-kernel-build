@@ -41,6 +41,7 @@
 #include <stub-panic.h>
 #include <stub_nt.h>
 #include <ss_model.h>
+#include <prot_restore_model.h>
 #include <syscall.h>
 #include <bench.h>
 #include <os.h>
@@ -1042,6 +1043,32 @@ void userspace(struct uml_pt_regs *regs)
 				c->ans_regs[i] != now[i] ? "*" : " ", nm[i],
 				c->ans_regs[i], now[i],
 				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
+	}
+	/* Shelley 166 [prot-truth]: the ledger against Windows, at the
+	 * two pages that decide the story. `bad` counts rounds where the
+	 * ledger said the page is executable and Windows disagreed — the
+	 * upgrade is the only thing that can make a fetch fault look like
+	 * a resume that never happened. */
+	{
+		const struct uml_nt_vma *dv =
+			c->mm ? uml_nt_vma_find(c->mm, c->d->regs.rip) : NULL;
+		int ledger_exec = dv != NULL && (dv->prot & 0x60);
+		int actual_exec = uml_nt_prot_executable(
+			c->d->fault_page_prot);
+
+		if (ledger_exec && !actual_exec)
+			c->d->prot_truth_bad++;
+		os_info("[prot-truth] pid %d resume_page(vma prot=0x%x) "
+			"actual=0x%x state=0x%x %s | trampoline actual=0x%x "
+			"state=0x%x | bad=%llu last_prot_op va=0x%llx "
+			"prot=0x%llx seq=%llu\n",
+			c->pid, dv ? dv->prot : 0, c->d->fault_page_prot,
+			c->d->fault_page_state,
+			(ledger_exec && !actual_exec) ?
+			"<-- LEDGER SAYS EXEC, WINDOWS DOES NOT" : "",
+			c->d->tramp_page_prot, c->d->tramp_page_state,
+			c->d->prot_truth_bad, c->d->prot_op_va,
+			c->d->prot_op_prot, c->d->prot_op_seq);
 	}
 	/* Shelley 165: the gamma witness — did the dispatcher apply the
 	 * context we handed back? ask_* is what the stub requested at the

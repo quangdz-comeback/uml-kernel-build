@@ -21,6 +21,7 @@
 #include "fillrehome_model.h"
 #include "dr7_model.h"
 #include "drslot_model.h"
+#include "prot_restore_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -227,6 +228,33 @@ static void section16(void)
 	printf("section 16 (one owner per DR slot): all ok\n");
 }
 
+/* section 17 — a page comes back with the protection its VMA asks for
+ * (Shelley 166). The regression: a write-dance over TEXT restored
+ * PAGE_READONLY, so the next fetch faulted — and a fetch fault is
+ * delivered before the CPU checks DR execute breakpoints, which made it
+ * look like a resume that never reached the guest.
+ */
+static void section17(void)
+{
+	/* a. text comes back executable */
+	CHECK(uml_nt_prot_restore(0x20) == UML_NT_PROT_EXR);
+	/* b. a writable-exec VMA keeps both rights (the VMA decides) */
+	CHECK(uml_nt_prot_restore(0x40) == UML_NT_PROT_EXW);
+	/* c. data keeps its shape: write stays write, read stays read */
+	CHECK(uml_nt_prot_restore(0x04) == UML_NT_PROT_RW);
+	CHECK(uml_nt_prot_restore(0x02) == UML_NT_PROT_RO);
+	CHECK(uml_nt_prot_restore(0x00) == UML_NT_PROT_RO);
+	/* d. an exec VMA with extra flag bits still yields execute */
+	CHECK(uml_nt_prot_restore(0x80 | 0x20) == UML_NT_PROT_EXR);
+	/* e. the predicate the ledger comparison uses */
+	CHECK(uml_nt_prot_executable(UML_NT_PROT_EXR));
+	CHECK(uml_nt_prot_executable(UML_NT_PROT_EXW));
+	CHECK(!uml_nt_prot_executable(UML_NT_PROT_RO));
+	CHECK(!uml_nt_prot_executable(UML_NT_PROT_RW));
+
+	printf("section 17 (protection comes from the VMA): all ok\n");
+}
+
 int main(void)
 {
 	test_pwslot();
@@ -414,6 +442,7 @@ int main(void)
 	section14();
 	section15();
 	section16();
+	section17();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);
