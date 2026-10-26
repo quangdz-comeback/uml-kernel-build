@@ -1068,6 +1068,68 @@ void userspace(struct uml_pt_regs *regs)
 				nshape++;
 		if (nshape > 0 && c->rg_logged < 12) {
 			c->rg_logged++;
+			/* Shelley 179: the REAL access type and address.
+			 * fault_addr kept its v13 meaning (the armed slot
+			 * VA); the pair (dr_hit_type, dr_hit_va) is what
+			 * says whether this fault is a read, a write or a
+			 * DEP/execute — and 0x601dce67 above was a RIP,
+			 * never a fault VA. The 16 bytes at rip name the
+			 * instruction (a `mov [reg],…` reads very
+			 * differently from a `call` to a bad target). */
+			os_info("[fault-where] pid %d i0=%llu (%s) i1=0x%llx "
+				"rip=0x%llx nr=%llu rsp=0x%llx garbage=%d "
+				"same_round=%s\n",
+				c->pid,
+				(unsigned long long)c->d->dr_hit_type,
+				c->d->dr_hit_type == 0 ? "READ" :
+				c->d->dr_hit_type == 1 ? "WRITE" :
+				c->d->dr_hit_type == 8 ? "EXEC/DEP" : "?",
+				(unsigned long long)c->d->dr_hit_va,
+				(unsigned long long)now[16],
+				(unsigned long long)c->d->args[0],
+				(unsigned long long)now[4], nshape,
+				c->d->pub_seq == c->ans_pub ? "yes" : "STALE");
+			{
+				unsigned char ib[16];
+				int k, got = 0;
+
+				MEMORY_BASIC_INFORMATION mbi;
+				int ok, pprot;
+				(void)pprot;
+
+				for (k = 0; k < 16; k++)
+					ib[k] = 0;
+				ok = nt->VirtualQueryEx(c->proc,
+						    (void *)(uintptr_t)now[16],
+						    &mbi, sizeof(mbi)) > 0 &&
+				     mbi.State == 0x1000 /* MEM_COMMIT */ &&
+				     ((mbi.Protect & 0x0ff) == 0x20 /* EXECUTE_READ */ ||
+				      (mbi.Protect & 0x0ff) == 0x40 /* EXECUTE_READWRITE */ ||
+				      (mbi.Protect & 0x0ff) == 0x80 /* EXECUTE_WRITECOPY */ ||
+				      (mbi.Protect & 0x0ff) == 0x02 /* READONLY */ ||
+				      (mbi.Protect & 0x0ff) == 0x04 /* READWRITE */ ||
+				      (mbi.Protect & 0x0ff) == 0x08 /* WRITECOPY */);
+				if (ok) {
+					const unsigned char *src =
+						(const unsigned char *)
+						(uintptr_t)now[16];
+
+					for (k = 0; k < 16; k++)
+						ib[k] = src[k];
+				}
+				for (k = 0; k < 16; k++)
+					if (ib[k])
+						got++;
+				os_info("[fault-where] insn @0x%llx = "
+					"%02x %02x %02x %02x %02x %02x %02x %02x"
+					" %02x %02x %02x %02x %02x %02x %02x %02x"
+					" (nonzero=%d)\n",
+					(unsigned long long)now[16],
+					ib[0], ib[1], ib[2], ib[3], ib[4], ib[5],
+					ib[6], ib[7], ib[8], ib[9], ib[10],
+					ib[11], ib[12], ib[13], ib[14], ib[15],
+					got);
+			}
 			os_info("[reg-fault] pid %d fault_addr=0x%llx nr=%llu "
 				"garbage=%d same_round=%s\n",
 				c->pid, (unsigned long long)c->d->fault_addr,
