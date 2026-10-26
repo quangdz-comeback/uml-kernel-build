@@ -1044,6 +1044,18 @@ void userspace(struct uml_pt_regs *regs)
 				c->ans_regs[i], now[i],
 				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
 	}
+	/* Shelley 175: the explicit NtContinue — calls, returns, and the
+	 * status the resume refused with. Success never returns, so
+	 * ntc_returned is the count of refusals. */
+	os_info("[ntcontinue] pid %d calls=%llu returned=%llu last_status=0x%llx "
+		"rip=0x%llx rsp=0x%llx dr7=0x%llx flags=0x%llx ==> %s\n",
+		c->pid, c->d->ntc_calls, c->d->ntc_returned,
+		c->d->ntc_last_status, c->d->ntc_rip, c->d->ntc_rsp,
+		c->d->ntc_dr7, c->d->ntc_flags,
+		c->d->ntc_returned ? "RESUME REFUSED (this is the code we never had)"
+				   : (c->d->ntc_calls ?
+				      "every resume succeeded and stayed in the guest"
+				      : "not called (no answer was built)"));
 	/* Shelley 173: every VEH entry, stamped at the handler's first
 	 * line. An exception here with no counterpart elsewhere is an
 	 * exception that arrived while we were inside the dispatch. */

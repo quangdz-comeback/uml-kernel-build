@@ -398,6 +398,12 @@ struct uml_nt_stub_data {
 	} entry_ring[16];
 	volatile long entry_ring_at; /* InterlockedIncrement */
 	unsigned long long ret_stamped_n; /* Shelley 174: one stamp per entry */
+	/* Shelley 175: the explicit NtContinue. Success does not return; if
+	 * it does, the NTSTATUS IS the answer we could never read before.
+	 * Two shapes are recorded: how many calls, how many came back, and
+	 * the last status + the context it refused. */
+	unsigned long long ntc_calls, ntc_returned, ntc_last_status;
+	unsigned long long ntc_rip, ntc_rsp, ntc_dr7, ntc_flags;
 	struct uml_nt_ret_ring {
 		unsigned long long seq, rip, rsp, eflags, cs, ss;
 		unsigned long long dr0, dr1, dr2, dr3, dr6, dr7, ctx_flags;
