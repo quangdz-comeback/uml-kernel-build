@@ -11301,6 +11301,28 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 						c->d->stack_alloc_hint,
 						&c->plan);
 
+		/* Shelley 170: WHICH mm, WHICH table, WHICH answer. Three
+		 * suspects, three fixes: (2) my scan's `start >= best` with
+		 * best=0; (1) a stack mapped outside the VMA table; (3) the
+		 * answer path and the death dump looking at different mms
+		 * (D15 uaccess install lifecycle). One line per conn says
+		 * which. */
+		if (c->mm_logged < 2 && uml_nt_conn_is_login(c)) {
+			struct uml_nt_vma *mv = uml_nt_vma_find(c->mm,
+								c->d->regs.rsp);
+
+			c->mm_logged++;
+			os_info("[mm-id] pid %lu mm=%px uacc_mm=%px nvma=%d "
+				"rsp=0x%llx find=%s(0x%llx,0x%llx,prot=0x%x) "
+				"stack_bottom=0x%llx top_hint=0x%llx "
+				"mm_stack_top=0x%llx\n",
+				(unsigned long)c->pid, c->mm,
+				uml_nt_uacc_mm_ptr(), c->mm->nvma,
+				c->d->regs.rsp, mv ? "YES" : "NULL",
+				mv ? mv->start : 0, mv ? mv->end : 0,
+				mv ? mv->prot : 0, c->d->stack_bottom,
+				c->d->stack_top_hint, c->mm->stack_top);
+		}
 		if (sg < 0 && c->sg_logged < 4) {
 			c->sg_logged++;
 			os_info("[stack-pre] pid %lu grow REQUESTED but the "

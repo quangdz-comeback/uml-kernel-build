@@ -49,6 +49,7 @@ struct uml_nt_uacc_sink {
  * the dispatch saves at entry and restores at exit; clearing to NULL
  * would EFAULT every writeback of the woken outer dispatch. */
 struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm);
+struct uml_nt_mm *uml_nt_uacc_mm_ptr(void);
 struct uml_nt_uacc_sink uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s);
 
 /* Read-only peek at the installed fixup channel (M5.4 c3 EFAULT

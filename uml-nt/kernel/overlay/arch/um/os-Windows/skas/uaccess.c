@@ -93,6 +93,14 @@ struct uml_nt_mm *uml_nt_uacc_set_mm(struct uml_nt_mm *mm)
 	return prev;
 }
 
+/* Shelley 170: read-only view of the installed mm, so a diagnostic can
+ * say whether the answer path and the death path were serving the SAME
+ * conn's mm. */
+struct uml_nt_mm *uml_nt_uacc_mm_ptr(void)
+{
+	return uacc_mm;
+}
+
 struct uml_nt_mm *uml_nt_syscall_mm(void)
 {
 	return uacc_mm;
