@@ -161,6 +161,18 @@ struct uml_nt_stub_data {
 	 * of this conn. A compacted-format mismatch shows up as a MBZ bit set
 	 * in XCOMP_BV; entropy in XMM shows up as a big diff. */
 	unsigned long long xs_bv, xs_xcomp;
+	/* Shelley 188 (#13 fix): ContextFlags decides whether 0x100 is an
+	 * XSAVE header at all — without CONTEXT_XSTATE the bytes there are
+	 * x87/SSE save state, and "BV=0x37f" was our reading of FltSave. */
+	u32_nt ctx_flags;
+	u32_nt ctx_xstate_claim;	/* 1 = CONTEXT_XSTATE was set */
+	/* Shelley 188: THREAD CENSUS. Every VEH entry names its thread; a
+	 * VEH is process-wide, but veh_body's logic assumes the guest
+	 * thread — an exception on any other thread would be misrouted and
+	 * its record mangled. */
+	u32_nt guest_tid;
+	u32_nt census_other;		/* entries on a non-guest thread */
+	u32_nt census_tids[4];		/* the first four distinct tids */
 	unsigned long long xs_xmm_diff;
 	unsigned long long xs_xmm_first;	/* first differing XMM byte */
 	u32_nt ctx_snapshots;	/* ctx_audit_snapshot ran */

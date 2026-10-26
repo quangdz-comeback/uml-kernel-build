@@ -957,14 +957,33 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->ctx_dirty_max == 0 ?
 						"ran and never found a dirty word"
 						: "WE DIRTIED THE RECORD");
-					os_info("[xs-diff] pid %d BV=0x%llx "
+					os_info("[census] pid %d guest_tid=%u "
+						"other_tid_entries=%lu tids=[%u,%u,%u,%u] "
+						"==> %s\n",
+						c->pid,
+						(unsigned)c->d->guest_tid,
+						(unsigned long)c->d->census_other,
+						(unsigned)c->d->census_tids[0],
+						(unsigned)c->d->census_tids[1],
+						(unsigned)c->d->census_tids[2],
+						(unsigned)c->d->census_tids[3],
+						c->d->census_other > 0 ?
+						"EXCEPTIONS ARRIVE ON OTHER THREADS (veh_body assumes the guest thread)" :
+						"every exception was the guest thread");
+					os_info("[xs-diff] pid %d flags=0x%lx xstate=%u "
+						"BV=0x%llx "
 						"XCOMP=0x%llx xmm_diff=%llu "
 						"first=%llu ==> %s\n",
-						c->pid, c->d->xs_bv,
+						c->pid,
+						(unsigned long)c->d->ctx_flags,
+						(unsigned)c->d->ctx_xstate_claim,
+						c->d->xs_bv,
 						c->d->xs_xcomp,
 						c->d->xs_xmm_diff,
 						c->d->xs_xmm_first,
-						(c->d->xs_xcomp >> 63) ?
+						!c->d->ctx_xstate_claim ?
+						"NO CONTEXT_XSTATE — 0x100 is FltSave, not a header (not evidence)"
+						: (c->d->xs_xcomp >> 63) ?
 						"COMPACTED format (XCOMP_BV bit 63 set)"
 						: "standard format");
 					os_info("[stage] pid %d last_stage=%u (%s)\n",

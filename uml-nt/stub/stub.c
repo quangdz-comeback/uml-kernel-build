@@ -1537,8 +1537,37 @@ static void ctx_audit_snapshot(CONTEXT *c)
 		return;
 	memcpy(&ctx_entry, c, sizeof(ctx_entry));
 	ctx_entry_ok = 1;
-	if (d != NULL)
+	if (d != NULL) {
+		unsigned tid = (unsigned)GetCurrentThreadId();
+		int i, seen = 0;
+
 		d->ctx_snapshots++;
+		d->ctx_flags = (u32_nt)c->ContextFlags;
+		d->ctx_xstate_claim =
+			(c->ContextFlags & 0x00100000u) ? 1u : 0u;
+		for (i = 0; i < 4; i++)
+			if (d->census_tids[i] == tid)
+				seen = 1;
+		if (!seen)
+			for (i = 0; i < 4; i++)
+				if (d->census_tids[i] == 0) {
+					d->census_tids[i] = (u32_nt)tid;
+					break;
+				}
+		if (d->guest_tid == 0)
+			d->guest_tid = (u32_nt)tid;
+		else if ((u32_nt)tid != d->guest_tid) {
+			d->census_other++;
+			if (d->census_other <= 8)
+				fprintf(stderr, "[census] pid %lu exception on "
+					"thread %u — NOT the guest thread %u "
+					"(#%lu): veh_body would treat it as "
+					"guest state\n",
+					(unsigned long)d->pid, tid,
+					(unsigned)d->guest_tid,
+					(unsigned long)d->census_other);
+		}
+	}
 }
 
 static void ctx_audit_check(CONTEXT *c)
@@ -1582,8 +1611,16 @@ static void ctx_audit_check(CONTEXT *c)
 		const unsigned char *rec = (const unsigned char *)c;
 		const unsigned char *xmm = rec + 0x1a0;	/* XMM0..15 */
 
-		memcpy(&d->xs_bv, rec + 0x100, 8);
-		memcpy(&d->xs_xcomp, rec + 0x108, 8);
+		if ((c->ContextFlags & 0x00100000u)) {
+			memcpy(&d->xs_bv, rec + 0x100, 8);
+			memcpy(&d->xs_xcomp, rec + 0x108, 8);
+		} else {
+			/* no CONTEXT_XSTATE: 0x100 is x87/SSE save state,
+			 * not a header — say so with zeros, not with a
+			 * misread that looks like evidence (label bug #13) */
+			d->xs_bv = 0;
+			d->xs_xcomp = 0;
+		}
 		if (xs_prev_ok) {
 			unsigned long long diff = 0, first = 0;
 			int k, seen = 0;
@@ -1606,15 +1643,19 @@ static void ctx_audit_check(CONTEXT *c)
 	if (d->ctx_rounds % 200u == 0)
 		fprintf(stderr, "[ctx-audit] pid %lu rounds=%lu snapshots=%lu "
 			"dirty_max=%lu xs_changed=%lu xs_hdr=0x%llx "
-			"BV=0x%llx XCOMP=0x%llx xmm_diff=%lu first=%lu\n",
+			"flags=0x%lx xstate=%u BV=0x%llx XCOMP=0x%llx "
+			"xmm_diff=%lu first=%lu tid=%u other_tid=%lu\n",
 			(unsigned long)d->pid,
 			(unsigned long)d->ctx_rounds,
 			(unsigned long)d->ctx_snapshots,
 			(unsigned long)d->ctx_dirty_max,
 			(unsigned long)d->ctx_xs_changed,
-			d->ctx_xs_hdr, d->xs_bv, d->xs_xcomp,
+			d->ctx_xs_hdr, (unsigned long)d->ctx_flags,
+			(unsigned)d->ctx_xstate_claim, d->xs_bv, d->xs_xcomp,
 			(unsigned long)d->xs_xmm_diff,
-			(unsigned long)d->xs_xmm_first);
+			(unsigned long)d->xs_xmm_first,
+			(unsigned)d->guest_tid,
+			(unsigned long)d->census_other);
 	if (dirty != d->ctx_dirty_words) {
 		d->ctx_dirty_words = (u32_nt)dirty;
 		fprintf(stderr, "[ctx-dirty] pid %lu round dirty_words=%llu "
