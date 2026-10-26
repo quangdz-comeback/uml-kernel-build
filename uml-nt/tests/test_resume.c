@@ -22,6 +22,7 @@
 #include "dr7_model.h"
 #include "drslot_model.h"
 #include "prot_restore_model.h"
+#include "stackgrow_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -255,6 +256,37 @@ static void section17(void)
 	printf("section 17 (protection comes from the VMA): all ok\n");
 }
 
+/* section 18 — grow the stack BEFORE the exception that needs it
+ * (Shelley 168). Measured: rsp with 264..3900 bytes of committed page
+ * under it, reservation hole below, dispatcher builds its frame there,
+ * second AV, no handler, silent death. The rule grows one run below the
+ * committed bottom, inside the reservation, and never past the floor.
+ */
+static void section18(void)
+{
+	unsigned long long st = 0;
+	unsigned long long top = 0x60860000ull;   /* stack_top */
+	unsigned long long lim = 0x60060000ull;   /* 8 MiB reservation floor */
+	unsigned long long bot = 0x60850000ull;   /* committed bottom */
+	unsigned long long run = UML_NT_SG_RUN;
+
+	/* a. 600 bytes of headroom => grow, and the run is right below */
+	CHECK(uml_nt_sg_precommit(top, lim, 0x60850258ull, bot, run, &st) == 1);
+	CHECK(st == bot - run);
+	/* b. plenty of headroom => nothing to do */
+	CHECK(uml_nt_sg_precommit(top, lim, 0x6085f000ull, bot, run, &st) == 0);
+	/* c. one page left is NOT enough (the measured death had 264 bytes) */
+	CHECK(uml_nt_sg_precommit(top, lim, bot + 0x1000ull, bot, run, &st) == 1);
+	/* d. a run would cross the floor => not ours (clean SIGSEGV instead) */
+	CHECK(uml_nt_sg_precommit(top, lim, lim + 0x100ull, lim + 0x10000ull,
+				  run, &st) == -1);
+	/* e. rsp outside the stack => no opinion */
+	CHECK(uml_nt_sg_precommit(top, lim, 0x70000000ull, bot, run, &st) == 0);
+	CHECK(uml_nt_sg_precommit(0, lim, 0x60850000ull, bot, run, &st) == 0);
+
+	printf("section 18 (stack grown ahead of the exception): all ok\n");
+}
+
 int main(void)
 {
 	test_pwslot();
@@ -443,6 +475,7 @@ int main(void)
 	section15();
 	section16();
 	section17();
+	section18();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);

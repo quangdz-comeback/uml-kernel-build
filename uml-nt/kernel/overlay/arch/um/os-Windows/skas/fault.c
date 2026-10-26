@@ -19,6 +19,7 @@
  * s) — every offset stays 64K-aligned.
  */
 #include <fault.h>
+#include <stackgrow_model.h>
 
 /* COW-BREAK AUDIT globals (fault.h): the init-plan's writable-map-
  * on-shared-run census — see the audit block in uml_nt_mm_init_plan. */
@@ -156,6 +157,49 @@ int uml_nt_stack_grow(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	}
 	if (plan_op(plan, UML_NT_FOP_MAP, 0x04u, start,
 		    UML_NT_STACK_GROW_UNIT, (unsigned long long)off) < 0) {
+		plan->kill = 1;
+		plan->kill_why = 'o';
+		return -1;
+	}
+	return 1;
+}
+
+/* Shelley 168: the proactive grow. Called at ANSWER time, where the
+ * kernel already has rsp and owns the plan — no round trip, no stall,
+ * and every exception that follows (the guest's, the dispatcher's, and
+ * our own instrument's #DB) has a committed page to build a frame on.
+ *
+ * Same discipline as the fault-driven grow: one run, immediately below
+ * the committed bottom, inside the reservation, floor = RLIMIT. */
+int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			   unsigned long long rsp,
+			   struct uml_nt_fault_plan *plan)
+{
+	unsigned long long committed = 0, start = 0, off;
+	int i, d;
+
+	if (mm == 0 || ph == 0 || plan == 0)
+		return 0;
+	for (i = 0; i < mm->nvma; i++)
+		if (rsp >= mm->vma[i].start && rsp < mm->vma[i].end &&
+		    mm->vma[i].end <= mm->stack_top &&
+		    (committed == 0 || mm->vma[i].start < committed))
+			committed = mm->vma[i].start;
+	d = uml_nt_sg_precommit(mm->stack_top, mm->stack_limit, rsp,
+				committed, UML_NT_SG_RUN, &start);
+	if (d <= 0)
+		return d;
+	off = uml_nt_phys_alloc_span(ph, UML_NT_SG_RUN / UML_NT_PHYS_RUN_SIZE);
+	if (off < 0)
+		return 0;
+	if (uml_nt_vma_add_gen(mm, start, start + UML_NT_SG_RUN,
+			       (unsigned long long)off, 0x04u /* RW */, 0,
+			       (unsigned long long)uml_nt_phys_gen(ph, off)) < 0) {
+		uml_nt_phys_unref(ph, off);
+		return 0;
+	}
+	if (plan_op(plan, UML_NT_FOP_MAP, 0x04u, start, UML_NT_SG_RUN,
+		    (unsigned long long)off) < 0) {
 		plan->kill = 1;
 		plan->kill_why = 'o';
 		return -1;

@@ -11285,6 +11285,28 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * (that is exactly how the first attempt measured nothing). */
 	if (c->d->action == UML_STUB_ACTION_NONE)
 		uml_nt_drexec_arm(c);
+	/* Shelley 168: before this answer releases the stub, make sure the
+	 * stack has a committed page under rsp. Every exception — the
+	 * guest's, the dispatcher's, and our own instrument's #DB — builds
+	 * its frame on this stack, and an exception with <8KB of committed
+	 * page under rsp writes into the reservation hole and dies with no
+	 * handler at all. The kernel has rsp here and owns the plan, so
+	 * this costs one MAP op in an answer we were sending anyway. */
+	if (c->d->action == UML_STUB_ACTION_NONE && c->mm != NULL) {
+		int sg = uml_nt_stack_precommit(c->mm, c->ph,
+						c->d->regs.rsp, &c->plan);
+
+		if (sg > 0 && c->sg_logged < 8) {
+			c->sg_logged++;
+			os_info("[stack-pre] pid %lu rsp=0x%llx grew to "
+				"[0x%llx,+0x%llx) — the dispatcher needs "
+				"committed page under rsp too, not just the "
+				"guest\n",
+				(unsigned long)c->pid, c->d->regs.rsp,
+				c->plan.ops[c->plan.n_ops - 1].va,
+				c->plan.ops[c->plan.n_ops - 1].len);
+		}
+	}
 	if (c->d->action == UML_STUB_ACTION_NONE && !c->ws_armed)
 		uml_nt_pivot_wslot_arm(c);
 	/* M5.6a login-depth follow-up (Shelley 149): the RESUME answer —

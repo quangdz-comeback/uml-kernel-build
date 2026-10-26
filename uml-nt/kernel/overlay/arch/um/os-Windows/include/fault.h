@@ -240,6 +240,13 @@ int uml_nt_stack_grow(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		      unsigned long long addr, unsigned long long rsp,
 		      struct uml_nt_fault_plan *plan);
 
+/* Shelley 168: grow the stack at ANSWER time, before any exception can
+ * need a dispatcher frame on it. Returns 1 = grew (the plan carries the
+ * MAP op), 0 = enough headroom, -1 = below the floor. */
+int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			   unsigned long long rsp,
+			   struct uml_nt_fault_plan *plan);
+
 int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		    unsigned long long addr, unsigned type,
 		    struct uml_nt_fault_plan *plan);

@@ -206,6 +206,7 @@ struct uml_nt_stub_conn {
 	unsigned long long ans_pub; /* publish count when we answered */
 	struct uml_nt_drslots drs;
 	int drex_slot; /* slot the probe holds, -1 when none */
+	unsigned sg_logged; /* [stack-pre] lines printed */
 	unsigned long long ans_step;
 	unsigned long long req_rip, req_rsp, req_seq_seen;
 	/* [d20-guard] self-measurement: what the guard actually looked at
