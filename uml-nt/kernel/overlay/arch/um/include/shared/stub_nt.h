@@ -145,6 +145,13 @@ struct uml_nt_stub_data {
 	 * eight are logged with their offset. A non-zero count in a dying
 	 * round names the writer (us), zero exonerates the record. */
 	u32_nt ctx_dirty_words;
+	/* Shelley 184 (rule #11): an instrument that is silent when clean
+	 * MUST carry a positive counter, or "clean" and "never ran" are
+	 * the same reading. */
+	u32_nt ctx_rounds;	/* ctx_audit_check ran */
+	u32_nt ctx_snapshots;	/* ctx_audit_snapshot ran */
+	u32_nt ctx_dirty_max;	/* worst dirty_words seen */
+	u32_nt ctx_xs_changed;	/* xs_hdr differed from the previous round */
 	u32_nt _pad_ctx_dirty;
 	unsigned long long ctx_dirty[8][2];	/* off, value */
 	unsigned long long ctx_xs_hdr;		/* 8 bytes just past CONTEXT */

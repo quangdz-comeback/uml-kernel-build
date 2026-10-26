@@ -3987,7 +3987,10 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 0: /* read — guest fds (init: 0/1/2 = /dev/console via
 		 * console_on_rootfs; script/file fds from openat) */
 	case 2: /* open — musl still issues plain open(2) */
-	case 3: /* close */
+	case 3: /* close — Shelley 184: the dying round is a close, so the
+		 * value we hand back is named: fd, ret and the rip that will
+		 * read it. A close that returns something odd is a whole
+		 * class of guest bug we could be manufacturing. */
 	case 63: /* uname — busybox sh queries at startup */
 	case 72: /* fcntl — ash dups the script fd high (F_DUPFD*) */
 	case 257: /* openat */
@@ -4053,6 +4056,12 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		  * __abort_msg and aborts — signature-gated, silent
 		  * for every normal console writev. */
 		ret = sys_vfs(nr, a);
+		if (nr == 3 && uml_nt_conn_is_login(c) && c->close_logged < 12) {
+			c->close_logged++;
+			os_info("[close] pid %d fd=%llu ret=%lld rip=0x%llx\n",
+				c->pid, (unsigned long long)a[0], (long long)ret,
+				(unsigned long long)d->regs.rip);
+		}
 		abrt_writev_capture(c, d, a, ret);
 		break;
 	case 41: /* socket — M5.1c: AF_PACKET (udhcpc), AF_INET/ICMP

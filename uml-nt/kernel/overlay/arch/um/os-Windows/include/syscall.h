@@ -216,6 +216,7 @@ struct uml_nt_stub_conn {
 	 * class). */
 	unsigned long rp_writes, rp_already, rp_foreign, rp_guarded;
 	unsigned long rp_stale, tctrip_refused;
+	unsigned close_logged;	/* [close] lines printed (Shelley 184) */
 	/* Shelley 170: the LAST rounds are the ones that matter — a grow
 	 * decision is only interesting at the round that died, and the
 	 * first two answers always look healthy. Ring, dumped at death. */

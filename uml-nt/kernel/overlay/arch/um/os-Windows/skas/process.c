@@ -941,6 +941,21 @@ void userspace(struct uml_pt_regs *regs)
 					 * last state the kernel handed or
 					 * saw — after a verbatim push it
 					 * is the resume target itself. */
+					os_info("[ctx-audit] pid %d rounds=%lu "
+						"snapshots=%lu dirty_max=%lu "
+						"xs_changed=%lu xs_hdr=0x%llx "
+						"==> %s\n",
+						c->pid,
+						(unsigned long)c->d->ctx_rounds,
+						(unsigned long)c->d->ctx_snapshots,
+						(unsigned long)c->d->ctx_dirty_max,
+						(unsigned long)c->d->ctx_xs_changed,
+						c->d->ctx_xs_hdr,
+						c->d->ctx_rounds == 0 ?
+						"NEVER RAN — no truth, not a verdict" :
+						c->d->ctx_dirty_max == 0 ?
+						"ran and never found a dirty word"
+						: "WE DIRTIED THE RECORD");
 					os_info("userspace: stub pid %d "
 						"died silently (%lu) — last "
 						"cmd=%u rip=%llx rsp=%llx "

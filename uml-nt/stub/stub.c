@@ -1535,6 +1535,8 @@ static void ctx_audit_snapshot(CONTEXT *c)
 		return;
 	memcpy(&ctx_entry, c, sizeof(ctx_entry));
 	ctx_entry_ok = 1;
+	if (d != NULL)
+		d->ctx_snapshots++;
 }
 
 static void ctx_audit_check(CONTEXT *c)
@@ -1545,6 +1547,7 @@ static void ctx_audit_check(CONTEXT *c)
 
 	if (!ctx_entry_ok || c == NULL)
 		return;
+	d->ctx_rounds++;
 	d->ctx_xs_hdr_prev = d->ctx_xs_hdr;
 	d->ctx_xs_hdr = *(const unsigned long long *)(const void *)
 		((const char *)c + sizeof(CONTEXT));
@@ -1569,6 +1572,17 @@ static void ctx_audit_check(CONTEXT *c)
 				uml_nt_ctx_word_name(off), b, a);
 		dirty++;
 	}
+	if (dirty > d->ctx_dirty_max)
+		d->ctx_dirty_max = (u32_nt)dirty;
+	if (d->ctx_rounds % 200u == 0)
+		fprintf(stderr, "[ctx-audit] pid %lu rounds=%lu snapshots=%lu "
+			"dirty_max=%lu xs_changed=%lu xs_hdr=0x%llx\n",
+			(unsigned long)d->pid,
+			(unsigned long)d->ctx_rounds,
+			(unsigned long)d->ctx_snapshots,
+			(unsigned long)d->ctx_dirty_max,
+			(unsigned long)d->ctx_xs_changed,
+			d->ctx_xs_hdr);
 	if (dirty != d->ctx_dirty_words) {
 		d->ctx_dirty_words = (u32_nt)dirty;
 		fprintf(stderr, "[ctx-dirty] pid %lu round dirty_words=%llu "
