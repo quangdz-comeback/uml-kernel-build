@@ -1044,6 +1044,30 @@ void userspace(struct uml_pt_regs *regs)
 				c->ans_regs[i], now[i],
 				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
 	}
+	/* Shelley 167: the last exception entries, with the two numbers
+	 * that decide between (a) a guest dereference, (b) the hop jumping
+	 * to the wrong place, and (c) the dispatcher building a frame into
+	 * the hole under a nearly-exhausted stack. */
+	{
+		unsigned at = c->d->exc_ring_at;
+		unsigned i, n = at < 16 ? at : 16;
+
+		os_info("[exc-ring] pid %d entries=%u\n", c->pid, at);
+		for (i = 0; i < n; i++) {
+			struct uml_nt_exc_ring *r =
+				&c->d->exc_ring[(at - 1 - i) & 15u];
+
+			os_info("[exc-ring] #%u seq=%llu code=0x%llx "
+				"i0=%llu i1=0x%llx rip=0x%llx rsp=0x%llx "
+				"headroom_run=0x%llx headroom_res=0x%llx "
+				"fault_va(ok=%llu prot=0x%llx state=0x%llx) "
+				"tramp_tgt=0x%llx dr0=0x%llx\n",
+				i, r->seq, r->code, r->i0, r->i1, r->rip,
+				r->rsp, r->headroom_run, r->headroom_res,
+				r->fq_ok, r->fq_prot, r->fq_state, r->tgt,
+				r->dtarget);
+		}
+	}
 	/* Shelley 166 [prot-truth]: the ledger against Windows, at the
 	 * two pages that decide the story. `bad` counts rounds where the
 	 * ledger said the page is executable and Windows disagreed — the

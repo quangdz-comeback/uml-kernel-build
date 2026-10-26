@@ -846,6 +846,65 @@ static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
  * is not executable, the death is a protection downgrade and no resume
  * instrument could ever have seen it: a fetch fault is delivered BEFORE
  * the CPU checks DR execute breakpoints. */
+/* Every exception entry, ring-buffered — Shelley 167.
+ *
+ * Two questions need a number at EVERY entry, not only at a fault:
+ *   - what kind of access (AV [0] = 0 read, 1 write, 8 execute) and at
+ *     which VA ([1]) — that is what separates "the guest dereferenced
+ *     something bad" from "the hop jumped somewhere else";
+ *   - how much COMMITTED stack sits under rsp. The reservation below a
+ *     stack run is a hole; the dispatcher builds its frame on the
+ *     thread's own stack, and with <8KB of committed page it writes into
+ *     the hole and dies on a second AV with no handler left.
+ */
+static void exc_entry_note(const EXCEPTION_RECORD *er, const CONTEXT *c)
+{
+	struct uml_nt_exc_ring *r;
+	MEMORY_BASIC_INFORMATION mbi;
+	uintptr_t va;
+
+	if (d == NULL || er == NULL)
+		return;
+	r = &d->exc_ring[d->exc_ring_at & 15u];
+	d->exc_ring_at++;
+	memset(r, 0, sizeof(*r));
+	r->seq = d->done_seq;
+	r->code = (unsigned long long)er->ExceptionCode;
+	r->i0 = er->NumberParameters > 0 ?
+		(unsigned long long)er->ExceptionInformation[0] : 0;
+	r->i1 = er->NumberParameters > 1 ?
+		(unsigned long long)er->ExceptionInformation[1] : 0;
+	if (c != NULL) {
+		r->rip = (unsigned long long)c->Rip;
+		r->rsp = (unsigned long long)c->Rsp;
+		r->csp = (unsigned long long)c->Rsp;
+	}
+	/* the stack question: committed bottom of the run rsp sits in, and
+	 * the bottom of the whole reservation (a hole by design) */
+	memset(&mbi, 0, sizeof(mbi));
+	if (c != NULL &&
+	    VirtualQuery((void *)(uintptr_t)c->Rsp, &mbi, sizeof(mbi)) ==
+			sizeof(mbi)) {
+		r->csp = (unsigned long long)(uintptr_t)mbi.BaseAddress;
+		r->headroom_run = (unsigned long long)c->Rsp -
+			(unsigned long long)(uintptr_t)mbi.BaseAddress;
+		r->headroom_res = (unsigned long long)c->Rsp -
+			(unsigned long long)(uintptr_t)mbi.AllocationBase;
+	}
+	/* (a) vs (b): where the fault really is, and where the hop was told
+	 * to jump versus where the probe was armed */
+	va = (uintptr_t)r->i1;
+	memset(&mbi, 0, sizeof(mbi));
+	if (er->NumberParameters > 1 &&
+	    VirtualQuery((void *)va, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+		r->fq_ok = 1;
+		r->fq_prot = (unsigned long long)mbi.Protect;
+		r->fq_state = (unsigned long long)mbi.State;
+	}
+	r->tgt = fs_tramp_target;
+	r->dtarget = d->dr_watch[0];
+}
+
 static void prot_truth_sample(uintptr_t resume_va)
 {
 	MEMORY_BASIC_INFORMATION mbi;
@@ -1323,6 +1382,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 
 	/* Shelley 166: an AV is the moment the ledger and Windows can be
 	 * compared at the page that actually decided it. */
+	exc_entry_note(er, c);
 	if (er->ExceptionCode == STATUS_ACCESS_VIOLATION)
 		prot_truth_sample((uintptr_t)c->Rip);
 

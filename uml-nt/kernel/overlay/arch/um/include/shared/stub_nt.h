@@ -547,6 +547,27 @@ struct uml_nt_stub_data {
 		unsigned long long host_xs_lo;
 		unsigned long long ex_back;	/* bytes before the context */
 	} ctx_ring[16];
+	/* Shelley 167 (1)+(2): EVERY exception entry, not just the fault
+	 * round. For an AV the access type ([0] = 0 read / 1 write / 8
+	 * DEP-execute) and the faulting VA ([1]) are the two facts that
+	 * separate a guest dereference from the hop jumping somewhere it
+	 * should not; headroom_run/headroom_res are the stack question —
+	 * rsp minus the bottom of the committed run it sits in, and minus
+	 * the bottom of the whole reservation (which is a HOLE: unmapped).
+	 * If the ntdll dispatcher has to build a frame with almost no
+	 * committed page under rsp, it writes into that hole, takes a
+	 * second AV on a thread with no handler, and dies exactly like
+	 * this. */
+	struct uml_nt_exc_ring {
+		unsigned long long seq;
+		unsigned long long code, i0, i1;
+		unsigned long long rip, rsp, csp;
+		unsigned long long headroom_run; /* rsp - committed bottom */
+		unsigned long long headroom_res; /* rsp - reservation base */
+		unsigned long long tgt, dtarget; /* tramp target vs probe va */
+		unsigned long long fq_ok, fq_prot, fq_state;
+	} exc_ring[16];
+	unsigned exc_ring_at;
 	unsigned long long ctx_ring_at;
 	/* [xstate] (Shelley 158 step 2): what the OS wants for a CONTEXT
 	 * with CONTEXT_XSTATE (InitializeContext: 1 ok / 2 failed / 0 no
