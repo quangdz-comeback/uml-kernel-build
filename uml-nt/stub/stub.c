@@ -625,14 +625,21 @@ static unsigned long long host_xstate_lo;
  */
 static void drop_xstate_claim(CONTEXT *c)
 {
+	/* Shelley 174 retest (referee 40313858070, clean conditions after
+	 * map-truth): with the claim dropped, systemd dies of ABRT
+	 * ("Freezing execution") BEFORE multi-user — no login, no prompts,
+	 * nothing. So the claim is LOAD-BEARING: the dispatcher's extended
+	 * state has to keep riding across the resume, and the earlier
+	 * revert (b4b1c9b) was right. Keep it, count it. The experiment is
+	 * recorded here because "we tried it in clean conditions" is the
+	 * only thing that makes the next reader trust the revert. */
 	if (c == NULL)
 		return;
 	if (c->ContextFlags & CONTEXT_XSTATE) {
-		c->ContextFlags &= ~(DWORD)CONTEXT_XSTATE;
 		if (d != NULL)
-			d->xstate_cleared++;
+			d->xstate_kept++;
 	} else if (d != NULL) {
-		d->xstate_kept++;
+		d->xstate_cleared++;
 	}
 }
 
