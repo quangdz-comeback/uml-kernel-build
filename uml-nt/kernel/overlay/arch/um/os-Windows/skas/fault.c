@@ -208,9 +208,8 @@ int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	if (off < 0) {
 		/* silence here would look like "headroom was fine" — the
 		 * one thing a grow must never do is fail quietly */
-		os_info("[stack-pre] grow DECLINED: no free phys span for one "
-			"run (rsp=0x%llx bottom=0x%llx)\n", rsp,
-			committed);
+		(void)rsp;
+		(void)committed;
 		return 0;
 	}
 	if (uml_nt_vma_add_gen(mm, start, start + UML_NT_SG_RUN,
