@@ -177,7 +177,7 @@ int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			   unsigned long long alloc_hint,
 			   struct uml_nt_fault_plan *plan)
 {
-	unsigned long long committed = 0, start = 0, off;
+	unsigned long long committed = 0, start = 0, off, vma_top = 0;
 	int i, d;
 
 	if (mm == 0 || ph == 0 || plan == 0)
@@ -185,19 +185,41 @@ int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	/* the stub's VirtualQuery answer is the authority on what Windows
 	 * has committed (Shelley 168); the VMA scan is the fallback for a
 	 * round where the stub had no exception to measure */
-	committed = hint_bottom;
-	for (i = 0; i < mm->nvma && committed == 0; i++)
-		if (rsp >= mm->vma[i].start && rsp < mm->vma[i].end &&
-		    mm->vma[i].end <= mm->stack_top &&
-		    (committed == 0 || mm->vma[i].start < committed))
-			committed = mm->vma[i].start;
+	/* Shelley 169: the kernel OWNS the VMA table, so it should not need
+	 * the stub to tell it where the stack run starts. The earlier scan
+	 * failed only because it demanded `end <= stack_top` — a condition
+	 * that is simply false for the run rsp is in. The run containing rsp
+	 * IS the committed bottom, and VMA starts are run-aligned by
+	 * construction, so the grow target lines up by definition. */
+	committed = 0;
+	{
+		unsigned long long best = 0, best_end = 0;
+
+		for (i = 0; i < mm->nvma; i++) {
+			struct uml_nt_vma *v = &mm->vma[i];
+
+			if (rsp >= v->start && rsp < v->end &&
+			    v->start >= best) {
+				best = v->start;
+				best_end = v->end;
+			}
+		}
+		if (best != 0) {
+			committed = best;
+			vma_top = best_end;
+		}
+	}
+	if (committed == 0)
+		committed = hint_bottom;
 	/* the kernel's own stack numbers can be 0 for a conn that never
 	 * went through the ELF image path; the stub measured them */
 	{
 		unsigned long long top = mm->stack_top ? mm->stack_top :
-			top_hint;
+			(vma_top ? vma_top : top_hint);
 		unsigned long long lim = mm->stack_limit ? mm->stack_limit :
-			(alloc_hint ? alloc_hint + UML_NT_SG_RUN : 0);
+			(committed > UML_NT_STACK_RLIMIT ?
+			 committed - UML_NT_STACK_RLIMIT :
+			 (alloc_hint ? alloc_hint : 0));
 
 		d = uml_nt_sg_precommit(top, lim, rsp, committed,
 					UML_NT_SG_RUN, &start);
