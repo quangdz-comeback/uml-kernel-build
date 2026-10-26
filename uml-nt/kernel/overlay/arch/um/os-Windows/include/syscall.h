@@ -207,7 +207,15 @@ struct uml_nt_stub_conn {
 	struct uml_nt_drslots drs;
 	int drex_slot; /* slot the probe holds, -1 when none */
 	unsigned sg_logged;
-	unsigned mm_logged; /* [mm-id] lines printed */ /* [stack-pre] lines printed */
+	unsigned mm_logged; /* [mm-id] lines printed */
+	/* Shelley 170: the LAST rounds are the ones that matter — a grow
+	 * decision is only interesting at the round that died, and the
+	 * first two answers always look healthy. Ring, dumped at death. */
+	struct {
+		unsigned long long rsp, bottom, top, find_start, find_end;
+		int sg, found, nvma;
+	} sg_ring[8];
+	unsigned sg_ring_at; /* [stack-pre] lines printed */
 	unsigned long long ans_step;
 	unsigned long long req_rip, req_rsp, req_seq_seen;
 	/* [d20-guard] self-measurement: what the guard actually looked at

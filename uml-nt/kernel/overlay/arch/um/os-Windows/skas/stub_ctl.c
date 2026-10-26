@@ -11342,6 +11342,24 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				"the committed run\n", (unsigned long)c->pid,
 				c->d->stack_bottom);
 		}
+		{
+			struct uml_nt_vma *rv = uml_nt_vma_find(c->mm,
+							       c->d->regs.rsp);
+
+			c->sg_ring[c->sg_ring_at & 7u].rsp = c->d->regs.rsp;
+			c->sg_ring[c->sg_ring_at & 7u].bottom =
+				c->d->stack_bottom;
+			c->sg_ring[c->sg_ring_at & 7u].top =
+				c->mm->stack_top;
+			c->sg_ring[c->sg_ring_at & 7u].found = rv != NULL;
+			c->sg_ring[c->sg_ring_at & 7u].find_start =
+				rv ? rv->start : 0;
+			c->sg_ring[c->sg_ring_at & 7u].find_end =
+				rv ? rv->end : 0;
+			c->sg_ring[c->sg_ring_at & 7u].nvma = (int)c->mm->nvma;
+			c->sg_ring[c->sg_ring_at & 7u].sg = sg;
+			c->sg_ring_at++;
+		}
 		if (sg == 0 && c->d->stack_bottom != 0 && c->sg_logged < 4) {
 			/* why did it not grow? the inputs, once per conn —
 			 * "no line" must never be the answer to "why". */

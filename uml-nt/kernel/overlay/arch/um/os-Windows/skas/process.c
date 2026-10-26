@@ -1044,6 +1044,28 @@ void userspace(struct uml_pt_regs *regs)
 				c->ans_regs[i], now[i],
 				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
 	}
+	/* Shelley 170: the last grow decisions, in order — the one that
+	 * matters is the round that died. */
+	{
+		unsigned at = c->sg_ring_at;
+		unsigned i, n = at < 8 ? at : 8;
+
+		os_info("[sg-ring] pid %d rounds=%u\n", c->pid, at);
+		for (i = 0; i < n; i++) {
+			int k = (int)((at - 1 - i) & 7u);
+
+			os_info("[sg-ring] #%u rsp=0x%llx bottom=0x%llx "
+				"top=0x%llx nvma=%d find=%s(0x%llx,0x%llx) "
+				"sg=%d headroom=0x%llx\n",
+				i, c->sg_ring[k].rsp, c->sg_ring[k].bottom,
+				c->sg_ring[k].top, c->sg_ring[k].nvma,
+				c->sg_ring[k].found ? "YES" : "NULL",
+				c->sg_ring[k].find_start,
+				c->sg_ring[k].find_end, c->sg_ring[k].sg,
+				(c->sg_ring[k].rsp > c->sg_ring[k].bottom) ?
+				c->sg_ring[k].rsp - c->sg_ring[k].bottom : 0);
+		}
+	}
 	/* Shelley 167: the last exception entries, with the two numbers
 	 * that decide between (a) a guest dereference, (b) the hop jumping
 	 * to the wrong place, and (c) the dispatcher building a frame into
