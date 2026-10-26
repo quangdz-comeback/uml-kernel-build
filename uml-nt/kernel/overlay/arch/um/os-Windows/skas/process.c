@@ -42,6 +42,7 @@
 #include <stub_nt.h>
 #include <ss_model.h>
 #include <prot_restore_model.h>
+#include <regshape_model.h>
 #include <syscall.h>
 #include <bench.h>
 #include <os.h>
@@ -1043,6 +1044,44 @@ void userspace(struct uml_pt_regs *regs)
 				c->ans_regs[i] != now[i] ? "*" : " ", nm[i],
 				c->ans_regs[i], now[i],
 				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
+	}
+	/* Shelley 177 (milestone): the register file at a FAULT round, with
+	 * the shape of every value and which of them moved since the answer.
+	 * The two garbage shapes have different sources and only a per-
+	 * register reading can tell them apart. */
+	if (c->d->cmd == UML_STUB_CMD_FAULT) {
+		const struct uml_nt_gp_regs *g = &c->d->regs;
+		unsigned long long now[17];
+		const char *nm[17] = { "rax", "rcx", "rdx", "rbx", "rsp",
+			"rbp", "rsi", "rdi", "r8", "r9", "r10", "r11",
+			"r12", "r13", "r14", "r15", "rip" };
+		int i, nshape = 0;
+
+		now[0] = g->rax;  now[1] = g->rcx;  now[2] = g->rdx;
+		now[3] = g->rbx;  now[4] = g->rsp;  now[5] = g->rbp;
+		now[6] = g->rsi;  now[7] = g->rdi;  now[8] = g->r8;
+		now[9] = g->r9;   now[10] = g->r10; now[11] = g->r11;
+		now[12] = g->r12; now[13] = g->r13; now[14] = g->r14;
+		now[15] = g->r15; now[16] = g->rip;
+		for (i = 0; i < 17; i++)
+			if (uml_nt_reg_shape(now[i]))
+				nshape++;
+		if (nshape > 0 && c->rg_logged < 12) {
+			c->rg_logged++;
+			os_info("[reg-fault] pid %d fault_addr=0x%llx nr=%llu "
+				"garbage=%d same_round=%s\n",
+				c->pid, (unsigned long long)c->d->fault_addr,
+				(unsigned long long)c->d->args[0], nshape,
+				c->d->pub_seq == c->ans_pub ? "yes" : "STALE");
+			for (i = 0; i < 17; i++)
+				os_info("[reg-fault] %-4s = 0x%016llx %-12s%s\n",
+					nm[i], now[i],
+					uml_nt_reg_shape_name(
+						uml_nt_reg_shape(now[i])),
+					(c->d->pub_seq == c->ans_pub &&
+					 c->ans_regs[i] != now[i]) ?
+					" <-- MOVED since answer" : "");
+		}
 	}
 	/* Shelley 173: every VEH entry, stamped at the handler's first
 	 * line. An exception here with no counterpart elsewhere is an

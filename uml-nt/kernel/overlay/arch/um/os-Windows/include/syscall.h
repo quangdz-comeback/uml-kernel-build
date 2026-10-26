@@ -208,6 +208,7 @@ struct uml_nt_stub_conn {
 	int drex_slot; /* slot the probe holds, -1 when none */
 	unsigned sg_logged;
 	unsigned mm_logged; /* [mm-id] lines printed */
+	unsigned rg_logged; /* [reg-fault] dumps printed */
 	/* Shelley 170: the LAST rounds are the ones that matter — a grow
 	 * decision is only interesting at the round that died, and the
 	 * first two answers always look healthy. Ring, dumped at death. */

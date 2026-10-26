@@ -24,6 +24,7 @@
 #include "prot_restore_model.h"
 #include "stackgrow_model.h"
 #include "maplen_model.h"
+#include "regshape_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -315,6 +316,32 @@ static void section19(void)
 	printf("section 19 (a run-backed MAP commits the run): all ok\n");
 }
 
+/* section 20 — the SHAPE of a garbage register (Shelley 177).
+ * Two shapes keep appearing in the dying rounds and they may not share a
+ * source: a u16 shifted into the top half (a 2-byte store at +6 of an
+ * 8-byte slot) and a full-random 64-bit value (a torn/uninitialised read).
+ */
+static void section20(void)
+{
+	/* a. the observed u16-shape values */
+	CHECK(uml_nt_reg_shape(0x4802000000000000ull) == UML_NT_REG_U16_HIGH);
+	CHECK(uml_nt_reg_shape(0x4002000000000000ull) == UML_NT_REG_U16_HIGH);
+	CHECK(uml_nt_reg_shape(0x6802000000000000ull) == UML_NT_REG_U16_HIGH);
+	/* b. the observed full-random values */
+	CHECK(uml_nt_reg_shape(0x2fc6222fb3efde00ull) == UML_NT_REG_FULL_RANDOM);
+	CHECK(uml_nt_reg_shape(0x57cb60ecc23ee700ull) == UML_NT_REG_FULL_RANDOM);
+	/* c. clean values: small ints, guest addresses, kernel addresses */
+	CHECK(uml_nt_reg_shape(0) == UML_NT_REG_CLEAN);
+	CHECK(uml_nt_reg_shape(3) == UML_NT_REG_CLEAN);
+	CHECK(uml_nt_reg_shape(0x601dce67ull) == UML_NT_REG_CLEAN);
+	CHECK(uml_nt_reg_shape(0x6085d258ull) == UML_NT_REG_CLEAN);
+	CHECK(uml_nt_reg_shape(0x7ff6735e16d0ull) == UML_NT_REG_CLEAN);
+	/* d. a plain pointer-sized value in the top half is not "u16" */
+	CHECK(uml_nt_reg_shape(0xffff800000000001ull) == UML_NT_REG_FULL_RANDOM);
+
+	printf("section 20 (register garbage shapes): all ok\n");
+}
+
 int main(void)
 {
 	test_pwslot();
@@ -505,6 +532,7 @@ int main(void)
 	section17();
 	section18();
 	section19();
+	section20();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);
