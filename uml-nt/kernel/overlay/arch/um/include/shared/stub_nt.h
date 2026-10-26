@@ -139,6 +139,16 @@ struct uml_nt_stub_data {
 	 * (retval = 1 ok / 0 failed), then resumes on ACTION_NONE. */
 	unsigned long long fault_addr;
 	u32_nt fault_type;
+	/* -- Shelley 183: who touches the ContextRecord --------------
+	 * dirty_words = 8-byte words that changed inside CONTEXT during
+	 * this round at an offset we do not write on purpose; the first
+	 * eight are logged with their offset. A non-zero count in a dying
+	 * round names the writer (us), zero exonerates the record. */
+	u32_nt ctx_dirty_words;
+	u32_nt _pad_ctx_dirty;
+	unsigned long long ctx_dirty[8][2];	/* off, value */
+	unsigned long long ctx_xs_hdr;		/* 8 bytes just past CONTEXT */
+	unsigned long long ctx_xs_hdr_prev;
 	u32_nt action; /* UML_STUB_ACTION_* */
 	u32_nt prot;   /* ACTION_PROT: NT PAGE_* constant */
 	u32_nt _pad_fault;

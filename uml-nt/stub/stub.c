@@ -55,6 +55,7 @@
 
 #include "../kernel/overlay/arch/um/include/shared/stub_nt.h"
 #include "resume_model.h"
+#include <ctxaudit_model.h>
 #include "../kernel/overlay/arch/um/include/shared/veh_model.h"
 #include "../kernel/overlay/arch/um/include/shared/ss_model.h"
 #include "../kernel/overlay/arch/um/include/shared/dr7_model.h"
@@ -1518,9 +1519,71 @@ static void entry_stamp(const EXCEPTION_POINTERS *ep)
 	r->slot = (unsigned long long)((at - 1) & 15u);
 }
 
+/* Shelley 183: the ContextRecord is the one suspect never measured.
+ * Every death happens in the round we just answered, and our GPR/DR
+ * writes sit inside the same record as the XSAVE area — a write that ran
+ * long would make the kernel's xrstor fault with no user-mode handler,
+ * which is the signature. Snapshot the whole record at entry, then at
+ * exit name every word that changed somewhere we do not write on
+ * purpose. */
+static CONTEXT ctx_entry;
+static int ctx_entry_ok;
+static void ctx_audit_snapshot(CONTEXT *c)
+{
+	ctx_entry_ok = 0;
+	if (c == NULL || d == NULL)
+		return;
+	memcpy(&ctx_entry, c, sizeof(ctx_entry));
+	ctx_entry_ok = 1;
+}
+
+static void ctx_audit_check(CONTEXT *c)
+{
+	unsigned long long i, off, dirty = 0;
+	const unsigned char *now = (const unsigned char *)c;
+	const unsigned char *was = (const unsigned char *)&ctx_entry;
+
+	if (!ctx_entry_ok || c == NULL)
+		return;
+	d->ctx_xs_hdr_prev = d->ctx_xs_hdr;
+	d->ctx_xs_hdr = *(const unsigned long long *)(const void *)
+		((const char *)c + sizeof(CONTEXT));
+	for (i = 0; i + 8 <= sizeof(CONTEXT); i += 8) {
+		unsigned long long a, b;
+
+		memcpy(&a, now + i, 8);
+		memcpy(&b, was + i, 8);
+		if (a == b)
+			continue;
+		if (uml_nt_ctx_word_is_intended(i))
+			continue;
+		off = i;
+		if (dirty < 8) {
+			d->ctx_dirty[dirty][0] = off;
+			d->ctx_dirty[dirty][1] = a;
+		}
+		if (dirty < 8)
+			fprintf(stderr, "[ctx-dirty] pid %lu off=0x%llx (%s) "
+				"was=0x%llx now=0x%llx\n",
+				(unsigned long)d->pid, off,
+				uml_nt_ctx_word_name(off), b, a);
+		dirty++;
+	}
+	if (dirty != d->ctx_dirty_words) {
+		d->ctx_dirty_words = (u32_nt)dirty;
+		fprintf(stderr, "[ctx-dirty] pid %lu round dirty_words=%llu "
+			"xs_hdr=0x%llx prev=0x%llx\n",
+			(unsigned long)d->pid, dirty,
+			d->ctx_xs_hdr, d->ctx_xs_hdr_prev);
+	}
+	ctx_entry_ok = 0;
+}
+
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	entry_stamp(ep);
+	if (ep != NULL && ep->ContextRecord != NULL)
+		ctx_audit_snapshot(ep->ContextRecord);
 	unsigned long long sp_in = veh_now_sp();
 
 	d->veh_entries++;
@@ -2216,6 +2279,9 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	if (is_syscall && d->halt)
 		park_forever(); /* guest exit(): kernel terminates us */
 
+	/* Shelley 183: name anything we dirtied outside our own fields
+	 * before this record goes back to the kernel. */
+	ctx_audit_check(ep->ContextRecord);
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
 

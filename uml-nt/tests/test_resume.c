@@ -26,6 +26,7 @@
 #include "maplen_model.h"
 #include "regshape_model.h"
 #include "replay_model.h"
+#include "ctxaudit_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -385,6 +386,29 @@ static void section21(void)
 	printf("section 21 (replay follows content): all ok\n");
 }
 
+/* section 22 — WHO TOUCHED THE CONTEXT (Shelley 183).
+ * Every death lands in the round we just answered, so the record itself
+ * is the suspect: a write that ran long would dirty the legacy XSAVE
+ * header and make the kernel's xrstor fault with no handler. The model
+ * separates the words we write on purpose from everything else.
+ */
+static void section22(void)
+{
+	/* a. our own fields are intended */
+	CHECK(uml_nt_ctx_word_is_intended(0x30) == 1);	/* ContextFlags */
+	CHECK(uml_nt_ctx_word_is_intended(0x44) == 1);	/* SegGs/Eflags */
+	CHECK(uml_nt_ctx_word_is_intended(0x48) == 1);	/* Dr0 */
+	CHECK(uml_nt_ctx_word_is_intended(0x78) == 1);	/* Dr7/Rax */
+	CHECK(uml_nt_ctx_word_is_intended(0xf8) == 1);	/* Rip */
+	/* b. the legacy XSAVE header is NOT ours to write */
+	CHECK(uml_nt_ctx_word_is_intended(0x100) == 0);
+	CHECK(uml_nt_ctx_word_is_intended(0x108) == 0);
+	/* c. a stray spill just past the GPR block is evidence */
+	CHECK(uml_nt_ctx_word_is_intended(0x118) == 0);
+
+	printf("section 22 (who touched the context): all ok\n");
+}
+
 int main(void)
 {
 	test_pwslot();
@@ -577,6 +601,7 @@ int main(void)
 	section19();
 	section20();
 	section21();
+	section22();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);
