@@ -278,8 +278,9 @@ static void section18(void)
 	/* c. one page left is NOT enough (the measured death had 264 bytes) */
 	CHECK(uml_nt_sg_precommit(top, lim, bot + 0x1000ull, bot, run, &st) == 1);
 	/* d. a run would cross the floor => not ours (clean SIGSEGV instead) */
-	CHECK(uml_nt_sg_precommit(top, lim, lim + 0x100ull, lim + 0x10000ull,
-				  run, &st) == -1);
+	/* the committed bottom has reached the floor: nothing to grow */
+	CHECK(uml_nt_sg_precommit(top, lim, lim + 0x100ull, lim, run, &st)
+	      == -1);
 	/* e. rsp outside the stack => no opinion */
 	CHECK(uml_nt_sg_precommit(top, lim, 0x70000000ull, bot, run, &st) == 0);
 	CHECK(uml_nt_sg_precommit(0, lim, 0x60850000ull, bot, run, &st) == 0);
