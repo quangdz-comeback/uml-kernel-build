@@ -944,18 +944,34 @@ void userspace(struct uml_pt_regs *regs)
 					os_info("[ctx-audit] pid %d rounds=%lu "
 						"snapshots=%lu dirty_max=%lu "
 						"xs_changed=%lu xs_hdr=0x%llx "
-						"==> %s\n",
+						"stage=%u ==> %s\n",
 						c->pid,
 						(unsigned long)c->d->ctx_rounds,
 						(unsigned long)c->d->ctx_snapshots,
 						(unsigned long)c->d->ctx_dirty_max,
 						(unsigned long)c->d->ctx_xs_changed,
 						c->d->ctx_xs_hdr,
+						(unsigned)c->d->vstage,
 						c->d->ctx_rounds == 0 ?
 						"NEVER RAN — no truth, not a verdict" :
 						c->d->ctx_dirty_max == 0 ?
 						"ran and never found a dirty word"
 						: "WE DIRTIED THE RECORD");
+					os_info("[stage] pid %d last_stage=%u (%s)\n",
+						c->pid, (unsigned)c->d->vstage,
+						c->d->vstage == 1 ?
+						"snapshot taken, body entered" :
+						c->d->vstage == 2 ?
+						"about to publish" :
+						c->d->vstage == 3 ?
+						"PUBLISHED — died while waiting for the answer" :
+						c->d->vstage == 4 ?
+						"answer in, before the register apply" :
+						c->d->vstage == 5 ?
+						"registers+watchpoints applied, before the record check" :
+						c->d->vstage == 6 ?
+						"record check reached (the round lived)" :
+						"no stage");
 					os_info("userspace: stub pid %d "
 						"died silently (%lu) — last "
 						"cmd=%u rip=%llx rsp=%llx "

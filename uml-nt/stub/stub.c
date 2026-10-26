@@ -1548,6 +1548,8 @@ static void ctx_audit_check(CONTEXT *c)
 	if (!ctx_entry_ok || c == NULL)
 		return;
 	d->ctx_rounds++;
+	if (d->vstage < 6)
+		d->vstage = 6;	/* reached the record check: the round lived */
 	d->ctx_xs_hdr_prev = d->ctx_xs_hdr;
 	d->ctx_xs_hdr = *(const unsigned long long *)(const void *)
 		((const char *)c + sizeof(CONTEXT));
@@ -1597,7 +1599,11 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	entry_stamp(ep);
 	if (ep != NULL && ep->ContextRecord != NULL)
+		{
 		ctx_audit_snapshot(ep->ContextRecord);
+		if (d != NULL)
+			d->vstage = 1;	/* snapshot taken, body entered */
+	}
 	unsigned long long sp_in = veh_now_sp();
 
 	d->veh_entries++;
@@ -2102,9 +2108,12 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 				er->ExceptionInformation[1];
 			d->fault_type = (u32_nt)er->ExceptionInformation[0];
 		}
+		d->vstage = 2;	/* about to publish the fault */
 		publish(UML_STUB_CMD_FAULT);
+		d->vstage = 3;	/* published — now waiting for the answer */
 	}
 
+	d->vstage = 4;		/* the answer is in (action_chain returned) */
 	action_chain();
 
 	/* Kernel answered. Syscall: retval in rax, resume past the ud2
@@ -2114,6 +2123,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * verbatim, rip unchanged — the faulting instruction
 	 * re-executes on the now-fixed view (the kernel-pushed SIGSEGV
 	 * handler state from S4d rides the same verbatim shape). */
+	d->vstage = 5;		/* answer consumed, registers applied */
 	gp_to_context(c, &d->regs);
 	d->round_step = 7;
 

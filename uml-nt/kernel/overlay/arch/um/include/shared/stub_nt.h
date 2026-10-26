@@ -149,6 +149,12 @@ struct uml_nt_stub_data {
 	 * MUST carry a positive counter, or "clean" and "never ran" are
 	 * the same reading. */
 	u32_nt ctx_rounds;	/* ctx_audit_check ran */
+	/* Shelley 185: WHERE in veh_body the dying round stopped.
+	 * 1 snapshot taken · 2 about to publish · 3 published (waiting for
+	 * the answer) · 4 answer in · 5 registers+watchpoints applied ·
+	 * 6 record check reached (the round lived). Monotonic.
+	 */
+	volatile u32_nt vstage;
 	u32_nt ctx_snapshots;	/* ctx_audit_snapshot ran */
 	u32_nt ctx_dirty_max;	/* worst dirty_words seen */
 	u32_nt ctx_xs_changed;	/* xs_hdr differed from the previous round */
