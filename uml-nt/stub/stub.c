@@ -166,8 +166,45 @@ static void sample_stub_stack(void)
 		d->stub_sp_min = sp;
 }
 
+/* Shelley 169: the stack numbers ride EVERY answer-wait, not only the
+ * exception entries — a conn's first answer must have them too, and no
+ * diagnostic may depend on which path happened to run.
+ *
+ * Alignment matters more than it looks: VirtualQuery answers per REGION,
+ * and a 64 KiB committed stack run can be split into 4 KiB regions — so
+ * the bottom it reports for the page rsp sits in is not the bottom of the
+ * committed RUN. Rounding it down to the run is the difference between a
+ * grow target that lines up with the reservation and one that does not.
+ */
+#define UML_NT_STACK_RUN_ALIGN 0x10000ull /* the run the phys layer maps */
+
+static void publish_stack_hints(void)
+{
+	MEMORY_BASIC_INFORMATION q;
+	uintptr_t rsp;
+
+	if (d == NULL)
+		return;
+	rsp = (uintptr_t)d->regs.rsp;
+	if (rsp == 0)
+		return;
+	memset(&q, 0, sizeof(q));
+	if (VirtualQuery((void *)rsp, &q, sizeof(q)) != sizeof(q))
+		return;
+	if (q.State != MEM_COMMIT)
+		return;
+	d->stack_bottom = (unsigned long long)(uintptr_t)q.BaseAddress &
+		~(UML_NT_STACK_RUN_ALIGN - 1);
+	d->stack_top_hint = ((unsigned long long)(uintptr_t)q.BaseAddress +
+		(unsigned long long)q.RegionSize +
+		UML_NT_STACK_RUN_ALIGN - 1) & ~(UML_NT_STACK_RUN_ALIGN - 1);
+	d->stack_alloc_hint = (unsigned long long)(uintptr_t)q.AllocationBase;
+}
+
 static void publish(unsigned cmd)
 {
+	/* before the kernel is woken: it reads these at answer time */
+	publish_stack_hints();
 	sample_stub_stack();
 	d->pub_seq++;
 	d->cmd = cmd;
@@ -887,7 +924,8 @@ static void exc_entry_note(const EXCEPTION_RECORD *er, const CONTEXT *c)
 			sizeof(mbi)) {
 		r->csp = (unsigned long long)(uintptr_t)mbi.BaseAddress;
 		r->headroom_run = (unsigned long long)c->Rsp -
-			(unsigned long long)(uintptr_t)mbi.BaseAddress;
+			((unsigned long long)(uintptr_t)mbi.BaseAddress &
+			 ~(UML_NT_STACK_RUN_ALIGN - 1));
 		r->headroom_res = (unsigned long long)c->Rsp -
 			(unsigned long long)(uintptr_t)mbi.AllocationBase;
 	}

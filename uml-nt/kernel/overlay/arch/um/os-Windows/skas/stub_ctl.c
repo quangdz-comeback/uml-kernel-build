@@ -45,6 +45,7 @@
 #include <elf.h>
 #include "drslot_model.h"
 #include "prot_restore_model.h"
+#include "stackgrow_model.h"
 #include <stub-panic.h>
 #include <stub_nt.h>
 #include <ss_model.h>
@@ -11306,6 +11307,17 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				"plan refused it (rsp=0x%llx bottom=0x%llx) "
 				"— the round goes out unchanged\n",
 				(unsigned long)c->pid, c->d->regs.rsp,
+				c->d->stack_bottom);
+		}
+		/* Shelley 169 (3): the alignment question — a bottom that is not
+		 * run-aligned cannot be a grow target. */
+		if (sg == 0 && c->d->stack_bottom != 0 &&
+		    (c->d->stack_bottom & (UML_NT_SG_RUN - 1)) != 0 &&
+		    c->sg_logged < 4) {
+			c->sg_logged++;
+			os_info("[stack-pre] pid %lu bottom 0x%llx is NOT "
+				"run-aligned — the hint is a region base, not "
+				"the committed run\n", (unsigned long)c->pid,
 				c->d->stack_bottom);
 		}
 		if (sg == 0 && c->d->stack_bottom != 0 && c->sg_logged < 4) {
