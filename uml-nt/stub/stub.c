@@ -986,62 +986,6 @@ static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
-/* Shelley 175: resume by calling NtContinue OURSELVES.
- *
- * Returning EXCEPTION_CONTINUE_EXECUTION hands the context back to the
- * dispatcher, and when the resume fails there the process dies with no
- * exception entry anywhere — not first-chance, not unhandled — which is
- * the silent class this hunt has been chasing. NtContinue takes the same
- * context and gives a STATUS: success never returns (the thread is in the
- * guest, on the guest's own rsp, which the context restores), so if it
- * ever comes back, the value it returns IS the diagnosis.
- */
-typedef LONG(NTAPI *nt_continue_t)(PCONTEXT, BOOLEAN);
-
-static int nt_continue_resume(CONTEXT *c)
-{
-	static nt_continue_t nt_continue;
-	LONG st;
-
-	if (c == NULL || d == NULL)
-		return 0;
-	if (nt_continue == NULL) {
-		nt_continue = (nt_continue_t)(uintptr_t)GetProcAddress(
-			GetModuleHandleA("ntdll.dll"), "NtContinue");
-		if (nt_continue == NULL)
-			return 0;
-	}
-	d->ntc_calls++;
-	st = nt_continue(c, FALSE);
-	/* We are back: success would have kept us in the guest. */
-	d->ntc_returned++;
-	d->ntc_last_status = (unsigned long long)(unsigned int)st;
-	d->ntc_rip = (unsigned long long)c->Rip;
-	d->ntc_rsp = (unsigned long long)c->Rsp;
-	d->ntc_dr7 = (unsigned long long)c->Dr7;
-	d->ntc_flags = (unsigned long long)c->ContextFlags;
-	{
-		static char line[256];
-		int n = snprintf(line, sizeof(line),
-				 "[ntcontinue] pid %lu RETURNED status=0x%lx "
-				 "(!= SUCCESS) rip=0x%llx rsp=0x%llx "
-				 "dr7=0x%llx flags=0x%llx — the resume was "
-				 "REFUSED with a code, not silently\n",
-				 (unsigned long)GetCurrentProcessId(),
-				 (unsigned long)(unsigned int)st,
-				 (unsigned long long)c->Rip,
-				 (unsigned long long)c->Rsp,
-				 (unsigned long long)c->Dr7,
-				 (unsigned long long)c->ContextFlags);
-		DWORD wrote;
-
-		if (n > 0)
-			WriteFile(GetStdHandle(STD_ERROR_HANDLE), line,
-				  (DWORD)n, &wrote, NULL);
-	}
-	return 1;
-}
-
 /* [prot-truth] (Shelley 166): the ledger is our bookkeeping; Windows
  * is the truth. A fault round is the moment to compare them at the two
  * pages that decide the story — the address we were asked to resume at
@@ -2272,14 +2216,6 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	if (is_syscall && d->halt)
 		park_forever(); /* guest exit(): kernel terminates us */
 
-	/* Shelley 175: resume through NtContinue so a refusal comes back as
-	 * a STATUS instead of a silent death. Success never returns. */
-	{
-		CONTEXT *rc = ep->ContextRecord;
-
-		if (nt_continue_resume(rc))
-			return EXCEPTION_CONTINUE_EXECUTION;
-	}
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
 
