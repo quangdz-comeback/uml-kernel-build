@@ -397,6 +397,7 @@ struct uml_nt_stub_data {
 		unsigned long long in_body, slot;
 	} entry_ring[16];
 	volatile long entry_ring_at; /* InterlockedIncrement */
+	unsigned long long ret_stamped_n; /* Shelley 174: one stamp per entry */
 	struct uml_nt_ret_ring {
 		unsigned long long seq, rip, rsp, eflags, cs, ss;
 		unsigned long long dr0, dr1, dr2, dr3, dr6, dr7, ctx_flags;

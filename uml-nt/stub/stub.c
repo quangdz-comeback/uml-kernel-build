@@ -601,6 +601,41 @@ static unsigned long long host_xcr0;
 static unsigned long long host_xstate_max;
 static unsigned long long host_xstate_lo;
 
+/* Shelley 174: THE XSTATE CLAIM IS DROPPED ON EVERY RESUME.
+ *
+ * The evidence chain, now that the experiment is not polluted:
+ *  - InitializeContext(CONTEXT_ALL|CONTEXT_XSTATE) FAILS on this host
+ *    (api=2, wants 3263 bytes — [xstate] from 159), so nobody in user
+ *    mode can build a legal extended context; the flag on the
+ *    ContextRecord is the dispatcher's own claim;
+ *  - [ctx-apply] says 996/996 applies land (Rip/DR intact), so the
+ *    context itself is accepted;
+ *  - the fatal round's last exception is a #DB we ANSWER correctly
+ *    (RF=1, DR disarmed) and then the process dies with NO exception
+ *    entry at all — not first-chance, not unhandled. That is a
+ *    kernel-side resume failure, and the only part of the context the
+ *    kernel has to parse is the extended-state area this host cannot
+ *    produce.
+ *
+ * Trade-off, stated: the guest loses any extended state across a resume
+ * (AVX upper halves); CONTEXT_FLOATING_POINT (the legacy 512-byte
+ * area — xmm0-15, mxcsr, x87) still rides, which is what the Linux
+ * ABI's signal path needs. If a guest faults on FP after this, the
+ * counters below say so immediately.
+ */
+static void drop_xstate_claim(CONTEXT *c)
+{
+	if (c == NULL)
+		return;
+	if (c->ContextFlags & CONTEXT_XSTATE) {
+		c->ContextFlags &= ~(DWORD)CONTEXT_XSTATE;
+		if (d != NULL)
+			d->xstate_cleared++;
+	} else if (d != NULL) {
+		d->xstate_kept++;
+	}
+}
+
 /* ---- [xstate] what does this OS expect for CONTEXT_XSTATE? ---------- */
 
 /* The outgoing CONTEXT advertises CONTEXT_XSTATE (0x10005f includes bit
@@ -660,6 +695,13 @@ static void record_ask(const CONTEXT *c)
 	d->ask_dr7 = (unsigned long long)c->Dr7;
 	d->ask_flags = (unsigned long long)c->ContextFlags;
 	d->ask_round++;
+	/* Shelley 174: note_resume() has TWO call sites, so one exception
+	 * used to stamp TWO entries — a phantom round that made the death
+	 * look like an unseen fault. One stamp per VEH entry, keyed on the
+	 * entry ring's own counter. */
+	if (d->ret_stamped_n == (unsigned long long)d->entry_ring_at)
+		return;
+	d->ret_stamped_n = (unsigned long long)d->entry_ring_at;
 	/* Shelley 172: the whole returned context, ring 8 — the live #DB
 	 * rounds and the fatal one can then be diffed field by field. */
 	{
@@ -1999,6 +2041,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * watchpoint shape (RW=01 write, LEN=10 = 8 bytes). One Dr7
 	 * built from the slots keeps both instruments honest. */
 	apply_watchpoints(c);
+	drop_xstate_claim(c);
 	d->round_step = 8;
 
 	/* S4d: apply the kernel's FP/XSTATE (upstream parity:
@@ -2054,8 +2097,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		 * rsp it answered: equal + clean = the guest's own stack
 		 * arithmetic; a mismatch is OUR restore, not the guest. */
 		d->resume_rsp = (unsigned long long)c->Rsp;
-		if (c->ContextFlags & CONTEXT_XSTATE)
-			d->xstate_kept++;
+		drop_xstate_claim(c);
 		/* Shelley 163: DR state rides EVERY resume — including this
 		 * one, which used to return without it. */
 		apply_watchpoints(c);
