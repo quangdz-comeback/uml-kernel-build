@@ -1076,10 +1076,36 @@ void userspace(struct uml_pt_regs *regs)
 			 * never a fault VA. The 16 bytes at rip name the
 			 * instruction (a `mov [reg],…` reads very
 			 * differently from a `call` to a bad target). */
-			os_info("[fault-where] pid %d i0=%llu (%s) i1=0x%llx "
+			/* The AV's OWN pair: stub.c publishes
+			 * fault_type = ExceptionInformation[0] and
+			 * fault_addr = ExceptionInformation[1] for every
+			 * plain AV. dr_hit_* is the DR-hit publication and
+			 * is meaningless on this path (label bug #10 —
+			 * printed here as "(DR-only)" so it can never be
+			 * read as this fault's truth again). */
+			os_info("[fault-where] pid %d AV i0=%u (%s) "
+				"i1=0x%llx | dr-only i0=%llu i1=0x%llx | "
 				"rip=0x%llx nr=%llu rsp=0x%llx garbage=%d "
 				"same_round=%s\n",
 				c->pid,
+				(unsigned)c->d->fault_type,
+				c->d->fault_type == 0 ? "READ" :
+				c->d->fault_type == 1 ? "WRITE" :
+				c->d->fault_type == 8 ? "EXEC/DEP" :
+				c->d->fault_type == UML_NT_FAULT_STEP ? "STEP" :
+				c->d->fault_type == UML_NT_FAULT_WATCHPT ?
+					"WATCHPT" :
+				c->d->fault_type == UML_NT_FAULT_DREXEC ?
+					"DREXEC" : "?",
+				(unsigned long long)c->d->fault_addr,
+				(unsigned long long)c->d->dr_hit_type,
+				(unsigned long long)c->d->dr_hit_va,
+				(unsigned long long)now[16],
+				(unsigned long long)c->d->args[0],
+				(unsigned long long)now[4], nshape,
+				c->d->pub_seq == c->ans_pub ? "yes" : "STALE");
+			os_info("[fault-where] (DR-only) i0=%llu i1=0x%llx "
+				"ignored-for-AV\n",
 				(unsigned long long)c->d->dr_hit_type,
 				c->d->dr_hit_type == 0 ? "READ" :
 				c->d->dr_hit_type == 1 ? "WRITE" :
@@ -1110,21 +1136,27 @@ void userspace(struct uml_pt_regs *regs)
 				      (mbi.Protect & 0x0ff) == 0x04 /* READWRITE */ ||
 				      (mbi.Protect & 0x0ff) == 0x08 /* WRITECOPY */);
 				if (ok) {
-					const unsigned char *src =
-						(const unsigned char *)
-						(uintptr_t)now[16];
+					SIZE_T got_n = 0;
 
-					for (k = 0; k < 16; k++)
-						ib[k] = src[k];
+					/* another process's memory: the host
+					 * pointer is not ours to read */
+					if (!ReadProcessMemory(c->proc,
+					    (void *)(uintptr_t)now[16],
+					    ib, 16, &got_n) || got_n != 16) {
+						for (k = 0; k < 16; k++)
+							ib[k] = 0;
+						ok = 0;
+					}
 				}
 				for (k = 0; k < 16; k++)
 					if (ib[k])
 						got++;
-				os_info("[fault-where] insn @0x%llx = "
+				os_info("[fault-where] insn @0x%llx read=%s = "
 					"%02x %02x %02x %02x %02x %02x %02x %02x"
 					" %02x %02x %02x %02x %02x %02x %02x %02x"
 					" (nonzero=%d)\n",
 					(unsigned long long)now[16],
+					ok ? "ok" : "NO-TRUTH",
 					ib[0], ib[1], ib[2], ib[3], ib[4], ib[5],
 					ib[6], ib[7], ib[8], ib[9], ib[10],
 					ib[11], ib[12], ib[13], ib[14], ib[15],
