@@ -336,8 +336,11 @@ static void section20(void)
 	CHECK(uml_nt_reg_shape(0x601dce67ull) == UML_NT_REG_CLEAN);
 	CHECK(uml_nt_reg_shape(0x6085d258ull) == UML_NT_REG_CLEAN);
 	CHECK(uml_nt_reg_shape(0x7ff6735e16d0ull) == UML_NT_REG_CLEAN);
-	/* d. a plain pointer-sized value in the top half is not "u16" */
-	CHECK(uml_nt_reg_shape(0xffff800000000001ull) == UML_NT_REG_FULL_RANDOM);
+	/* d. a kernel-canonical address is CLEAN, not garbage; a dense
+	 * 64-bit value is full-random */
+	CHECK(uml_nt_reg_shape(0xffff800000000001ull) == UML_NT_REG_CLEAN);
+	CHECK(uml_nt_reg_shape(0x123456789abcdef0ull) ==
+	      UML_NT_REG_FULL_RANDOM);
 
 	printf("section 20 (register garbage shapes): all ok\n");
 }
