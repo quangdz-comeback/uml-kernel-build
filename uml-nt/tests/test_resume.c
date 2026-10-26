@@ -27,7 +27,6 @@
 #include "regshape_model.h"
 #include "replay_model.h"
 #include "ctxaudit_model.h"
-#include "veh_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -410,27 +409,6 @@ static void section22(void)
 	printf("section 22 (who touched the context): all ok\n");
 }
 
-/* section 23 — a record may not contradict itself (Shelley 188).
- * XSTATE_BV=0x37f with XCOMP_BV=0 declares AVX-512 components in a
- * standard-format area; Intel says those components exist only in the
- * compacted format, so restoring it is a #GP in the kernel's own path.
- */
-static void section23(void)
-{
-	/* a. the measured dying pair IS inconsistent */
-	CHECK(uml_nt_xstate_inconsistent(0x37f, 0) == 1);
-	CHECK(uml_nt_xstate_mask(0x37f, 0) == 0x31f);
-	/* b. a compacted area may claim anything */
-	CHECK(uml_nt_xstate_inconsistent(0x37f, UML_NT_XCOMP_COMPACTED) == 0);
-	CHECK(uml_nt_xstate_mask(0x37f, UML_NT_XCOMP_COMPACTED) == 0x37f);
-	/* c. a standard area with standard components is left alone */
-	CHECK(uml_nt_xstate_inconsistent(0x31f, 0) == 0);
-	CHECK(uml_nt_xstate_mask(0x31f, 0) == 0x31f);
-	CHECK(uml_nt_xstate_inconsistent(0x3, 0) == 0);
-
-	printf("section 23 (a record may not contradict itself): all ok\n");
-}
-
 int main(void)
 {
 	test_pwslot();
@@ -624,7 +602,6 @@ int main(void)
 	section20();
 	section21();
 	section22();
-	section23();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);

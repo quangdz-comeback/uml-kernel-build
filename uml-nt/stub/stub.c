@@ -2374,32 +2374,6 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	if (is_syscall && d->halt)
 		park_forever(); /* guest exit(): kernel terminates us */
 
-	/* Shelley 188: never hand back a record that contradicts itself.
-	 * XSTATE_BV may only claim AVX-512 components when XCOMP_BV bit 63
-	 * says the area is compacted; otherwise the kernel's restore is a
-	 * #GP and the thread dies with no user-mode handler — the exact
-	 * signature of this hunt. Measured pair: BV=0x37f, XCOMP=0. */
-	if ((ep->ContextRecord->ContextFlags & 0x00100000u) &&
-	    ep->ContextRecord->ContextFlags != 0) {
-		unsigned char *rec = (unsigned char *)ep->ContextRecord;
-		unsigned long long bv = 0, xc = 0;
-
-		memcpy(&bv, rec + 0x100, 8);
-		memcpy(&xc, rec + 0x108, 8);
-		if (uml_nt_xstate_inconsistent(bv, xc)) {
-			unsigned long long fixed =
-				uml_nt_xstate_mask(bv, xc);
-
-			memcpy(rec + 0x100, &fixed, 8);
-			d->xs_fixed++;
-			if (d->xs_fixed <= 8)
-				fprintf(stderr, "[xs-fix] pid %lu BV=0x%llx "
-					"XCOMP=0x%llx (standard format "
-					"claiming AVX-512) -> BV=0x%llx "
-					"— the restore would #GP on this\n",
-					(unsigned long)d->pid, bv, xc, fixed);
-		}
-	}
 	/* Shelley 183: name anything we dirtied outside our own fields
 	 * before this record goes back to the kernel. */
 	ctx_audit_check(ep->ContextRecord);

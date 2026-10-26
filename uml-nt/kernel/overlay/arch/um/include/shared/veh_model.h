@@ -83,38 +83,4 @@ static inline int uml_nt_veh_leave(struct uml_nt_veh_stack *s,
 	return 0;
 }
 
-/* A record must not contradict itself (Shelley 188).
- *
- * XSTATE_BV names the components present; XCOMP_BV bit 63 says whether the
- * area is in compacted format. Intel SDM: components 5, 6 and 7 (opmask,
- * ZMM_Hi256, Hi16_ZMM) exist only in the compacted format — a record that
- * sets any of those BV bits while declaring standard format is invalid,
- * and handing it back to a context restore is a #GP inside the kernel's
- * own restore path: the thread dies with 0xC0000005 and no user-mode
- * handler ever runs, which is this hunt's signature to the letter.
- *
- * Referee 40396760752 measured exactly that pair on the dying conn:
- * ContextFlags=0x10005f (CONTEXT_XSTATE set), XSTATE_BV=0x37f, XCOMP_BV=0.
- *
- * So: before the record goes back, the standard-format area may only claim
- * standard-format components. Pure logic, red-first in section 23.
- */
-#define UML_NT_XCOMP_COMPACTED	(1ull << 63)
-#define UML_NT_XSTATE_AVX512	0x000000e0ull	/* bits 5, 6, 7 */
-
-static inline unsigned long long uml_nt_xstate_mask(unsigned long long bv,
-						    unsigned long long xcomp)
-{
-	if (xcomp & UML_NT_XCOMP_COMPACTED)
-		return bv;	/* compacted: AVX-512 components are legal */
-	return bv & ~UML_NT_XSTATE_AVX512;
-}
-
-static inline int uml_nt_xstate_inconsistent(unsigned long long bv,
-					     unsigned long long xcomp)
-{
-	return (xcomp & UML_NT_XCOMP_COMPACTED) == 0 &&
-	       (bv & UML_NT_XSTATE_AVX512) != 0;
-}
-
 #endif /* UML_NT_VEH_MODEL_H */
