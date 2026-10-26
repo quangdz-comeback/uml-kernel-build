@@ -11296,6 +11296,8 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		int sg = uml_nt_stack_precommit(c->mm, c->ph,
 						c->d->regs.rsp,
 						c->d->stack_bottom,
+						c->d->stack_top_hint,
+						c->d->stack_alloc_hint,
 						&c->plan);
 
 		if (sg == 0 && c->sg_logged < 4) {

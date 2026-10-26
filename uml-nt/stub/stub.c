@@ -904,8 +904,26 @@ static void exc_entry_note(const EXCEPTION_RECORD *er, const CONTEXT *c)
 	r->tgt = fs_tramp_target;
 	r->dtarget = d->dr_watch[0];
 	/* the committed bottom, for the kernel's proactive grow */
-	if (c != NULL && r->headroom_run > 0)
+	if (c != NULL && r->headroom_run > 0) {
 		d->stack_bottom = r->csp;
+		d->stack_top_hint = r->csp + (unsigned long long)
+			(uintptr_t)(mbi.BaseAddress ?
+				(char *)mbi.BaseAddress - (char *)0 : 0);
+	}
+	if (c != NULL) {
+		/* top of the committed run = base + size of the region the
+		 * trap's rsp sits in; reservation base for the floor */
+		MEMORY_BASIC_INFORMATION q;
+
+		memset(&q, 0, sizeof(q));
+		if (VirtualQuery((void *)(uintptr_t)c->Rsp, &q,
+				 sizeof(q)) == sizeof(q)) {
+			d->stack_top_hint = (unsigned long long)(uintptr_t)
+				q.BaseAddress + (unsigned long long)q.RegionSize;
+			d->stack_alloc_hint = (unsigned long long)(uintptr_t)
+				q.AllocationBase;
+		}
+	}
 }
 
 static void prot_truth_sample(uintptr_t resume_va)

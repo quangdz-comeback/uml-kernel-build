@@ -361,6 +361,12 @@ struct uml_nt_stub_data {
 	 * headroom was 0x258), and Windows is the authority on what is
 	 * committed — the probe publishes it every round. */
 	unsigned long long stack_bottom;
+	/* the top of that same committed run, and the reservation base —
+	 * the kernel's own stack_top/stack_limit are 0 for a conn whose
+	 * mm never went through the ELF image path (referee 40266736890:
+	 * NO GROW top=0x0 limit=0x0), and the stub is the side that can
+	 * ask Windows. */
+	unsigned long long stack_top_hint, stack_alloc_hint;
 	unsigned tramp_page_prot, tramp_page_state;
 	unsigned long long prot_truth_bad; /* ledger exec but actual is not */
 	/* the last protection operation this run performed, for decoding

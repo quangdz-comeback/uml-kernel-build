@@ -173,6 +173,8 @@ int uml_nt_stack_grow(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
  * the committed bottom, inside the reservation, floor = RLIMIT. */
 int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			   unsigned long long rsp, unsigned long long hint_bottom,
+			   unsigned long long top_hint,
+			   unsigned long long alloc_hint,
 			   struct uml_nt_fault_plan *plan)
 {
 	unsigned long long committed = 0, start = 0, off;
@@ -189,8 +191,17 @@ int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		    mm->vma[i].end <= mm->stack_top &&
 		    (committed == 0 || mm->vma[i].start < committed))
 			committed = mm->vma[i].start;
-	d = uml_nt_sg_precommit(mm->stack_top, mm->stack_limit, rsp,
-				committed, UML_NT_SG_RUN, &start);
+	/* the kernel's own stack numbers can be 0 for a conn that never
+	 * went through the ELF image path; the stub measured them */
+	{
+		unsigned long long top = mm->stack_top ? mm->stack_top :
+			top_hint;
+		unsigned long long lim = mm->stack_limit ? mm->stack_limit :
+			(alloc_hint ? alloc_hint + UML_NT_SG_RUN : 0);
+
+		d = uml_nt_sg_precommit(top, lim, rsp, committed,
+					UML_NT_SG_RUN, &start);
+	}
 	if (d <= 0)
 		return d;
 	off = uml_nt_phys_alloc_span(ph, UML_NT_SG_RUN / UML_NT_PHYS_RUN_SIZE);
