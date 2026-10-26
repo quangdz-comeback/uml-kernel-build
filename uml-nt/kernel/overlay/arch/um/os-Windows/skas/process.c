@@ -1140,7 +1140,7 @@ void userspace(struct uml_pt_regs *regs)
 
 					/* another process's memory: the host
 					 * pointer is not ours to read */
-					if (!ReadProcessMemory(c->proc,
+					if (!nt->ReadProcessMemory(c->proc,
 					    (void *)(uintptr_t)now[16],
 					    ib, 16, &got_n) || got_n != 16) {
 						for (k = 0; k < 16; k++)
