@@ -355,6 +355,12 @@ struct uml_nt_stub_data {
 	 * FAILED query reads as "Windows says the page is not executable"
 	 * — label bug #8, referee 40253591749. */
 	unsigned fault_page_ok, tramp_page_ok;
+	/* Shelley 168: the committed bottom of the run the TRAP's rsp sits
+	 * in, straight from VirtualQuery. The kernel's own VMA scan did not
+	 * match (referee 40262318084: [stack-pre] never fired while
+	 * headroom was 0x258), and Windows is the authority on what is
+	 * committed — the probe publishes it every round. */
+	unsigned long long stack_bottom;
 	unsigned tramp_page_prot, tramp_page_state;
 	unsigned long long prot_truth_bad; /* ledger exec but actual is not */
 	/* the last protection operation this run performed, for decoding

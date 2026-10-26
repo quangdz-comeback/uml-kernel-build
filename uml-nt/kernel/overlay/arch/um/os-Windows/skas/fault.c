@@ -172,7 +172,7 @@ int uml_nt_stack_grow(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
  * Same discipline as the fault-driven grow: one run, immediately below
  * the committed bottom, inside the reservation, floor = RLIMIT. */
 int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
-			   unsigned long long rsp,
+			   unsigned long long rsp, unsigned long long hint_bottom,
 			   struct uml_nt_fault_plan *plan)
 {
 	unsigned long long committed = 0, start = 0, off;
@@ -180,7 +180,11 @@ int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 
 	if (mm == 0 || ph == 0 || plan == 0)
 		return 0;
-	for (i = 0; i < mm->nvma; i++)
+	/* the stub's VirtualQuery answer is the authority on what Windows
+	 * has committed (Shelley 168); the VMA scan is the fallback for a
+	 * round where the stub had no exception to measure */
+	committed = hint_bottom;
+	for (i = 0; i < mm->nvma && committed == 0; i++)
 		if (rsp >= mm->vma[i].start && rsp < mm->vma[i].end &&
 		    mm->vma[i].end <= mm->stack_top &&
 		    (committed == 0 || mm->vma[i].start < committed))

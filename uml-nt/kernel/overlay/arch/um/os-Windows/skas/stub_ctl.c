@@ -11294,7 +11294,9 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * this costs one MAP op in an answer we were sending anyway. */
 	if (c->d->action == UML_STUB_ACTION_NONE && c->mm != NULL) {
 		int sg = uml_nt_stack_precommit(c->mm, c->ph,
-						c->d->regs.rsp, &c->plan);
+						c->d->regs.rsp,
+						c->d->stack_bottom,
+						&c->plan);
 
 		if (sg > 0 && c->sg_logged < 8) {
 			c->sg_logged++;

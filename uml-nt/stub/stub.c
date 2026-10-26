@@ -903,6 +903,9 @@ static void exc_entry_note(const EXCEPTION_RECORD *er, const CONTEXT *c)
 	}
 	r->tgt = fs_tramp_target;
 	r->dtarget = d->dr_watch[0];
+	/* the committed bottom, for the kernel's proactive grow */
+	if (c != NULL && r->headroom_run > 0)
+		d->stack_bottom = r->csp;
 }
 
 static void prot_truth_sample(uintptr_t resume_va)
