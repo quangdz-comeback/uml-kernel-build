@@ -1043,6 +1043,17 @@ void userspace(struct uml_pt_regs *regs)
 				c->ans_regs[i], now[i],
 				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
 	}
+	/* Shelley 165: the gamma witness — did the dispatcher apply the
+	 * context we handed back? ask_* is what the stub requested at the
+	 * last resume, and the counters say how often the next entry saw
+	 * exactly that. A nonzero bad count with dr7 dropped is the OS
+	 * refusing the debug state; a death with ask_round unattended is
+	 * a resume that never reached a next entry. */
+	os_info("[ctx-apply] pid %d asks=%llu ok=%llu bad=%llu dr_dropped=%llu "
+		"last(ask rip=0x%llx rsp=0x%llx dr7=0x%llx flags=0x%llx)\n",
+		c->pid, c->d->ask_round, c->d->ctx_check_ok,
+		c->d->ctx_check_bad, c->d->dr_mismatch, c->d->ask_rip,
+		c->d->ask_rsp, c->d->ask_dr7, c->d->ask_flags);
 	os_info("[dr-exec] pid %d armed=%lu hits=%lu last_target=0x%llx "
 		"==> %s\n", c->pid, c->drex_rounds, c->drex_hits_seen,
 		c->drex_va,

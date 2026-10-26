@@ -555,6 +555,17 @@ struct uml_nt_stub_data {
 	 * 17 "MOVED" registers that are simply the NEXT round's trap
 	 * state (referee 40236214578 read exactly that way). */
 	unsigned long long pub_seq;
+	/* Shelley 165 (gamma): "did the dispatcher APPLY the context we
+	 * handed back?" The stub never calls SetThreadContext — the VEH
+	 * return is the apply — so the only honest witness is the NEXT
+	 * entry's own ContextRecord compared with what we asked for.
+	 * asked_* is stamped at the resume, got_* at the next entry, and
+	 * the verdict ring keeps the last 16 rounds. */
+	unsigned long long ask_rip, ask_rsp, ask_dr2, ask_dr7, ask_flags;
+	unsigned long long ask_round;
+	unsigned long long got_rip, got_rsp, got_dr2, got_dr7, got_flags;
+	unsigned long long ctx_check_ok, ctx_check_bad;
+	unsigned long long dr_mismatch; /* DR silently dropped by the OS */
 	unsigned long long dr_applied; /* resumes that carried DR state */
 	unsigned long long d20_guarded; /* answers whose rip held 0f 05 */
 	unsigned long long xstate_cleared;

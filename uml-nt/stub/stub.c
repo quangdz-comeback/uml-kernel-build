@@ -569,6 +569,63 @@ static void xstate_probe_once(void)
 		d->xstate_mask = (unsigned long long)mask;
 }
 
+/* Shelley 165 (gamma): stamp the context we are asking the dispatcher to
+ * apply. No SetThreadContext exists on this path — returning from the VEH
+ * IS the apply — so a refusal cannot be caught here; it can only be read
+ * at the next entry. */
+static void record_ask(const CONTEXT *c)
+{
+	if (d == NULL || c == NULL)
+		return;
+	d->ask_rip = (unsigned long long)c->Rip;
+	d->ask_rsp = (unsigned long long)c->Rsp;
+	d->ask_dr2 = (unsigned long long)c->Dr2;
+	d->ask_dr7 = (unsigned long long)c->Dr7;
+	d->ask_flags = (unsigned long long)c->ContextFlags;
+	d->ask_round++;
+}
+
+/* And compare at the next entry: if the dispatcher applied our context,
+ * Rip/Dr must be exactly what we asked. A DR that came back zeroed while
+ * we asked for Ln means the OS dropped the debug state (which would also
+ * explain a probe that never fires), and a Rip that differs means the
+ * apply failed outright. */
+static void check_apply(const CONTEXT *c)
+{
+	int dr_lost, rip_lost;
+
+	if (d == NULL || c == NULL || d->ask_round == 0)
+		return;
+	rip_lost = ((unsigned long long)c->Rip != d->ask_rip);
+	dr_lost = (d->ask_dr7 != 0 &&
+		   (unsigned long long)c->Dr7 != d->ask_dr7);
+	if (rip_lost || dr_lost) {
+		d->ctx_check_bad++;
+		d->dr_mismatch += dr_lost ? 1 : 0;
+		if (d->ctx_check_bad <= 4 || !(d->ctx_check_bad % 50)) {
+			static char line[256];
+			int n = snprintf(line, sizeof(line),
+					 "[ctx-apply] MISMATCH #%llu round=%llu "
+					 "rip ask=0x%llx got=0x%llx%s dr7 "
+					 "ask=0x%llx got=0x%llx%s\n",
+					 d->ctx_check_bad, d->ask_round,
+					 d->ask_rip,
+					 (unsigned long long)c->Rip,
+					 rip_lost ? " <-- NOT APPLIED" : "",
+					 d->ask_dr7,
+					 (unsigned long long)c->Dr7,
+					 dr_lost ? " <-- DR DROPPED" : "");
+			DWORD wrote;
+
+			if (n > 0)
+				WriteFile(GetStdHandle(STD_ERROR_HANDLE),
+					  line, (DWORD)n, &wrote, NULL);
+		}
+	} else {
+		d->ctx_check_ok++;
+	}
+}
+
 static void note_resume(CONTEXT *c, unsigned long long kind)
 {
 	struct uml_nt_ctx_ring *r;
@@ -683,6 +740,7 @@ static void note_resume(CONTEXT *c, unsigned long long kind)
 		r->xsa_area = ex->xstate.area_size;
 		r->xsa_off = ex->xstate.area_offset;
 	}
+	record_ask(c);
 }
 
 static void action_chain(void)
@@ -1211,6 +1269,10 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	int is_exec = 0;
 	unsigned long long watch_va = 0;
 	int verbatim;
+
+	/* Shelley 165 (gamma): first thing, before any edit — did the
+	 * dispatcher apply the context we asked for last round? */
+	check_apply(c);
 
 	/* The #DB owner (ss_model.h, M5.6a K7 slice D): every
 	 * STATUS_SINGLE_STEP is classified first and NO verdict is
