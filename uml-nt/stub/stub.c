@@ -854,15 +854,19 @@ static void prot_truth_sample(uintptr_t resume_va)
 	if (d == NULL)
 		return;
 	memset(&mbi, 0, sizeof(mbi));
+	d->fault_page_ok = 0;
+	d->tramp_page_ok = 0;
 	if (VirtualQuery((void *)resume_va, &mbi, sizeof(mbi)) ==
 	    sizeof(mbi)) {
 		d->fault_page_prot = (unsigned)mbi.Protect;
 		d->fault_page_state = (unsigned)mbi.State;
+		d->fault_page_ok = 1;
 	}
 	memset(&mbi, 0, sizeof(mbi));
 	if (VirtualQuery((void *)tva, &mbi, sizeof(mbi)) == sizeof(mbi)) {
 		d->tramp_page_prot = (unsigned)mbi.Protect;
 		d->tramp_page_state = (unsigned)mbi.State;
+		d->tramp_page_ok = 1;
 	}
 	/* the kernel decides against the ledger — it is the side that owns
 	 * the VMA — and counts the disagreement here. */

@@ -1053,10 +1053,11 @@ void userspace(struct uml_pt_regs *regs)
 		const struct uml_nt_vma *dv =
 			c->mm ? uml_nt_vma_find(c->mm, c->d->regs.rip) : NULL;
 		int ledger_exec = dv != NULL && (dv->prot & 0x60);
-		int actual_exec = uml_nt_prot_executable(
+		int queried = c->d->fault_page_ok != 0;
+		int actual_exec = queried && uml_nt_prot_executable(
 			c->d->fault_page_prot);
 
-		if (ledger_exec && !actual_exec)
+		if (ledger_exec && queried && !actual_exec)
 			c->d->prot_truth_bad++;
 		os_info("[prot-truth] pid %d resume_page(vma prot=0x%x) "
 			"actual=0x%x state=0x%x %s | trampoline actual=0x%x "
@@ -1064,6 +1065,9 @@ void userspace(struct uml_pt_regs *regs)
 			"prot=0x%llx seq=%llu\n",
 			c->pid, dv ? dv->prot : 0, c->d->fault_page_prot,
 			c->d->fault_page_state,
+			!queried ? "(VirtualQuery FAILED — no truth, not a "
+				   "verdict: state=0 is what an unanswered "
+				   "query looks like)" :
 			(ledger_exec && !actual_exec) ?
 			"<-- LEDGER SAYS EXEC, WINDOWS DOES NOT" : "",
 			c->d->tramp_page_prot, c->d->tramp_page_state,

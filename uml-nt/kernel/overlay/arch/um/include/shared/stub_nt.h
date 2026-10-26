@@ -351,6 +351,10 @@ struct uml_nt_stub_data {
 	 * matter when a fault round arrives — the resume target and the
 	 * fs trampoline — against what the ledger claims. */
 	unsigned fault_page_prot, fault_page_state;
+	/* 1 = VirtualQuery answered. Without this the "actual=0x0" of a
+	 * FAILED query reads as "Windows says the page is not executable"
+	 * — label bug #8, referee 40253591749. */
+	unsigned fault_page_ok, tramp_page_ok;
 	unsigned tramp_page_prot, tramp_page_state;
 	unsigned long long prot_truth_bad; /* ledger exec but actual is not */
 	/* the last protection operation this run performed, for decoding
