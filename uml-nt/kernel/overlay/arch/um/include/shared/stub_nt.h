@@ -372,6 +372,9 @@ struct uml_nt_stub_data {
 	/* the last protection operation this run performed, for decoding
 	 * a downgrade offline */
 	unsigned long long prot_op_va, prot_op_prot, prot_op_seq;
+	/* Shelley 171 [map-truth]: every run-backed MAP must leave Windows
+	 * holding the whole run the ledger claims. */
+	unsigned long long map_truth_ok, map_truth_bad;
 	/* -- v13: DR watchpoints on the tcache entries[] (M5.6a) ------
 	 * Page traps can't isolate the tcache struct from its page-mate
 	 * chunks (the dl6 storm: 38k faults on ONE hot qword, 19.4M

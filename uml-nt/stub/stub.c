@@ -58,6 +58,7 @@
 #include "../kernel/overlay/arch/um/include/shared/veh_model.h"
 #include "../kernel/overlay/arch/um/include/shared/ss_model.h"
 #include "../kernel/overlay/arch/um/include/shared/dr7_model.h"
+#include "../kernel/overlay/arch/um/include/shared/maplen_model.h"
 /* fault.h drags vma.h (kernel-side); the one constant the stub
  * needs is pinned here — keep in sync with fault.h. */
 #define UML_NT_FAULT_WATCHPT 0x10u
@@ -482,13 +483,22 @@ static int do_action(void)
 		return verify_prot(page, d->prot);
 	}
 	case UML_STUB_ACTION_MAP: {
+		/* Shelley 171: a run-backed op commits its WHOLE run. A view
+		 * mapped with the content length leaves the rest of the run
+		 * non-existent for Windows while the kernel's VMA (and every
+		 * walker) believes the run is there — measured as a stack run
+		 * with only 3 of its 16 pages committed, which is what the
+		 * dispatcher fell into. */
+		SIZE_T view_len = (SIZE_T)uml_nt_map_len(
+			(unsigned long long)d->map_len,
+			(unsigned long long)d->map_off);
 		void *base = MapViewOfFileEx(phys_sec,
 					     map_access(d->map_prot),
 					     (DWORD)((d->map_off >> 32) &
 						     0xFFFFFFFFu),
 					     (DWORD)(d->map_off &
 						     0xFFFFFFFFu),
-					     (SIZE_T)d->map_len,
+					     view_len,
 					     (PVOID)(uintptr_t)d->map_va);
 
 		if (base == NULL) {
@@ -501,12 +511,42 @@ static int do_action(void)
 		/* The view came in RWX (raisable, see map_access): drop
 		 * the page protection to what the kernel asked for. A
 		 * later PROTECT op can move it either way. */
-		if (!VirtualProtect(base, (SIZE_T)d->map_len, d->map_prot,
+		if (!VirtualProtect(base, view_len, d->map_prot,
 				    &old_prot)) {
 			fprintf(stderr, "stub: map VirtualProtect(%p, "
 				"%#x) failed (%lu)\n", base,
 				(unsigned)d->map_prot, GetLastError());
 			return 0;
+		}
+		/* [map-truth] (Shelley 171): the ledger is run-granular, so
+		 * Windows must agree — the region must start at the VA and
+		 * cover the run we claim. Loud on mismatch: silence here is
+		 * what let a 3-page stack look like a 64K one. */
+		{
+			MEMORY_BASIC_INFORMATION mq;
+
+			memset(&mq, 0, sizeof(mq));
+			if (VirtualQuery(base, &mq, sizeof(mq)) ==
+			    sizeof(mq)) {
+				d->map_truth_ok++;
+				if ((unsigned long long)(uintptr_t)
+						mq.BaseAddress !=
+					(unsigned long long)d->map_va ||
+				    mq.RegionSize < view_len) {
+					d->map_truth_bad++;
+					fprintf(stderr, "[map-truth] va=%#llx "
+						"want_run=%#llx base=%p "
+						"region=%#llx state=%#lx "
+						"prot=%#lx ==> LEDGER SAYS "
+						"MORE THAN WINDOWS HAS\n",
+						d->map_va,
+						(unsigned long long)view_len,
+						mq.BaseAddress,
+						(unsigned long long)mq.RegionSize,
+						(unsigned long)mq.State,
+						(unsigned long)mq.Protect);
+				}
+			}
 		}
 		/* mapcanary (stub_nt.h v7): read the view's tail-8
 		 * THROUGH the fresh mapping so the kernel can prove the

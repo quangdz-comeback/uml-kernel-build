@@ -23,6 +23,7 @@
 #include "drslot_model.h"
 #include "prot_restore_model.h"
 #include "stackgrow_model.h"
+#include "maplen_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -288,6 +289,32 @@ static void section18(void)
 	printf("section 18 (stack grown ahead of the exception): all ok\n");
 }
 
+/* section 19 — a run-backed MAP commits its whole run (Shelley 171).
+ * Measured: the ledger claimed [0x60850000,0x60860000) while Windows had
+ * only [0x6085d000,0x60860000) — 3 of 16 pages — because the view was
+ * mapped with the content length. The dispatcher then built its frame in
+ * memory that did not exist. The VMA stays run-granular; the MAP has to
+ * match it.
+ */
+static void section19(void)
+{
+	/* a. a run-aligned op that asks for less still commits the run */
+	CHECK(uml_nt_map_len(0x3000, 0x7580000ull) == UML_NT_MAP_RUN);
+	CHECK(uml_nt_map_len(1, 0x10000ull) == UML_NT_MAP_RUN);
+	/* b. a full run is unchanged */
+	CHECK(uml_nt_map_len(UML_NT_MAP_RUN, 0x20000ull) == UML_NT_MAP_RUN);
+	/* c. a partial (non-run-aligned) op keeps its exact shape: file
+	 *    segments must never grow past what the file holds */
+	CHECK(uml_nt_map_len(0x3000, 0x1000ull) == 0x3000);
+	CHECK(uml_nt_map_len(0x1234, 0x1ull) == 0x1234);
+	/* d. a multi-run op is unchanged */
+	CHECK(uml_nt_map_len(0x20000, 0x10000ull) == 0x20000);
+	/* e. zero length stays zero (nothing to map) */
+	CHECK(uml_nt_map_len(0, 0x10000ull) == 0);
+
+	printf("section 19 (a run-backed MAP commits the run): all ok\n");
+}
+
 int main(void)
 {
 	test_pwslot();
@@ -477,6 +504,7 @@ int main(void)
 	section16();
 	section17();
 	section18();
+	section19();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);
