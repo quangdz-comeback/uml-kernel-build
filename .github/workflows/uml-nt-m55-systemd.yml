@@ -199,6 +199,23 @@ jobs:
         shell: msys2 {0}
         run: ls -lh rootfs-img
 
+      - name: WER LocalDumps for stub.exe (diagnostics only)
+        shell: powershell
+        run: |
+          # Shelley 188: when a process dies unhandled, WER can write a
+          # dump that carries the REAL exception record — code, address
+          # and the thread context at death, including exceptions the
+          # user-mode handlers never saw. Diagnostics only; it does not
+          # touch the gate.
+          $dir = Join-Path $env:RUNNER_TEMP "uml-dumps"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $k = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\stub.exe"
+          New-Item -Path $k -Force | Out-Null
+          New-ItemProperty -Path $k -Name DumpFolder -Value $dir -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $k -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $k -Name DumpCount -Value 4 -PropertyType DWord -Force | Out-Null
+          Write-Host "LocalDumps -> $dir (Type=2 full)"
+
       - name: NATIVE systemd boot (M5.5a + M5.5b-1 login feed)
         shell: msys2 {0}
         run: |
@@ -308,3 +325,11 @@ jobs:
         with:
           name: m55a-systemd-log-${{ github.run_id }}
           path: uml-nt/launcher/systemd.log
+
+      - name: Upload WER dumps (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m55a-wer-dumps-${{ github.run_id }}
+          path: ${{ runner.temp }}/uml-dumps/*.dmp
+          if-no-files-found: warn

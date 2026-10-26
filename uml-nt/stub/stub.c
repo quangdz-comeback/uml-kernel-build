@@ -1535,6 +1535,8 @@ static void ctx_audit_snapshot(CONTEXT *c)
 	ctx_entry_ok = 0;
 	if (c == NULL || d == NULL)
 		return;
+	if (d != NULL && d->quiet)
+		return;
 	memcpy(&ctx_entry, c, sizeof(ctx_entry));
 	ctx_entry_ok = 1;
 	if (d != NULL) {

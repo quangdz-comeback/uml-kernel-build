@@ -181,6 +181,27 @@ static int witness_off(void)
  * comparable. Prints once, loudly, because a silent switch is exactly the
  * class of mistake this hunt keeps paying for. */
 int uml_nt_drexec_off = -1;
+/* Shelley 188 (3): a further step down from EVADE — turn the remaining
+ * login-conn instruments (ctx-audit snapshots, reg-fault dumps) off too.
+ * If the death disappears under this, one of them still had no lever. */
+int uml_nt_quiet_off = -1;
+static int quiet_off(void)
+{
+	int i;
+
+	if (uml_nt_quiet_off >= 0)
+		return uml_nt_quiet_off;
+	uml_nt_quiet_off = 0;
+	for (i = 0; i < uml_boot.argc; i++)
+		if (uml_boot.argv[i] != NULL &&
+		    __builtin_strcmp(uml_boot.argv[i],
+				     "uml_nt_quiet=1") == 0)
+			uml_nt_quiet_off = 1;
+	if (uml_nt_quiet_off)
+		os_info("[quiet] uml_nt_quiet=1 — ctx-audit snapshots and "
+			"reg-fault dumps OFF (deepest EVADE leg)\n");
+	return uml_nt_quiet_off;
+}
 static int drexec_off(void)
 {
 	int i;
@@ -3743,6 +3764,8 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 		uml_nt_drs_retire(&c->drs, UML_NT_DRS_ARENA);
 		uml_nt_drs_retire(&c->drs, UML_NT_DRS_WSLOT);
 		c->drex_slot = got[0];
+		if (quiet_off())
+			c->d->quiet = 1;
 		d->dr_watch[c->drex_slot] = va;
 		d->dr_exec_mask |= 1u << c->drex_slot;
 		os_info("[dr-exec] slot=%d shape=%s (ledger: exec=%d)\n",

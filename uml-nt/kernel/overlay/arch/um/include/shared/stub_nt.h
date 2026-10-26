@@ -170,6 +170,7 @@ struct uml_nt_stub_data {
 	 * VEH is process-wide, but veh_body's logic assumes the guest
 	 * thread — an exception on any other thread would be misrouted and
 	 * its record mangled. */
+	u32_nt quiet;		/* 1 = ctx-audit / reg-fault off on this conn */
 	u32_nt guest_tid;
 	u32_nt census_other;		/* entries on a non-guest thread */
 	u32_nt census_tids[4];		/* the first four distinct tids */
