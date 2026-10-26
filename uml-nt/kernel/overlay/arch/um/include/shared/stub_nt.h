@@ -402,13 +402,6 @@ struct uml_nt_stub_data {
 	 * it does, the NTSTATUS IS the answer we could never read before.
 	 * Two shapes are recorded: how many calls, how many came back, and
 	 * the last status + the context it refused. */
-	/* 1 = this conn resumes through NtContinue (set by the kernel for
-	 * the login conn only). The unconditional version broke the native
-	 * boot test outright — "console: stdin status c000014b
-	 * (class=fatal)" — so the discriminator is scoped to the conn whose
-	 * death we are chasing, and every other round keeps the proven
-	 * path. */
-	unsigned ntc_enable;
 	unsigned long long ntc_calls, ntc_returned, ntc_last_status;
 	unsigned long long ntc_rip, ntc_rsp, ntc_dr7, ntc_flags;
 	struct uml_nt_ret_ring {
