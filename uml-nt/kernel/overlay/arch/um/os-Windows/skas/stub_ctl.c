@@ -173,6 +173,32 @@ static int witness_off(void)
 	return uml_nt_witness_off;
 }
 
+/* M5.6a A/B (Shelley 182): the DR-execute probe is the instrument that
+ * pushes a #DB round between the guest's password syscalls. The lever
+ * decides whether the probe exists at all on this run:
+ *   uml_nt_drexec=0  -> probe off (the A/B "off" leg)
+ * Anything else keeps today's behaviour, so every earlier referee stays
+ * comparable. Prints once, loudly, because a silent switch is exactly the
+ * class of mistake this hunt keeps paying for. */
+int uml_nt_drexec_off = -1;
+static int drexec_off(void)
+{
+	int i;
+
+	if (uml_nt_drexec_off >= 0)
+		return uml_nt_drexec_off;
+	uml_nt_drexec_off = 0;
+	for (i = 0; i < uml_boot.argc; i++)
+		if (uml_boot.argv[i] != NULL &&
+		    __builtin_strcmp(uml_boot.argv[i],
+				     "uml_nt_drexec=0") == 0)
+			uml_nt_drexec_off = 1;
+	if (uml_nt_drexec_off)
+		os_info("[drexec] uml_nt_drexec=0 — the DR-execute probe is "
+			"OFF for this boot (A/B leg)\n");
+	return uml_nt_drexec_off;
+}
+
 static void uml_nt_cowtrap_arm(struct uml_nt_stub_conn *c,
 			       unsigned long long owner_va,
 			       unsigned long long hit_va,
@@ -3645,6 +3671,9 @@ static int dr_probe_owns_slots(struct uml_nt_stub_conn *c)
 static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
+
+	if (drexec_off())
+		return;
 	unsigned long long va;
 
 	if (d == NULL || c->mm == NULL || c->imgw_n <= 0)
