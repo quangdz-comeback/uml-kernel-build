@@ -11298,6 +11298,20 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 						c->d->stack_bottom,
 						&c->plan);
 
+		if (sg == 0 && c->sg_logged < 4) {
+			/* why did it not grow? the inputs, once per conn —
+			 * "no line" must never be the answer to "why". */
+			c->sg_logged++;
+			os_info("[stack-pre] pid %lu NO GROW rsp=0x%llx "
+				"hint=0x%llx top=0x%llx limit=0x%llx "
+				"headroom=0x%llx\n",
+				(unsigned long)c->pid, c->d->regs.rsp,
+				c->d->stack_bottom, c->mm->stack_top,
+				c->mm->stack_limit,
+				(c->d->stack_bottom != 0 &&
+				 c->d->regs.rsp > c->d->stack_bottom) ?
+				c->d->regs.rsp - c->d->stack_bottom : 0);
+		}
 		if (sg > 0 && c->sg_logged < 8) {
 			c->sg_logged++;
 			os_info("[stack-pre] pid %lu rsp=0x%llx grew to "
