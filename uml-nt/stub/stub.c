@@ -1528,6 +1528,8 @@ static void entry_stamp(const EXCEPTION_POINTERS *ep)
  * purpose. */
 static CONTEXT ctx_entry;
 static int ctx_entry_ok;
+static unsigned char xs_prev[256];
+static int xs_prev_ok;
 static void ctx_audit_snapshot(CONTEXT *c)
 {
 	ctx_entry_ok = 0;
@@ -1574,17 +1576,45 @@ static void ctx_audit_check(CONTEXT *c)
 				uml_nt_ctx_word_name(off), b, a);
 		dirty++;
 	}
+	/* (gamma) the XSAVE header and the XMM block: a compacted-format
+	 * mismatch is a bit in XCOMP_BV, entropy is a large byte diff. */
+	{
+		const unsigned char *rec = (const unsigned char *)c;
+		const unsigned char *xmm = rec + 0x1a0;	/* XMM0..15 */
+
+		memcpy(&d->xs_bv, rec + 0x100, 8);
+		memcpy(&d->xs_xcomp, rec + 0x108, 8);
+		if (xs_prev_ok) {
+			unsigned long long diff = 0, first = 0;
+			int k, seen = 0;
+
+			for (k = 0; k < 256; k++)
+				if (xs_prev[k] != xmm[k]) {
+					diff++;
+					if (!seen++) {
+						first = (unsigned long long)k;
+					}
+				}
+			d->xs_xmm_diff = diff;
+			d->xs_xmm_first = first;
+		}
+		memcpy(xs_prev, xmm, 256);
+		xs_prev_ok = 1;
+	}
 	if (dirty > d->ctx_dirty_max)
 		d->ctx_dirty_max = (u32_nt)dirty;
 	if (d->ctx_rounds % 200u == 0)
 		fprintf(stderr, "[ctx-audit] pid %lu rounds=%lu snapshots=%lu "
-			"dirty_max=%lu xs_changed=%lu xs_hdr=0x%llx\n",
+			"dirty_max=%lu xs_changed=%lu xs_hdr=0x%llx "
+			"BV=0x%llx XCOMP=0x%llx xmm_diff=%lu first=%lu\n",
 			(unsigned long)d->pid,
 			(unsigned long)d->ctx_rounds,
 			(unsigned long)d->ctx_snapshots,
 			(unsigned long)d->ctx_dirty_max,
 			(unsigned long)d->ctx_xs_changed,
-			d->ctx_xs_hdr);
+			d->ctx_xs_hdr, d->xs_bv, d->xs_xcomp,
+			(unsigned long)d->xs_xmm_diff,
+			(unsigned long)d->xs_xmm_first);
 	if (dirty != d->ctx_dirty_words) {
 		d->ctx_dirty_words = (u32_nt)dirty;
 		fprintf(stderr, "[ctx-dirty] pid %lu round dirty_words=%llu "

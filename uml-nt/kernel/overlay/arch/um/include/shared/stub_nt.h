@@ -155,6 +155,14 @@ struct uml_nt_stub_data {
 	 * 6 record check reached (the round lived). Monotonic.
 	 */
 	volatile u32_nt vstage;
+	/* Shelley 185/186 (gamma): the XSAVE header of the record each round
+	 * carried — XSTATE_BV at CONTEXT+0x100, XCOMP_BV at +0x108 — and how
+	 * many bytes of the 256-byte XMM block differ from the previous round
+	 * of this conn. A compacted-format mismatch shows up as a MBZ bit set
+	 * in XCOMP_BV; entropy in XMM shows up as a big diff. */
+	unsigned long long xs_bv, xs_xcomp;
+	unsigned long long xs_xmm_diff;
+	unsigned long long xs_xmm_first;	/* first differing XMM byte */
 	u32_nt ctx_snapshots;	/* ctx_audit_snapshot ran */
 	u32_nt ctx_dirty_max;	/* worst dirty_words seen */
 	u32_nt ctx_xs_changed;	/* xs_hdr differed from the previous round */

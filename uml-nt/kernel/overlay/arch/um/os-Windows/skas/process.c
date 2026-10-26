@@ -957,6 +957,16 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->ctx_dirty_max == 0 ?
 						"ran and never found a dirty word"
 						: "WE DIRTIED THE RECORD");
+					os_info("[xs-diff] pid %d BV=0x%llx "
+						"XCOMP=0x%llx xmm_diff=%llu "
+						"first=%llu ==> %s\n",
+						c->pid, c->d->xs_bv,
+						c->d->xs_xcomp,
+						c->d->xs_xmm_diff,
+						c->d->xs_xmm_first,
+						(c->d->xs_xcomp >> 63) ?
+						"COMPACTED format (XCOMP_BV bit 63 set)"
+						: "standard format");
 					os_info("[stage] pid %d last_stage=%u (%s)\n",
 						c->pid, (unsigned)c->d->vstage,
 						c->d->vstage == 1 ?
@@ -972,8 +982,17 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->vstage == 6 ?
 						"record check reached (the round lived)" :
 						"no stage");
+					/* (alpha, Shelley 186): the number below
+					 * IS GetExitCodeProcess's — the death
+					 * line's source is named here so it can
+					 * never be read as "an exception code we
+					 * guessed". 0xC0000005 as an exit code
+					 * means the thread died from an AV no
+					 * handler took; TerminateThread would
+					 * leave a different number. */
 					os_info("userspace: stub pid %d "
-						"died silently (%lu) — last "
+						"died silently (%lu from "
+						"GetExitCodeProcess) — last "
 						"cmd=%u rip=%llx rsp=%llx "
 						"rax=%llx xs_flags=%x "
 						"stub-stk=[%llx,%llx) "
