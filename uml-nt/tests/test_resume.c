@@ -25,6 +25,7 @@
 #include "stackgrow_model.h"
 #include "maplen_model.h"
 #include "regshape_model.h"
+#include "replay_model.h"
 
 static int fails;
 #define CHECK(cond) do { \
@@ -345,6 +346,35 @@ static void section20(void)
 	printf("section 20 (register garbage shapes): all ok\n");
 }
 
+/* section 21 — REPLAY FOLLOWS CONTENT (Shelley 180, D-level).
+ * A store replay obeys the same law as a code patch: content is the
+ * master, the operation follows. Only "the word is still what we read"
+ * may be written; "our value is already there" must skip; anything else
+ * is a newer writer and must not be overwritten.
+ */
+static void section21(void)
+{
+	/* a. the three verdicts, on the observed entropy-buffer shape */
+	CHECK(uml_nt_replay_verdict(0, 0, 0x9fb20b33ba71684aull) ==
+	      UML_NT_REPLAY_WRITE);
+	CHECK(uml_nt_replay_verdict(0x9fb20b33ba71684aull, 0,
+				    0x9fb20b33ba71684aull) ==
+	      UML_NT_REPLAY_ALREADY);
+	CHECK(uml_nt_replay_verdict(0x1111111111111111ull, 0,
+				    0x9fb20b33ba71684aull) ==
+	      UML_NT_REPLAY_FOREIGN);
+	/* b. exactly one verdict authorises a write */
+	CHECK(uml_nt_replay_may_write(0, 0, 7) == 1);
+	CHECK(uml_nt_replay_may_write(7, 0, 7) == 0);
+	CHECK(uml_nt_replay_may_write(9, 0, 7) == 0);
+	/* c. before == want is not a replay: the word is already final */
+	CHECK(uml_nt_replay_verdict(5, 5, 5) == UML_NT_REPLAY_WRITE);
+	/* d. a zero-intent store must never erase entropy */
+	CHECK(uml_nt_replay_may_write(0x9fb20b33ba71684aull, 0, 0) == 0);
+
+	printf("section 21 (replay follows content): all ok\n");
+}
+
 int main(void)
 {
 	test_pwslot();
@@ -536,6 +566,7 @@ int main(void)
 	section18();
 	section19();
 	section20();
+	section21();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);

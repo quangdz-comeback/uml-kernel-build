@@ -49,6 +49,7 @@
 #include <stub-panic.h>
 #include <stub_nt.h>
 #include <ss_model.h>
+#include <replay_model.h>
 #include <resume_model.h>
 #include <guard_model.h>
 
@@ -5431,6 +5432,32 @@ static void replay_check_verify(struct uml_nt_stub_conn *c)
 			"landing (if any) rode the copy\n",
 			(unsigned long)c->pid, c->rp_va,
 			c->rp_armrun, vrun);
+	/* REPLAY FOLLOWS CONTENT (Shelley 180): classify this word before
+	 * anything is allowed to act on it. One verdict may write; the
+	 * other two must not, and both are evidence that a race is real. */
+	{
+		int verdict = uml_nt_replay_verdict(now, c->rp_before,
+						    c->rp_want);
+
+		if (verdict == UML_NT_REPLAY_WRITE)
+			c->rp_writes++;
+		else if (verdict == UML_NT_REPLAY_ALREADY)
+			c->rp_already++;
+		else
+			c->rp_foreign++;
+		if (c->rp_guarded < 40) {
+			c->rp_guarded++;
+			os_info("[replay-guard] pid %lu va=0x%llx verdict=%s "
+				"now=0x%llx before=0x%llx want=0x%llx "
+				"(writes=%lu already=%lu foreign=%lu)\n",
+				(unsigned long)c->pid, c->rp_va,
+				uml_nt_replay_name(verdict), now,
+				c->rp_before, c->rp_want,
+				(unsigned long)c->rp_writes,
+				(unsigned long)c->rp_already,
+				(unsigned long)c->rp_foreign);
+		}
+	}
 	if (now == c->rp_before && now != c->rp_want) {
 		unsigned long long run, sz = uml_boot.physmem_size;
 		const char *b = (const char *)uml_boot.physmem_base;

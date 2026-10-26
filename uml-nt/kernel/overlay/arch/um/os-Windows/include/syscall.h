@@ -209,6 +209,12 @@ struct uml_nt_stub_conn {
 	unsigned sg_logged;
 	unsigned mm_logged; /* [mm-id] lines printed */
 	unsigned rg_logged; /* [reg-fault] dumps printed */
+	/* REPLAY FOLLOWS CONTENT (Shelley 180): the per-word verdict
+	 * ledger. writes = the store had not happened and may be replayed;
+	 * already = its own value is present; foreign = someone newer wrote
+	 * the word (replaying would destroy fresh data — the entropy
+	 * class). */
+	unsigned long rp_writes, rp_already, rp_foreign, rp_guarded;
 	/* Shelley 170: the LAST rounds are the ones that matter — a grow
 	 * decision is only interesting at the round that died, and the
 	 * first two answers always look healthy. Ring, dumped at death. */
