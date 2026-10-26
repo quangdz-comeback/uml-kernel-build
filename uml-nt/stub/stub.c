@@ -1444,8 +1444,34 @@ static void veh_stk_selfcheck(void)
 
 static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep);
 
+/* Shelley 173: the first line of the handler owns the record. Nothing
+ * has been read, decided or overwritten yet — if an entry is missing
+ * from this ring, that exception never entered a handler we own. */
+static void entry_stamp(const EXCEPTION_POINTERS *ep)
+{
+	struct uml_nt_entry_ring *r;
+	long at;
+
+	if (d == NULL)
+		return;
+	at = InterlockedIncrement(&d->entry_ring_at);
+	r = &d->entry_ring[(unsigned long)(at - 1) & 15u];
+	r->n = (unsigned long long)(at - 1);
+	r->seq = d->done_seq;
+	r->cmd = d->cmd;
+	r->code = ep && ep->ExceptionRecord ?
+		(unsigned long long)ep->ExceptionRecord->ExceptionCode : 0;
+	r->rip = ep && ep->ContextRecord ?
+		(unsigned long long)ep->ContextRecord->Rip : 0;
+	r->rsp = ep && ep->ContextRecord ?
+		(unsigned long long)ep->ContextRecord->Rsp : 0;
+	r->in_body = 0;
+	r->slot = (unsigned long long)((at - 1) & 15u);
+}
+
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
+	entry_stamp(ep);
 	unsigned long long sp_in = veh_now_sp();
 
 	d->veh_entries++;

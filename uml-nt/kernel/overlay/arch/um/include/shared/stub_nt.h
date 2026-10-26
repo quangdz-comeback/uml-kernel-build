@@ -384,6 +384,19 @@ struct uml_nt_stub_data {
 	 * TF set or RF clear, so the kernel-side resume raises the #DB
 	 * itself before user mode can dispatch.
 	 */
+	/* Shelley 173 (1)/(2): EVERY VEH entry, stamped at the FIRST line of
+	 * the handler — before anything can overwrite d->cmd or done_seq.
+	 * The index is taken atomically so two nested entries can never
+	 * share a slot (a shared slot would hide data, not just a label).
+	 * If the dying #DB is followed by a fault that appears here and
+	 * nowhere else, that fault never reached a handler we own — it is a
+	 * nested exception outside our coverage, and the fix is a catch-all
+	 * at dispatcher level. */
+	struct uml_nt_entry_ring {
+		unsigned long long n, seq, cmd, code, rip, rsp;
+		unsigned long long in_body, slot;
+	} entry_ring[16];
+	volatile long entry_ring_at; /* InterlockedIncrement */
 	struct uml_nt_ret_ring {
 		unsigned long long seq, rip, rsp, eflags, cs, ss;
 		unsigned long long dr0, dr1, dr2, dr3, dr6, dr7, ctx_flags;

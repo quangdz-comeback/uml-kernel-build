@@ -1044,6 +1044,25 @@ void userspace(struct uml_pt_regs *regs)
 				c->ans_regs[i], now[i],
 				c->ans_regs[i] != now[i] ? "  <-- MOVED" : "");
 	}
+	/* Shelley 173: every VEH entry, stamped at the handler's first
+	 * line. An exception here with no counterpart elsewhere is an
+	 * exception that arrived while we were inside the dispatch. */
+	{
+		long at = c->d->entry_ring_at;
+		unsigned i, n = at < 16 ? (unsigned)at : 16;
+
+		os_info("[entry-ring] pid %d entries=%ld\n", c->pid, at);
+		for (i = 0; i < n; i++) {
+			struct uml_nt_entry_ring *r =
+				&c->d->entry_ring[
+					((unsigned long)(at - 1 - (long)i)) & 15u];
+
+			os_info("[entry-ring] #%u n=%llu seq=%llu cmd=%llu "
+				"code=0x%llx rip=0x%llx rsp=0x%llx\n",
+				i, r->n, r->seq, r->cmd, r->code, r->rip,
+				r->rsp);
+		}
+	}
 	/* Shelley 172: the returned contexts, newest first — TF/RF and the
 	 * DR state at each resume. The live #DB rounds and the fatal one are
 	 * in here; the diff is the answer. */
