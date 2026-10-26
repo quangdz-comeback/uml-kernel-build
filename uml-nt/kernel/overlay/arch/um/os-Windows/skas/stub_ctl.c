@@ -11300,6 +11300,14 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 						c->d->stack_alloc_hint,
 						&c->plan);
 
+		if (sg < 0 && c->sg_logged < 4) {
+			c->sg_logged++;
+			os_info("[stack-pre] pid %lu grow REQUESTED but the "
+				"plan refused it (rsp=0x%llx bottom=0x%llx) "
+				"— the round goes out unchanged\n",
+				(unsigned long)c->pid, c->d->regs.rsp,
+				c->d->stack_bottom);
+		}
 		if (sg == 0 && c->d->stack_bottom != 0 && c->sg_logged < 4) {
 			/* why did it not grow? the inputs, once per conn —
 			 * "no line" must never be the answer to "why". */

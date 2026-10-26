@@ -220,9 +220,12 @@ int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	}
 	if (plan_op(plan, UML_NT_FOP_MAP, 0x04u, start, UML_NT_SG_RUN,
 		    (unsigned long long)off) < 0) {
-		plan->kill = 1;
-		plan->kill_why = 'o';
-		return -1;
+		/* an OPPORTUNISTIC grow must never kill a conn: if the plan
+		 * cannot carry the op, the VMA goes back and the round goes
+		 * out as it would have (Shelley 168's discipline — grow
+		 * ahead is a courtesy, not a repair). */
+		uml_nt_phys_unref(ph, off);
+		return 0;
 	}
 	return 1;
 }
