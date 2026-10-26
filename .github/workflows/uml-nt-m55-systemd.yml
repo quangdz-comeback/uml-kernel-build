@@ -326,10 +326,12 @@ jobs:
           name: m55a-systemd-log-${{ github.run_id }}
           path: uml-nt/launcher/systemd.log
 
-      - name: Upload WER dumps (diagnostics)
+      - name: Upload WER dumps + last-chance record (diagnostics)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: m55a-wer-dumps-${{ github.run_id }}
-          path: ${{ runner.temp }}/uml-dumps/*.dmp
+          path: |
+            ${{ runner.temp }}/uml-dumps/*.dmp
+            uml-nt/launcher/stub-unhandled.txt
           if-no-files-found: warn

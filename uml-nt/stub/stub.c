@@ -1668,6 +1668,57 @@ static void ctx_audit_check(CONTEXT *c)
 	ctx_entry_ok = 0;
 }
 
+/* The last-chance record (Shelley 188). Runs when no handler took the
+ * exception — which is exactly the case this hunt keeps hitting. Writes
+ * one line with everything the record carries, flushes, and returns
+ * EXCEPTION_CONTINUE_SEARCH so the process dies the same way it would
+ * have. */
+static LONG CALLBACK unhandled_writer(EXCEPTION_POINTERS *ep)
+{
+	HANDLE f;
+	DWORD wrote = 0;
+	char line[512];
+	int n;
+	EXCEPTION_RECORD *er = ep ? ep->ExceptionRecord : NULL;
+	CONTEXT *c = ep ? ep->ContextRecord : NULL;
+
+	if (er == NULL || c == NULL)
+		return EXCEPTION_CONTINUE_SEARCH;
+	n = 0;
+	n += sprintf(line + n, "stub: UNHANDLED code=0x%08lx addr=0x%llx "
+		     "nparams=%lu", (unsigned long)er->ExceptionCode,
+		     (unsigned long long)(uintptr_t)er->ExceptionAddress,
+		     (unsigned long)er->NumberParameters);
+	{
+		DWORD k;
+		for (k = 0; k < er->NumberParameters && k < 4; k++)
+			n += sprintf(line + n, " info[%lu]=0x%llx",
+				     (unsigned long)k, (unsigned long long)
+				     er->ExceptionInformation[k]);
+	}
+	n += sprintf(line + n, " rip=0x%llx rsp=0x%llx rax=0x%llx "
+		     "rcx=0x%llx rdx=0x%llx rbx=0x%llx rsi=0x%llx "
+		     "rdi=0x%llx rbp=0x%llx r8=0x%llx r9=0x%llx "
+		     "r10=0x%llx r11=0x%llx flags=0x%lx\n",
+		     (unsigned long long)c->Rip, (unsigned long long)c->Rsp,
+		     (unsigned long long)c->Rax, (unsigned long long)c->Rcx,
+		     (unsigned long long)c->Rdx, (unsigned long long)c->Rbx,
+		     (unsigned long long)c->Rsi, (unsigned long long)c->Rdi,
+		     (unsigned long long)c->Rbp, (unsigned long long)c->R8,
+		     (unsigned long long)c->R9, (unsigned long long)c->R10,
+		     (unsigned long long)c->R11,
+		     (unsigned long)c->EFlags);
+	fprintf(stderr, "%s", line);
+	f = CreateFileA("stub-unhandled.txt", GENERIC_WRITE, 0, NULL,
+			CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (f != INVALID_HANDLE_VALUE) {
+		WriteFile(f, line, (DWORD)n, &wrote, NULL);
+		FlushFileBuffers(f);
+		CloseHandle(f);
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	entry_stamp(ep);
@@ -2521,6 +2572,14 @@ int main(int argc, char **argv)
 	}
 
 	SetUnhandledExceptionFilter(unhandled_filter);
+	/* Shelley 188: the LAST-CHANCE record. A VEH sees everything user
+	 * mode raises — except an exception raised where dispatchers do not
+	 * run. The unhandled filter still gets the record in those cases, so
+	 * it writes the sentence we have been missing (code, address, the
+	 * four parameters, and the outage context) to a file the referee can
+	 * read. It never swallows: CONTINUE_SEARCH, so the process still
+	 * dies exactly as before. */
+	SetUnhandledExceptionFilter(unhandled_writer);
 	if (!AddVectoredExceptionHandler(1, veh_handler))
 		die("AddVectoredExceptionHandler", GetLastError());
 
