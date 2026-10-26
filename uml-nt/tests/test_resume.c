@@ -372,6 +372,16 @@ static void section21(void)
 	/* d. a zero-intent store must never erase entropy */
 	CHECK(uml_nt_replay_may_write(0x9fb20b33ba71684aull, 0, 0) == 0);
 
+	/* e. a ledger entry from another round cannot classify anything:
+	 * 70 "FOREIGN" hits of referee 40358989413 were exactly this */
+	CHECK(uml_nt_replay_fresh(7, 7) == 1);
+	CHECK(uml_nt_replay_fresh(7, 8) == 0);
+	CHECK(uml_nt_replay_fresh(0, 0) == 0);	/* no stamp = not fresh */
+	CHECK(uml_nt_replay_verdict_seq(0x9999, 0, 0x9999, 0) ==
+	      UML_NT_REPLAY_STALE);
+	CHECK(uml_nt_replay_verdict_seq(0x9999, 0, 0x9999, 1) ==
+	      UML_NT_REPLAY_ALREADY);
+
 	printf("section 21 (replay follows content): all ok\n");
 }
 

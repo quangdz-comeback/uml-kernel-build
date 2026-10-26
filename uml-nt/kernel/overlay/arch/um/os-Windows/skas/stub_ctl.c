@@ -539,13 +539,52 @@ static int uml_nt_tctrip_emulate(struct uml_nt_stub_conn *c,
 		uml_nt_flatwr_check(c, UML_NT_FLATWR_SITE_TCTRIP_EMU,
 				    dst, size, (unsigned long long)off,
 				    cap, off);
-		if (size == 2)
-			*(unsigned short *)((char *)
-				uml_boot.physmem_base + off) =
-				(unsigned short)val;
-		else
-			*(unsigned long long *)((char *)
-				uml_boot.physmem_base + off) = val;
+		/* REPLAY FOLLOWS CONTENT, at the site that really writes.
+		 * Shelley 181's audit: this emulated struct store is the ONE
+		 * place the kernel puts a saved replay value into guest
+		 * memory — replay_check_verify only ever measures. So the
+		 * guard belongs here, and it has two laws:
+		 *   1. a 2-byte store must be 2-byte aligned, an 8-byte
+		 *      store 8-byte: an unaligned one IS the u16-at-+6
+		 *      signature (0x4802… shifted into a register's top
+		 *      half) and must never be written;
+		 *   2. the word must not already hold the value (ALREADY):
+		 *      the store happened, writing again is at best noise.
+		 */
+		{
+			unsigned int misaligned = (size == 2 &&
+				(dst & 1)) || (size == 8 && (dst & 7));
+			unsigned long long cur = (size == 2) ?
+				(unsigned long long)*(const unsigned short *)
+					((const char *)uml_boot.physmem_base +
+					 off) :
+				*(const unsigned long long *)
+					((const char *)uml_boot.physmem_base +
+					 off);
+			int v = uml_nt_replay_verdict_seq(cur, cur, val, 1);
+
+			if (misaligned) {
+				c->tctrip_refused++;
+				if (c->tctrip_refused <= 8)
+					os_info("[tctrip-GUARD] pid %lu "
+						"REFUSED unaligned size=%u "
+						"dst=0x%llx (offset %u) — "
+						"the u16-at-+6 signature\n",
+						(unsigned long)c->pid, size,
+						dst, (unsigned)(dst & 7));
+			} else if (v == UML_NT_REPLAY_ALREADY) {
+				c->rp_already++;
+			} else if (size == 2) {
+				*(unsigned short *)((char *)
+					uml_boot.physmem_base + off) =
+					(unsigned short)val;
+				c->rp_writes++;
+			} else {
+				*(unsigned long long *)((char *)
+					uml_boot.physmem_base + off) = val;
+				c->rp_writes++;
+			}
+		}
 	}
 	d->regs.rip += len;
 	tctrip_emulated++;
