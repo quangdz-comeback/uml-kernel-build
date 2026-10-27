@@ -59,6 +59,15 @@ int is_skas_winch(int pid, int fd, void *data)
 /* NtWaitForSingleObject timeout status (win32 WAIT_TIMEOUT == 258). */
 #define UML_NT_STATUS_TIMEOUT ((NTSTATUS)0x00000102)
 /* GetExitCodeProcess: 259 = STILL_ACTIVE (win32). */
+/* Shelley 195: the debug lever lives in stub_ctl.c; this file only needs
+ * to know whether rounds are slow by design. Declared here to keep the two
+ * translation units honest without a header churn. */
+extern int uml_nt_dbg_on;
+static int uml_nt_dbg_mode(void)
+{
+	return uml_nt_dbg_on == 1;
+}
+
 #define UML_NT_STILL_ACTIVE 259u
 
 /* S4d: one XSTATE-CAPTURED line per boot (the CI gate's evidence). */
@@ -1577,8 +1586,16 @@ void userspace(struct uml_pt_regs *regs)
 					os_dump_core();
 				}
 				wait_tmo++;
-				if (wait_tmo == 5 || wait_tmo == 15 ||
-				    wait_tmo == 30) {
+				/* Shelley 195: under the debugger every round is
+				 * slower by design — the debuggee is frozen
+				 * between events — so the same second counts must
+				 * not scream at a valid slow round. The report
+				 * moves out to 20/60/120s on that path. */
+				if (uml_nt_dbg_mode() ?
+				    (wait_tmo == 20 || wait_tmo == 60 ||
+				     wait_tmo == 120) :
+				    (wait_tmo == 5 || wait_tmo == 15 ||
+				     wait_tmo == 30)) {
 					os_info("[userspace-tmo] stub pid %d "
 						"wait=%us cmd=%u req=%llu "
 						"done=%llu action=%u left=%d "

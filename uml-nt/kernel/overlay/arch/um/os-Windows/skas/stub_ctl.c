@@ -154,7 +154,7 @@ static int cowtrap_pending;
  * guest at all. UML_NT_WITNESS=0 in the environment turns them off
  * as a group: if the boot still corrupts, the witnesses are
  * exonerated; if it survives, the hunt turns inward. */
-static int uml_nt_dbg_flag(void);
+int uml_nt_dbg_flag(void);
 
 /* The kernel is a freestanding ELF: no windows.h, so DEBUG_EVENT and
  * EXCEPTION_RECORD are spelled out here from the documented x64 layout
@@ -341,6 +341,29 @@ static void dbg_mod_name(unsigned long long addr, char *out, int len)
 		return;
 	}
 	snprintf(out, len, "mod@0x%llx+0x%llx", best, addr - best);
+}
+
+static unsigned long dbg_drained;	/* total events drained */
+static void dbg_event(unsigned char *de);
+
+/* Drain-to-empty: after every ContinueDebugEvent, keep taking events with
+ * a zero timeout until the queue answers "nothing". A debug event freezes
+ * every debuggee thread, so an event left in the queue is a guest standing
+ * still — referee 40449370951 hung the login stub's first round exactly
+ * that way. */
+static void dbg_drain(void)
+{
+	unsigned char de[UML_NT_DE_SIZE];
+	int guard = 256;
+	unsigned long n = 0;
+
+	while (guard-- > 0 && nt->WaitForDebugEvent(de, 0)) {
+		dbg_event(de);
+		n++;
+	}
+	dbg_drained += n;
+	if (n > 0 && (dbg_drained % 200u) < n)
+		os_info("[dbg] queue drained=%lu (total %lu)\n", n, dbg_drained);
 }
 
 static void dbg_event(unsigned char *de)
@@ -3980,8 +4003,8 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 			/* the attach itself queues a batch of events (the
 			 * CREATE_PROCESS + thread/DLL set); drain it now or
 			 * the debuggee stays frozen from the first one */
-			while (nt->WaitForDebugEvent(fe, 100))
-				dbg_event(fe);
+			dbg_drain();
+			(void)fe;
 		} else {
 			os_info("[dbg] DebugActiveProcess(%lu) FAILED "
 				"win32=%lu\n", (unsigned long)c->pid,
@@ -10892,7 +10915,7 @@ void uml_nt_exec_path_set(const char *path)
 
 static volatile int dbg_stop;
 static unsigned long dbg_events;
-static int uml_nt_dbg_flag(void)
+int uml_nt_dbg_flag(void)
 {
 	int i;
 
@@ -12281,8 +12304,7 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		if (uml_nt_dbg_flag()) {
 			unsigned char de[UML_NT_DE_SIZE];
 
-			while (nt->WaitForDebugEvent(de, 0))
-				dbg_event(de);
+			dbg_drain();
 		}
 		w = nt->WaitForMultipleObjects((ULONG)nwaits, waits, 0,
 					       uml_nt_dbg_flag() ? 5u : 1000u);
@@ -12291,8 +12313,7 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		if (uml_nt_dbg_flag()) {
 			unsigned char de2[UML_NT_DE_SIZE];
 
-			while (nt->WaitForDebugEvent(de2, 0))
-				dbg_event(de2);
+			dbg_drain();
 		}
 		if (w == 0xFFFFFFFFu /*WAIT_FAILED*/) {
 			os_info("[stubtest] wait failed win32=%lu\n",
