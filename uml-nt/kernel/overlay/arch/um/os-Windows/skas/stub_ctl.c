@@ -11353,7 +11353,8 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	si.cb = sizeof(si); /* 104 on x64 — pitfall 10 */
 	memset(&pi, 0, sizeof(pi));
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
-				(unsigned long)(uml_nt_dbg_flag() ?
+				(unsigned long)((uml_nt_dbg_flag() &&
+				uml_nt_conn_is_login(c)) ?
 				/* a debuggee must NOT be created suspended:
 				 * the first event (CREATE_PROCESS) has to be
 				 * continued before any thread runs, and the
@@ -11364,7 +11365,7 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				0x4 /*CREATE_SUSPENDED*/),
 				NULL, NULL, &si, &pi))
 		goto fail;
-	if (uml_nt_dbg_flag()) {
+	if (uml_nt_dbg_flag() && uml_nt_conn_is_login(c)) {
 		/* the handshake, on THIS thread, before anything else */
 		unsigned char fe[UML_NT_DE_SIZE];
 		unsigned int tid = 0;
