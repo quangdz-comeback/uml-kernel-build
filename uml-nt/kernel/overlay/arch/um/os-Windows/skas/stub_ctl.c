@@ -12081,6 +12081,53 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		if (conn_child.alive)
 			waits[nwaits++] = conn_child.evt_in;
 
+		/* Shelley 191: on the debug path the debug events are taken
+		 * HERE, on the thread that made the handshake. A debug event
+		 * freezes every debuggee thread until it is continued, so a
+		 * pump that lives anywhere else (or a thread that never gets
+		 * the event) turns the guest into a statue — referee
+		 * 40424336921 hung exactly there. Poll with zero timeout so
+		 * the wait below keeps its 1s cadence. */
+		if (uml_nt_dbg_flag()) {
+			unsigned char de[UML_NT_DE_SIZE];
+
+			while (nt->WaitForDebugEvent(de, 0)) {
+				unsigned int dcode = de_u32(de, UML_NT_DE_CODE);
+				unsigned int dtid = de_u32(de, UML_NT_DE_TID);
+				unsigned int dst = UML_NT_DBG_CONTINUE;
+
+				dbg_events++;
+				if (dcode == UML_NT_EXCEPTION_DEBUG) {
+					const unsigned char *u =
+						de + UML_NT_DE_U;
+					unsigned int np = de_u32(u,
+						UML_NT_U_EXC_NPARAMS);
+					unsigned int k;
+
+					os_info("[dbg] EXC%s code=0x%08x "
+						"addr=0x%llx nparams=%u",
+						de_u32(u, UML_NT_U_EXC_FIRSTCH)
+						? "1" : "2",
+						de_u32(u, UML_NT_U_EXC_CODE),
+						de_u64(u, UML_NT_U_EXC_ADDR),
+						np);
+					for (k = 0; k < np && k < 4; k++)
+						os_info(" info[%u]=0x%llx",
+							k, de_u64(u,
+							UML_NT_U_EXC_INFO +
+							8 * k));
+					os_info(" tid=%u\n", dtid);
+					dst = UML_NT_DBG_NOT_HANDLED;
+				} else if (dcode == UML_NT_EXIT_PROCESS) {
+					os_info("[dbg] EXIT_PROCESS code=0x%x\n",
+						de_u32(de + UML_NT_DE_U,
+						       UML_NT_U_EXIT_CODE));
+				}
+				nt->ContinueDebugEvent(de_u32(de,
+							      UML_NT_DE_PID),
+						       dtid, dst);
+			}
+		}
 		w = nt->WaitForMultipleObjects((ULONG)nwaits, waits, 0,
 					       1000);
 		if (w == 0xFFFFFFFFu /*WAIT_FAILED*/) {
