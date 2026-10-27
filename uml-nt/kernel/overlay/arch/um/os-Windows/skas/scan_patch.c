@@ -298,6 +298,28 @@ static int insn_len(const u8_scan *p, const u8_scan *end)
  * suspended tasks' schedule chains, which killed the net reader
  * (ret-to-0x1000100) the moment the vector channel went live.
  */
+/* Shelley 210: count what the patcher WOULD patch, using the patcher's own
+ * criterion — an instruction-boundary 2-byte 0f 05. A byte-pair scan is not
+ * a witness (sixteen "hits" in libc were immediates and tables); this is. */
+unsigned long uml_nt_count_syscalls(void *buf, unsigned long len)
+{
+	u8_scan *b = buf, *end = b + len;
+	unsigned long o = 0, n = 0;
+
+	while (o + 2 <= len) {
+		int L = insn_len(b + o, end);
+
+		if (L <= 0 || o + L > (unsigned long)len) {
+			o++;
+			continue;
+		}
+		if (L == 2 && b[o] == 0x0F && b[o + 1] == 0x05)
+			n++;
+		o += L;
+	}
+	return n;
+}
+
 unsigned long uml_nt_patch_syscalls(void *buf, unsigned long len,
 				    unsigned long entry_off, void *markp)
 {
