@@ -61,6 +61,8 @@ int is_skas_winch(int pid, int fd, void *data)
 /* GetExitCodeProcess: 259 = STILL_ACTIVE (win32). */
 void uml_nt_dbg_summary(void);
 void dbg_drain(void);
+void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c);
+void uml_nt_death_exit_check(struct uml_nt_stub_conn *c);
 extern unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 extern unsigned long long uml_nt_tick_round;
 extern unsigned long long uml_nt_qpc_ms(unsigned long long, unsigned long long);
@@ -1072,6 +1074,8 @@ void userspace(struct uml_pt_regs *regs)
 							c->d->ts_resume),
 						c->d->ts_resume);
 					}
+					uml_nt_death_exit_check(c);
+					uml_nt_death_scan_exec(c);
 					uml_nt_dbg_summary();
 					os_info("userspace: stub pid %d "
 						"died silently (%lu from "

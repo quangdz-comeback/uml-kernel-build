@@ -355,6 +355,72 @@ static void dbg_event(unsigned char *de);
  * every debuggee thread, so an event left in the queue is a guest standing
  * still — referee 40449370951 hung the login stub's first round exactly
  * that way. */
+/* Shelley 208 (VUA): walk every executable VMA of the dying conn, read each
+ * run through the kernel's flat view, and count 0f 05 bytes that are STILL
+ * there. A sweep left one behind = a real Windows syscall the guest could
+ * still make. Bounded so a death stays cheap. */
+void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c)
+{
+	int i;
+	unsigned long long runs = 0, bad = 0, badva = 0;
+	int printed = 0;
+
+	if (c == NULL || c->mm == NULL)
+		return;
+	for (i = 0; i < c->mm->nvma && runs < 64; i++) {
+		struct uml_nt_vma *v = &c->mm->vma[i];
+		unsigned long long va, off;
+
+		if (!uml_nt_prot_execable(v->prot))
+			continue;
+		for (va = v->start; va < v->end && runs < 64;
+		     va += UML_NT_PHYS_RUN_SIZE) {
+			unsigned long long so = uml_nt_vma_translate(
+				c->mm, va, 1);
+			unsigned char *p;
+			unsigned long long k, np = 0;
+
+			if (so < 0)
+				continue;
+			off = (unsigned long long)so;
+			p = (unsigned char *)uml_boot.physmem_base + off;
+			for (k = 0; k + 1 < UML_NT_PHYS_RUN_SIZE; k++)
+				if (p[k] == 0x0f && p[k + 1] == 0x05)
+					np++;
+			runs++;
+			if (np > 0) {
+				bad += np;
+				if (printed < 8) {
+					printed++;
+					badva = va;
+					os_info("[exec-scan] run va=0x%llx "
+						"has %llu unpatched "
+						"syscall byte(s)\n",
+						va, np);
+				}
+			}
+		}
+	}
+	os_info("[exec-scan] pid %lu: %llu exec run(s) scanned, "
+		"%llu unpatched syscall byte(s)%s\n",
+		(unsigned long)c->pid, runs, bad,
+		bad == 0 ? " ==> every exec page is swept" : "");
+}
+
+/* Shelley 208 (1): did the guest itself ask to leave? */
+void uml_nt_death_exit_check(struct uml_nt_stub_conn *c)
+{
+	if (c == NULL || c->d == NULL)
+		return;
+	os_info("[exit-req] pid %lu last_nr=%llu args[0]=0x%llx halt=%u "
+		"action=%u vstage=%u ==> %s\n", (unsigned long)c->pid,
+		c->last_nr,
+		c->d->args[0], (unsigned)c->d->halt,
+		(unsigned)c->d->action, (unsigned)c->d->vstage,
+		c->d->halt ? "guest asked to exit (its own code)"
+			   : "guest did NOT ask to exit");
+}
+
 void uml_nt_dbg_summary(void)
 {
 	os_info("[dbg] summary: drain calls=%lu events=%lu empty=%lu "
