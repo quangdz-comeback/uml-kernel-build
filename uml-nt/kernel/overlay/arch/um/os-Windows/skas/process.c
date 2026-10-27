@@ -65,6 +65,7 @@ extern unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 extern unsigned long long uml_nt_tick_round;
 extern unsigned long long uml_nt_qpc_ms(unsigned long long, unsigned long long);
 extern unsigned long long uml_nt_qpc_us(unsigned long long, unsigned long long);
+extern unsigned long long uml_nt_resume_to_exit_us(HANDLE, unsigned long long);
 /* Shelley 195: the debug lever lives in stub_ctl.c; this file only needs
  * to know whether rounds are slow by design. Declared here to keep the two
  * translation units honest without a header churn. */

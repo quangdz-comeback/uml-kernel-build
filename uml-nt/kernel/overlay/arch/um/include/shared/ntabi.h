@@ -446,6 +446,12 @@ int UML_NTABI_CC QueryPerformanceCounter(LARGE_INTEGER *counter);
 int UML_NTABI_CC QueryPerformanceFrequency(LARGE_INTEGER *frequency);
 
 void UML_NTABI_CC GetSystemTimePreciseAsFileTime(FILETIME *out);
+/* Shelley 206: the OS records the instant a process exited; with a QPC
+ * bridge that time becomes a microseconds answer to "how long after the
+ * last resume did the guest die". */
+int UML_NTABI_CC GetProcessTimes(HANDLE process, FILETIME *creation,
+				 FILETIME *exit_time, FILETIME *kernel_time,
+				 FILETIME *user_time);
 
 HANDLE UML_NTABI_CC CreateWaitableTimerExW(PVOID sec_attr, WCHAR *name,
 					   ULONG flags, ACCESS_MASK access);
@@ -652,6 +658,10 @@ struct uml_nt_api_table {
 	int (UML_NTABI_CC *QueryPerformanceCounter)(LARGE_INTEGER *counter);
 	int (UML_NTABI_CC *QueryPerformanceFrequency)(LARGE_INTEGER *frequency);
 	void (UML_NTABI_CC *GetSystemTimePreciseAsFileTime)(FILETIME *out);
+	int (UML_NTABI_CC *GetProcessTimes)(HANDLE process, FILETIME *creation,
+					    FILETIME *exit_time,
+					    FILETIME *kernel_time,
+					    FILETIME *user_time);
 	HANDLE (UML_NTABI_CC *CreateWaitableTimerExW)(PVOID sec_attr,
 			WCHAR *name, ULONG flags, ACCESS_MASK access);
 	BOOLEAN (UML_NTABI_CC *SetWaitableTimer)(HANDLE timer,

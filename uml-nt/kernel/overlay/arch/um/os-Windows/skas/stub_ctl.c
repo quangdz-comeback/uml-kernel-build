@@ -10915,6 +10915,37 @@ static int g_exec_login;
 unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 unsigned long long uml_nt_tick_round;	/* last completed round */
 
+/* Shelley 206: microseconds between the last resume and the instant the OS
+ * says the process exited. FILETIME counts 100ns; QPC counts ticks; the
+ * two are bridged by reading both at the same moment. */
+unsigned long long uml_nt_resume_to_exit_us(HANDLE proc,
+					    unsigned long long ts_resume)
+{
+	FILETIME cr, ex, kt, ut, now_ft;
+	LARGE_INTEGER q_now, f;
+	unsigned long long ex100, now100, hz, ticks, q_exit;
+
+	if (ts_resume == 0 || proc == NULL)
+		return 0;
+	if (nt->GetProcessTimes(proc, &cr, &ex, &kt, &ut) == 0)
+		return 0;
+	nt->GetSystemTimePreciseAsFileTime(&now_ft);
+	nt->QueryPerformanceCounter(&q_now);
+	if (nt->QueryPerformanceFrequency(&f) == 0 || f.QuadPart <= 0)
+		return 0;
+	hz = (unsigned long long)f.QuadPart;
+	ex100 = ((unsigned long long)ex.HighPart << 32) | ex.LowPart;
+	now100 = ((unsigned long long)now_ft.HighPart << 32) | now_ft.LowPart;
+	if (now100 < ex100)
+		return 0;
+	/* 100ns -> ticks: ticks = us * hz / 1e6, us = (ft100 / 10) */
+	ticks = (now100 - ex100) * (hz / 10000ull) / 1000ull;
+	q_exit = (unsigned long long)q_now.QuadPart - ticks;
+	if (q_exit < ts_resume)
+		return 0;
+	return (q_exit - ts_resume) * 1000000ull / hz;
+}
+
 unsigned long long uml_nt_qpc_us(unsigned long long from, unsigned long long to)
 {
 	LARGE_INTEGER f;

@@ -136,6 +136,7 @@ static void resolve_api_table(void)
 	RESOLVE(QueryPerformanceFrequency, k32, "QueryPerformanceFrequency");
 	RESOLVE(GetSystemTimePreciseAsFileTime, k32,
 		"GetSystemTimePreciseAsFileTime");
+	RESOLVE(GetProcessTimes, k32, "GetProcessTimes");
 	RESOLVE(CreateWaitableTimerExW, k32, "CreateWaitableTimerExW");
 	RESOLVE(SetWaitableTimer, k32, "SetWaitableTimer");
 	RESOLVE(CancelWaitableTimer, k32, "CancelWaitableTimer");
