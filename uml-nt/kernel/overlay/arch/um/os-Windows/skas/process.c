@@ -60,6 +60,7 @@ int is_skas_winch(int pid, int fd, void *data)
 #define UML_NT_STATUS_TIMEOUT ((NTSTATUS)0x00000102)
 /* GetExitCodeProcess: 259 = STILL_ACTIVE (win32). */
 void uml_nt_dbg_summary(void);
+void dbg_drain(void);
 /* Shelley 195: the debug lever lives in stub_ctl.c; this file only needs
  * to know whether rounds are slow by design. Declared here to keep the two
  * translation units honest without a header churn. */
@@ -843,6 +844,13 @@ void userspace(struct uml_pt_regs *regs)
 				continue;
 			}
 			if (w == 258u /*WAIT_TIMEOUT*/) {
+				/* Shelley 202: the last poll happens BEFORE we
+				 * read the exit code. An event raised in the
+				 * five milliseconds we just spent in the wait
+				 * is still queued, and the death path used to
+				 * walk past it. */
+				if (uml_nt_dbg_mode() != 0)
+					dbg_drain();
 				code = 0;
 				nt->GetExitCodeProcess(c->proc, &code);
 					/* v21 (Shelley 155, witness-first): the

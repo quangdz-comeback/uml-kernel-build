@@ -365,7 +365,7 @@ void uml_nt_dbg_summary(void)
 		 "polled and took events"));
 }
 
-static void dbg_drain(void)
+void dbg_drain(void)
 {
 	unsigned char de[UML_NT_DE_SIZE];
 	int guard = 256;
@@ -425,6 +425,13 @@ static void dbg_event(unsigned char *de)
 				e->addr, e->nparams, e->info[0], e->info[1],
 				e->tid);
 		}
+		/* Two sources for one number (Shelley 202): this is the
+		 * exit code the DEBUG PORT reports; the kernel reads its own
+		 * from GetExitCodeProcess. Equal codes = the OS itself
+		 * terminated the process; a mismatch = someone lied. */
+		os_info("[dbg] EXIT_PROCESS pid %lu code=0x%lx (from the "
+			"debug event)\n", (unsigned long)pid,
+			(unsigned long)de_u32(de, UML_NT_DE_U));
 		nt->ContinueDebugEvent(pid, tid, UML_NT_DBG_CONTINUE);
 		dbg_pid_del((unsigned long)pid);
 		return;
