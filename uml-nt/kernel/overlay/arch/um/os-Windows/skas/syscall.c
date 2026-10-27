@@ -1440,6 +1440,8 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
  * register/demand/drop carry the touched-vs-file-run accounting that
  * quantifies the win. */
 static unsigned long long lazy_demand_runs, lazy_eager_runs;
+static unsigned long long lazy_unswept_syscalls, lazy_filled_runs;
+static int lazy_unswept_budget = 12;
 static int lazy_reg_budget = 16, lazy_drop_budget = 24;
 static int lazy_demand_budget = 32;
 /* live deferred regions + their file/touched run totals (the D28
@@ -1566,6 +1568,35 @@ static int lazy_run(struct uml_nt_stub_conn *c, struct uml_nt_lazy_region *r,
 				&pos) != (ssize_t)n) {
 			uml_nt_phys_unref(c->ph, (long long)sp);
 			return -1;
+		}
+	}
+	/* Shelley 207 (the lazy hole): this fill is the ONE file writer that
+	 * never patched. Swept runs get their 0f 05 replaced by ud2 at map
+	 * time; a page that materializes LATER comes straight from the file,
+	 * and the flat view makes every page executable in the host — so an
+	 * unpatched syscall byte here is a real Windows syscall and a silent
+	 * death. Count what we delivered; a positive number is the root. */
+	if (n > 0) {
+		unsigned long long i;
+		unsigned np = 0;
+
+		for (i = 0; i + 1 < n; i++) {
+			if (((unsigned char *)
+			     uml_boot.physmem_base)[sp + i] == 0x0f &&
+			    ((unsigned char *)
+			     uml_boot.physmem_base)[sp + i + 1] == 0x05)
+				np++;
+		}
+		lazy_unswept_syscalls += np;
+		lazy_filled_runs++;
+		if (np > 0 && lazy_unswept_budget > 0) {
+			lazy_unswept_budget--;
+			os_info("[lazy-unswept] pid %lu va=0x%llx "
+				"run=0x%llx len=%llu: %u syscall byte(s) "
+				"materialized UNPATCHED (total %llu in "
+				"%llu run(s))\n",
+				(unsigned long)c->pid, run_va, sp, n, np,
+				lazy_unswept_syscalls, lazy_filled_runs);
 		}
 	}
 	if (uml_nt_vma_add_gen(c->mm, run_va, run_end, sp,
