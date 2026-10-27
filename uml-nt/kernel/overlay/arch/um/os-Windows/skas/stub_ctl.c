@@ -4013,32 +4013,6 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 		return;
 	if (!uml_nt_conn_is_login(c))
 		return;
-	/* Shelley 194: attach HERE, late enough that exec_path is known and
-	 * early enough that the password round is still ahead. The kernel
-	 * thread keeps the debug port; the service loop continues the
-	 * events (one consumer), and a debuggee we are attached to is never
-	 * left frozen. */
-	if (uml_nt_dbg_flag() && !dbg_pid_live((unsigned long)c->pid)) {
-		if (nt->DebugActiveProcess((ULONG)c->pid)) {
-			unsigned char fe[UML_NT_DE_SIZE];
-
-			nt->DebugSetProcessKillOnExit(0);
-			dbg_pid_add((unsigned long)c->pid);
-			dbg_active_pid = (unsigned long)c->pid;
-			os_info("[dbg] attached LATE to the login conn pid %lu "
-				"(DebugActiveProcess=1, KillOnExit cleared)\n",
-				(unsigned long)c->pid);
-			/* the attach itself queues a batch of events (the
-			 * CREATE_PROCESS + thread/DLL set); drain it now or
-			 * the debuggee stays frozen from the first one */
-			dbg_drain();
-			(void)fe;
-		} else {
-			os_info("[dbg] DebugActiveProcess(%lu) FAILED "
-				"win32=%lu\n", (unsigned long)c->pid,
-				nt->RtlGetLastWin32Error());
-		}
-	}
 	/* Already armed? Then MOVE the breakpoint to this round's target
 	 * instead of returning: keeping a stale address armed was the
 	 * fourth way this probe measured nothing (referee 40243638730:
@@ -11550,8 +11524,7 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	si.cb = sizeof(si); /* 104 on x64 — pitfall 10 */
 	memset(&pi, 0, sizeof(pi));
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
-				(unsigned long)((uml_nt_dbg_flag() &&
-				uml_nt_conn_is_login(c)) ?
+				(unsigned long)(uml_nt_dbg_flag() ?
 				/* a debuggee must NOT be created suspended:
 				 * the first event (CREATE_PROCESS) has to be
 				 * continued before any thread runs, and the
@@ -11562,7 +11535,7 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				0x4 /*CREATE_SUSPENDED*/),
 				NULL, NULL, &si, &pi))
 		goto fail;
-	if (uml_nt_dbg_flag() && uml_nt_conn_is_login(c)) {
+	if (uml_nt_dbg_flag()) {
 		/* the handshake, on THIS thread, before anything else */
 		unsigned char fe[UML_NT_DE_SIZE];
 		unsigned int tid = 0;
