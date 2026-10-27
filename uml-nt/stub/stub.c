@@ -2084,6 +2084,9 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 					(unsigned long long)c->Rip;
 				c->Rip = (DWORD64)(uintptr_t)
 					&fs_trampoline_fault;
+				d->tramp_va = (unsigned long long)
+					(uintptr_t)c->Rip;
+				d->tramp_arm++;
 			}
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
@@ -2378,18 +2381,24 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			 * spends TF and ends the trace, logged via tf_stop). */
 			c->EFlags |= 0x100;
 			c->Rip = (DWORD64)target;
+			d->tramp_arm++;
 		} else if (d->fs_tramp_off != 0) {
 			/* A/B (Shelley 161): resume PLAIN — the guest's own
 			 * rip+2, no native hop on the guest stack. */
 			d->fs_tramp_skipped++;
 			c->Rip = (DWORD64)target;
+			d->tramp_arm++;
 		} else if (d->fs_base != 0 && have_fsgsbase) {
 			fs_tramp_base = d->fs_base;
 			fs_tramp_target = target;
 			fs_tramp_eflags = uml_nt_ss_resume_flags(c->EFlags);
 			c->Rip = (DWORD64)(uintptr_t)&fs_trampoline_sys;
+			d->tramp_va = (unsigned long long)(uintptr_t)
+				c->Rip;
+			d->tramp_arm++;
 		} else {
 			c->Rip = (DWORD64)target;
+			d->tramp_arm++;
 		}
 		d->resume_rip = target;
 	} else {
@@ -2414,6 +2423,9 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 				((d->ss_page != 0 || d->tf_trace != 0) ?
 				 &fs_trampoline_fault_tf
 					 : &fs_trampoline_fault);
+			d->tramp_va = (unsigned long long)(uintptr_t)
+				c->Rip;
+			d->tramp_arm++;
 		} else if (d->ss_page != 0 || d->tf_trace != 0) {
 			c->EFlags |= 0x100; /* TF: #DB after the store */
 		}
