@@ -839,6 +839,13 @@ static int run_already_swept(struct uml_nt_stub_conn *c,
 	return !uml_nt_sweep_needed(exec_vma, fcache_run_swept_gen[i], g);
 }
 
+/* Shelley 209: the death scan needs the same verdict the sweeper would use. */
+int uml_nt_run_is_swept(struct uml_nt_stub_conn *c, unsigned long long off,
+			int exec_vma)
+{
+	return run_already_swept(c, off, exec_vma);
+}
+
 static void run_mark_swept(struct uml_nt_stub_conn *c,
 			   unsigned long long off, int exec_vma)
 {

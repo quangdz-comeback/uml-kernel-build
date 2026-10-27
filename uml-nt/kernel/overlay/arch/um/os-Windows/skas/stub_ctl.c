@@ -359,6 +359,9 @@ static void dbg_event(unsigned char *de);
  * run through the kernel's flat view, and count 0f 05 bytes that are STILL
  * there. A sweep left one behind = a real Windows syscall the guest could
  * still make. Bounded so a death stays cheap. */
+int uml_nt_run_is_swept(struct uml_nt_stub_conn *c, unsigned long long off,
+			int exec_vma);
+
 void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c)
 {
 	int i;
@@ -393,10 +396,42 @@ void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c)
 				if (printed < 8) {
 					printed++;
 					badva = va;
+					unsigned long long b;
+
 					os_info("[exec-scan] run va=0x%llx "
 						"has %llu unpatched "
-						"syscall byte(s)\n",
-						va, np);
+						"syscall byte(s) "
+						"vma=[0x%llx,0x%llx) "
+						"prot=0x%x flags=0x%x "
+						"run_off=0x%llx "
+						"gen=0x%llx swept=%d\n",
+						va, np, v->start, v->end,
+						v->prot, v->flags, v->run_off,
+						uml_nt_phys_gen(c->ph,
+							(long long)off),
+						uml_nt_run_is_swept(c, off,
+							uml_nt_prot_execable(
+								v->prot)));
+					for (b = 0; b < np && b < 2; b++) {
+						unsigned long long k2;
+						char line[3 * 16 + 1];
+						int q = 0;
+
+						for (k2 = 0; k2 < 16; k2++) {
+							unsigned char byte =
+							 p[k2 + (b ? 8 : 0)];
+
+							line[q++] = "0123456789abcdef"
+								[(byte >> 4) & 15];
+							line[q++] = "0123456789abcdef"
+								[byte & 15];
+							line[q++] = ' ';
+						}
+						line[q] = 0;
+						os_info("[exec-scan]   bytes @+%llu: "
+							"%s\n", b ? 8ull : 0ull,
+							line);
+					}
 				}
 			}
 		}
