@@ -261,7 +261,7 @@ jobs:
               sleep 23
               i=$((i+1))
             done
-          } | timeout 900 ./launcher.exe ../../build/vmlinux \
+          } | timeout ${{ inputs.debugger && '1800' || '900' }} ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
             "mem=120M" \

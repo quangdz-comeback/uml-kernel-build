@@ -12135,7 +12135,49 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		 * timeout is already 1s and the poll block is compiled out by
 		 * the same flag check). */
 		w = nt->WaitForMultipleObjects((ULONG)nwaits, waits, 0,
-					       uml_nt_dbg_flag() ? 20u : 1000u);
+					       uml_nt_dbg_flag() ? 5u : 1000u);
+		/* a debug event can arrive during the wait; drain again so the
+		 * guest is never left frozen between two polls */
+		if (uml_nt_dbg_flag()) {
+			unsigned char de2[UML_NT_DE_SIZE];
+
+			while (nt->WaitForDebugEvent(de2, 0)) {
+				unsigned int dc = de_u32(de2, UML_NT_DE_CODE);
+				unsigned int dt = de_u32(de2, UML_NT_DE_TID);
+				unsigned int ds = UML_NT_DBG_CONTINUE;
+
+				dbg_events++;
+				if (dc == UML_NT_EXCEPTION_DEBUG) {
+					const unsigned char *u2 =
+						de2 + UML_NT_DE_U;
+					unsigned int np2 = de_u32(u2,
+						UML_NT_U_EXC_NPARAMS);
+					unsigned int k2;
+
+					os_info("[dbg] EXC%s code=0x%08x "
+						"addr=0x%llx nparams=%u",
+						de_u32(u2, UML_NT_U_EXC_FIRSTCH)
+						? "1" : "2",
+						de_u32(u2, UML_NT_U_EXC_CODE),
+						de_u64(u2, UML_NT_U_EXC_ADDR),
+						np2);
+					for (k2 = 0; k2 < np2 && k2 < 4; k2++)
+						os_info(" info[%u]=0x%llx",
+							k2, de_u64(u2,
+							UML_NT_U_EXC_INFO +
+							8 * k2));
+					os_info(" tid=%u\n", dt);
+					ds = UML_NT_DBG_NOT_HANDLED;
+				} else if (dc == UML_NT_EXIT_PROCESS) {
+					os_info("[dbg] EXIT_PROCESS code=0x%x\n",
+						de_u32(de2 + UML_NT_DE_U,
+						       UML_NT_U_EXIT_CODE));
+				}
+				nt->ContinueDebugEvent(de_u32(de2,
+							      UML_NT_DE_PID),
+						       dt, ds);
+			}
+		}
 		if (w == 0xFFFFFFFFu /*WAIT_FAILED*/) {
 			os_info("[stubtest] wait failed win32=%lu\n",
 				nt->RtlGetLastWin32Error());
