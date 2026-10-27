@@ -64,6 +64,7 @@ void dbg_drain(void);
 extern unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 extern unsigned long long uml_nt_tick_round;
 extern unsigned long long uml_nt_qpc_ms(unsigned long long, unsigned long long);
+extern unsigned long long uml_nt_qpc_us(unsigned long long, unsigned long long);
 /* Shelley 195: the debug lever lives in stub_ctl.c; this file only needs
  * to know whether rounds are slow by design. Declared here to keep the two
  * translation units honest without a header churn. */
@@ -1048,6 +1049,19 @@ void userspace(struct uml_pt_regs *regs)
 							      now),
 						uml_nt_qpc_ms(uml_nt_tick_round,
 							      now));
+					 os_info("[gaps] pid %d "
+						"now-publish=%llu us "
+						"now-resume=%llu us "
+						"veh_entries=%llu "
+						"ts_publish=0x%llx ts_resume=0x%llx\n",
+						c->pid,
+						uml_nt_qpc_us(c->d->ts_publish,
+							      now),
+						uml_nt_qpc_us(c->d->ts_resume,
+							      now),
+						c->d->veh_entries,
+						c->d->ts_publish,
+						c->d->ts_resume);
 					}
 					uml_nt_dbg_summary();
 					os_info("userspace: stub pid %d "

@@ -10915,6 +10915,19 @@ static int g_exec_login;
 unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 unsigned long long uml_nt_tick_round;	/* last completed round */
 
+unsigned long long uml_nt_qpc_us(unsigned long long from, unsigned long long to)
+{
+	LARGE_INTEGER f;
+	unsigned long long hz;
+
+	if (from == 0 || to < from)
+		return 0;	/* 0 = never stamped */
+	if (nt->QueryPerformanceFrequency(&f) == 0 || f.QuadPart <= 0)
+		return 0;
+	hz = (unsigned long long)f.QuadPart;
+	return (to - from) * 1000000ull / hz;
+}
+
 unsigned long long uml_nt_qpc_ms(unsigned long long from, unsigned long long to)
 {
 	LARGE_INTEGER f;
