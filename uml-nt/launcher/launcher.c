@@ -131,6 +131,8 @@ static void resolve_api_table(void)
 	/* Shelley 189: mini-debugger exports (diagnostics only) */
 	RESOLVE(WaitForDebugEvent, k32, "WaitForDebugEvent");
 	RESOLVE(ContinueDebugEvent, k32, "ContinueDebugEvent");
+	RESOLVE(DebugActiveProcess, k32, "DebugActiveProcess");
+	RESOLVE(DebugSetProcessKillOnExit, k32, "DebugSetProcessKillOnExit");
 	RESOLVE(QueryPerformanceFrequency, k32, "QueryPerformanceFrequency");
 	RESOLVE(GetSystemTimePreciseAsFileTime, k32,
 		"GetSystemTimePreciseAsFileTime");

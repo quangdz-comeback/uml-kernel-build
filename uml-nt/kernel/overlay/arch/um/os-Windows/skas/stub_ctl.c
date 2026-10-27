@@ -156,6 +156,144 @@ static int cowtrap_pending;
  * exonerated; if it survives, the hunt turns inward. */
 static int uml_nt_dbg_flag(void);
 
+/* The kernel is a freestanding ELF: no windows.h, so DEBUG_EVENT and
+ * EXCEPTION_RECORD are spelled out here from the documented x64 layout
+ * (asserted by the fact that the fields we read are the ones the CI log
+ * shows). dwDebugEventCode/ProcessId/ThreadId occupy 12 bytes, the union
+ * starts at 16 (8-byte alignment), EXCEPTION_DEBUG_INFO is a 152-byte
+ * EXCEPTION_RECORD followed by dwFirstChance.
+ */
+#define UML_NT_DE_CODE		0	/* DWORD */
+#define UML_NT_DE_PID		4
+#define UML_NT_DE_TID		8
+#define UML_NT_DE_U		16
+#define UML_NT_U_EXC_CODE	0	/* within the union */
+#define UML_NT_U_EXC_FLAGS	4
+#define UML_NT_U_EXC_ADDR	16
+#define UML_NT_U_EXC_NPARAMS	24
+#define UML_NT_U_EXC_INFO	32
+#define UML_NT_U_EXC_FIRSTCH	152
+#define UML_NT_U_EXIT_CODE	0
+#define UML_NT_DE_SIZE		176
+#define UML_NT_EXCEPTION_DEBUG	1u
+#define UML_NT_EXIT_PROCESS	5u
+
+#define UML_NT_DBG_CONTINUE	0x00010002u
+#define UML_NT_DBG_NOT_HANDLED	0x80010001u
+
+static volatile int dbg_stop;
+static unsigned long dbg_events;
+
+static unsigned int de_u32(const unsigned char *b, unsigned int off)
+{
+	unsigned int v;
+
+	__builtin_memcpy(&v, b + off, 4);
+	return v;
+}
+
+static unsigned long long de_u64(const unsigned char *b, unsigned int off)
+{
+	unsigned long long v;
+
+	__builtin_memcpy(&v, b + off, 8);
+	return v;
+}
+
+static unsigned long UML_NTABI_CC dbg_pump(void *arg)
+{
+	unsigned long pid = (unsigned long)(uintptr_t)arg;
+	unsigned char de[UML_NT_DE_SIZE];
+	int budget = 2000;
+
+	while (!dbg_stop && budget-- > 0) {
+		unsigned int code, tid, st;
+		const unsigned char *u = de + UML_NT_DE_U;
+
+		if (!nt->WaitForDebugEvent(de, 200))
+			continue;
+		dbg_events++;
+		code = de_u32(de, UML_NT_DE_CODE);
+		tid = de_u32(de, UML_NT_DE_TID);
+		st = UML_NT_DBG_CONTINUE;
+		if (code == UML_NT_EXCEPTION_DEBUG) {
+			unsigned int np = de_u32(u, UML_NT_U_EXC_NPARAMS);
+			unsigned int k;
+			char info[160];
+			int n = 0;
+
+			info[0] = 0;
+			for (k = 0; k < np && k < 4; k++)
+				n += snprintf(info + n, sizeof(info) - n,
+					      " info[%u]=0x%llx", k,
+					      de_u64(u, UML_NT_U_EXC_INFO + 8 * k));
+			os_info("[dbg] pid %lu EXC%s code=0x%08x addr=0x%llx "
+				"nparams=%u%s tid=%u\n",
+				pid,
+				de_u32(u, UML_NT_U_EXC_FIRSTCH) ? "1" : "2",
+				de_u32(u, UML_NT_U_EXC_CODE),
+				de_u64(u, UML_NT_U_EXC_ADDR), np, info, tid);
+			/* never steal: the stub's own handlers see it
+			 * exactly as they would without us */
+			st = UML_NT_DBG_NOT_HANDLED;
+		} else if (code == UML_NT_EXIT_PROCESS) {
+			os_info("[dbg] pid %lu EXIT_PROCESS code=0x%x "
+				"(GetExitCodeProcess will agree)\n",
+				pid, de_u32(u, UML_NT_U_EXIT_CODE));
+			nt->ContinueDebugEvent(de_u32(de, UML_NT_DE_PID), tid, st);
+			os_info("[dbg] pump ended after %lu event(s)\n",
+				dbg_events);
+			return 0;
+		}
+		nt->ContinueDebugEvent(de_u32(de, UML_NT_DE_PID), tid, st);
+	}
+	os_info("[dbg] pump ended after %lu event(s)\n", dbg_events);
+	return 0;
+}
+
+/* Every conn is its own process, and every debug event freezes the whole
+ * debuggee until it is continued — so we must continue events for EVERY
+ * process we attached to, not only the one whose exceptions we log. The
+ * active pid decides who gets the detailed lines (Shelley 193). */
+static unsigned long dbg_pids[8];
+static unsigned long dbg_active_pid;
+
+static void dbg_pid_add(unsigned long pid)
+{
+	int i;
+
+	for (i = 0; i < 8; i++)
+		if (dbg_pids[i] == pid)
+			return;
+	for (i = 0; i < 8; i++)
+		if (dbg_pids[i] == 0) {
+			dbg_pids[i] = pid;
+			return;
+		}
+}
+
+static void dbg_pid_del(unsigned long pid)
+{
+	int i;
+
+	for (i = 0; i < 8; i++)
+		if (dbg_pids[i] == pid)
+			dbg_pids[i] = 0;
+	if (dbg_active_pid == pid)
+		dbg_active_pid = 0;
+}
+
+static int dbg_pid_live(unsigned long pid)
+{
+	int i;
+
+	for (i = 0; i < 8; i++)
+		if (dbg_pids[i] == pid)
+			return 1;
+	return 0;
+}
+
+int uml_nt_dbg_on = -1;
 int uml_nt_witness_off = -1;
 static int witness_off(void)
 {
@@ -3704,6 +3842,50 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 		return;
 	if (!uml_nt_conn_is_login(c))
 		return;
+	/* Shelley 194: attach HERE, late enough that exec_path is known and
+	 * early enough that the password round is still ahead. The kernel
+	 * thread keeps the debug port; the service loop continues the
+	 * events (one consumer), and a debuggee we are attached to is never
+	 * left frozen. */
+	if (uml_nt_dbg_flag() && !dbg_pid_live((unsigned long)c->pid)) {
+		if (nt->DebugActiveProcess((ULONG)c->pid)) {
+			unsigned char fe[UML_NT_DE_SIZE];
+
+			nt->DebugSetProcessKillOnExit(0);
+			dbg_pid_add((unsigned long)c->pid);
+			dbg_active_pid = (unsigned long)c->pid;
+			os_info("[dbg] attached LATE to the login conn pid %lu\n",
+				(unsigned long)c->pid);
+			/* the attach itself queues a batch of events (the
+			 * CREATE_PROCESS + thread/DLL set); drain it now or
+			 * the debuggee stays frozen from the first one */
+			while (nt->WaitForDebugEvent(fe, 100)) {
+				unsigned int c2 = de_u32(fe, UML_NT_DE_CODE);
+				unsigned int t2 = de_u32(fe, UML_NT_DE_TID);
+
+				dbg_events++;
+				if (c2 == UML_NT_EXCEPTION_DEBUG)
+					os_info("[dbg] EXC%s code=0x%08x "
+						"addr=0x%llx (attach burst)\n",
+						de_u32(fe + UML_NT_DE_U,
+						       UML_NT_U_EXC_FIRSTCH)
+						? "1" : "2",
+						de_u32(fe + UML_NT_DE_U,
+						       UML_NT_U_EXC_CODE),
+						de_u64(fe + UML_NT_DE_U,
+						       UML_NT_U_EXC_ADDR));
+				nt->ContinueDebugEvent(de_u32(fe, UML_NT_DE_PID),
+						       t2, c2 ==
+						       UML_NT_EXCEPTION_DEBUG ?
+						       UML_NT_DBG_NOT_HANDLED :
+						       UML_NT_DBG_CONTINUE);
+			}
+		} else {
+			os_info("[dbg] DebugActiveProcess(%lu) FAILED "
+				"win32=%lu\n", (unsigned long)c->pid,
+				nt->RtlGetLastWin32Error());
+		}
+	}
 	/* Already armed? Then MOVE the breakpoint to this round's target
 	 * instead of returning: keeping a stale address armed was the
 	 * fourth way this probe measured nothing (referee 40243638730:
@@ -10608,144 +10790,6 @@ void uml_nt_exec_path_set(const char *path)
 
 static volatile int dbg_stop;
 static unsigned long dbg_events;
-/* Every conn is its own process, and every debug event freezes the whole
- * debuggee until it is continued — so we must continue events for EVERY
- * process we attached to, not only the one whose exceptions we log. The
- * active pid decides who gets the detailed lines (Shelley 193). */
-static unsigned long dbg_pids[8];
-static unsigned long dbg_active_pid;
-
-static void dbg_pid_add(unsigned long pid)
-{
-	int i;
-
-	for (i = 0; i < 8; i++)
-		if (dbg_pids[i] == pid)
-			return;
-	for (i = 0; i < 8; i++)
-		if (dbg_pids[i] == 0) {
-			dbg_pids[i] = pid;
-			return;
-		}
-}
-
-static void dbg_pid_del(unsigned long pid)
-{
-	int i;
-
-	for (i = 0; i < 8; i++)
-		if (dbg_pids[i] == pid)
-			dbg_pids[i] = 0;
-	if (dbg_active_pid == pid)
-		dbg_active_pid = 0;
-}
-
-static int dbg_pid_live(unsigned long pid)
-{
-	int i;
-
-	for (i = 0; i < 8; i++)
-		if (dbg_pids[i] == pid)
-			return 1;
-	return 0;
-}
-
-/* The kernel is a freestanding ELF: no windows.h, so DEBUG_EVENT and
- * EXCEPTION_RECORD are spelled out here from the documented x64 layout
- * (asserted by the fact that the fields we read are the ones the CI log
- * shows). dwDebugEventCode/ProcessId/ThreadId occupy 12 bytes, the union
- * starts at 16 (8-byte alignment), EXCEPTION_DEBUG_INFO is a 152-byte
- * EXCEPTION_RECORD followed by dwFirstChance.
- */
-#define UML_NT_DE_CODE		0	/* DWORD */
-#define UML_NT_DE_PID		4
-#define UML_NT_DE_TID		8
-#define UML_NT_DE_U		16
-#define UML_NT_U_EXC_CODE	0	/* within the union */
-#define UML_NT_U_EXC_FLAGS	4
-#define UML_NT_U_EXC_ADDR	16
-#define UML_NT_U_EXC_NPARAMS	24
-#define UML_NT_U_EXC_INFO	32
-#define UML_NT_U_EXC_FIRSTCH	152
-#define UML_NT_U_EXIT_CODE	0
-#define UML_NT_DE_SIZE		176
-#define UML_NT_EXCEPTION_DEBUG	1u
-#define UML_NT_EXIT_PROCESS	5u
-
-#define UML_NT_DBG_CONTINUE	0x00010002u
-#define UML_NT_DBG_NOT_HANDLED	0x80010001u
-
-static volatile int dbg_stop;
-static unsigned long dbg_events;
-
-static unsigned int de_u32(const unsigned char *b, unsigned int off)
-{
-	unsigned int v;
-
-	__builtin_memcpy(&v, b + off, 4);
-	return v;
-}
-
-static unsigned long long de_u64(const unsigned char *b, unsigned int off)
-{
-	unsigned long long v;
-
-	__builtin_memcpy(&v, b + off, 8);
-	return v;
-}
-
-static unsigned long UML_NTABI_CC dbg_pump(void *arg)
-{
-	unsigned long pid = (unsigned long)(uintptr_t)arg;
-	unsigned char de[UML_NT_DE_SIZE];
-	int budget = 2000;
-
-	while (!dbg_stop && budget-- > 0) {
-		unsigned int code, tid, st;
-		const unsigned char *u = de + UML_NT_DE_U;
-
-		if (!nt->WaitForDebugEvent(de, 200))
-			continue;
-		dbg_events++;
-		code = de_u32(de, UML_NT_DE_CODE);
-		tid = de_u32(de, UML_NT_DE_TID);
-		st = UML_NT_DBG_CONTINUE;
-		if (code == UML_NT_EXCEPTION_DEBUG) {
-			unsigned int np = de_u32(u, UML_NT_U_EXC_NPARAMS);
-			unsigned int k;
-			char info[160];
-			int n = 0;
-
-			info[0] = 0;
-			for (k = 0; k < np && k < 4; k++)
-				n += snprintf(info + n, sizeof(info) - n,
-					      " info[%u]=0x%llx", k,
-					      de_u64(u, UML_NT_U_EXC_INFO + 8 * k));
-			os_info("[dbg] pid %lu EXC%s code=0x%08x addr=0x%llx "
-				"nparams=%u%s tid=%u\n",
-				pid,
-				de_u32(u, UML_NT_U_EXC_FIRSTCH) ? "1" : "2",
-				de_u32(u, UML_NT_U_EXC_CODE),
-				de_u64(u, UML_NT_U_EXC_ADDR), np, info, tid);
-			/* never steal: the stub's own handlers see it
-			 * exactly as they would without us */
-			st = UML_NT_DBG_NOT_HANDLED;
-		} else if (code == UML_NT_EXIT_PROCESS) {
-			os_info("[dbg] pid %lu EXIT_PROCESS code=0x%x "
-				"(GetExitCodeProcess will agree)\n",
-				pid, de_u32(u, UML_NT_U_EXIT_CODE));
-			nt->ContinueDebugEvent(de_u32(de, UML_NT_DE_PID), tid, st);
-			os_info("[dbg] pump ended after %lu event(s)\n",
-				dbg_events);
-			return 0;
-		}
-		nt->ContinueDebugEvent(de_u32(de, UML_NT_DE_PID), tid, st);
-	}
-	os_info("[dbg] pump ended after %lu event(s)\n", dbg_events);
-	return 0;
-}
-
-int uml_nt_dbg_on = -1;
 static int uml_nt_dbg_flag(void)
 {
 	int i;

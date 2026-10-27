@@ -725,6 +725,10 @@ struct uml_nt_api_table {
 	BOOL (UML_NTABI_CC *WaitForDebugEvent)(void *ev, ULONG ms);
 	BOOL (UML_NTABI_CC *ContinueDebugEvent)(ULONG pid, ULONG tid,
 						ULONG status);
+	/* Attaching LATE: the exec path is only known after the conn is
+	 * created, so the login conn is attached once it is identified. */
+	BOOL (UML_NTABI_CC *DebugActiveProcess)(ULONG pid);
+	BOOL (UML_NTABI_CC *DebugSetProcessKillOnExit)(BOOL kill);
 
 	/* ---- appended for M3.3 ------------------------------------------ */
 	ULONG (UML_NTABI_CC *WaitForMultipleObjects)(ULONG count,
