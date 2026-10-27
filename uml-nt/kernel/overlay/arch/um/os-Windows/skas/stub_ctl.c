@@ -344,6 +344,9 @@ static void dbg_mod_name(unsigned long long addr, char *out, int len)
 }
 
 static unsigned long dbg_drained;	/* total events drained */
+static unsigned long dbg_drain_calls;	/* how many times dbg_drain ran */
+static unsigned long dbg_wfd_false;	/* WaitForDebugEvent returned 0 */
+static int dbg_wfd_err_logged;
 static void dbg_event(unsigned char *de);
 
 /* Drain-to-empty: after every ContinueDebugEvent, keep taking events with
@@ -357,13 +360,30 @@ static void dbg_drain(void)
 	int guard = 256;
 	unsigned long n = 0;
 
-	while (guard-- > 0 && nt->WaitForDebugEvent(de, 0)) {
+	dbg_drain_calls++;
+	while (guard-- > 0) {
+		if (!nt->WaitForDebugEvent(de, 0)) {
+			dbg_wfd_false++;
+			if (!dbg_wfd_err_logged) {
+				dbg_wfd_err_logged = 1;
+				os_info("[dbg] first empty poll: WaitForDebugEvent"
+					"=0 win32=%lu (0 = nothing queued, which "
+					"is normal; anything else means the port "
+					"is not ours)\n",
+					nt->RtlGetLastWin32Error());
+			}
+			break;
+		}
 		dbg_event(de);
 		n++;
 	}
 	dbg_drained += n;
-	if (n > 0 && (dbg_drained % 200u) < n)
-		os_info("[dbg] queue drained=%lu (total %lu)\n", n, dbg_drained);
+	/* Rule #11: report the counters whether or not anything came out —
+	 * "nothing to do" and "never ran" must never read the same. */
+	if (n > 0 || (dbg_drain_calls % 200ul) == 0)
+		os_info("[dbg] drain calls=%lu events=%lu total=%lu "
+			"empty=%lu\n", dbg_drain_calls, n, dbg_drained,
+			dbg_wfd_false);
 }
 
 static void dbg_event(unsigned char *de)
@@ -4005,7 +4025,8 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 			nt->DebugSetProcessKillOnExit(0);
 			dbg_pid_add((unsigned long)c->pid);
 			dbg_active_pid = (unsigned long)c->pid;
-			os_info("[dbg] attached LATE to the login conn pid %lu\n",
+			os_info("[dbg] attached LATE to the login conn pid %lu "
+				"(DebugActiveProcess=1, KillOnExit cleared)\n",
 				(unsigned long)c->pid);
 			/* the attach itself queues a batch of events (the
 			 * CREATE_PROCESS + thread/DLL set); drain it now or
