@@ -62,6 +62,8 @@ int is_skas_winch(int pid, int fd, void *data)
 void uml_nt_dbg_summary(void);
 void dbg_drain(void);
 extern unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
+extern unsigned long long uml_nt_tick_round;
+extern unsigned long long uml_nt_qpc_ms(unsigned long long, unsigned long long);
 /* Shelley 195: the debug lever lives in stub_ctl.c; this file only needs
  * to know whether rounds are slow by design. Declared here to keep the two
  * translation units honest without a header churn. */
@@ -1037,9 +1039,15 @@ void userspace(struct uml_pt_regs *regs)
 
 					 os_info("[when] death tick=%llu "
 						"since spawn=%llu ms "
-						"since attach=%llu ms\n",
-						now, now - uml_nt_tick_spawn,
-						now - uml_nt_tick_dbg);
+						"since attach=%llu ms "
+						"since last round=%llu ms\n",
+						now,
+						uml_nt_qpc_ms(uml_nt_tick_spawn,
+							      now),
+						uml_nt_qpc_ms(uml_nt_tick_dbg,
+							      now),
+						uml_nt_qpc_ms(uml_nt_tick_round,
+							      now));
 					}
 					uml_nt_dbg_summary();
 					os_info("userspace: stub pid %d "

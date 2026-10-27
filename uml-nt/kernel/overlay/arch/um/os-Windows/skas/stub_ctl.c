@@ -357,6 +357,10 @@ static void dbg_event(unsigned char *de);
  * that way. */
 void uml_nt_dbg_summary(void)
 {
+	os_info("[dbg] threads: guest_tid=%lu other_entries=%lu tids=%lu,%lu,%lu,%lu\n",
+		(unsigned long)guest_tid, (unsigned long)census_other,
+		(unsigned long)census_tids[0], (unsigned long)census_tids[1],
+		(unsigned long)census_tids[2], (unsigned long)census_tids[3]);
 	os_info("[dbg] summary: drain calls=%lu events=%lu empty=%lu "
 		"live=%d ==> %s\n", dbg_drain_calls, dbg_drained,
 		dbg_wfd_false, dbg_pid_live(0) ? 1 : 0,
@@ -10913,6 +10917,20 @@ static int g_exec_login;
 /* Shelley 203: the death lands ~0.4s after SOMETHING; these stamps tell us
  * which something. */
 unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
+unsigned long long uml_nt_tick_round;	/* last completed round */
+
+unsigned long long uml_nt_qpc_ms(unsigned long long from, unsigned long long to)
+{
+	LARGE_INTEGER f;
+	unsigned long long hz;
+
+	if (from == 0 || to < from)
+		return 0;
+	if (nt->QueryPerformanceFrequency(&f) == 0 || f.QuadPart <= 0)
+		return 0;
+	hz = (unsigned long long)f.QuadPart;
+	return (to - from) * 1000ull / hz;
+}
 
 static int path_is_login_chain(const char *p)
 {
@@ -12042,6 +12060,12 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	c->ans_retval = c->d->retval;
 	c->ans_seq = c->d->req_seq;
 	c->ans_step = c->d->round_step;
+	{
+		LARGE_INTEGER q;
+
+		nt->QueryPerformanceCounter(&q);
+		uml_nt_tick_round = (unsigned long long)q.QuadPart;
+	}
 	mb();
 	nt->NtSetEvent(c->evt_out, NULL);
 	if (c->d->halt || c->d->action == UML_STUB_ACTION_KILL) {
@@ -12405,6 +12429,27 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 			unsigned char de[UML_NT_DE_SIZE];
 
 			dbg_drain();
+		}
+		{
+			static unsigned long long job_t[4];
+			static int job_n;
+			LARGE_INTEGER q;
+			unsigned long long now;
+
+			nt->QueryPerformanceCounter(&q);
+			now = (unsigned long long)q.QuadPart;
+			if (job_n < 4 && (job_n == 0 ||
+			    uml_nt_qpc_ms(job_t[job_n - 1], now) >=
+			    (job_n == 1 ? 1000u : 4000u))) {
+				job_t[job_n++] = now;
+				os_info("[job] probe %d: t=%llu ms since spawn "
+					"= %llu ms (launcher alive — a closed "
+					"kill-on-close job would have taken "
+					"every conn with it)\n",
+					job_n - 1,
+					uml_nt_qpc_ms(uml_nt_tick_spawn, now),
+					uml_nt_qpc_ms(uml_nt_tick_spawn, now));
+			}
 		}
 		w = nt->WaitForMultipleObjects((ULONG)nwaits, waits, 0,
 					       uml_nt_dbg_flag() ? 5u : 1000u);
