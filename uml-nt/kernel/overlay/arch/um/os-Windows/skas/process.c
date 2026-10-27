@@ -1063,6 +1063,14 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->veh_entries,
 						c->d->ts_publish,
 						c->d->ts_resume);
+					 os_info("[exit-when] pid %d "
+						"resume->exit=%llu us "
+						"(ts_resume=0x%llx)\n",
+						c->pid,
+						uml_nt_resume_to_exit_us(
+							c->proc,
+							c->d->ts_resume),
+						c->d->ts_resume);
 					}
 					uml_nt_dbg_summary();
 					os_info("userspace: stub pid %d "
