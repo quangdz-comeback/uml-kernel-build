@@ -329,6 +329,25 @@ static void dbg_mod_add(unsigned long long base)
 		dbg_mods[dbg_nmods++] = base;
 }
 
+/* Shelley 214: which host module owns an address? The debug loader map is
+ * the only host-side map we have, and the nearest base at or below the VA is
+ * the module — unless the VA is far above every base, in which case it is
+ * past the last section we know about. */
+void uml_nt_host_mod(unsigned long long va, char *out, int len)
+{
+	unsigned long long best = 0;
+	int i;
+
+	for (i = 0; i < dbg_nmods; i++) {
+		if (dbg_mods[i] <= va && dbg_mods[i] >= best)
+			best = dbg_mods[i];
+	}
+	if (best != 0 && va - best < (64ull << 20))
+		snprintf(out, len, "mod@0x%llx+0x%llx", best, va - best);
+	else
+		snprintf(out, len, "UNKNOWN-HOST-MODULE (mods=%d)", dbg_nmods);
+}
+
 static void dbg_mod_name(unsigned long long addr, char *out, int len)
 {
 	unsigned long long best = 0;

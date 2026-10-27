@@ -62,6 +62,7 @@ int is_skas_winch(int pid, int fd, void *data)
 void uml_nt_dbg_summary(void);
 void dbg_drain(void);
 void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c);
+void uml_nt_host_mod(unsigned long long va, char *out, int len);
 void uml_nt_death_exit_check(struct uml_nt_stub_conn *c);
 extern unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 extern unsigned long long uml_nt_tick_round;
@@ -1097,6 +1098,7 @@ void userspace(struct uml_pt_regs *regs)
 					}
 					{
 						int ri;
+						char mo[64], mo2[64];
 						unsigned rat =
 						 c->d->ret_ring_at;
 
@@ -1115,6 +1117,13 @@ void userspace(struct uml_pt_regs *regs)
 							r->cmd, r->action,
 							r->resuming);
 					 }
+					 uml_nt_host_mod(c->d->regs.rip, mo,
+							 sizeof(mo));
+					 uml_nt_host_mod(c->d->regs.rsp, mo2,
+							 sizeof(mo2));
+					 os_info("[mods] death rip %s ; rsp %s "
+						"(guest space is 0x60xxxxxx)\n",
+						mo, mo2);
 					 /* the eflags/DR state the guest was resumed
 					  * WITH on the very last round */
 					 os_info("[tf] hop_armed=%llu step_armed=%llu "
