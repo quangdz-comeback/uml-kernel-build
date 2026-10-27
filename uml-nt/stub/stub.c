@@ -980,6 +980,28 @@ static void publish_unhandled(const EXCEPTION_RECORD *er, const CONTEXT *c)
 	}
 }
 
+/* Shelley 211: the two CRT terminators that never reach a VEH. Both write
+ * a line to stderr (captured in the log) and to the shared page counter, so
+ * a death that follows them is no longer anonymous. */
+static void crt_invalid_parameter(const wchar_t *expression,
+				  const wchar_t *function,
+				  const wchar_t *file, unsigned int line,
+				  uintptr_t reserved)
+{
+	(void)expression; (void)function; (void)file; (void)line;
+	(void)reserved;
+	fprintf(stderr, "stub: CRT INVALID PARAMETER — the process would have "
+		"been terminated here\n");
+	fflush(stderr);
+}
+
+static void crt_purecall(void)
+{
+	fprintf(stderr, "stub: CRT PURE VIRTUAL CALL — the process would have "
+		"been terminated here\n");
+	fflush(stderr);
+}
+
 static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
 {
 	publish_unhandled(ep ? ep->ExceptionRecord : NULL,
@@ -2584,6 +2606,22 @@ int main(int argc, char **argv)
 	}
 
 	SetUnhandledExceptionFilter(unhandled_filter);
+	/* Shelley 211: the CRT can leave this world without an exception the
+	 * kernel would ever see — an invalid parameter, a pure virtual call,
+	 * a heap check. Each of those paths is named here, with its source
+	 * location, before the CRT does anything drastic. */
+	{
+		static char crt_buf[400];
+		LARGE_INTEGER q;
+
+		QueryPerformanceCounter(&q);
+		_snprintf(crt_buf, sizeof(crt_buf) - 1,
+			  "crt: invalid parameter at t=%lld file=%s line=%llu\n",
+			  (long long)q.QuadPart, "(hook)", 0ull);
+		SetEnvironmentVariableA("UML_NT_CRT_HOOK", crt_buf);
+	}
+	_set_invalid_parameter_handler(crt_invalid_parameter);
+	_set_purecall_handler(crt_purecall);
 	/* Shelley 188: the LAST-CHANCE record. A VEH sees everything user
 	 * mode raises — except an exception raised where dispatchers do not
 	 * run. The unhandled filter still gets the record in those cases, so

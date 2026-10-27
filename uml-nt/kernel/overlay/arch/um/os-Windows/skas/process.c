@@ -1074,6 +1074,27 @@ void userspace(struct uml_pt_regs *regs)
 							c->d->ts_resume),
 						c->d->ts_resume);
 					}
+					{
+						int ei;
+						long at =
+						 c->d->entry_ring_at;
+
+					 for (ei = 3; ei >= 1; ei--) {
+						struct uml_nt_entry_ring *
+						 e = &c->d->entry_ring[
+						 (unsigned)(at - ei) & 15];
+
+						os_info("[edge] -%d n=%llu "
+							"seq=%llu cmd=%u "
+							"code=0x%llx "
+							"rip=0x%llx "
+							"in_body=%llu\n",
+							ei, e->n, e->seq,
+							(unsigned)e->cmd,
+							e->code, e->rip,
+							e->in_body);
+					 }
+					}
 					uml_nt_death_exit_check(c);
 					uml_nt_death_scan_exec(c);
 					uml_nt_dbg_summary();
