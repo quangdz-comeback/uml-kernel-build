@@ -10910,6 +10910,9 @@ static char g_exec_path[UML_NT_EXEC_PATH_MAX_LOCAL];
  * binary. The conn's own exec_path is still empty when its stub is being
  * created (it is adopted later), so the chain flag must come from here. */
 static int g_exec_login;
+/* Shelley 203: the death lands ~0.4s after SOMETHING; these stamps tell us
+ * which something. */
+unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 
 static int path_is_login_chain(const char *p)
 {
@@ -11593,9 +11596,16 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	memset(&si, 0, sizeof(si));
 	si.cb = sizeof(si); /* 104 on x64 — pitfall 10 */
 	memset(&pi, 0, sizeof(pi));
+	if (dbg_want(c) || g_exec_login) {
+		LARGE_INTEGER q;
+
+		nt->QueryPerformanceCounter(&q);
+		uml_nt_tick_spawn = (unsigned long long)q.QuadPart;
+	}
 	os_info("[dbg] spawn pid-soon exec='%s' chain=%u gexec_login=%d "
-		"debug=%d\n", c->exec_path, (unsigned)c->chain_login,
-		g_exec_login, dbg_want(c));
+		"debug=%d tick=%llu\n", c->exec_path,
+		(unsigned)c->chain_login, g_exec_login, dbg_want(c),
+		uml_nt_tick_spawn);
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
 				(unsigned long)(dbg_want(c) ?
 				/* a debuggee must NOT be created suspended:
@@ -11609,6 +11619,15 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				NULL, NULL, &si, &pi))
 		goto fail;
 	if (dbg_want(c)) {
+		{
+			LARGE_INTEGER q;
+
+			nt->QueryPerformanceCounter(&q);
+			uml_nt_tick_dbg = (unsigned long long)q.QuadPart;
+		}
+		os_info("[dbg] attach tick=%llu (since spawn %llu ms)\n",
+			uml_nt_tick_dbg,
+			uml_nt_tick_dbg - uml_nt_tick_spawn);
 		/* the handshake, on THIS thread, before anything else */
 		unsigned char fe[UML_NT_DE_SIZE];
 		unsigned int tid = 0;

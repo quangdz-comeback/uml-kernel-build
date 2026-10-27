@@ -61,6 +61,7 @@ int is_skas_winch(int pid, int fd, void *data)
 /* GetExitCodeProcess: 259 = STILL_ACTIVE (win32). */
 void uml_nt_dbg_summary(void);
 void dbg_drain(void);
+extern unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 /* Shelley 195: the debug lever lives in stub_ctl.c; this file only needs
  * to know whether rounds are slow by design. Declared here to keep the two
  * translation units honest without a header churn. */
@@ -1027,6 +1028,19 @@ void userspace(struct uml_pt_regs *regs)
 					 * means the thread died from an AV no
 					 * handler took; TerminateThread would
 					 * leave a different number. */
+					{
+						LARGE_INTEGER q;
+						unsigned long long now;
+
+					 nt->QueryPerformanceCounter(&q);
+					 now = (unsigned long long)q.QuadPart;
+
+					 os_info("[when] death tick=%llu "
+						"since spawn=%llu ms "
+						"since attach=%llu ms\n",
+						now, now - uml_nt_tick_spawn,
+						now - uml_nt_tick_dbg);
+					}
 					uml_nt_dbg_summary();
 					os_info("userspace: stub pid %d "
 						"died silently (%lu from "
