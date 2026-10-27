@@ -154,7 +154,12 @@ static int launcher_dump(unsigned long pid)
 		CloseHandle(proc);
 		return 0;
 	}
-	ok = mwd(proc, (DWORD)pid, file, 2 /*MiniDumpWithFullMemory*/,
+	/* ruling 217: thread context + module list is what we need, and a
+	 * full-memory dump of a 1 GiB guest can blow the artifact limit. */
+	ok = mwd(proc, (DWORD)pid, file,
+		 0x00000004 /*WithProcessThreadData*/ |
+		 0x00040000 /*WithThreadInfo*/ |
+		 0x00000020 /*WithUnloadedModules*/,
 		 NULL, NULL, NULL);
 	fprintf(stderr, "[dump] pid %lu -> %s : %s (gle=%lu)\n", pid, path,
 		ok ? "written" : "FAILED", GetLastError());
