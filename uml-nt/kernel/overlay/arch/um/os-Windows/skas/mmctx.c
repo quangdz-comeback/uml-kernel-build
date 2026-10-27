@@ -195,6 +195,8 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * suspended (never got guest code — the normal S1/S2 fate for
 	 * an mm whose exec failed) or parked after a halt. */
 	if (c->alive) {
+		os_info("[term] mmctx: killing stub pid %lu code=0\n",
+			(unsigned long)c->pid);
 		nt->NtTerminateProcess(c->proc, 0);
 		c->alive = 0;
 	}

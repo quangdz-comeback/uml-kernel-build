@@ -1027,7 +1027,9 @@ void userspace(struct uml_pt_regs *regs)
 						"rax=%llx xs_flags=%x "
 						"stub-stk=[%llx,%llx) "
 						"sp=0x%llx min=0x%llx "
-						"headroom=0x%llx\n",
+						"headroom=0x%llx "
+						"retval=0x%llx err=%d "
+						"step=%u halt=%u action=%u\n",
 						mm_id->pid,
 						(unsigned long)code,
 						(unsigned)c->d->cmd,
@@ -1042,7 +1044,12 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->stub_sp >
 						  c->d->stub_sp_lim ?
 						  c->d->stub_sp -
-						  c->d->stub_sp_lim : 0);
+						  c->d->stub_sp_lim : 0,
+						c->d->retval,
+						(int)c->d->err,
+						(unsigned)c->d->round_step,
+						(unsigned)c->d->halt,
+						(unsigned)c->d->action);
 					uml_nt_death_site(c);
 					uml_nt_guestsite("rip", c->d->regs.rip, c);
 					uml_nt_guestsite("rsp", c->d->regs.rsp, c);

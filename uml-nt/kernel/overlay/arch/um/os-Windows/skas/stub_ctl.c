@@ -12036,6 +12036,13 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			(unsigned)c->d->action,
 			c->d->retval, (unsigned)c->d->cmd,
 			c->d->regs.rip);
+		/* Shelley 201 (self-kill audit): if THIS line fires with the
+		 * dying pid, the exit code was never an exception — it is the
+		 * guest's own retval, handed to NtTerminateProcess by us. */
+		os_info("[term] SELF-KILL pid %lu code=0x%llx (guest retval, "
+			"KILL action) cmd=%u\n", (unsigned long)c->pid,
+			(unsigned long long)(unsigned int)c->d->retval,
+			(unsigned)c->d->cmd);
 		nt->NtTerminateProcess(c->proc,
 				       (NTSTATUS)c->d->retval);
 		c->exit_code = c->d->retval;
