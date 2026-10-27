@@ -412,25 +412,39 @@ void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c)
 						uml_nt_run_is_swept(c, off,
 							uml_nt_prot_execable(
 								v->prot)));
-					for (b = 0; b < np && b < 2; b++) {
-						unsigned long long k2;
-						char line[3 * 16 + 1];
-						int q = 0;
+					{
+						unsigned long long k2, start;
+						int shown = 0;
 
-						for (k2 = 0; k2 < 16; k2++) {
-							unsigned char byte =
-							 p[k2 + (b ? 8 : 0)];
+						/* print the bytes AT the hit, not the run
+						 * start: a hit inside data is not a
+						 * weapon and must not be read as one */
+						for (k2 = 0; k2 + 1 < UML_NT_PHYS_RUN_SIZE &&
+						     shown < 2; k2++) {
+							char line[3 * 16 + 1];
+							int q = 0;
+							unsigned long long m;
 
-							line[q++] = "0123456789abcdef"
-								[(byte >> 4) & 15];
-							line[q++] = "0123456789abcdef"
-								[byte & 15];
-							line[q++] = ' ';
+							if (p[k2] != 0x0f ||
+							    p[k2 + 1] != 0x05)
+								continue;
+							start = k2 > 8 ? k2 - 8 : 0;
+							for (m = 0; m < 16; m++) {
+								unsigned char bt =
+								 p[start + m];
+
+								line[q++] = "0123456789abcdef"
+									[(bt >> 4) & 15];
+								line[q++] = "0123456789abcdef"
+									[bt & 15];
+								line[q++] = ' ';
+							}
+							line[q] = 0;
+							os_info("[exec-scan]   hit@+0x%llx "
+								"(ctx from +0x%llx): %s\n",
+								k2, start, line);
+							shown++;
 						}
-						line[q] = 0;
-						os_info("[exec-scan]   bytes @+%llu: "
-							"%s\n", b ? 8ull : 0ull,
-							line);
 					}
 				}
 			}
