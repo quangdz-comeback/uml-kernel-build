@@ -10608,6 +10608,47 @@ void uml_nt_exec_path_set(const char *path)
 
 static volatile int dbg_stop;
 static unsigned long dbg_events;
+/* Every conn is its own process, and every debug event freezes the whole
+ * debuggee until it is continued — so we must continue events for EVERY
+ * process we attached to, not only the one whose exceptions we log. The
+ * active pid decides who gets the detailed lines (Shelley 193). */
+static unsigned long dbg_pids[8];
+static unsigned long dbg_active_pid;
+
+static void dbg_pid_add(unsigned long pid)
+{
+	int i;
+
+	for (i = 0; i < 8; i++)
+		if (dbg_pids[i] == pid)
+			return;
+	for (i = 0; i < 8; i++)
+		if (dbg_pids[i] == 0) {
+			dbg_pids[i] = pid;
+			return;
+		}
+}
+
+static void dbg_pid_del(unsigned long pid)
+{
+	int i;
+
+	for (i = 0; i < 8; i++)
+		if (dbg_pids[i] == pid)
+			dbg_pids[i] = 0;
+	if (dbg_active_pid == pid)
+		dbg_active_pid = 0;
+}
+
+static int dbg_pid_live(unsigned long pid)
+{
+	int i;
+
+	for (i = 0; i < 8; i++)
+		if (dbg_pids[i] == pid)
+			return 1;
+	return 0;
+}
 
 /* The kernel is a freestanding ELF: no windows.h, so DEBUG_EVENT and
  * EXCEPTION_RECORD are spelled out here from the documented x64 layout
@@ -11333,6 +11374,8 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				de_u32(fe, UML_NT_DE_CODE),
 				de_u32(fe, UML_NT_DE_PID),
 				de_u32(fe, UML_NT_DE_TID));
+			dbg_pid_add((unsigned long)pi.dwProcessId);
+			dbg_active_pid = (unsigned long)pi.dwProcessId;
 			nt->ContinueDebugEvent(de_u32(fe, UML_NT_DE_PID),
 					       de_u32(fe, UML_NT_DE_TID),
 					       UML_NT_DBG_CONTINUE);
@@ -12096,8 +12139,15 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 				unsigned int dtid = de_u32(de, UML_NT_DE_TID);
 				unsigned int dst = UML_NT_DBG_CONTINUE;
 
+				unsigned int dpid = de_u32(de, UML_NT_DE_PID);
+
 				dbg_events++;
-				if (dcode == UML_NT_EXCEPTION_DEBUG) {
+				if (dcode == UML_NT_EXIT_PROCESS)
+					dbg_pid_del((unsigned long)dpid);
+				if (!dbg_pid_live((unsigned long)dpid))
+					; /* unknown/old pid: continue, no log */
+				else if (dcode == UML_NT_EXCEPTION_DEBUG &&
+					 (unsigned long)dpid == dbg_active_pid) {
 					const unsigned char *u =
 						de + UML_NT_DE_U;
 					unsigned int np = de_u32(u,
@@ -12119,7 +12169,8 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 					os_info(" tid=%u\n", dtid);
 					dst = UML_NT_DBG_NOT_HANDLED;
 				} else if (dcode == UML_NT_EXIT_PROCESS) {
-					os_info("[dbg] EXIT_PROCESS code=0x%x\n",
+					os_info("[dbg] EXIT_PROCESS pid=%u "
+						"code=0x%x\n", dpid,
 						de_u32(de + UML_NT_DE_U,
 						       UML_NT_U_EXIT_CODE));
 				}
@@ -12146,8 +12197,14 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 				unsigned int dt = de_u32(de2, UML_NT_DE_TID);
 				unsigned int ds = UML_NT_DBG_CONTINUE;
 
+				unsigned int dp2 = de_u32(de2, UML_NT_DE_PID);
+
 				dbg_events++;
-				if (dc == UML_NT_EXCEPTION_DEBUG) {
+				if (dc == UML_NT_EXIT_PROCESS)
+					dbg_pid_del((unsigned long)dp2);
+				if (dbg_pid_live((unsigned long)dp2) &&
+				    dc == UML_NT_EXCEPTION_DEBUG &&
+				    (unsigned long)dp2 == dbg_active_pid) {
 					const unsigned char *u2 =
 						de2 + UML_NT_DE_U;
 					unsigned int np2 = de_u32(u2,
@@ -12169,7 +12226,8 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 					os_info(" tid=%u\n", dt);
 					ds = UML_NT_DBG_NOT_HANDLED;
 				} else if (dc == UML_NT_EXIT_PROCESS) {
-					os_info("[dbg] EXIT_PROCESS code=0x%x\n",
+					os_info("[dbg] EXIT_PROCESS pid=%u "
+						"code=0x%x\n", dp2,
 						de_u32(de2 + UML_NT_DE_U,
 						       UML_NT_U_EXIT_CODE));
 				}
