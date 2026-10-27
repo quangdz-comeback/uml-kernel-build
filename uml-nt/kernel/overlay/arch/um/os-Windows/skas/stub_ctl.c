@@ -11341,11 +11341,11 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				"debugger attach did not take (check the Job "
 				"Object interaction)\n");
 		}
-		if (nt->CreateThread(NULL, 0, dbg_pump,
-				     (void *)(uintptr_t)pi.dwProcessId,
-				     0, &tid) == NULL)
-			os_info("[dbg] debug pump thread FAILED — the "
-				"stub still runs, unattended\n");
+		/* NO pump thread: the service loop takes the events, on
+		 * this thread, right where it waits (Shelley 191). Two
+		 * consumers would race for the same debug buffer —
+		 * referee 40428162068 showed both of them running. */
+		(void)tid;
 	}
 
 	c->proc = pi.hProcess;
