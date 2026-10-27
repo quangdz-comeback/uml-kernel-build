@@ -177,6 +177,7 @@ static int uml_nt_dbg_flag(void);
 #define UML_NT_DE_SIZE		176
 #define UML_NT_EXCEPTION_DEBUG	1u
 #define UML_NT_EXIT_PROCESS	5u
+#define UML_NT_LOAD_DLL		6u
 
 #define UML_NT_DBG_CONTINUE	0x00010002u
 #define UML_NT_DBG_NOT_HANDLED	0x80010001u
@@ -291,6 +292,126 @@ static int dbg_pid_live(unsigned long pid)
 		if (dbg_pids[i] == pid)
 			return 1;
 	return 0;
+}
+
+/* (alpha/beta, Shelley 194): module map + the full exception record.
+ * A second-chance AV is only useful if we can say WHERE it fell, and
+ * "0x7ffc76f32639" says nothing until it is named against the module that
+ * contains it. LOAD_DLL events carry BaseOfDll; the ring keeps the last
+ * eight first-chance exceptions so the log stays readable and the events
+ * that led to the death are still there when the process exits.
+ */
+#define UML_NT_MAX_MODS	64
+static unsigned long long dbg_mods[UML_NT_MAX_MODS];
+static int dbg_nmods;
+static unsigned long dbg_burst_exc1;
+
+struct dbg_ring_ent {
+	unsigned int code, firstchance, tid;
+	unsigned long long addr;
+	unsigned long long info[4];
+	unsigned int nparams;
+};
+static struct dbg_ring_ent dbg_ring[8];
+static int dbg_ring_at;
+
+static void dbg_mod_add(unsigned long long base)
+{
+	int i;
+
+	if (base == 0)
+		return;
+	for (i = 0; i < dbg_nmods; i++)
+		if (dbg_mods[i] == base)
+			return;
+	if (dbg_nmods < UML_NT_MAX_MODS)
+		dbg_mods[dbg_nmods++] = base;
+}
+
+static void dbg_mod_name(unsigned long long addr, char *out, int len)
+{
+	unsigned long long best = 0;
+	int i;
+
+	for (i = 0; i < dbg_nmods; i++)
+		if (dbg_mods[i] <= addr && dbg_mods[i] > best)
+			best = dbg_mods[i];
+	if (best == 0) {
+		snprintf(out, len, "no-module");
+		return;
+	}
+	snprintf(out, len, "mod@0x%llx+0x%llx", best, addr - best);
+}
+
+static void dbg_event(unsigned char *de)
+{
+	unsigned int code = de_u32(de, UML_NT_DE_CODE);
+	unsigned int pid = de_u32(de, UML_NT_DE_PID);
+	unsigned int tid = de_u32(de, UML_NT_DE_TID);
+
+	dbg_events++;
+	if (code == UML_NT_LOAD_DLL) {
+		dbg_mod_add(de_u64(de, UML_NT_DE_U));	/* BaseOfDll */
+		return;
+	}
+	if (code == UML_NT_EXIT_PROCESS) {
+		int k;
+
+		os_info("[dbg] EXIT_PROCESS pid=%u code=0x%x (burst EXC1=%lu)\n",
+			pid, de_u32(de, UML_NT_DE_U), dbg_burst_exc1);
+		for (k = 0; k < 8; k++) {
+			struct dbg_ring_ent *e = &dbg_ring[k];
+
+			if (e->code == 0)
+				continue;
+			os_info("[dbg]   ring[%d] EXC%d code=0x%08x addr=0x%llx "
+				"nparams=%u info[0]=0x%llx info[1]=0x%llx "
+				"tid=%u\n", k, e->firstchance ? 1 : 2, e->code,
+				e->addr, e->nparams, e->info[0], e->info[1],
+				e->tid);
+		}
+		dbg_pid_del((unsigned long)pid);
+		return;
+	}
+	if (code != UML_NT_EXCEPTION_DEBUG)
+		return;
+	{
+		const unsigned char *u = de + UML_NT_DE_U;
+		unsigned int np = de_u32(u, UML_NT_U_EXC_NPARAMS);
+		unsigned int fc = de_u32(u, UML_NT_U_EXC_FIRSTCH);
+		unsigned long long addr = de_u64(u, UML_NT_U_EXC_ADDR);
+		unsigned int exc = de_u32(u, UML_NT_U_EXC_CODE);
+		unsigned long long info[4] = { 0, 0, 0, 0 };
+		unsigned int k;
+		char mod[64];
+
+		for (k = 0; k < np && k < 4; k++)
+			info[k] = de_u64(u, UML_NT_U_EXC_INFO + 8 * k);
+		dbg_mod_name(addr, mod, sizeof(mod));
+		dbg_ring[dbg_ring_at & 7].code = exc;
+		dbg_ring[dbg_ring_at & 7].firstchance = fc;
+		dbg_ring[dbg_ring_at & 7].tid = tid;
+		dbg_ring[dbg_ring_at & 7].addr = addr;
+		dbg_ring[dbg_ring_at & 7].nparams = np;
+		for (k = 0; k < 4; k++)
+			dbg_ring[dbg_ring_at & 7].info[k] = info[k];
+		dbg_ring_at++;
+		if (!fc || (unsigned long)pid == dbg_active_pid) {
+			if (fc)
+				dbg_burst_exc1++;
+			/* second chance is always worth a full line; first
+			 * chance only for the conn we are watching, and even
+			 * then without the burst roar */
+			if (!fc || dbg_burst_exc1 <= 20)
+				os_info("[dbg] EXC%d code=0x%08x addr=0x%llx "
+					"%s nparams=%u info[0]=0x%llx "
+					"info[1]=0x%llx info[2]=0x%llx "
+					"info[3]=0x%llx tid=%u pid=%u\n",
+					fc ? 1 : 2, exc, addr, mod, np,
+					info[0], info[1], info[2], info[3],
+					tid, pid);
+		}
+	}
 }
 
 int uml_nt_dbg_on = -1;
@@ -3859,27 +3980,8 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 			/* the attach itself queues a batch of events (the
 			 * CREATE_PROCESS + thread/DLL set); drain it now or
 			 * the debuggee stays frozen from the first one */
-			while (nt->WaitForDebugEvent(fe, 100)) {
-				unsigned int c2 = de_u32(fe, UML_NT_DE_CODE);
-				unsigned int t2 = de_u32(fe, UML_NT_DE_TID);
-
-				dbg_events++;
-				if (c2 == UML_NT_EXCEPTION_DEBUG)
-					os_info("[dbg] EXC%s code=0x%08x "
-						"addr=0x%llx (attach burst)\n",
-						de_u32(fe + UML_NT_DE_U,
-						       UML_NT_U_EXC_FIRSTCH)
-						? "1" : "2",
-						de_u32(fe + UML_NT_DE_U,
-						       UML_NT_U_EXC_CODE),
-						de_u64(fe + UML_NT_DE_U,
-						       UML_NT_U_EXC_ADDR));
-				nt->ContinueDebugEvent(de_u32(fe, UML_NT_DE_PID),
-						       t2, c2 ==
-						       UML_NT_EXCEPTION_DEBUG ?
-						       UML_NT_DBG_NOT_HANDLED :
-						       UML_NT_DBG_CONTINUE);
-			}
+			while (nt->WaitForDebugEvent(fe, 100))
+				dbg_event(fe);
 		} else {
 			os_info("[dbg] DebugActiveProcess(%lu) FAILED "
 				"win32=%lu\n", (unsigned long)c->pid,
@@ -12179,57 +12281,9 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		if (uml_nt_dbg_flag()) {
 			unsigned char de[UML_NT_DE_SIZE];
 
-			while (nt->WaitForDebugEvent(de, 0)) {
-				unsigned int dcode = de_u32(de, UML_NT_DE_CODE);
-				unsigned int dtid = de_u32(de, UML_NT_DE_TID);
-				unsigned int dst = UML_NT_DBG_CONTINUE;
-
-				unsigned int dpid = de_u32(de, UML_NT_DE_PID);
-
-				dbg_events++;
-				if (dcode == UML_NT_EXIT_PROCESS)
-					dbg_pid_del((unsigned long)dpid);
-				if (!dbg_pid_live((unsigned long)dpid))
-					; /* unknown/old pid: continue, no log */
-				else if (dcode == UML_NT_EXCEPTION_DEBUG &&
-					 (unsigned long)dpid == dbg_active_pid) {
-					const unsigned char *u =
-						de + UML_NT_DE_U;
-					unsigned int np = de_u32(u,
-						UML_NT_U_EXC_NPARAMS);
-					unsigned int k;
-
-					os_info("[dbg] EXC%s code=0x%08x "
-						"addr=0x%llx nparams=%u",
-						de_u32(u, UML_NT_U_EXC_FIRSTCH)
-						? "1" : "2",
-						de_u32(u, UML_NT_U_EXC_CODE),
-						de_u64(u, UML_NT_U_EXC_ADDR),
-						np);
-					for (k = 0; k < np && k < 4; k++)
-						os_info(" info[%u]=0x%llx",
-							k, de_u64(u,
-							UML_NT_U_EXC_INFO +
-							8 * k));
-					os_info(" tid=%u\n", dtid);
-					dst = UML_NT_DBG_NOT_HANDLED;
-				} else if (dcode == UML_NT_EXIT_PROCESS) {
-					os_info("[dbg] EXIT_PROCESS pid=%u "
-						"code=0x%x\n", dpid,
-						de_u32(de + UML_NT_DE_U,
-						       UML_NT_U_EXIT_CODE));
-				}
-				nt->ContinueDebugEvent(de_u32(de,
-							      UML_NT_DE_PID),
-						       dtid, dst);
-			}
+			while (nt->WaitForDebugEvent(de, 0))
+				dbg_event(de);
 		}
-		/* A debug event freezes the debuggee until continued, so on
-		 * the debug path the wait must be short: a 1s cadence would
-		 * give the guest one round per second and never finish the
-		 * boot. 20ms costs nothing on the production path (where the
-		 * timeout is already 1s and the poll block is compiled out by
-		 * the same flag check). */
 		w = nt->WaitForMultipleObjects((ULONG)nwaits, waits, 0,
 					       uml_nt_dbg_flag() ? 5u : 1000u);
 		/* a debug event can arrive during the wait; drain again so the
@@ -12237,49 +12291,8 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 		if (uml_nt_dbg_flag()) {
 			unsigned char de2[UML_NT_DE_SIZE];
 
-			while (nt->WaitForDebugEvent(de2, 0)) {
-				unsigned int dc = de_u32(de2, UML_NT_DE_CODE);
-				unsigned int dt = de_u32(de2, UML_NT_DE_TID);
-				unsigned int ds = UML_NT_DBG_CONTINUE;
-
-				unsigned int dp2 = de_u32(de2, UML_NT_DE_PID);
-
-				dbg_events++;
-				if (dc == UML_NT_EXIT_PROCESS)
-					dbg_pid_del((unsigned long)dp2);
-				if (dbg_pid_live((unsigned long)dp2) &&
-				    dc == UML_NT_EXCEPTION_DEBUG &&
-				    (unsigned long)dp2 == dbg_active_pid) {
-					const unsigned char *u2 =
-						de2 + UML_NT_DE_U;
-					unsigned int np2 = de_u32(u2,
-						UML_NT_U_EXC_NPARAMS);
-					unsigned int k2;
-
-					os_info("[dbg] EXC%s code=0x%08x "
-						"addr=0x%llx nparams=%u",
-						de_u32(u2, UML_NT_U_EXC_FIRSTCH)
-						? "1" : "2",
-						de_u32(u2, UML_NT_U_EXC_CODE),
-						de_u64(u2, UML_NT_U_EXC_ADDR),
-						np2);
-					for (k2 = 0; k2 < np2 && k2 < 4; k2++)
-						os_info(" info[%u]=0x%llx",
-							k2, de_u64(u2,
-							UML_NT_U_EXC_INFO +
-							8 * k2));
-					os_info(" tid=%u\n", dt);
-					ds = UML_NT_DBG_NOT_HANDLED;
-				} else if (dc == UML_NT_EXIT_PROCESS) {
-					os_info("[dbg] EXIT_PROCESS pid=%u "
-						"code=0x%x\n", dp2,
-						de_u32(de2 + UML_NT_DE_U,
-						       UML_NT_U_EXIT_CODE));
-				}
-				nt->ContinueDebugEvent(de_u32(de2,
-							      UML_NT_DE_PID),
-						       dt, ds);
-			}
+			while (nt->WaitForDebugEvent(de2, 0))
+				dbg_event(de2);
 		}
 		if (w == 0xFFFFFFFFu /*WAIT_FAILED*/) {
 			os_info("[stubtest] wait failed win32=%lu\n",
