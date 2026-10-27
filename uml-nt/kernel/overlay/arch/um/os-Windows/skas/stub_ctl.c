@@ -375,6 +375,7 @@ static void dbg_event(unsigned char *de)
 	dbg_events++;
 	if (code == UML_NT_LOAD_DLL) {
 		dbg_mod_add(de_u64(de, UML_NT_DE_U));	/* BaseOfDll */
+		nt->ContinueDebugEvent(pid, tid, UML_NT_DBG_CONTINUE);
 		return;
 	}
 	if (code == UML_NT_EXIT_PROCESS) {
@@ -393,11 +394,17 @@ static void dbg_event(unsigned char *de)
 				e->addr, e->nparams, e->info[0], e->info[1],
 				e->tid);
 		}
+		nt->ContinueDebugEvent(pid, tid, UML_NT_DBG_CONTINUE);
 		dbg_pid_del((unsigned long)pid);
 		return;
 	}
-	if (code != UML_NT_EXCEPTION_DEBUG)
+	if (code != UML_NT_EXCEPTION_DEBUG) {
+		/* CREATE_PROCESS, thread and string events: continue them or
+		 * the debuggee never runs again. This one omission parked the
+		 * login stub at its first round with an empty queue. */
+		nt->ContinueDebugEvent(pid, tid, UML_NT_DBG_CONTINUE);
 		return;
+	}
 	{
 		const unsigned char *u = de + UML_NT_DE_U;
 		unsigned int np = de_u32(u, UML_NT_U_EXC_NPARAMS);
