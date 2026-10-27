@@ -342,5 +342,7 @@ jobs:
           name: m55a-wer-dumps-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/uml-dumps/*.dmp
+            ${{ runner.temp }}/stub-death-*.dmp
+            stub-death-*.dmp
             uml-nt/launcher/stub-unhandled.txt
           if-no-files-found: warn

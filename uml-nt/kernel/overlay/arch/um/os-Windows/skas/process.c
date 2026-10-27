@@ -62,6 +62,10 @@ int is_skas_winch(int pid, int fd, void *data)
 void uml_nt_dbg_summary(void);
 void dbg_drain(void);
 void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c);
+/* Shelley 216: the launcher installs this if dbghelp is available; a weak
+ * default keeps the kernel linkable on its own. */
+extern int (*uml_nt_dump_hook)(unsigned long pid)
+	__attribute__((weak));
 void uml_nt_host_mod(unsigned long long va, char *out, int len);
 void uml_nt_death_exit_check(struct uml_nt_stub_conn *c);
 extern unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
@@ -1153,6 +1157,19 @@ void userspace(struct uml_pt_regs *regs)
 						(int)((c->d->regs.rflags >> 8) & 1),
 						c->d->got_dr7, c->d->ask_dr7,
 						c->d->got_flags);
+					}
+					/* Shelley 216: ask the launcher for a dump
+					 * BEFORE we classify — it still holds the
+					 * handle and lives in another process, so
+					 * the target cannot take the writer with
+					 * it. */
+					{
+					 if (uml_nt_dump_hook != NULL)
+						uml_nt_dump_hook(
+						  (unsigned long)mm_id->pid);
+					 else
+						os_info("[dump] no launcher "
+							"hook installed\n");
 					}
 					uml_nt_death_exit_check(c);
 					uml_nt_death_scan_exec(c);

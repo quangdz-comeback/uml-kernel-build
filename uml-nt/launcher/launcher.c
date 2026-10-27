@@ -96,6 +96,73 @@ static void create_boot_job(void)
 			"host\n", GetLastError());
 }
 
+
+/* Shelley 216: when a conn dies, the launcher — still alive, still holding
+ * the handle — writes a minidump of that process. A dump taken from inside
+ * the dying process cannot work: TerminateProcess takes the watchdog with
+ * it. This one runs in a different process and outlives the target. */
+int (*uml_nt_dump_hook)(unsigned long pid);
+
+static int launcher_dump(unsigned long pid)
+{
+	typedef BOOL (WINAPI *mwd_t)(HANDLE, DWORD, HANDLE, int, void *, void *,
+				     void *);
+	static mwd_t mwd;
+	static int tries;
+	JOBOBJECT_BASIC_ACCOUNTING_INFORMATION acc;
+	HANDLE proc, file;
+	char path[MAX_PATH];
+	BOOL ok;
+
+	if (mwd == NULL && tries++ == 0) {
+		HMODULE dbg = LoadLibraryA("dbghelp.dll");
+
+		if (dbg != NULL)
+			mwd = (mwd_t)GetProcAddress(dbg, "MiniDumpWriteDump");
+		if (mwd == NULL) {
+			fprintf(stderr, "[dump] dbghelp unavailable (gle=%lu)\n",
+				GetLastError());
+			return 0;
+		}
+	}
+	if (mwd == NULL)
+		return 0;
+	/* what the OS itself thinks happened to our job */
+	if (g_job && QueryInformationJobObject(g_job,
+			JobObjectBasicAccountingInformation, &acc,
+			sizeof(acc), NULL))
+		fprintf(stderr, "[job] terminated_processes=%lu "
+			"active=%lu total_user=%lld total_kernel=%lld\n",
+			(unsigned long)acc.TotalTerminatedProcesses,
+			(unsigned long)acc.ActiveProcesses,
+			(long long)acc.ThisPeriodTotalUserTime.QuadPart,
+			(long long)acc.ThisPeriodTotalKernelTime.QuadPart);
+	proc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+	if (proc == NULL) {
+		fprintf(stderr, "[dump] OpenProcess(%lu) failed gle=%lu\n",
+			pid, GetLastError());
+		return 0;
+	}
+	GetTempPathA(sizeof(path), path);
+	snprintf(path + strlen(path), sizeof(path) - strlen(path),
+		 "stub-death-%lu.dmp", pid);
+	file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+			   FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE) {
+		fprintf(stderr, "[dump] CreateFile(%s) failed gle=%lu\n", path,
+			GetLastError());
+		CloseHandle(proc);
+		return 0;
+	}
+	ok = mwd(proc, (DWORD)pid, file, 2 /*MiniDumpWithFullMemory*/,
+		 NULL, NULL, NULL);
+	fprintf(stderr, "[dump] pid %lu -> %s : %s (gle=%lu)\n", pid, path,
+		ok ? "written" : "FAILED", GetLastError());
+	CloseHandle(file);
+	CloseHandle(proc);
+	return ok ? 1 : 0;
+}
+
 #define RESOLVE(field, mod, name)                                          \
 	do {                                                               \
 		g_api.field = (typeof(g_api.field))GetProcAddress(mod, name); \
@@ -471,6 +538,7 @@ int main(int argc, char **argv)
 	 * see the function comment). */
 	resolve_api_table();
 	create_boot_job();
+	uml_nt_dump_hook = launcher_dump;
 	reserve_vmalloc_band();
 
 	/* M3.4: uml_nt_exec=<file> names the guest ELF the kernel-side
