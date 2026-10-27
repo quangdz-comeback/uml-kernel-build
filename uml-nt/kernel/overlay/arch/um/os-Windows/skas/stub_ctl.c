@@ -12128,8 +12128,14 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 						       dtid, dst);
 			}
 		}
+		/* A debug event freezes the debuggee until continued, so on
+		 * the debug path the wait must be short: a 1s cadence would
+		 * give the guest one round per second and never finish the
+		 * boot. 20ms costs nothing on the production path (where the
+		 * timeout is already 1s and the poll block is compiled out by
+		 * the same flag check). */
 		w = nt->WaitForMultipleObjects((ULONG)nwaits, waits, 0,
-					       1000);
+					       uml_nt_dbg_flag() ? 20u : 1000u);
 		if (w == 0xFFFFFFFFu /*WAIT_FAILED*/) {
 			os_info("[stubtest] wait failed win32=%lu\n",
 				nt->RtlGetLastWin32Error());
