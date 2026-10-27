@@ -1095,6 +1095,36 @@ void userspace(struct uml_pt_regs *regs)
 							e->in_body);
 					 }
 					}
+					{
+						int ri;
+						unsigned rat =
+						 c->d->ret_ring_at;
+
+					 for (ri = 3; ri >= 1; ri--) {
+						struct uml_nt_ret_ring *
+						 r = &c->d->ret_ring[
+						 (rat - ri) & 7];
+
+						os_info("[ret3] -%d seq=%llu "
+							"rip=0x%llx rsp=0x%llx "
+							"eflags=0x%llx dr6=0x%llx "
+							"dr7=0x%llx cmd=%llu "
+							"action=%llu resuming=%llu\n",
+							ri, r->seq, r->rip, r->rsp,
+							r->eflags, r->dr6, r->dr7,
+							r->cmd, r->action,
+							r->resuming);
+					 }
+					 /* the eflags/DR state the guest was resumed
+					  * WITH on the very last round */
+					 os_info("[dr-now] eflags=0x%llx tf=%d "
+						"got_dr7=0x%llx ask_dr7=0x%llx "
+						"got_dr6=0x%llx\n",
+						c->d->regs.rflags,
+						(int)((c->d->regs.rflags >> 8) & 1),
+						c->d->got_dr7, c->d->ask_dr7,
+						c->d->got_flags);
+					}
 					uml_nt_death_exit_check(c);
 					uml_nt_death_scan_exec(c);
 					uml_nt_dbg_summary();
