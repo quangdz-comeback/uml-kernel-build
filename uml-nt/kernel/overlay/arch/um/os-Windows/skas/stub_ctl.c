@@ -11444,6 +11444,31 @@ void uml_nt_sys_wait4(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d,
  * before the jump (fork children need the parent snapshot).
  * EXPORT (S1): the real mm-context lifecycle (mmctx.c) spawns through
  * this too — same machinery as the probe, one protocol. */
+/* Shelley 198 (option C): the debug tax is only worth paying on the conn
+ * we are chasing. At spawn time the conn may already know its exec path
+ * (fork inherits it, exec sets it), so the gate asks the path: a conn on
+ * the agetty→login chain gets the debugger, everything else is created on
+ * the production path and runs at full speed.
+ */
+static int dbg_want(const struct uml_nt_stub_conn *c)
+{
+	const char *p;
+	int i;
+
+	if (!uml_nt_dbg_flag() || c == NULL)
+		return 0;
+	p = c->exec_path;
+	for (i = 0; p[i] != 0; i++) {
+		if (p[i] == 'l' && p[i + 1] == 'o' && p[i + 2] == 'g' &&
+		    p[i + 3] == 'i' && p[i + 4] == 'n')
+			return 1;
+		if (p[i] == 'g' && p[i + 1] == 'e' && p[i + 2] == 't' &&
+		    p[i + 3] == 't' && p[i + 4] == 'y')
+			return 1;
+	}
+	return 0;
+}
+
 int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 		      unsigned long long stack_va,
 		      const struct uml_nt_gp_regs *init)
@@ -11523,8 +11548,10 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	memset(&si, 0, sizeof(si));
 	si.cb = sizeof(si); /* 104 on x64 — pitfall 10 */
 	memset(&pi, 0, sizeof(pi));
+	os_info("[dbg] spawn pid-soon exec='%s' debug=%d\n",
+		c->exec_path, dbg_want(c));
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
-				(unsigned long)(uml_nt_dbg_flag() ?
+				(unsigned long)(dbg_want(c) ?
 				/* a debuggee must NOT be created suspended:
 				 * the first event (CREATE_PROCESS) has to be
 				 * continued before any thread runs, and the
@@ -11535,7 +11562,7 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				0x4 /*CREATE_SUSPENDED*/),
 				NULL, NULL, &si, &pi))
 		goto fail;
-	if (uml_nt_dbg_flag()) {
+	if (dbg_want(c)) {
 		/* the handshake, on THIS thread, before anything else */
 		unsigned char fe[UML_NT_DE_SIZE];
 		unsigned int tid = 0;
