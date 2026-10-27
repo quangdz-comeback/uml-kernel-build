@@ -133,6 +133,10 @@ struct uml_nt_stub_conn {
 	int ph_shared;
 	ULONG pid;
 	int alive;
+	/* Shelley 199: this conn is on the agetty→login chain (itself or an
+	 * ancestor execed a login/getty binary). Inherited across fork —
+	 * the debug tax is paid only where the disease lives. */
+	u32_nt chain_login;
 	ULONG exit_code;
 	/* [ss-stray] rows consumed from d->ss_stray_n (stub_nt.h v14) */
 	unsigned int ss_stray_seen;

@@ -26,6 +26,7 @@
 #include "maplen_model.h"
 #include "regshape_model.h"
 #include "replay_model.h"
+#include "chain_model.h"
 #include "ctxaudit_model.h"
 
 static int fails;
@@ -409,6 +410,24 @@ static void section22(void)
 	printf("section 22 (who touched the context): all ok\n");
 }
 
+
+/* ---- 24: the login chain is inherited, never guessed ---------------- */
+static void section24(void)
+{
+	printf("[24] login-chain inheritance\n");
+	/* a fork of a chain conn stays on the chain */
+	CHECK(uml_nt_chain_child(1, 0) == 1);
+	/* a fork of a login binary that has not flagged itself yet */
+	CHECK(uml_nt_chain_child(0, 1) == 1);
+	/* an ordinary conn must NOT drag its children into the tax */
+	CHECK(uml_nt_chain_child(0, 0) == 0);
+	/* and the flag never clears by inheritance */
+	CHECK(uml_nt_chain_child(1, 1) == 1);
+
+	printf("section 24 (login chain inheritance): all ok\n");
+}
+
+
 int main(void)
 {
 	test_pwslot();
@@ -602,6 +621,7 @@ int main(void)
 	section20();
 	section21();
 	section22();
+	section24();
 
 	if (fails) {
 		fprintf(stderr, "test_resume: %d failure(s)\n", fails);

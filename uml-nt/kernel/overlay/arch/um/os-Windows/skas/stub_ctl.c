@@ -41,6 +41,7 @@
 #include <linux/vmstat.h>
 #include <init.h>
 #include <ntabi.h>
+#include "chain_model.h"
 #include <fault.h>
 #include <elf.h>
 #include "drslot_model.h"
@@ -10888,6 +10889,26 @@ void uml_nt_phys_event_log(const char *kind, long long off, int nruns,
  */
 #define UML_NT_EXEC_PATH_MAX_LOCAL UML_NT_EXEC_PATH_MAX
 static char g_exec_path[UML_NT_EXEC_PATH_MAX_LOCAL];
+/* Shelley 199: the last exec path the kernel handled was a login/getty
+ * binary. The conn's own exec_path is still empty when its stub is being
+ * created (it is adopted later), so the chain flag must come from here. */
+static int g_exec_login;
+
+static int path_is_login_chain(const char *p)
+{
+	int i;
+
+	for (i = 0; p[i] != 0; i++) {
+		if (p[i] == 'l' && p[i + 1] == 'o' && p[i + 2] == 'g' &&
+		    p[i + 3] == 'i' && p[i + 4] == 'n' &&
+		    (i == 0 || p[i - 1] == '/'))
+			return 1;
+		if (p[i] == 'g' && p[i + 1] == 'e' && p[i + 2] == 't' &&
+		    p[i + 3] == 't' && p[i + 4] == 'y')
+			return 1;
+	}
+	return 0;
+}
 
 void uml_nt_exec_path_set(const char *path)
 {
@@ -10902,6 +10923,10 @@ void uml_nt_exec_path_set(const char *path)
 		i++;
 	}
 	g_exec_path[i] = 0;
+	g_exec_login = path_is_login_chain(g_exec_path);
+	if (g_exec_login)
+		os_info("[dbg] login chain armed by exec '%s'\n",
+			g_exec_path);
 }
 
 /* The exec birth's name (called from uml_nt_fork_seed's exec branch). */
@@ -10940,6 +10965,8 @@ static void uml_nt_exec_path_adopt(struct uml_nt_stub_conn *c)
 
 	for (i = 0; i < UML_NT_EXEC_PATH_MAX_LOCAL; i++)
 		c->exec_path[i] = g_exec_path[i];
+	if (path_is_login_chain(c->exec_path))
+		c->chain_login = 1;
 }
 
 /* The binary's base name is "login" (path suffix /login or "login"). */
@@ -10974,7 +11001,14 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		 * building this mm (sys_execve's hint). */
 		uml_nt_exec_path_adopt(child);
 		return 0; /* exec/bprm birth — nothing to seed */
-	}	/* Anti-stale guard (per-task handoff): the armed conn must
+	}
+	/* Shelley 199: the chain flag is inherited, never guessed — a child
+	 * forked from a login-chain conn stays under the debugger. */
+	child->chain_login = uml_nt_chain_child(parent->chain_login,
+						uml_nt_conn_is_login(parent));
+	if (child->chain_login)
+		os_info("[dbg] fork %lu: child of the login conn inherits "
+			"the chain\n", (unsigned long)child->pid);	/* Anti-stale guard (per-task handoff): the armed conn must
 	 * still be THIS task's own mm conn. A recycled pid's stale
 	 * slot, or any foreign handoff, must never seed a foreign
 	 * mm — fail the fork loud instead. */
@@ -11452,21 +11486,15 @@ void uml_nt_sys_wait4(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d,
  */
 static int dbg_want(const struct uml_nt_stub_conn *c)
 {
-	const char *p;
-	int i;
+	int want;
 
 	if (!uml_nt_dbg_flag() || c == NULL)
 		return 0;
-	p = c->exec_path;
-	for (i = 0; p[i] != 0; i++) {
-		if (p[i] == 'l' && p[i + 1] == 'o' && p[i + 2] == 'g' &&
-		    p[i + 3] == 'i' && p[i + 4] == 'n')
-			return 1;
-		if (p[i] == 'g' && p[i + 1] == 'e' && p[i + 2] == 't' &&
-		    p[i + 3] == 't' && p[i + 4] == 'y')
-			return 1;
-	}
-	return 0;
+	/* the flag this conn inherited across fork, or discovered itself */
+	want = uml_nt_chain_child(c->chain_login,
+				  path_is_login_chain(c->exec_path) ||
+				  (g_exec_login && c->exec_path[0] == 0));
+	return want;
 }
 
 int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
@@ -11548,8 +11576,9 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	memset(&si, 0, sizeof(si));
 	si.cb = sizeof(si); /* 104 on x64 — pitfall 10 */
 	memset(&pi, 0, sizeof(pi));
-	os_info("[dbg] spawn pid-soon exec='%s' debug=%d\n",
-		c->exec_path, dbg_want(c));
+	os_info("[dbg] spawn pid-soon exec='%s' chain=%u gexec_login=%d "
+		"debug=%d\n", c->exec_path, (unsigned)c->chain_login,
+		g_exec_login, dbg_want(c));
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
 				(unsigned long)(dbg_want(c) ?
 				/* a debuggee must NOT be created suspended:
