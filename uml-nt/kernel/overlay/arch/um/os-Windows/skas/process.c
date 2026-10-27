@@ -1126,6 +1126,18 @@ void userspace(struct uml_pt_regs *regs)
 						mo, mo2);
 					 /* the eflags/DR state the guest was resumed
 					  * WITH on the very last round */
+					 os_info("[veh] first=%llu entries=%llu "
+						"%s ; guest sp [0x%llx,0x%llx] "
+						"death sp=0x%llx\n",
+						c->d->veh_first,
+						c->d->veh_entries,
+						c->d->veh_first >
+						  c->d->veh_entries ?
+						  "==> AN EXCEPTION ENTERED AND DIED BEFORE THE RING"
+						  : "==> every entry was recorded",
+						c->d->guest_sp_min,
+						c->d->guest_sp_max,
+						c->d->regs.rsp);
 					 os_info("[tf] tramp_arm=%llu ",
 						c->d->tramp_arm);
 					 os_info("[tf] hop_armed=%llu step_armed=%llu "

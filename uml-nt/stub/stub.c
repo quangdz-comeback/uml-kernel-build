@@ -1743,6 +1743,14 @@ static LONG CALLBACK unhandled_writer(EXCEPTION_POINTERS *ep)
 
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
+	/* Shelley 215: the very first thing that happens, before the switch
+	 * stack and before any ring write. If this counter ever exceeds the
+	 * entry-ring count at death, an exception did enter this handler and
+	 * the process died before the ring could record it. */
+	if (d != NULL)
+		((volatile LONG64 *)&d->veh_first)[0] =
+			InterlockedIncrement64((volatile LONG64 *)
+					       &d->veh_first);
 	entry_stamp(ep);
 	if (ep != NULL && ep->ContextRecord != NULL)
 		{
@@ -1751,6 +1759,15 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 			d->vstage = 1;	/* snapshot taken, body entered */
 	}
 	unsigned long long sp_in = veh_now_sp();
+
+	if (d != NULL && ep != NULL && ep->ContextRecord != NULL) {
+		unsigned long long gr = ep->ContextRecord->Rsp;
+
+		if (d->guest_sp_min == 0 || gr < d->guest_sp_min)
+			d->guest_sp_min = gr;
+		if (gr > d->guest_sp_max)
+			d->guest_sp_max = gr;
+	}
 
 	d->veh_entries++;
 	unsigned long long sp_out = sp_in;

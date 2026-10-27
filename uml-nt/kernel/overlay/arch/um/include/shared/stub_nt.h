@@ -608,6 +608,8 @@ struct uml_nt_stub_data {
 	 * gone, so the gap says where the death happened. */
 	unsigned long long tf_armed_hop;	/* TF raised for a fs hop */
 	unsigned long long tf_armed_step;	/* deliberate single step */
+	unsigned long long veh_first;	/* first instruction of the handler */
+	unsigned long long guest_sp_min, guest_sp_max;
 	unsigned long long tramp_va;
 	unsigned long long tramp_arm;	/* how many resumes went via a thunk */		/* the trampoline's own body */
 	unsigned long long ts_publish;
