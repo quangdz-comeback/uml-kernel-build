@@ -1925,6 +1925,12 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			 * exception return (local wine probe) — re-raise
 			 * it at every hop until the store has executed. */
 			c->EFlags |= (DWORD)0x100;
+			d->tf_armed_hop++;
+			/* Shelley 213: the arm address is the trampoline's own
+			 * body; publish it so the kernel can whitelist it
+			 * instead of calling it a host injection. */
+			d->tramp_va = (unsigned long long)(uintptr_t)
+				fs_tramp_base;
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 		if (d->tf_trace != 0 &&
@@ -1943,6 +1949,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			 * remaining budget. TF is off in this context; the
 			 * resume path re-raises it while tf_trace lasts. */
 			is_step = 1;
+			d->tf_armed_step++;
 			c->EFlags &= ~(DWORD)0x100;
 		} else if (cls == UML_NT_SS_POST_STORE) {
 			/* The store JUST executed — read its target

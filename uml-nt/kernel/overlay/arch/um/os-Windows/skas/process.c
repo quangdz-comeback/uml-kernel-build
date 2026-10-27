@@ -1117,6 +1117,12 @@ void userspace(struct uml_pt_regs *regs)
 					 }
 					 /* the eflags/DR state the guest was resumed
 					  * WITH on the very last round */
+					 os_info("[tf] hop_armed=%llu step_armed=%llu "
+						"tramp_va=0x%llx (the ret3 rip above "
+						"is the trampoline iff it matches)\n",
+						c->d->tf_armed_hop,
+						c->d->tf_armed_step,
+						c->d->tramp_va);
 					 os_info("[dr-now] eflags=0x%llx tf=%d "
 						"got_dr7=0x%llx ask_dr7=0x%llx "
 						"got_dr6=0x%llx\n",

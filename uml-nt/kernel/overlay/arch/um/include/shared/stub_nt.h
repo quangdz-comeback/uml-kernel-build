@@ -606,6 +606,9 @@ struct uml_nt_stub_data {
 	/* Shelley 205: the two clocks that bracket the last resume. The
 	 * stub stamps them; the kernel reads the page after the process is
 	 * gone, so the gap says where the death happened. */
+	unsigned long long tf_armed_hop;	/* TF raised for a fs hop */
+	unsigned long long tf_armed_step;	/* deliberate single step */
+	unsigned long long tramp_va;		/* the trampoline's own body */
 	unsigned long long ts_publish;
 	unsigned long long ts_resume;
 	unsigned long long veh_entries;
