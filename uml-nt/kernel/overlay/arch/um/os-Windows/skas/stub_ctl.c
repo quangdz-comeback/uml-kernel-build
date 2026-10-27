@@ -355,6 +355,16 @@ static void dbg_event(unsigned char *de);
  * every debuggee thread, so an event left in the queue is a guest standing
  * still — referee 40449370951 hung the login stub's first round exactly
  * that way. */
+void uml_nt_dbg_summary(void)
+{
+	os_info("[dbg] summary: drain calls=%lu events=%lu empty=%lu "
+		"live=%d ==> %s\n", dbg_drain_calls, dbg_drained,
+		dbg_wfd_false, dbg_pid_live(0) ? 1 : 0,
+		dbg_drain_calls == 0 ? "the poll never ran" :
+		(dbg_drained == 0 ? "polled, nothing was ever queued" :
+		 "polled and took events"));
+}
+
 static void dbg_drain(void)
 {
 	unsigned char de[UML_NT_DE_SIZE];

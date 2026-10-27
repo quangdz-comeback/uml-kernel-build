@@ -59,6 +59,7 @@ int is_skas_winch(int pid, int fd, void *data)
 /* NtWaitForSingleObject timeout status (win32 WAIT_TIMEOUT == 258). */
 #define UML_NT_STATUS_TIMEOUT ((NTSTATUS)0x00000102)
 /* GetExitCodeProcess: 259 = STILL_ACTIVE (win32). */
+void uml_nt_dbg_summary(void);
 /* Shelley 195: the debug lever lives in stub_ctl.c; this file only needs
  * to know whether rounds are slow by design. Declared here to keep the two
  * translation units honest without a header churn. */
@@ -1018,6 +1019,7 @@ void userspace(struct uml_pt_regs *regs)
 					 * means the thread died from an AV no
 					 * handler took; TerminateThread would
 					 * leave a different number. */
+					uml_nt_dbg_summary();
 					os_info("userspace: stub pid %d "
 						"died silently (%lu from "
 						"GetExitCodeProcess) — last "
