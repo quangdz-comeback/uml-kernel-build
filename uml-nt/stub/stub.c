@@ -2422,6 +2422,12 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);
 	d->round_step = 11;
+	{
+		LARGE_INTEGER q;
+
+		QueryPerformanceCounter(&q);
+		d->ts_publish = (unsigned long long)q.QuadPart;
+	}
 	note_resume(c, is_syscall ? 0 : 1);
 
 	if (is_syscall && d->halt)
@@ -2430,6 +2436,12 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	/* Shelley 183: name anything we dirtied outside our own fields
 	 * before this record goes back to the kernel. */
 	ctx_audit_check(ep->ContextRecord);
+	{
+		LARGE_INTEGER q;
+
+		QueryPerformanceCounter(&q);
+		d->ts_resume = (unsigned long long)q.QuadPart;
+	}
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
 

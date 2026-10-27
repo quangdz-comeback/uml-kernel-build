@@ -603,6 +603,11 @@ struct uml_nt_stub_data {
 	 * the serve loop 1..6; veh_entries counts every VEH entry (normal
 	 * and nested); unhandled_calls counts last-chance publishes. */
 	unsigned long long round_step;
+	/* Shelley 205: the two clocks that bracket the last resume. The
+	 * stub stamps them; the kernel reads the page after the process is
+	 * gone, so the gap says where the death happened. */
+	unsigned long long ts_publish;
+	unsigned long long ts_resume;
 	unsigned long long veh_entries;
 	unsigned long long unhandled_calls;
 	/* [ctx-ring] (Shelley 158 step 1): the CONTEXT handed to
