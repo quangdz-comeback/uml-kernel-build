@@ -154,6 +154,8 @@ static int cowtrap_pending;
  * guest at all. UML_NT_WITNESS=0 in the environment turns them off
  * as a group: if the boot still corrupts, the witnesses are
  * exonerated; if it survives, the hunt turns inward. */
+static int uml_nt_dbg_flag(void);
+
 int uml_nt_witness_off = -1;
 static int witness_off(void)
 {
@@ -3363,7 +3365,8 @@ static int uml_nt_sample_read(struct uml_nt_stub_conn *c,
 	if (nt->SuspendThread(c->thread) == (ULONG)-1)
 		return -1;
 	ok = nt->GetThreadContext(c->thread, ctx);
-	nt->ResumeThread(c->thread);
+	if (!uml_nt_dbg_flag())
+		nt->ResumeThread(c->thread);
 	if (!ok)
 		return -1;
 	*rip = UML_NT_X64_CTX_RIP(ctx);
@@ -10702,7 +10705,7 @@ static unsigned long UML_NTABI_CC dbg_pump(void *arg)
 }
 
 int uml_nt_dbg_on = -1;
-static int dbg_on(void)
+static int uml_nt_dbg_flag(void)
 {
 	int i;
 
@@ -11309,13 +11312,35 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	si.cb = sizeof(si); /* 104 on x64 — pitfall 10 */
 	memset(&pi, 0, sizeof(pi));
 	if (!nt->CreateProcessA(NULL, cmd, NULL, NULL, 1,
-				(unsigned long)(0x4 /*CREATE_SUSPENDED*/ |
-				(dbg_on() ? 0x2 /*DEBUG_ONLY_THIS_PROCESS*/ : 0)),
+				(unsigned long)(uml_nt_dbg_flag() ?
+				/* a debuggee must NOT be created suspended:
+				 * the first event (CREATE_PROCESS) has to be
+				 * continued before any thread runs, and the
+				 * pump thread cannot be the one to do it —
+				 * it does not exist yet (referee 40420877602:
+				 * 0 events and a stub that never ran). */
+				0x2 /*DEBUG_ONLY_THIS_PROCESS*/ :
+				0x4 /*CREATE_SUSPENDED*/),
 				NULL, NULL, &si, &pi))
 		goto fail;
-	if (dbg_on()) {
+	if (uml_nt_dbg_flag()) {
+		/* the handshake, on THIS thread, before anything else */
+		unsigned char fe[UML_NT_DE_SIZE];
 		unsigned int tid = 0;
 
+		if (nt->WaitForDebugEvent(fe, 5000)) {
+			os_info("[dbg] first event code=%u pid=%u tid=%u\n",
+				de_u32(fe, UML_NT_DE_CODE),
+				de_u32(fe, UML_NT_DE_PID),
+				de_u32(fe, UML_NT_DE_TID));
+			nt->ContinueDebugEvent(de_u32(fe, UML_NT_DE_PID),
+					       de_u32(fe, UML_NT_DE_TID),
+					       UML_NT_DBG_CONTINUE);
+		} else {
+			os_info("[dbg] no first event within 5s — the "
+				"debugger attach did not take (check the Job "
+				"Object interaction)\n");
+		}
 		if (nt->CreateThread(NULL, 0, dbg_pump,
 				     (void *)(uintptr_t)pi.dwProcessId,
 				     0, &tid) == NULL)
