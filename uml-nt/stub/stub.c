@@ -1708,6 +1708,29 @@ static void ctx_audit_check(CONTEXT *c)
 		if ((c->ContextFlags & 0x00100000u)) {
 			memcpy(&d->xs_bv, rec + 0x100, 8);
 			memcpy(&d->xs_xcomp, rec + 0x108, 8);
+			/* ruling 222: content past the legacy+XMM blocks can only
+			 * be ZMM/opmask; counting it answers "did the guest really
+			 * use AVX-512" at every entry, which no dump could. */
+			{
+				unsigned long long want = d->xstate_want;
+				unsigned long long nz = 0, scanned = 0;
+				unsigned long long off;
+
+				if (want > 0x300 && want <= 8192) {
+					for (off = 0x300; off + 8 <= want;
+					     off += 8) {
+						unsigned long long w;
+
+						memcpy(&w, rec + off, 8);
+						scanned += 8;
+						if (w != 0)
+							nz++;
+					}
+				}
+				d->xs_scan_bytes = scanned;
+				if (nz > d->xs_zmm_nonzero)
+					d->xs_zmm_nonzero = nz;
+			}
 		} else {
 			/* no CONTEXT_XSTATE: 0x100 is x87/SSE save state,
 			 * not a header — say so with zeros, not with a
@@ -1746,6 +1769,7 @@ static void ctx_audit_check(CONTEXT *c)
 			(unsigned long)d->ctx_xs_changed,
 			d->ctx_xs_hdr, (unsigned long)d->ctx_flags,
 			(unsigned)d->ctx_xstate_claim, d->xs_bv, d->xs_xcomp,
+			d->xs_zmm_nonzero, d->xs_scan_bytes,
 			(unsigned long)d->xs_xmm_diff,
 			(unsigned long)d->xs_xmm_first,
 			(unsigned)d->guest_tid,

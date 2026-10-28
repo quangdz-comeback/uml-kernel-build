@@ -161,6 +161,13 @@ struct uml_nt_stub_data {
 	 * of this conn. A compacted-format mismatch shows up as a MBZ bit set
 	 * in XCOMP_BV; entropy in XMM shows up as a big diff. */
 	unsigned long long xs_bv, xs_xcomp;
+	/* ruling 222: the dump could never catch the guest in flight, so the
+	 * xstate question is answered where the state actually is — in the
+	 * context the dispatcher hands the handler. Content beyond the legacy
+	 * and XMM blocks is ZMM/opmask territory: if the guest really ran
+	 * AVX-512, some of those words are not zero. */
+	unsigned long long xs_zmm_nonzero;	/* nonzero 8-byte words */
+	unsigned long long xs_scan_bytes;	/* bytes examined after 0x300 */
 	/* Shelley 188 (#13 fix): ContextFlags decides whether 0x100 is an
 	 * XSAVE header at all — without CONTEXT_XSTATE the bytes there are
 	 * x87/SSE save state, and "BV=0x37f" was our reading of FltSave. */
