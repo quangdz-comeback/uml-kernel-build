@@ -345,7 +345,12 @@ jobs:
         run: |
           $dst = "uml-nt/launcher"
           $n = 0
-          Get-ChildItem "$env:TEMP\stub-loop-*.dmp","$env:TEMP\stub-death-*.dmp" -ErrorAction SilentlyContinue | ForEach-Object {
+          # the msys2 TEMP is where the stub (a msys2 child) writes, and it is
+          # not $env:TEMP of this shell — collect from both
+          $globs = @("$env:TEMP\stub-loop-*.dmp","$env:TEMP\stub-death-*.dmp",
+                     "D:\a\_temp\msys64\tmp\stub-loop-*.dmp",
+                     "D:\a\_temp\msys64\tmp\stub-death-*.dmp")
+          Get-ChildItem $globs -ErrorAction SilentlyContinue | ForEach-Object {
             Copy-Item $_.FullName -Destination $dst -Force
             Write-Host "collected $($_.Name) $($_.Length) bytes"
             $n++
