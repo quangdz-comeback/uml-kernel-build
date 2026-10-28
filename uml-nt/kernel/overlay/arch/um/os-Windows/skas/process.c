@@ -1158,6 +1158,13 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->got_dr7, c->d->ask_dr7,
 						c->d->got_flags);
 					}
+					/* ruling 223: the lever is only worth
+					 * anything if it says it acted */
+					os_info("[xs-lever] pid %d armed=%u "
+						"dropped=%u\n",
+						mm_id->pid,
+						(unsigned)c->d->xs_lever,
+						(unsigned)c->d->xs_dropped);
 					uml_nt_death_exit_check(c);
 					uml_nt_death_scan_exec(c);
 					os_info("userspace: stub pid %d "
