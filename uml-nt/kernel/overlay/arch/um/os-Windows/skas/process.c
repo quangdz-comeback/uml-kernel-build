@@ -68,6 +68,13 @@ extern int (*uml_nt_dump_hook)(unsigned long pid)
 	__attribute__((weak));
 void uml_nt_host_mod(unsigned long long va, char *out, int len);
 void uml_nt_death_rip_vma(struct uml_nt_stub_conn *c);
+
+/* Shelley 232: exec_path is empty at spawn (ruling 199), so the flag that
+ * actually names the login chain is chain_login — set at fork and at exec. */
+static int login_conn(const struct uml_nt_stub_conn *c)
+{
+	return c != NULL && (c->chain_login || uml_nt_conn_is_login(c));
+}
 void uml_nt_sample_push(struct uml_nt_stub_conn *c);
 void uml_nt_sample_dump(const struct uml_nt_stub_conn *c);
 void uml_nt_death_exit_check(struct uml_nt_stub_conn *c);
@@ -846,8 +853,7 @@ void userspace(struct uml_pt_regs *regs)
 			 * it sharpens the detection from one second to fifty
 			 * milliseconds as a bonus. */
 			w = nt->WaitForMultipleObjects(nwait, waits, 0,
-						       uml_nt_conn_is_login(c) ?
-						       50 : 1000);
+						       login_conn(c) ? 50 : 1000);
 			if (w == 0)
 				break; /* stub trap ready */
 			if (idx_net >= 0 && w == (ULONG)idx_net) {
@@ -1806,7 +1812,7 @@ void userspace(struct uml_pt_regs *regs)
 					}
 					os_dump_core();
 				}
-				if (uml_nt_conn_is_login(c))
+				if (login_conn(c))
 					uml_nt_sample_push(c);
 				wait_tmo++;
 				/* Shelley 195: under the debugger every round is
