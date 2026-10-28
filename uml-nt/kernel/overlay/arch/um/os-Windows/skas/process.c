@@ -1160,22 +1160,6 @@ void userspace(struct uml_pt_regs *regs)
 					}
 					uml_nt_death_exit_check(c);
 					uml_nt_death_scan_exec(c);
-					uml_nt_dbg_summary();
-					/* Shelley 219: the dump goes LAST. It used
-					 * to run before the death line, and when
-					 * MiniDumpWriteDump blocked the log simply
-					 * stopped — an instrument that hides the
-					 * observation it was meant to serve. */
-					os_info("[dump] begin pid %d (all "
-						"diagnostics above are already "
-						"out)\n", mm_id->pid);
-					if (uml_nt_dump_hook != NULL)
-						os_info("[dump] returned %d\n",
-							uml_nt_dump_hook(
-							  (unsigned long)
-							  mm_id->pid));
-					else
-						os_info("[dump] no hook\n");
 					os_info("userspace: stub pid %d "
 						"died silently (%lu from "
 						"GetExitCodeProcess) — last "
@@ -1206,6 +1190,23 @@ void userspace(struct uml_pt_regs *regs)
 						(unsigned)c->d->round_step,
 						(unsigned)c->d->halt,
 						(unsigned)c->d->action);
+					uml_nt_dbg_summary();
+					/* Shelley 219: the dump goes LAST. It used
+					 * to run before the death line, and when
+					 * MiniDumpWriteDump blocked the log simply
+					 * stopped — an instrument that hides the
+					 * observation it was meant to serve. */
+					os_info("[dump] begin pid %d (all "
+						"diagnostics above are already "
+						"out)\n", mm_id->pid);
+					if (uml_nt_dump_hook != NULL)
+						os_info("[dump] returned %d\n",
+							uml_nt_dump_hook(
+							  (unsigned long)
+							  mm_id->pid));
+					else
+						os_info("[dump] no hook\n");
+
 					uml_nt_death_site(c);
 					uml_nt_guestsite("rip", c->d->regs.rip, c);
 					uml_nt_guestsite("rsp", c->d->regs.rsp, c);
