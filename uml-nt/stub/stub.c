@@ -313,6 +313,8 @@ static volatile unsigned long long fs_tramp_snap_id, fs_tramp_ent_id;
  * Not static and marked used: only inline asm refers to it, and the
  * compiler does not count asm references when it decides what to keep. */
 volatile unsigned char *fs_stage __attribute__((used));
+volatile unsigned long long *fs_seq __attribute__((used));
+volatile unsigned long long *fs_ts __attribute__((used));
 
 __attribute__((naked)) static void fs_trampoline_sys(void)
 {
@@ -344,7 +346,26 @@ __attribute__((naked)) static void fs_trampoline_sys(void)
 		"testq	%r11, %r11\n\t"
 		"jz	3f\n\t"
 		"movb	$3, (%r11)\n\t"
+		"movq	fs_seq(%rip), %r11\n\t"
+		"testq	%r11, %r11\n\t"
+		"jz	3f\n\t"
+		"pushq	%rax\n\t"
+		"movq	fs_tramp_snap_id(%rip), %rax\n\t"
+		"movq	%rax, (%r11)\n\t"
+		"popq	%rax\n\t"
 		"3:\n\t"
+		"movq	fs_ts(%rip), %r11\n\t"
+		"testq	%r11, %r11\n\t"
+		"jz	4f\n\t"
+		"pushq	%rax\n\t"
+		"pushq	%rdx\n\t"
+		"rdtsc\n\t"
+		"shlq	$32, %rdx\n\t"
+		"orq	%rdx, %rax\n\t"
+		"movq	%rax, (%r11)\n\t"
+		"popq	%rdx\n\t"
+		"popq	%rax\n\t"
+		"4:\n\t"
 		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
@@ -370,7 +391,26 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
 		"testq	%r11, %r11\n\t"
 		"jz	3f\n\t"
 		"movb	$3, (%r11)\n\t"
+		"movq	fs_seq(%rip), %r11\n\t"
+		"testq	%r11, %r11\n\t"
+		"jz	3f\n\t"
+		"pushq	%rax\n\t"
+		"movq	fs_tramp_snap_id(%rip), %rax\n\t"
+		"movq	%rax, (%r11)\n\t"
+		"popq	%rax\n\t"
 		"3:\n\t"
+		"movq	fs_ts(%rip), %r11\n\t"
+		"testq	%r11, %r11\n\t"
+		"jz	4f\n\t"
+		"pushq	%rax\n\t"
+		"pushq	%rdx\n\t"
+		"rdtsc\n\t"
+		"shlq	$32, %rdx\n\t"
+		"orq	%rdx, %rax\n\t"
+		"movq	%rax, (%r11)\n\t"
+		"popq	%rdx\n\t"
+		"popq	%rax\n\t"
+		"4:\n\t"
 		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
@@ -2863,8 +2903,31 @@ int main(int argc, char **argv)
 			  (long long)q.QuadPart, "(hook)", 0ull);
 		SetEnvironmentVariableA("UML_NT_CRT_HOOK", crt_buf);
 	}
-	if (d != NULL)
+	if (d != NULL) {
+		LARGE_INTEGER q0, q1, qf;
+		unsigned long long t0, t1, dtsc, dqpc, freq;
+
+		QueryPerformanceFrequency(&qf);
+		freq = (unsigned long long)qf.QuadPart;
+		if (freq == 0)
+			freq = 1000000ull;
+
 		fs_stage = (volatile unsigned char *)&d->hop_stage;
+		fs_seq = &d->hop_seq;
+		fs_ts = &d->hop_ts;
+		/* one-calibration: TSC ticks per microsecond, from QPC */
+		QueryPerformanceCounter(&q0);
+		t0 = __rdtsc();
+		do {
+			QueryPerformanceCounter(&q1);
+		} while ((q1.QuadPart - q0.QuadPart) <
+			 (LONGLONG)(freq / 1000));
+		t1 = __rdtsc();
+		dtsc = t1 - t0;
+		dqpc = (unsigned long long)(q1.QuadPart - q0.QuadPart);
+		/* ticks per microsecond: dtsc / (dqpc / freq * 1e6) */
+		d->tsc_per_us = dqpc ? (dtsc * freq) / (dqpc * 1000000ull) : 0;
+	}
 	job_report("boot");
 	CreateThread(NULL, 0, dump_watchdog, NULL, 0, NULL);
 	_set_invalid_parameter_handler(crt_invalid_parameter);

@@ -1163,11 +1163,35 @@ void userspace(struct uml_pt_regs *regs)
 					 * enough to be cut mid-print in the log, so the
 					 * hop stage gets a line of its own — it is the
 					 * whole point of this measurement. */
-					os_info("[hop] pid %d stage=%llu "
-						"veh=%llu steps=%u\n",
-						mm_id->pid, c->d->hop_stage,
-						c->d->veh_entries,
-						(unsigned)c->d->round_step);
+					{
+						/* Shelley 231: the stage byte is sticky
+						 * from the previous hop unless the seq
+						 * names this round — and the TSC stamped
+						 * just before the jmp says whether the
+						 * thread even reached the hop. */
+						unsigned long long now =
+							__builtin_ia32_rdtsc();
+						unsigned long long dt = 0, us = 0;
+
+						if (c->d->hop_ts != 0 &&
+						    now > c->d->hop_ts)
+							dt = now - c->d->hop_ts;
+						if (c->d->tsc_per_us != 0)
+							us = dt / c->d->tsc_per_us;
+						os_info("[hop] pid %d stage=%llu "
+							"seq=%llu round=%llu "
+							"veh=%llu steps=%u "
+							"dtsc=%llu us=%llu "
+							"tsc_per_us=%llu\n",
+							mm_id->pid,
+							c->d->hop_stage,
+							c->d->hop_seq,
+							c->d->req_seq,
+							c->d->veh_entries,
+							(unsigned)c->d->round_step,
+							dt, us,
+							c->d->tsc_per_us);
+					}
 					/* ruling 223: the lever is only worth
 					 * anything if it says it acted */
 					os_info("[xs-lever] pid %d armed=%u "

@@ -180,7 +180,10 @@ struct uml_nt_stub_data {
 	 * at each step; surviving the death, the byte says which step the
 	 * thread never finished. */
 	unsigned long long hop_stage;	/* 1 entry, 2 past wrfsbase, 3 cleared */
-	unsigned long long hop_seq;
+	unsigned long long hop_seq;	/* which round wrote that stage */
+	unsigned long long hop_ts;	/* RDTSC immediately before the jmp */
+	unsigned long long tsc_per_us;	/* calibration, so the kernel can read µs */
+	unsigned long long tsc_death;	/* kernel's own RDTSC at detection */
 	unsigned long long prot_rip_real;	/* VirtualQuery at the rip */
 	unsigned long long prot_rip_book;	/* what the VMA table says */
 	unsigned long long prot_real_nonexec;	/* rounds whose page lacks exec */
