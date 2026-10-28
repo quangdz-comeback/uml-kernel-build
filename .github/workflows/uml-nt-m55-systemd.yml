@@ -368,5 +368,6 @@ jobs:
             ${{ runner.temp }}/stub-loop-*.dmp
             stub-death-*.dmp
             stub-loop-*.dmp
+            uml-nt/launcher/stub-*.dmp
             uml-nt/launcher/stub-unhandled.txt
           if-no-files-found: warn
