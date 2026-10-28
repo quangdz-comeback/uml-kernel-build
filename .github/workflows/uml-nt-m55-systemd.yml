@@ -343,6 +343,8 @@ jobs:
           path: |
             ${{ runner.temp }}/uml-dumps/*.dmp
             ${{ runner.temp }}/stub-death-*.dmp
+            ${{ runner.temp }}/stub-loop-*.dmp
             stub-death-*.dmp
+            stub-loop-*.dmp
             uml-nt/launcher/stub-unhandled.txt
           if-no-files-found: warn

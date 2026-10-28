@@ -1002,6 +1002,60 @@ static void crt_purecall(void)
 	fflush(stderr);
 }
 
+
+/* Shelley 219: a dump taken after the process dies never returns — the
+ * object is gone and MiniDumpWriteDump waits forever. So the dump must be
+ * taken WHILE the guest is alive: this watchdog keeps the last few snapshots
+ * of the process, and the one nearest the death is the one worth reading.
+ * Gated by UML_NT_DUMP_EVERY (seconds); off by default. */
+static DWORD WINAPI dump_watchdog(LPVOID arg)
+{
+	typedef BOOL (WINAPI *mwd_t)(HANDLE, DWORD, HANDLE, int, void *, void *,
+				     void *);
+	HMODULE dbg;
+	mwd_t mwd;
+	char every[16];
+	DWORD ms;
+	unsigned n = 0;
+	char path[MAX_PATH];
+
+	(void)arg;
+	if (GetEnvironmentVariableA("UML_NT_DUMP_EVERY", every,
+				    sizeof(every)) == 0)
+		return 0;
+	ms = (DWORD)atoi(every) * 1000u;
+	if (ms == 0)
+		return 0;
+	dbg = LoadLibraryA("dbghelp.dll");
+	if (dbg == NULL)
+		return 0;
+	mwd = (mwd_t)GetProcAddress(dbg, "MiniDumpWriteDump");
+	if (mwd == NULL)
+		return 0;
+	for (;;) {
+		HANDLE f;
+		char tmp[MAX_PATH];
+
+		Sleep(ms);
+		GetTempPathA(sizeof(tmp), tmp);
+		_snprintf(path, sizeof(path) - 1, "%sstub-loop-%lu-%u.dmp",
+			  tmp, (unsigned long)GetCurrentProcessId(), n % 3);
+		f = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+				FILE_ATTRIBUTE_NORMAL, NULL);
+		if (f != INVALID_HANDLE_VALUE) {
+			BOOL ok = mwd(GetCurrentProcess(),
+				      GetCurrentProcessId(), f,
+				      0x00040000 /*WithThreadInfo*/,
+				      NULL, NULL, NULL);
+
+			CloseHandle(f);
+			if (ok)
+				n++;
+		}
+	}
+	return 0;
+}
+
 static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
 {
 	publish_unhandled(ep ? ep->ExceptionRecord : NULL,
@@ -2656,6 +2710,7 @@ int main(int argc, char **argv)
 			  (long long)q.QuadPart, "(hook)", 0ull);
 		SetEnvironmentVariableA("UML_NT_CRT_HOOK", crt_buf);
 	}
+	CreateThread(NULL, 0, dump_watchdog, NULL, 0, NULL);
 	_set_invalid_parameter_handler(crt_invalid_parameter);
 	_set_purecall_handler(crt_purecall);
 	/* Shelley 188: the LAST-CHANCE record. A VEH sees everything user
