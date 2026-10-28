@@ -1761,6 +1761,7 @@ static void ctx_audit_check(CONTEXT *c)
 		fprintf(stderr, "[ctx-audit] pid %lu rounds=%lu snapshots=%lu "
 			"dirty_max=%lu xs_changed=%lu xs_hdr=0x%llx "
 			"flags=0x%lx xstate=%u BV=0x%llx XCOMP=0x%llx "
+			"zmm_nz=%llu scan=%llu "
 			"xmm_diff=%lu first=%lu tid=%u other_tid=%lu\n",
 			(unsigned long)d->pid,
 			(unsigned long)d->ctx_rounds,
