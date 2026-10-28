@@ -1021,16 +1021,21 @@ static DWORD WINAPI dump_watchdog(LPVOID arg)
 
 	(void)arg;
 	if (GetEnvironmentVariableA("UML_NT_DUMP_EVERY", every,
-				    sizeof(every)) == 0)
+				    sizeof(every)) == 0) {
+		fprintf(stderr, "stub: watchdog OFF (UML_NT_DUMP_EVERY unset)\n");
+		fflush(stderr);
 		return 0;
+	}
 	ms = (DWORD)atoi(every) * 1000u;
 	if (ms == 0)
 		return 0;
 	dbg = LoadLibraryA("dbghelp.dll");
-	if (dbg == NULL)
-		return 0;
-	mwd = (mwd_t)GetProcAddress(dbg, "MiniDumpWriteDump");
-	if (mwd == NULL)
+	mwd = dbg != NULL ?
+	      (mwd_t)GetProcAddress(dbg, "MiniDumpWriteDump") : NULL;
+	fprintf(stderr, "stub: watchdog start every=%s dbg=%p mwd=%p\n",
+		every, (void *)dbg, (void *)mwd);
+	fflush(stderr);
+	if (dbg == NULL || mwd == NULL)
 		return 0;
 	for (;;) {
 		HANDLE f;
