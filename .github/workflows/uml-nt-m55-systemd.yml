@@ -28,6 +28,10 @@ on:
         description: "uml_nt_dbg=1 (run stub.exe under the launcher's own mini-debugger)"
         type: boolean
         default: false
+      feed:
+        description: "feed the console at all (false = diagnostic A/B: is the input path the killer?)"
+        type: boolean
+        default: true
       xs_lever:
         description: "drop CONTEXT_XSTATE for the login chain only (ruling 223 A/B)"
         type: boolean
@@ -293,10 +297,14 @@ jobs:
           {
             i=0
             while [ $i -lt 36 ]; do
-              printf 'root\n'; sleep 1
-              printf 'root\n'; sleep 1
-              printf 'echo LOGIN-OK\n'
-              sleep 23
+              if [ "${{ inputs.feed }}" != "false" ]; then
+                printf 'root\n'; sleep 1
+                printf 'root\n'; sleep 1
+                printf 'echo LOGIN-OK\n'
+                sleep 23
+              else
+                sleep 26
+              fi
               i=$((i+1))
             done
           } | timeout ${{ inputs.debugger && '1800' || '900' }} ./launcher.exe ../../build/vmlinux \

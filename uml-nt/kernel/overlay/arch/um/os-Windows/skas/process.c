@@ -67,6 +67,7 @@ void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c);
 extern int (*uml_nt_dump_hook)(unsigned long pid)
 	__attribute__((weak));
 void uml_nt_host_mod(unsigned long long va, char *out, int len);
+void uml_nt_death_rip_vma(struct uml_nt_stub_conn *c);
 void uml_nt_death_exit_check(struct uml_nt_stub_conn *c);
 extern unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 extern unsigned long long uml_nt_tick_round;
@@ -1165,6 +1166,11 @@ void userspace(struct uml_pt_regs *regs)
 						mm_id->pid,
 						(unsigned)c->d->xs_lever,
 						(unsigned)c->d->xs_dropped);
+					/* Shelley 226: three victims, three rips, one
+					 * class — the question is whether they sit in
+					 * one library or anywhere at all. Name the VMA
+					 * that holds the dying rip, with the offset. */
+					uml_nt_death_rip_vma(c);
 					uml_nt_death_exit_check(c);
 					uml_nt_death_scan_exec(c);
 					os_info("userspace: stub pid %d "

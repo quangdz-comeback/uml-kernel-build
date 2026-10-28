@@ -503,6 +503,40 @@ void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c)
 }
 
 /* Shelley 208 (1): did the guest itself ask to leave? */
+
+/* Shelley 226: which VMA — and therefore which module — holds the rip the
+ * guest died at. Three deaths, three addresses: if they land in one image
+ * the class is that image, and if they do not, the class is time. */
+void uml_nt_death_rip_vma(struct uml_nt_stub_conn *c)
+{
+	unsigned long long rip;
+	int i;
+	struct uml_nt_mm *mm;
+
+	if (c == NULL || c->d == NULL || c->mm == NULL)
+		return;
+	mm = c->mm;
+	rip = c->d->regs.rip;
+	for (i = 0; i < mm->nvma; i++) {
+		struct uml_nt_vma *v = &mm->vma[i];
+
+		if (rip >= v->start && rip < v->end) {
+			os_info("[rip-vma] pid %d rip=0x%llx vma[%d] "
+				"[0x%llx,0x%llx) prot=0x%x flags=0x%x "
+				"run_off=0x%llx off_in_vma=0x%llx "
+				"image_runs=%d\n",
+				(int)c->pid, rip, i, v->start, v->end,
+				v->prot, v->flags, v->run_off,
+				rip - v->start, c->imgw_n);
+			return;
+		}
+	}
+	os_info("[rip-vma] pid %d rip=0x%llx NO VMA (guest ran outside "
+		"every mapping) image_runs=%d\n",
+		(int)c->pid, rip, c->imgw_n);
+}
+
+void uml_nt_death_rip_vma(struct uml_nt_stub_conn *c);
 void uml_nt_death_exit_check(struct uml_nt_stub_conn *c)
 {
 	if (c == NULL || c->d == NULL)
