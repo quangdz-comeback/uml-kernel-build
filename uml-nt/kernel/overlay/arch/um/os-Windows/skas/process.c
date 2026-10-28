@@ -71,10 +71,8 @@ void uml_nt_death_rip_vma(struct uml_nt_stub_conn *c);
 
 /* Shelley 232: exec_path is empty at spawn (ruling 199), so the flag that
  * actually names the login chain is chain_login — set at fork and at exec. */
-static int login_conn(const struct uml_nt_stub_conn *c)
-{
-	return c != NULL && (c->chain_login || uml_nt_conn_is_login(c));
-}
+int uml_nt_login_chain(const struct uml_nt_stub_conn *c);
+#define login_conn(c) uml_nt_login_chain(c)
 void uml_nt_sample_push(struct uml_nt_stub_conn *c);
 void uml_nt_sample_dump(const struct uml_nt_stub_conn *c);
 void uml_nt_death_exit_check(struct uml_nt_stub_conn *c);

@@ -11834,6 +11834,15 @@ void uml_nt_sys_wait4(struct uml_nt_stub_conn *c, struct uml_nt_stub_data *d,
  * the agetty→login chain gets the debugger, everything else is created on
  * the production path and runs at full speed.
  */
+/* Shelley 232: the login chain as the rest of the kernel can ask about it.
+ * chain_login is set at fork/exec, g_exec_login at the exec of a login
+ * binary — either one is enough, and the exec path itself is empty at spawn
+ * (ruling 199), so it is never the test. */
+int uml_nt_login_chain(const struct uml_nt_stub_conn *c)
+{
+	return c != NULL && (c->chain_login || g_exec_login);
+}
+
 static int dbg_want(const struct uml_nt_stub_conn *c)
 {
 	int want;
