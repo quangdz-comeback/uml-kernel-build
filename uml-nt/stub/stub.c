@@ -1838,6 +1838,7 @@ static void ctx_audit_check(CONTEXT *c)
 			"dirty_max=%lu xs_changed=%lu xs_hdr=0x%llx "
 			"flags=0x%lx xstate=%u BV=0x%llx XCOMP=0x%llx "
 			"zmm_nz=%llu scan=%llu "
+			"prot_ok=%llu/%llu "
 			"xmm_diff=%lu first=%lu tid=%u other_tid=%lu\n",
 			(unsigned long)d->pid,
 			(unsigned long)d->ctx_rounds,
@@ -1847,6 +1848,8 @@ static void ctx_audit_check(CONTEXT *c)
 			d->ctx_xs_hdr, (unsigned long)d->ctx_flags,
 			(unsigned)d->ctx_xstate_claim, d->xs_bv, d->xs_xcomp,
 			d->xs_zmm_nonzero, d->xs_scan_bytes,
+			d->prot_checked - d->prot_real_nonexec,
+			d->prot_checked,
 			(unsigned long)d->xs_xmm_diff,
 			(unsigned long)d->xs_xmm_first,
 			(unsigned)d->guest_tid,
