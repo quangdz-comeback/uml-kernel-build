@@ -1072,6 +1072,59 @@ have_ms:
 	return 0;
 }
 
+
+/* Shelley 224: the runner puts every step process in a JOB OBJECT and our
+ * launcher's children inherit it. If that job carries a process-memory or
+ * commit limit, crossing it terminates the process with no dispatch and no
+ * exit event — which is every part of the death signature we could never
+ * explain. Ask the job directly, at boot and repeatedly, so the value near
+ * the death is on the record. */
+static void job_report(const char *when)
+{
+	JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli;
+	JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION acc;
+	DWORD ret = 0;
+	HANDLE job;
+	int in_job;
+
+	memset(&eli, 0, sizeof(eli));
+	memset(&acc, 0, sizeof(acc));
+	job = CreateJobObjectA(NULL, NULL);	/* probe object, not used */
+	if (job != NULL)
+		CloseHandle(job);
+	in_job = IsProcessInJob(GetCurrentProcess(), NULL, &ret) != 0;
+	if (!in_job) {
+		fprintf(stderr, "[job-limit] %s in_job=0\n", when);
+		return;
+	}
+	/* Query against the job we belong to: the API takes the job handle, so
+	 * open ours through the process — QueryInformationJobObject accepts a
+	 * NULL handle for "current job" only on some builds, so ask our own
+	 * process object first. */
+	if (!QueryInformationJobObject(NULL, JobObjectExtendedLimitInformation,
+				       &eli, sizeof(eli), NULL)) {
+		fprintf(stderr, "[job-limit] %s in_job=1 query=FAILED win32=%lu\n",
+			when, (unsigned long)GetLastError());
+		return;
+	}
+	QueryInformationJobObject(NULL, JobObjectBasicAndIoAccountingInformation,
+				  &acc, sizeof(acc), NULL);
+	fprintf(stderr, "[job-limit] %s in_job=1 flags=0x%lx "
+		"proc_mem_limit=0x%llx job_mem_limit=0x%llx "
+		"peak_proc=0x%llx peak_job=0x%llx active=%lu "
+		"terminated=%lu pagefaults=%lu\n",
+		when,
+		(unsigned long)eli.BasicLimitInformation.LimitFlags,
+		(unsigned long long)eli.ProcessMemoryLimit,
+		(unsigned long long)eli.JobMemoryLimit,
+		(unsigned long long)eli.PeakProcessMemoryUsed,
+		(unsigned long long)eli.PeakJobMemoryUsed,
+		(unsigned long)acc.BasicInfo.ActiveProcesses,
+		(unsigned long)acc.BasicInfo.TotalTerminatedProcesses,
+		(unsigned long)acc.BasicInfo.TotalPageFaultCount);
+	fflush(stderr);
+}
+
 static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
 {
 	publish_unhandled(ep ? ep->ExceptionRecord : NULL,
@@ -2759,6 +2812,7 @@ int main(int argc, char **argv)
 			  (long long)q.QuadPart, "(hook)", 0ull);
 		SetEnvironmentVariableA("UML_NT_CRT_HOOK", crt_buf);
 	}
+	job_report("boot");
 	CreateThread(NULL, 0, dump_watchdog, NULL, 0, NULL);
 	_set_invalid_parameter_handler(crt_invalid_parameter);
 	_set_purecall_handler(crt_purecall);
