@@ -1020,6 +1020,13 @@ static DWORD WINAPI dump_watchdog(LPVOID arg)
 	char path[MAX_PATH];
 
 	(void)arg;
+	if (GetEnvironmentVariableA("UML_NT_DUMP_MS", every,
+				    sizeof(every)) != 0) {
+		ms = (DWORD)atoi(every);
+		if (ms == 0)
+			return 0;
+		goto have_ms;
+	}
 	if (GetEnvironmentVariableA("UML_NT_DUMP_EVERY", every,
 				    sizeof(every)) == 0) {
 		fprintf(stderr, "stub: watchdog OFF (UML_NT_DUMP_EVERY unset)\n");
@@ -1029,6 +1036,7 @@ static DWORD WINAPI dump_watchdog(LPVOID arg)
 	ms = (DWORD)atoi(every) * 1000u;
 	if (ms == 0)
 		return 0;
+have_ms:
 	dbg = LoadLibraryA("dbghelp.dll");
 	mwd = dbg != NULL ?
 	      (mwd_t)GetProcAddress(dbg, "MiniDumpWriteDump") : NULL;

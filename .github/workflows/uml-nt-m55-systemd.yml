@@ -225,7 +225,10 @@ jobs:
         env:
           # Shelley 219: a dump after the death never returns, so the stub
           # photographs itself every two seconds and keeps the last three.
-          UML_NT_DUMP_EVERY: "2"
+          # ruling 221: 200 ms covers the last 600 ms with three files, and the
+          # hash window is ~187 ms — a snapshot now has a real chance of
+          # landing inside the compute.
+          UML_NT_DUMP_MS: "200"
         run: |
           cd uml-nt/launcher
           set +e
