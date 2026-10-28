@@ -521,13 +521,34 @@ void uml_nt_death_rip_vma(struct uml_nt_stub_conn *c)
 		struct uml_nt_vma *v = &mm->vma[i];
 
 		if (rip >= v->start && rip < v->end) {
+			unsigned char ins[16];
+			unsigned char hdr[8];
+			int hok = 0;
+
+			memset(ins, 0, sizeof(ins));
+			/* Shelley 227: the bytes are in the physmem we own,
+			 * so the dead is still readable — the one thing the
+			 * dump could never do. */
+			if (uml_nt_uacc_walk(c->mm, uml_boot.physmem_base,
+					     rip, sizeof(ins), (char *)ins,
+					     0) == 0)
+				hok = 1;
+			memset(hdr, 0, sizeof(hdr));
+			uml_nt_uacc_walk(c->mm, uml_boot.physmem_base,
+					 v->start, sizeof(hdr), (char *)hdr, 0);
 			os_info("[rip-vma] pid %d rip=0x%llx vma[%d] "
 				"[0x%llx,0x%llx) prot=0x%x flags=0x%x "
 				"run_off=0x%llx off_in_vma=0x%llx "
-				"image_runs=%d\n",
+				"image_runs=%d read=%s "
+				"insn=%02x%02x%02x%02x%02x%02x%02x%02x "
+				"vma_hdr=%02x%02x%02x%02x\n",
 				(int)c->pid, rip, i, v->start, v->end,
 				v->prot, v->flags, v->run_off,
-				rip - v->start, c->imgw_n);
+				rip - v->start, c->imgw_n,
+				hok ? "ok" : "FAULT",
+				ins[0], ins[1], ins[2], ins[3], ins[4],
+				ins[5], ins[6], ins[7],
+				hdr[0], hdr[1], hdr[2], hdr[3]);
 			return;
 		}
 	}
