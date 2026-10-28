@@ -1083,16 +1083,11 @@ static void job_report(const char *when)
 {
 	JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli;
 	JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION acc;
-	DWORD ret = 0;
-	HANDLE job;
-	int in_job;
+	BOOL in_job = FALSE;
 
 	memset(&eli, 0, sizeof(eli));
 	memset(&acc, 0, sizeof(acc));
-	job = CreateJobObjectA(NULL, NULL);	/* probe object, not used */
-	if (job != NULL)
-		CloseHandle(job);
-	in_job = IsProcessInJob(GetCurrentProcess(), NULL, &ret) != 0;
+	IsProcessInJob(GetCurrentProcess(), NULL, &in_job);
 	if (!in_job) {
 		fprintf(stderr, "[job-limit] %s in_job=0\n", when);
 		return;
