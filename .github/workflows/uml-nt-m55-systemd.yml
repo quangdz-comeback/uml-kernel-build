@@ -339,6 +339,19 @@ jobs:
           name: m55a-systemd-log-${{ github.run_id }}
           path: uml-nt/launcher/systemd.log
 
+      - name: Collect stub self-snapshots from %TEMP% (Windows temp, not runner.temp)
+        if: always()
+        shell: pwsh
+        run: |
+          $dst = "uml-nt/launcher"
+          $n = 0
+          Get-ChildItem "$env:TEMP\stub-loop-*.dmp","$env:TEMP\stub-death-*.dmp" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName -Destination $dst -Force
+            Write-Host "collected $($_.Name) $($_.Length) bytes"
+            $n++
+          }
+          Write-Host "stub snapshots collected: $n"
+
       - name: Upload WER dumps + last-chance record (diagnostics)
         if: always()
         uses: actions/upload-artifact@v4

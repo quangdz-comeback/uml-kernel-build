@@ -1049,6 +1049,9 @@ static DWORD WINAPI dump_watchdog(LPVOID arg)
 				      NULL, NULL, NULL);
 
 			CloseHandle(f);
+			fprintf(stderr, "stub: dump %s -> %s (n=%u)\n",
+				ok ? "written" : "FAILED", path, n);
+			fflush(stderr);
 			if (ok)
 				n++;
 		}
