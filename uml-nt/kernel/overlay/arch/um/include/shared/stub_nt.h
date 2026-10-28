@@ -171,6 +171,14 @@ struct uml_nt_stub_data {
 	 * native boot in ruling 160 — the guest needs its extended state,
 	 * so the question is whether the *claim* or the *content* is what
 	 * the dispatcher chokes on. */
+	/* Shelley 228: the rip the guest dies at is our own ud2 patch, i.e. a
+	 * syscall boundary — so the question is whether the page the guest
+	 * must execute there is really executable in this process's view.
+	 * Windows' answer is the only one that matters. */
+	unsigned long long prot_rip_real;	/* VirtualQuery at the rip */
+	unsigned long long prot_rip_book;	/* what the VMA table says */
+	unsigned long long prot_real_nonexec;	/* rounds whose page lacks exec */
+	unsigned long long prot_checked;	/* positive counter */
 	u32_nt xs_lever;		/* 1 = drop CONTEXT_XSTATE for this conn */
 	u32_nt xs_dropped;		/* positive counter: times we did */
 	unsigned long long xs_zmm_nonzero;	/* nonzero 8-byte words */

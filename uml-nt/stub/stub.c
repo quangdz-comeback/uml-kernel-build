@@ -1672,6 +1672,34 @@ static unsigned char xs_prev[256];
 static int xs_prev_ok;
 static void ctx_audit_snapshot(CONTEXT *c)
 {
+	/* Shelley 228: ask Windows what the page at the rip really is.
+	 * The book can say EXECUTE_READ and the view can say something else,
+	 * and then the fetch of our own ud2 traps as an access violation. */
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+		DWORD prot = 0;
+
+		memset(&mbi, 0, sizeof(mbi));
+		if (VirtualQuery((void *)(uintptr_t)c->Rip, &mbi,
+				 sizeof(mbi)) == sizeof(mbi))
+			prot = mbi.Protect;
+		d->prot_rip_real = prot;
+		d->prot_checked++;
+		/* exec bits live in PAGE_EXECUTE 0x10 .. PAGE_EXECUTE_WRITECOPY
+		 * 0x80, so a page with none of them set cannot run code */
+		if ((prot & 0xf0u) == 0 && prot != 0) {
+			d->prot_real_nonexec++;
+			if (d->prot_real_nonexec <= 8)
+				fprintf(stderr, "[prot-rip] pid %lu rip=0x%llx "
+					"real=0x%lx BOOK claims exec -- "
+					"non-exec round %llu/%llu\n",
+					(unsigned long)d->pid,
+					(unsigned long long)c->Rip,
+					(unsigned long)prot,
+					d->prot_real_nonexec,
+					d->prot_checked);
+		}
+	}
 	ctx_entry_ok = 0;
 	if (c == NULL || d == NULL)
 		return;
