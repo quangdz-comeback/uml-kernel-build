@@ -309,6 +309,11 @@ static volatile unsigned long long fs_tramp_snap_id, fs_tramp_ent_id;
  * rflags immediately before the jmp (on the private slot, never on the
  * guest stack) so the last unmeasured state — guest entry AFTER the
  * hop — is in the ring on the next death. */
+/* Set once the shared page exists: where the hop leaves its stage byte.
+ * Not static and marked used: only inline asm refers to it, and the
+ * compiler does not count asm references when it decides what to keep. */
+volatile unsigned char *fs_stage __attribute__((used));
+
 __attribute__((naked)) static void fs_trampoline_sys(void)
 {
 	__asm__ volatile (
@@ -387,8 +392,6 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
  * back around it. The TF trap after popfq lands after the rsp
  * restore (the next instruction), with the guest stack live again.
  * fs_tramp_tf_end bounds the body for the VEH's hop window. */
-/* Set once the shared page exists: where the hop leaves its stage byte. */
-static volatile unsigned char *fs_stage;
 static volatile unsigned long long fs_tramp_rsp;
 static volatile unsigned long long fs_tramp_tfslot[2];
 
