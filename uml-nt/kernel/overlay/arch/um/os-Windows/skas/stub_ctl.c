@@ -3928,14 +3928,18 @@ void uml_nt_sample_push(struct uml_nt_stub_conn *c)
 	unsigned long long rip = 0, rsp = 0, rbp = 0, rdi = 0, rsi = 0, rbx = 0;
 	unsigned slot;
 
-	if (c == NULL || c->d == NULL || c->thread == NULL)
+	if (c == NULL || c->d == NULL)
 		return;
-	if (c->d->round_step != 11)
-		return;
-	if (uml_nt_sample_read(c, &rip, &rsp, &rbp, &rdi, &rsi, &rbx) != 0) {
-		c->d->smp_ok++;
+	c->d->smp_calls++;
+	if (c->thread == NULL || c->d->round_step != 11) {
+		c->d->smp_skip_step++;
 		return;
 	}
+	if (uml_nt_sample_read(c, &rip, &rsp, &rbp, &rdi, &rsi, &rbx) != 0) {
+		c->d->smp_fail++;
+		return;
+	}
+	c->d->smp_ok++;
 	slot = c->d->smp_n & 3u;
 	c->d->smp_rip[slot] = rip;
 	c->d->smp_rsp[slot] = rsp;
@@ -3949,8 +3953,12 @@ void uml_nt_sample_dump(const struct uml_nt_stub_conn *c)
 
 	if (c == NULL || c->d == NULL)
 		return;
-	os_info("[smp] pid %d taken=%u ring=%u 4 last (rip rsp):\n",
-		(int)c->pid, (unsigned)c->d->smp_n, 4);
+	os_info("[smp] pid %d taken=%u calls=%u skip=%u fail=%u ok=%u "
+		"step=%u 4 last (rip rsp):\n",
+		(int)c->pid, (unsigned)c->d->smp_n,
+		(unsigned)c->d->smp_calls, (unsigned)c->d->smp_skip_step,
+		(unsigned)c->d->smp_fail, (unsigned)c->d->smp_ok,
+		(unsigned)c->d->round_step);
 	for (k = 3; k >= 0; k--) {
 		unsigned slot = (c->d->smp_n + k) & 3u;
 

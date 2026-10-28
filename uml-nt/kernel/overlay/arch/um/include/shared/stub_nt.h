@@ -191,7 +191,10 @@ struct uml_nt_stub_data {
 	unsigned long long smp_rip[4];
 	unsigned long long smp_rsp[4];
 	unsigned long long smp_fl[4];
-	u32_nt smp_n;		/* total samples taken */
+	u32_nt smp_n;		/* samples written to the ring */
+	u32_nt smp_calls;	/* every attempt */
+	u32_nt smp_skip_step;	/* guest did not own the CPU */
+	u32_nt smp_fail;	/* read failed */
 	u32_nt smp_ok;
 	unsigned long long prot_rip_real;	/* VirtualQuery at the rip */
 	unsigned long long prot_rip_book;	/* what the VMA table says */
