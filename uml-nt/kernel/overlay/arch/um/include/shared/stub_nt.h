@@ -184,6 +184,15 @@ struct uml_nt_stub_data {
 	unsigned long long hop_ts;	/* RDTSC immediately before the jmp */
 	unsigned long long tsc_per_us;	/* calibration, so the kernel can read µs */
 	unsigned long long tsc_death;	/* kernel's own RDTSC at detection */
+	/* Shelley 232: the sampler is the only lawful way to touch the guest
+	 * thread mid-compute (no APC exists in this port). Four samples, taken
+	 * every 50 ms while the guest has the CPU, are the execution path
+	 * immediately before the death. */
+	unsigned long long smp_rip[4];
+	unsigned long long smp_rsp[4];
+	unsigned long long smp_fl[4];
+	u32_nt smp_n;		/* total samples taken */
+	u32_nt smp_ok;
 	unsigned long long prot_rip_real;	/* VirtualQuery at the rip */
 	unsigned long long prot_rip_book;	/* what the VMA table says */
 	unsigned long long prot_real_nonexec;	/* rounds whose page lacks exec */

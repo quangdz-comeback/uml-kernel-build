@@ -3920,6 +3920,47 @@ static int uml_nt_sample_read(struct uml_nt_stub_conn *c,
 	*rbx = UML_NT_X64_CTX_REG(ctx, 0x90);
 	return 0;
 }
+/* Shelley 232: one mid-compute sample, kept in a four-deep ring. Only
+ * called while the guest owns the CPU (round_step 11 = published), which
+ * is also the only place a suspend is safe for us. */
+void uml_nt_sample_push(struct uml_nt_stub_conn *c)
+{
+	unsigned long long rip = 0, rsp = 0, rbp = 0, rdi = 0, rsi = 0, rbx = 0;
+	unsigned slot;
+
+	if (c == NULL || c->d == NULL || c->thread == NULL)
+		return;
+	if (c->d->round_step != 11)
+		return;
+	if (uml_nt_sample_read(c, &rip, &rsp, &rbp, &rdi, &rsi, &rbx) != 0) {
+		c->d->smp_ok++;
+		return;
+	}
+	slot = c->d->smp_n & 3u;
+	c->d->smp_rip[slot] = rip;
+	c->d->smp_rsp[slot] = rsp;
+	c->d->smp_fl[slot] = (unsigned long long)c->pid; /* tagged below */
+	c->d->smp_n++;
+}
+
+void uml_nt_sample_dump(const struct uml_nt_stub_conn *c)
+{
+	int k;
+
+	if (c == NULL || c->d == NULL)
+		return;
+	os_info("[smp] pid %d taken=%u ring=%u 4 last (rip rsp):\n",
+		(int)c->pid, (unsigned)c->d->smp_n, 4);
+	for (k = 3; k >= 0; k--) {
+		unsigned slot = (c->d->smp_n + k) & 3u;
+
+		if (c->d->smp_rip[slot] == 0 && k == 3)
+			continue;
+		os_info("[smp]   -%d rip=0x%llx rsp=0x%llx\n", 3 - k,
+			c->d->smp_rip[slot], c->d->smp_rsp[slot]);
+	}
+}
+
 
 /* A sample is a GUEST sample only when the thread is executing guest
  * code: between the answer release and the next trap the stub spends

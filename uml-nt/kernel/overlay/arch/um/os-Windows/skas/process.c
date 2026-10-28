@@ -68,6 +68,8 @@ extern int (*uml_nt_dump_hook)(unsigned long pid)
 	__attribute__((weak));
 void uml_nt_host_mod(unsigned long long va, char *out, int len);
 void uml_nt_death_rip_vma(struct uml_nt_stub_conn *c);
+void uml_nt_sample_push(struct uml_nt_stub_conn *c);
+void uml_nt_sample_dump(const struct uml_nt_stub_conn *c);
 void uml_nt_death_exit_check(struct uml_nt_stub_conn *c);
 extern unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
 extern unsigned long long uml_nt_tick_round;
@@ -838,8 +840,14 @@ void userspace(struct uml_pt_regs *regs)
 				idx_con = nwait;
 				waits[nwait++] = hcon;
 			}
+			/* Shelley 232: for the login chain the wait is also the
+			 * sampler clock — 50 ms gives three or four mid-compute
+			 * samples inside the window the death comes out of, and
+			 * it sharpens the detection from one second to fifty
+			 * milliseconds as a bonus. */
 			w = nt->WaitForMultipleObjects(nwait, waits, 0,
-						       1000);
+						       uml_nt_conn_is_login(c) ?
+						       50 : 1000);
 			if (w == 0)
 				break; /* stub trap ready */
 			if (idx_net >= 0 && w == (ULONG)idx_net) {
@@ -1178,7 +1186,8 @@ void userspace(struct uml_pt_regs *regs)
 							dt = now - c->d->hop_ts;
 						if (c->d->tsc_per_us != 0)
 							us = dt / c->d->tsc_per_us;
-						os_info("[hop] pid %d stage=%llu "
+						uml_nt_sample_dump(c);
+					os_info("[hop] pid %d stage=%llu "
 							"seq=%llu round=%llu "
 							"veh=%llu steps=%u "
 							"dtsc=%llu us=%llu "
@@ -1797,6 +1806,8 @@ void userspace(struct uml_pt_regs *regs)
 					}
 					os_dump_core();
 				}
+				if (uml_nt_conn_is_login(c))
+					uml_nt_sample_push(c);
 				wait_tmo++;
 				/* Shelley 195: under the debugger every round is
 				 * slower by design — the debuggee is frozen
