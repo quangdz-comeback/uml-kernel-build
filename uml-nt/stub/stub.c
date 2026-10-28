@@ -346,13 +346,6 @@ __attribute__((naked)) static void fs_trampoline_sys(void)
 		"testq	%r11, %r11\n\t"
 		"jz	3f\n\t"
 		"movb	$3, (%r11)\n\t"
-		"movq	fs_seq(%rip), %r11\n\t"
-		"testq	%r11, %r11\n\t"
-		"jz	3f\n\t"
-		"pushq	%rax\n\t"
-		"movq	fs_tramp_snap_id(%rip), %rax\n\t"
-		"movq	%rax, (%r11)\n\t"
-		"popq	%rax\n\t"
 		"3:\n\t"
 		"movq	fs_ts(%rip), %r11\n\t"
 		"testq	%r11, %r11\n\t"
@@ -391,13 +384,6 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
 		"testq	%r11, %r11\n\t"
 		"jz	3f\n\t"
 		"movb	$3, (%r11)\n\t"
-		"movq	fs_seq(%rip), %r11\n\t"
-		"testq	%r11, %r11\n\t"
-		"jz	3f\n\t"
-		"pushq	%rax\n\t"
-		"movq	fs_tramp_snap_id(%rip), %rax\n\t"
-		"movq	%rax, (%r11)\n\t"
-		"popq	%rax\n\t"
 		"3:\n\t"
 		"movq	fs_ts(%rip), %r11\n\t"
 		"testq	%r11, %r11\n\t"
@@ -2747,6 +2733,12 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		QueryPerformanceCounter(&q);
 		d->ts_resume = (unsigned long long)q.QuadPart;
 	}
+	/* Shelley 231: the hop's stage is only evidence for THIS round if it
+	 * starts at zero — so clear it here, name the round, and let the hop
+	 * raise it. A death that leaves it zero never reached the hop. */
+	d->hop_seq = d->req_seq;
+	d->hop_ts = 0;
+	d->hop_stage = 0;
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
 
