@@ -61,6 +61,28 @@
 #include <physalloc.h>
 #include "internal.h"
 
+static int g_xs_lever;
+
+/* Ruling 223: A/B on the same HEAD — the arm only happens when the boot
+ * command line asks for it, exactly like the witness and probe levers. */
+static int xs_lever_on(void)
+{
+	int i;
+
+	if (g_xs_lever >= 0 && g_xs_lever != 0)
+		return 1;
+	g_xs_lever = 0;
+	for (i = 0; i < uml_boot.argc; i++)
+		if (uml_boot.argv[i] != NULL &&
+		    __builtin_strcmp(uml_boot.argv[i],
+				     "uml_nt_xslever=1") == 0)
+			g_xs_lever = 1;
+	if (g_xs_lever)
+		os_info("[xs-lever] uml_nt_xslever=1 — CONTEXT_XSTATE is "
+			"dropped for the login chain only\n");
+	return g_xs_lever;
+}
+
 extern const char nt_guest_init_start[], nt_guest_init_end[];
 /* Absolute symbols (init_blob.S .set): byte offsets of the guard
  * address slots inside the blob. */
@@ -4170,6 +4192,11 @@ static void uml_nt_drexec_arm(struct uml_nt_stub_conn *c)
 		return;
 	if (!uml_nt_conn_is_login(c))
 		return;
+	if (g_xs_lever && d->xs_lever == 0) {
+		d->xs_lever = 1;
+		os_info("[xs-lever] login conn pid %d armed (EXTRA 1/2)\n",
+			(int)c->pid);
+	}
 	/* Already armed? Then MOVE the breakpoint to this round's target
 	 * instead of returning: keeping a stale address armed was the
 	 * fourth way this probe measured nothing (referee 40243638730:
@@ -11141,6 +11168,16 @@ void uml_nt_exec_path_set(const char *path)
 	}
 	g_exec_path[i] = 0;
 	g_exec_login = path_is_login_chain(g_exec_path);
+	if (g_exec_login && xs_lever_on()) {
+		/* ruling 223: arm the xstate lever for this conn only. Ruling
+		 * 160 measured that dropping the claim stops the silent death;
+		 * what it also did was break the guest, because the extended
+		 * state then is not carried across a restore. Doing it per-
+		 * connection keeps the native boot intact and asks the
+		 * question the global attempt could not. */
+		g_xs_lever = 1;
+		os_info("[xs-lever] armed for the login chain\n");
+	}
 	if (g_exec_login)
 		os_info("[dbg] login chain armed by exec '%s'\n",
 			g_exec_path);

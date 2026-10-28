@@ -2571,6 +2571,14 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * the discriminator is what we came for. */
 	if (c->ContextFlags & CONTEXT_XSTATE)
 		d->xstate_kept++;
+	/* ruling 223 / history in the comment above: dropping the claim stops
+	 * the silent death and breaks the guest's extended state. Armed per-
+	 * connection so the native boot keeps its claim and only the login
+	 * chain runs the experiment. */
+	if (d->xs_lever && (c->ContextFlags & ((DWORD)CONTEXT_XSTATE))) {
+		c->ContextFlags &= ~((DWORD)CONTEXT_XSTATE);
+		d->xs_dropped++;
+	}
 	d->round_step = 10;
 	MemoryBarrier();
 	InterlockedExchange64((volatile LONG64 *)&d->done_seq, d->req_seq);

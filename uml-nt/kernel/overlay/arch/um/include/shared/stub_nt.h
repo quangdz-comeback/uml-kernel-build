@@ -166,6 +166,13 @@ struct uml_nt_stub_data {
 	 * context the dispatcher hands the handler. Content beyond the legacy
 	 * and XMM blocks is ZMM/opmask territory: if the guest really ran
 	 * AVX-512, some of those words are not zero. */
+	/* ruling 223: the lever is set by the kernel for login-chain
+	 * connections only, because dropping the claim globally broke the
+	 * native boot in ruling 160 — the guest needs its extended state,
+	 * so the question is whether the *claim* or the *content* is what
+	 * the dispatcher chokes on. */
+	u32_nt xs_lever;		/* 1 = drop CONTEXT_XSTATE for this conn */
+	u32_nt xs_dropped;		/* positive counter: times we did */
 	unsigned long long xs_zmm_nonzero;	/* nonzero 8-byte words */
 	unsigned long long xs_scan_bytes;	/* bytes examined after 0x300 */
 	/* Shelley 188 (#13 fix): ContextFlags decides whether 0x100 is an
