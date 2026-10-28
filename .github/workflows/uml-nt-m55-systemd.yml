@@ -156,6 +156,22 @@ jobs:
           HASH=$(openssl passwd -6 -salt umlnt root)
           sudo sed -i "s|^root:[^:]*:|root:${HASH}:|" \
             /mnt/m55a-rootfs/etc/shadow
+          # USER ruling 2026-10 (M5.5b-1-AUTO): the death on the password
+          # path is not CI-specific — a real machine crashes the same way —
+          # and the kernel-mode hunt is deferred. So the milestone gate is
+          # reached by autologin: console-getty starts agetty with
+          # --autologin root, which skips the password round entirely. The
+          # gate grep is untouched: ^LOGIN-OK still has to appear, only the
+          # way we get to a shell changed (USER-approved semantics change).
+          sudo mkdir -p /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d
+          sudo tee /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d/autologin.conf >/dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root -o '-p -- \u' --noclear %I $TERM
+Type=idle
+EOF
+          echo "--- M5.5b-1-AUTO autologin override ---"
+          cat /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d/autologin.conf
           echo "--- M5.5b-1 login prep ---"
           ls -l /mnt/m55a-rootfs/etc/systemd/system/getty.target.wants/ || true
           grep "^root:" /mnt/m55a-rootfs/etc/shadow | cut -c1-14
