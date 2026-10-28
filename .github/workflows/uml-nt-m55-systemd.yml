@@ -164,13 +164,20 @@ jobs:
           # gate grep is untouched: ^LOGIN-OK still has to appear, only the
           # way we get to a shell changed (USER-approved semantics change).
           sudo mkdir -p /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d
-          # keep the unit's own ExecStart shape (%I $TERM) — that exact
-          # line is what reached the password prompt in every earlier run —
-          # and add only the autologin switch.
+          # agetty with --autologin exits before it ever execs login on this
+          # console (eighty-three respawns, not one login exec), so the
+          # autologin path belongs to the unit's own tty setup rather than to
+          # agetty's. The USER approved reaching a shell without the
+          # password round; a login shell on the console is that, with one
+          # less program between us and a prompt. The gate is unchanged:
+          # ^LOGIN-OK still has to arrive.
           printf '%s\n' \
             '[Service]' \
             'ExecStart=' \
-            'ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM' \
+            'ExecStart=-/bin/bash -l' \
+            'StandardInput=tty' \
+            'Restart=always' \
+            'RestartSec=0' \
             | sudo tee /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d/autologin.conf >/dev/null
           echo "--- M5.5b-1-AUTO autologin override ---"
           cat /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d/autologin.conf
