@@ -164,11 +164,13 @@ jobs:
           # gate grep is untouched: ^LOGIN-OK still has to appear, only the
           # way we get to a shell changed (USER-approved semantics change).
           sudo mkdir -p /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d
+          # keep the unit's own ExecStart shape (%I $TERM) — that exact
+          # line is what reached the password prompt in every earlier run —
+          # and add only the autologin switch.
           printf '%s\n' \
             '[Service]' \
             'ExecStart=' \
-            "ExecStart=-/sbin/agetty --autologin root -o '-p -- \\u' --noclear %I \$TERM" \
-            'Type=idle' \
+            'ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM' \
             | sudo tee /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d/autologin.conf >/dev/null
           echo "--- M5.5b-1-AUTO autologin override ---"
           cat /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d/autologin.conf
@@ -245,10 +247,9 @@ jobs:
         env:
           # Shelley 219: a dump after the death never returns, so the stub
           # photographs itself every two seconds and keeps the last three.
-          # ruling 221: 200 ms covers the last 600 ms with three files, and the
-          # hash window is ~187 ms — a snapshot now has a real chance of
-          # landing inside the compute.
-          UML_NT_DUMP_MS: "200"
+          # the snapshots found no death to photograph and cost the run
+          # thousands of files; off while the gate is what matters.
+          UML_NT_DUMP_MS: "0"
         run: |
           cd uml-nt/launcher
           set +e
