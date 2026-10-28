@@ -1182,7 +1182,8 @@ void userspace(struct uml_pt_regs *regs)
 						"sp=0x%llx min=0x%llx "
 						"headroom=0x%llx "
 						"retval=0x%llx err=%d "
-						"step=%u halt=%u action=%u\n",
+						"step=%u halt=%u action=%u "
+						"hop_stage=%llu\n",
 						mm_id->pid,
 						(unsigned long)code,
 						(unsigned)c->d->cmd,
@@ -1202,7 +1203,8 @@ void userspace(struct uml_pt_regs *regs)
 						(int)c->d->err,
 						(unsigned)c->d->round_step,
 						(unsigned)c->d->halt,
-						(unsigned)c->d->action);
+						(unsigned)c->d->action,
+						c->d->hop_stage);
 					uml_nt_dbg_summary();
 					/* Shelley 219: the dump goes LAST. It used
 					 * to run before the death line, and when

@@ -175,6 +175,12 @@ struct uml_nt_stub_data {
 	 * syscall boundary — so the question is whether the page the guest
 	 * must execute there is really executable in this process's view.
 	 * Windows' answer is the only one that matters. */
+	/* Shelley 229: the hop is the one place between our handler and the
+	 * guest that no instrument has looked inside. It writes a stage byte
+	 * at each step; surviving the death, the byte says which step the
+	 * thread never finished. */
+	unsigned long long hop_stage;	/* 1 entry, 2 past wrfsbase, 3 cleared */
+	unsigned long long hop_seq;
 	unsigned long long prot_rip_real;	/* VirtualQuery at the rip */
 	unsigned long long prot_rip_book;	/* what the VMA table says */
 	unsigned long long prot_real_nonexec;	/* rounds whose page lacks exec */

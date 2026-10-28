@@ -312,9 +312,19 @@ static volatile unsigned long long fs_tramp_snap_id, fs_tramp_ent_id;
 __attribute__((naked)) static void fs_trampoline_sys(void)
 {
 	__asm__ volatile (
+		"movq	fs_stage(%rip), %r11\n\t"
+		"testq	%r11, %r11\n\t"
+		"jz	1f\n\t"
+		"movb	$1, (%r11)\n\t"
+		"1:\n\t"
 		"incq	fs_tramp_pre(%rip)\n\t"
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
+		"movq	fs_stage(%rip), %r11\n\t"
+		"testq	%r11, %r11\n\t"
+		"jz	2f\n\t"
+		"movb	$2, (%r11)\n\t"
+		"2:\n\t"
 		"incq	fs_tramp_post(%rip)\n\t"
 		/* snapshot (id first, so a cross-round compare is impossible) */
 		"movq	fs_tramp_snap_id(%rip), %r11\n\t"
@@ -325,6 +335,11 @@ __attribute__((naked)) static void fs_trampoline_sys(void)
 		"popq	%r11\n\t"
 		"movq	%r11, fs_tramp_ent_fl(%rip)\n\t"
 		"movq	fs_tramp_ent_rsp(%rip), %rsp\n\t"
+		"movq	fs_stage(%rip), %r11\n\t"
+		"testq	%r11, %r11\n\t"
+		"jz	3f\n\t"
+		"movb	$3, (%r11)\n\t"
+		"3:\n\t"
 		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
@@ -346,6 +361,11 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
 		"popq	%r11\n\t"
 		"movq	%r11, fs_tramp_ent_fl(%rip)\n\t"
 		"movq	fs_tramp_ent_rsp(%rip), %rsp\n\t"
+		"movq	fs_stage(%rip), %r11\n\t"
+		"testq	%r11, %r11\n\t"
+		"jz	3f\n\t"
+		"movb	$3, (%r11)\n\t"
+		"3:\n\t"
 		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
@@ -367,6 +387,8 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
  * back around it. The TF trap after popfq lands after the rsp
  * restore (the next instruction), with the guest stack live again.
  * fs_tramp_tf_end bounds the body for the VEH's hop window. */
+/* Set once the shared page exists: where the hop leaves its stage byte. */
+static volatile unsigned char *fs_stage;
 static volatile unsigned long long fs_tramp_rsp;
 static volatile unsigned long long fs_tramp_tfslot[2];
 
@@ -2838,6 +2860,8 @@ int main(int argc, char **argv)
 			  (long long)q.QuadPart, "(hook)", 0ull);
 		SetEnvironmentVariableA("UML_NT_CRT_HOOK", crt_buf);
 	}
+	if (d != NULL)
+		fs_stage = (volatile unsigned char *)&d->hop_stage;
 	job_report("boot");
 	CreateThread(NULL, 0, dump_watchdog, NULL, 0, NULL);
 	_set_invalid_parameter_handler(crt_invalid_parameter);
