@@ -164,18 +164,17 @@ jobs:
           # gate grep is untouched: ^LOGIN-OK still has to appear, only the
           # way we get to a shell changed (USER-approved semantics change).
           sudo mkdir -p /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d
-          # agetty with --autologin exits before it ever execs login on this
-          # console (eighty-three respawns, not one login exec), so the
-          # autologin path belongs to the unit's own tty setup rather than to
-          # agetty's. The USER approved reaching a shell without the
-          # password round; a login shell on the console is that, with one
-          # less program between us and a prompt. The gate is unchanged:
-          # ^LOGIN-OK still has to arrive.
+          # Shelley 225: the binary that already runs well up to the
+          # password prompt is login itself, so the autologin belongs to it:
+          # -f root skips authentication and keeps everything else login
+          # does (pam_session, environment, the shell it spawns). agetty is
+          # out of the picture — it was exiting before it ever exec'd login.
           printf '%s\n' \
             '[Service]' \
             'ExecStart=' \
-            'ExecStart=-/bin/bash -l' \
+            'ExecStart=-/bin/login -f root' \
             'StandardInput=tty' \
+            'TTYPath=/dev/console' \
             'Restart=always' \
             'RestartSec=0' \
             | sudo tee /mnt/m55a-rootfs/etc/systemd/system/console-getty.service.d/autologin.conf >/dev/null
