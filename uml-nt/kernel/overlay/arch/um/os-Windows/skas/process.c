@@ -1159,6 +1159,15 @@ void userspace(struct uml_pt_regs *regs)
 						c->d->got_dr7, c->d->ask_dr7,
 						c->d->got_flags);
 					}
+					/* Shelley 229: the death line above is long
+					 * enough to be cut mid-print in the log, so the
+					 * hop stage gets a line of its own — it is the
+					 * whole point of this measurement. */
+					os_info("[hop] pid %d stage=%llu "
+						"veh=%llu steps=%u\n",
+						mm_id->pid, c->d->hop_stage,
+						c->d->veh_entries,
+						(unsigned)c->d->round_step);
 					/* ruling 223: the lever is only worth
 					 * anything if it says it acted */
 					os_info("[xs-lever] pid %d armed=%u "
@@ -1182,8 +1191,7 @@ void userspace(struct uml_pt_regs *regs)
 						"sp=0x%llx min=0x%llx "
 						"headroom=0x%llx "
 						"retval=0x%llx err=%d "
-						"step=%u halt=%u action=%u "
-						"hop_stage=%llu\n",
+						"step=%u halt=%u action=%u\n",
 						mm_id->pid,
 						(unsigned long)code,
 						(unsigned)c->d->cmd,
@@ -1203,8 +1211,7 @@ void userspace(struct uml_pt_regs *regs)
 						(int)c->d->err,
 						(unsigned)c->d->round_step,
 						(unsigned)c->d->halt,
-						(unsigned)c->d->action,
-						c->d->hop_stage);
+						(unsigned)c->d->action);
 					uml_nt_dbg_summary();
 					/* Shelley 219: the dump goes LAST. It used
 					 * to run before the death line, and when
