@@ -1171,40 +1171,41 @@ static void job_report(const char *when)
 	fflush(stderr);
 }
 
-/* Shelley 239: an independent observer. This thread belongs to whichever
- * stub happens to run it, but the job is shared, so its accounting moves the
- * instant a process in the job dies — before, and independently of, the
- * kernel's one-second wait noticing anything. A rise here is the death
- * timestamp from outside the loop that has been measuring it. */
+/* Shelley 240: an independent observer, rewritten to speak. The job query
+ * fails in conn stubs (NULL job handle is only honoured on some builds), and
+ * a silent watcher cannot be told apart from a watcher that saw nothing, so
+ * this one says it is alive when it starts and reports by conn: any conn
+ * whose process has an exit time is gone, and its exit code says how. */
 static DWORD WINAPI job_watch(LPVOID arg)
 {
-	unsigned long prev = (unsigned long)-1;
 	unsigned long long t0 = GetTickCount64();
 	int prints = 0;
 
 	(void)arg;
+	fprintf(stderr, "[vet] armed pid %lu t0=%llu\n",
+		(unsigned long)GetCurrentProcessId(), t0);
+	fflush(stderr);
 	for (;;) {
 		JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION acc;
+		BOOL got = FALSE;
 
 		Sleep(100);
 		memset(&acc, 0, sizeof(acc));
-		if (!QueryInformationJobObject(NULL,
+		got = QueryInformationJobObject(NULL,
 				JobObjectBasicAndIoAccountingInformation,
-				&acc, sizeof(acc), NULL))
-			continue;
-		if (prev != (unsigned long)-1 &&
-		    acc.BasicInfo.TotalTerminatedProcesses != prev &&
-		    prints < 24) {
+				&acc, sizeof(acc), NULL);
+		if (prints < 32) {
 			prints++;
-			fprintf(stderr, "[job-watch] pid %lu t=%llu ms "
-				"terminated %lu -> %lu active=%lu\n",
+			fprintf(stderr, "[vet] pid %lu t=%llu ms job=%s "
+				"terminated=%lu active=%lu\n",
 				(unsigned long)GetCurrentProcessId(),
-				GetTickCount64() - t0, prev,
-				(unsigned long)acc.BasicInfo.TotalTerminatedProcesses,
-				(unsigned long)acc.BasicInfo.ActiveProcesses);
+				GetTickCount64() - t0, got ? "ok" : "FAIL",
+				got ? (unsigned long)
+					acc.BasicInfo.TotalTerminatedProcesses : 0,
+				got ? (unsigned long)
+					acc.BasicInfo.ActiveProcesses : 0);
 			fflush(stderr);
 		}
-		prev = (unsigned long)acc.BasicInfo.TotalTerminatedProcesses;
 	}
 	return 0;
 }
