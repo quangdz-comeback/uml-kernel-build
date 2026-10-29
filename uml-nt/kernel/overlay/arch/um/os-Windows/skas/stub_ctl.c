@@ -11279,7 +11279,14 @@ void uml_nt_exec_path_set(const char *path)
 		i++;
 	}
 	g_exec_path[i] = 0;
-	g_exec_login = path_is_login_chain(g_exec_path);
+	/* Shelley 235: STICKY. login execs a shell, the shell execs its own
+	 * children, and every one of those execs used to clear the flag — so
+	 * by the time the dying round arrived the kernel no longer believed it
+	 * was serving the login chain at all (referee 40805791232: two "login
+	 * chain armed" lines, zero ticks, zero samples). Once a login binary
+	 * has been reached this boot, the session is the login chain. */
+	if (path_is_login_chain(g_exec_path))
+		g_exec_login = 1;
 	if (g_exec_login && xs_lever_on()) {
 		/* ruling 223: arm the xstate lever for this conn only. Ruling
 		 * 160 measured that dropping the claim stops the silent death;
