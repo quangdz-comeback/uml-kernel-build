@@ -3961,6 +3961,64 @@ void uml_nt_sample_dump(const struct uml_nt_stub_conn *c)
 
 	if (c == NULL || c->d == NULL)
 		return;
+	/* Shelley 236: the guest stood on one address for the whole window.
+	 * Read what is there (our own physmem, so the dead is readable) and
+	 * scan the containing mapping for a library name. */
+	{
+		static unsigned char sbuf[16384];
+		unsigned long long srip = c->d->smp_rip[(c->d->smp_n + 3) & 3u];
+		struct uml_nt_vma *v =
+			(c->mm != NULL) ? uml_nt_vma_find(c->mm, srip) : NULL;
+
+		if (v != NULL) {
+			unsigned char ins[16];
+			unsigned long long len = v->end - v->start;
+			int got = 0, k, n;
+			char name[96];
+
+			memset(ins, 0, sizeof(ins));
+			got = uml_nt_uacc_walk(c->mm, uml_boot.physmem_base,
+					       srip, sizeof(ins),
+					       (char *)ins, 0) == 0;
+			memset(sbuf, 0, sizeof(sbuf));
+			if (len > sizeof(sbuf))
+				len = sizeof(sbuf);
+			uml_nt_uacc_walk(c->mm, uml_boot.physmem_base,
+					 v->start, len, (char *)sbuf, 0);
+			/* find a printable run that looks like a library name */
+			name[0] = 0;
+			for (k = 0; k + 8 < (int)len; k++) {
+				if (sbuf[k] == 'l' && sbuf[k + 1] == 'i' &&
+				    sbuf[k + 2] == 'b') {
+					for (n = 0; n < (int)sizeof(name) - 1 &&
+					     k + n < (int)len; n++) {
+						unsigned char ch = sbuf[k + n];
+
+						if (ch < 0x20 || ch > 0x7e)
+							break;
+						name[n] = (char)ch;
+					}
+					name[n] = 0;
+					if (n > 4 &&
+					    (k + n + 3 < (int)len) &&
+					    sbuf[k + n] == '.' &&
+					    sbuf[k + n + 1] == 's' &&
+					    sbuf[k + n + 2] == 'o')
+						break;
+					name[0] = 0;
+				}
+			}
+			os_info("[smp] stuck rip=0x%llx vma=[0x%llx,0x%llx) "
+				"prot=0x%x flags=0x%x read=%s "
+				"insn=%02x%02x%02x%02x%02x%02x%02x%02x "
+				"lib='%s'\n",
+				srip, v->start, v->end, v->prot, v->flags,
+				got ? "ok" : "FAULT",
+				ins[0], ins[1], ins[2], ins[3], ins[4],
+				ins[5], ins[6], ins[7],
+				name[0] ? name : "?");
+		}
+	}
 	os_info("[smp] pid %d taken=%u calls=%u skip=%u fail=%u ok=%u "
 		"step=%u 4 last (rip rsp):\n",
 		(int)c->pid, (unsigned)c->d->smp_n,
