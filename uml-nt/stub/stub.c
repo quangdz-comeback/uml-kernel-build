@@ -47,6 +47,7 @@
  * only the kernel ELF free of that).
  */
 #include <windows.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1181,6 +1182,71 @@ static void job_report(const char *when)
 		(unsigned long)acc.BasicInfo.TotalTerminatedProcesses,
 		(unsigned long)acc.BasicInfo.TotalPageFaultCount);
 	fflush(stderr);
+}
+
+/* Shelley 242: who else lives in this process? The dump from 222 showed four
+ * threads where we create one, and a thread that is not ours is a candidate
+ * for an access violation that never reaches a dispatcher we installed. The
+ * census prints every thread's id, its start address and the CPU time it has
+ * burned, so a thread that is working while the guest sleeps stands out. */
+typedef LONG (NTAPI *pfn_nqit_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+static void thread_census(void)
+{
+	pfn_nqit_t nqit = (pfn_nqit_t)(uintptr_t)
+		GetProcAddress(GetModuleHandleA("ntdll.dll"),
+			       "NtQueryInformationThread");
+	int rounds = 0;
+
+	fprintf(stderr, "[census] pid %lu armed nqit=%d\n",
+		(unsigned long)GetCurrentProcessId(), nqit != NULL);
+	fflush(stderr);
+	for (;;) {
+		HANDLE snap;
+		THREADENTRY32 te;
+
+		Sleep(200);
+		if (rounds >= 10)
+			continue;
+		rounds++;
+		snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+		if (snap == INVALID_HANDLE_VALUE)
+			continue;
+		memset(&te, 0, sizeof(te));
+		te.dwSize = sizeof(te);
+		if (Thread32First(snap, &te)) {
+			do {
+				HANDLE th;
+				FILETIME cr, ex, ke, us;
+				unsigned long long cpu = 0;
+				unsigned long long start = 0;
+
+				if (te.th32OwnerProcessID !=
+				    GetCurrentProcessId())
+					continue;
+				th = OpenThread(THREAD_QUERY_INFORMATION,
+						FALSE, te.th32ThreadID);
+				if (th == NULL)
+					continue;
+				if (GetThreadTimes(th, &cr, &ex, &ke, &us))
+					cpu = (((unsigned long long)ke.dwHighDateTime
+						<< 32) | ke.dwLowDateTime) +
+					      (((unsigned long long)us.dwHighDateTime
+						<< 32) | us.dwLowDateTime);
+				if (nqit != NULL)
+					nqit(th, 9 /* ThreadQuerySetWin32StartAddress */,
+					     &start, sizeof(start), NULL);
+				CloseHandle(th);
+				fprintf(stderr, "[census] pid %lu r=%d tid %lu "
+					"cpu_us=%llu start=0x%llx\n",
+					(unsigned long)GetCurrentProcessId(),
+					rounds, (unsigned long)te.th32ThreadID,
+					cpu / 10, start);
+				fflush(stderr);
+			} while (Thread32Next(snap, &te));
+		}
+		CloseHandle(snap);
+	}
 }
 
 /* Shelley 240: an independent observer, rewritten to speak. The job query
@@ -2972,6 +3038,8 @@ int main(int argc, char **argv)
 		d->tsc_per_us = dqpc ? (dtsc * freq) / (dqpc * 1000000ull) : 0;
 	}
 	job_report("boot");
+	if (getenv("UML_NT_CENSUS") != NULL)
+		CreateThread(NULL, 0, thread_census, NULL, 0, NULL);
 	{
 		const char *jw = getenv("UML_NT_JOB_WATCH");
 
