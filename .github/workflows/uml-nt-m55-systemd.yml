@@ -265,8 +265,13 @@ jobs:
         run: |
           $etl = Join-Path $env:RUNNER_TEMP "uml-kproc.etl"
           Write-Host "etl -> $etl"
-          logman start umlnt -ets -p Microsoft-Windows-Kernel-Process 0x10 -o $etl -ct perf -f csv -max 64 -bs 64 2>&1 | Out-String | Write-Host
-          Write-Host "logman-start-exit=$LASTEXITCODE"
+          # -f bin with an .etl target: csv as a format is only valid for
+          # csv/tsv targets, and the previous spelling failed with
+          # E_INVALIDARG (0x80070057) before the boot even started.
+          $out = logman start umlnt -ets -p Microsoft-Windows-Kernel-Process 0x10 -o $etl -ct perf -f bin -max 64 -bs 64 2>&1 | Out-String
+          $rc = $LASTEXITCODE
+          Write-Host "logman-start-exit=$rc"
+          Write-Host $out
           logman query -ets 2>&1 | Out-String | Write-Host
 
       - name: NATIVE systemd boot (M5.5a + M5.5b-1 login feed)
