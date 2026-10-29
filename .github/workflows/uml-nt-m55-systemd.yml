@@ -307,7 +307,10 @@ jobs:
               fi
               i=$((i+1))
             done
-          } | timeout ${{ inputs.debugger && '1800' || '900' }} ./launcher.exe ../../build/vmlinux \
+          # -k 30: if the launcher ignores TERM we still get the log back —
+          # an instrument that can hang forever costs the whole run's
+          # evidence (referee 40794805029 lost everything at 1h01m).
+          } | timeout -k 30 ${{ inputs.debugger && '1800' || '900' }} ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
             "mem=120M" \

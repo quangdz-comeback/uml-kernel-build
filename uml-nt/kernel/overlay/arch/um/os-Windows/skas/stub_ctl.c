@@ -3930,8 +3930,16 @@ void uml_nt_sample_push(struct uml_nt_stub_conn *c)
 
 	if (c == NULL || c->d == NULL)
 		return;
+	if (c->d->smp_cap == 0)
+		c->d->smp_cap = 64;	/* default: 64 samples, then silence */
 	c->d->smp_calls++;
-	if (c->thread == NULL || c->d->round_step != 11) {
+	/* Shelley 234: only sample when the guest owns the CPU and the kernel
+	 * is holding nothing — a suspend taken while a round is in flight is
+	 * what wedged the boot. And never run forever: a hard cap keeps the
+	 * instrument from becoming the experiment. */
+	if (c->thread == NULL || c->d->round_step != 11 ||
+	    c->d->done_seq != c->d->req_seq ||
+	    (c->d->smp_cap != 0 && c->d->smp_n >= c->d->smp_cap)) {
 		c->d->smp_skip_step++;
 		return;
 	}
