@@ -218,8 +218,20 @@ static void publish(unsigned cmd)
 
 static void wait_answer(void)
 {
-	if (WaitForSingleObject(evt_out, INFINITE) != WAIT_OBJECT_0)
-		ExitProcess(121);
+	/* Shelley 241: never park for ever. A thread asleep on an infinite wait
+	 * gives the OS no runnable thread of ours, and the death we have been
+	 * chasing is an access violation that no dispatcher ever sees — exactly
+	 * what happens when the OS has to act on a thread that is deeply parked.
+	 * Waking every fifty milliseconds keeps a thread that can run, so an
+	 * exception either reaches our handler or does not happen at all. */
+	for (;;) {
+		DWORD w = WaitForSingleObject(evt_out, 50);
+
+		if (w == WAIT_OBJECT_0)
+			return;
+		if (w != WAIT_TIMEOUT)
+			ExitProcess(121);
+	}
 }
 
 static void park_forever(void)
