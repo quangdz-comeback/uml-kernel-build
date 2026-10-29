@@ -197,6 +197,11 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	if (c->alive) {
 		os_info("[term] mmctx: killing stub pid %lu code=0\n",
 			(unsigned long)c->pid);
+		/* Shelley 239: the counter speaks even when the kill is ours. */
+		if (c->d != NULL) {
+			c->d->term_calls++;
+			c->d->term_last_pid = (unsigned long long)c->pid;
+		}
 		nt->NtTerminateProcess(c->proc, 0);
 		c->alive = 0;
 	}

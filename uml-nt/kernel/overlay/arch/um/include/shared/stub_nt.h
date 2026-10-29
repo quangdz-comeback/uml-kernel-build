@@ -192,6 +192,11 @@ struct uml_nt_stub_data {
 	unsigned long long smp_rsp[4];
 	unsigned long long smp_fl[4];
 	u32_nt smp_n;		/* samples written to the ring */
+	/* Shelley 239: every terminate path in the tree counts itself before
+	 * it acts. All zero at the death means the killer is not in this
+	 * tree, and that is a fact worth having on the record. */
+	u32_nt term_calls;
+	unsigned long long term_last_pid;
 	u32_nt smp_susp_nonzero;	/* SuspendThread returned a non-zero count */
 	u32_nt smp_resume_fail;		/* ResumeThread said -1 */
 	u32_nt smp_susp_fail;		/* SuspendThread said -1 */

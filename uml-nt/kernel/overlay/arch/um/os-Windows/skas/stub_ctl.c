@@ -12539,6 +12539,8 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			"KILL action) cmd=%u\n", (unsigned long)c->pid,
 			(unsigned long long)(unsigned int)c->d->retval,
 			(unsigned)c->d->cmd);
+		c->d->term_calls++;
+		c->d->term_last_pid = (unsigned long long)c->pid;
 		nt->NtTerminateProcess(c->proc,
 				       (NTSTATUS)c->d->retval);
 		c->exit_code = c->d->retval;

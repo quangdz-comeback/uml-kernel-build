@@ -1206,7 +1206,15 @@ void userspace(struct uml_pt_regs *regs)
 							dt = now - c->d->hop_ts;
 						if (c->d->tsc_per_us != 0)
 							us = dt / c->d->tsc_per_us;
-						uml_nt_sample_dump(c);
+						os_info("[term-audit] pid %d "
+						"in-tree kills=%u last_pid=%llu "
+						"%s\n", mm_id->pid,
+						(unsigned)c->d->term_calls,
+						c->d->term_last_pid,
+						c->d->term_calls == 0 ?
+						"==> the killer is NOT in this tree" :
+						"==> we killed something");
+					uml_nt_sample_dump(c);
 					os_info("[hop] pid %d stage=%llu "
 							"seq=%llu round=%llu "
 							"veh=%llu steps=%u "
