@@ -3905,11 +3905,25 @@ static int uml_nt_sample_read(struct uml_nt_stub_conn *c,
 	 * 40094545095/40094551603 sampled rdi=rsi=rbx=0 on every guest
 	 * rip, which cannot tell a text-shaped argument). */
 	*(unsigned int *)(ctx + 0x30) = 0x00100003u;
-	if (nt->SuspendThread(c->thread) == (ULONG)-1)
-		return -1;
+	{
+		ULONG prev = nt->SuspendThread(c->thread);
+
+		if (prev == (ULONG)-1) {
+			c->d->smp_susp_fail++;
+			return -1;
+		}
+		/* a non-zero previous count means someone left a suspend
+		 * behind — that alone can freeze a thread for good */
+		if (prev != 0)
+			c->d->smp_susp_nonzero++;
+	}
 	ok = nt->GetThreadContext(c->thread, ctx);
-	if (!uml_nt_dbg_flag())
-		nt->ResumeThread(c->thread);
+	if (!uml_nt_dbg_flag()) {
+		ULONG r = nt->ResumeThread(c->thread);
+
+		if (r == (ULONG)-1)
+			c->d->smp_resume_fail++;
+	}
 	if (!ok)
 		return -1;
 	*rip = UML_NT_X64_CTX_RIP(ctx);
@@ -4020,10 +4034,14 @@ void uml_nt_sample_dump(const struct uml_nt_stub_conn *c)
 		}
 	}
 	os_info("[smp] pid %d taken=%u calls=%u skip=%u fail=%u ok=%u "
+		"susp_nonzero=%u susp_fail=%u resume_fail=%u "
 		"step=%u 4 last (rip rsp):\n",
 		(int)c->pid, (unsigned)c->d->smp_n,
 		(unsigned)c->d->smp_calls, (unsigned)c->d->smp_skip_step,
 		(unsigned)c->d->smp_fail, (unsigned)c->d->smp_ok,
+		(unsigned)c->d->smp_susp_nonzero,
+		(unsigned)c->d->smp_susp_fail,
+		(unsigned)c->d->smp_resume_fail,
 		(unsigned)c->d->round_step);
 	for (k = 3; k >= 0; k--) {
 		unsigned slot = (c->d->smp_n + k) & 3u;

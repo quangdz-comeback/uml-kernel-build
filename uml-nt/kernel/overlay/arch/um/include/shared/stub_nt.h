@@ -192,6 +192,11 @@ struct uml_nt_stub_data {
 	unsigned long long smp_rsp[4];
 	unsigned long long smp_fl[4];
 	u32_nt smp_n;		/* samples written to the ring */
+	u32_nt smp_susp_nonzero;	/* SuspendThread returned a non-zero count */
+	u32_nt smp_resume_fail;		/* ResumeThread said -1 */
+	u32_nt smp_susp_fail;		/* SuspendThread said -1 */
+	unsigned long long smp_last_user;	/* GetThreadTimes user time */
+	unsigned long long smp_last_kern;
 	u32_nt smp_cap;		/* hard stop: never more than this many */
 	u32_nt smp_calls;	/* every attempt */
 	u32_nt smp_skip_step;	/* guest did not own the CPU */
