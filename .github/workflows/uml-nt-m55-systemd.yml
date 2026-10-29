@@ -422,14 +422,26 @@ jobs:
           $etl = Join-Path $env:RUNNER_TEMP "uml-kproc.etl"
           if (Test-Path $etl) { Get-Item $etl | Format-List Name,Length | Out-String | Write-Host }
           else { Write-Host "no etl written" }
-          # reload into the event log so the events can be read as text too
-          tracerpt "$etl" -of CSV -o (Join-Path $env:RUNNER_TEMP "uml-kproc.csv") -y 2>&1 | Out-String | Write-Host
+          # Shelley 244: the etl is now seventy-five megabytes, so it covers
+          # the boot. Convert once, then pull out only the victim: the pid
+          # comes from this run's own systemd.log, and its ProcessStop line
+          # says when the kernel recorded the death and with what status.
           $csv = Join-Path $env:RUNNER_TEMP "uml-kproc.csv"
+          tracerpt "$etl" -of CSV -o $csv -y 2>&1 | Select-Object -Last 3 | Out-String | Write-Host
           if (Test-Path $csv) {
-            $lines = Get-Content $csv
-            Write-Host "csv-lines=$($lines.Count)"
-            $lines | Select-String -Pattern 'stub|Terminate|ProcessStart|Image' | Select-Object -First 40 | Out-String | Write-Host
-          }
+            $logp = "uml-nt\launcher\systemd.log"
+            $m = Select-String -Path $logp -Pattern 'exit-req\] pid (\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($m) {
+              $dec = [int]$m.Matches[0].Groups[1].Value
+              $hex = '0x{0:X4}' -f $dec
+              Write-Host "victim pid $dec ($hex)"
+              $hits = Select-String -Path $csv -Pattern $hex -SimpleMatch | Select-Object -First 20
+              Write-Host "victim rows: $($hits.Count)"
+              $hits | ForEach-Object { Write-Host $_.Line }
+            } else { Write-Host "victim pid not found in systemd.log" }
+            $small = Join-Path $env:RUNNER_TEMP "uml-kproc-victim.txt"
+            if ($hits) { $hits | ForEach-Object { $_.Line } | Set-Content $small }
+          } else { Write-Host "tracerpt produced no csv" }
 
       - name: Upload ETW trace
         if: always()
@@ -438,8 +450,8 @@ jobs:
         with:
           name: m55a-etw-kproc
           path: |
+            ${{ runner.temp }}/uml-kproc-victim.txt
             ${{ runner.temp }}/uml-kproc.etl
-            ${{ runner.temp }}/uml-kproc.csv
           if-no-files-found: warn
 
       - name: Upload systemd.log
