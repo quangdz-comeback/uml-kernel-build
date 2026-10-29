@@ -1191,13 +1191,14 @@ static void job_report(const char *when)
  * burned, so a thread that is working while the guest sleeps stands out. */
 typedef LONG (NTAPI *pfn_nqit_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 
-static void thread_census(void)
+static DWORD WINAPI thread_census(LPVOID arg)
 {
 	pfn_nqit_t nqit = (pfn_nqit_t)(uintptr_t)
 		GetProcAddress(GetModuleHandleA("ntdll.dll"),
 			       "NtQueryInformationThread");
 	int rounds = 0;
 
+	(void)arg;
 	fprintf(stderr, "[census] pid %lu armed nqit=%d\n",
 		(unsigned long)GetCurrentProcessId(), nqit != NULL);
 	fflush(stderr);
@@ -1247,6 +1248,7 @@ static void thread_census(void)
 		}
 		CloseHandle(snap);
 	}
+	return 0;
 }
 
 /* Shelley 240: an independent observer, rewritten to speak. The job query
