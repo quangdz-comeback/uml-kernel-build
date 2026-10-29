@@ -195,8 +195,12 @@ struct uml_nt_stub_data {
 	u32_nt smp_susp_nonzero;	/* SuspendThread returned a non-zero count */
 	u32_nt smp_resume_fail;		/* ResumeThread said -1 */
 	u32_nt smp_susp_fail;		/* SuspendThread said -1 */
-	unsigned long long smp_last_user;	/* GetThreadTimes user time */
-	unsigned long long smp_last_kern;
+	/* Shelley 237: between two samples the process must have burned some
+	 * CPU — if it has not, the guest thread is not being scheduled at all
+	 * and the question becomes who is eating the CPU. */
+	unsigned long long smp_ft_prev;
+	unsigned long long smp_ft_now;
+	unsigned long long smp_ft_stalls;	/* samples with no CPU progress */
 	u32_nt smp_cap;		/* hard stop: never more than this many */
 	u32_nt smp_calls;	/* every attempt */
 	u32_nt smp_skip_step;	/* guest did not own the CPU */

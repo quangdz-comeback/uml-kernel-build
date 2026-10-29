@@ -3918,11 +3918,17 @@ static int uml_nt_sample_read(struct uml_nt_stub_conn *c,
 			c->d->smp_susp_nonzero++;
 	}
 	ok = nt->GetThreadContext(c->thread, ctx);
-	if (!uml_nt_dbg_flag()) {
+	/* Shelley 237: ALWAYS resume. The debug-mode exception that left the
+	 * suspend behind is gone: a thread carrying a pending suspend cannot
+	 * run an exception dispatcher, and that is the signature this hunt
+	 * has been chasing. */
+	{
 		ULONG r = nt->ResumeThread(c->thread);
 
 		if (r == (ULONG)-1)
 			c->d->smp_resume_fail++;
+		if (r != 0)
+			c->d->smp_susp_nonzero++;
 	}
 	if (!ok)
 		return -1;
@@ -3962,6 +3968,24 @@ void uml_nt_sample_push(struct uml_nt_stub_conn *c)
 		return;
 	}
 	c->d->smp_ok++;
+	/* CPU-time progress between samples: a frozen thread that is still
+	 * being scheduled would show process time advancing. */
+	{
+		FILETIME cr, ex, ke, us;
+		unsigned long long now;
+
+		if (nt->GetProcessTimes(c->proc, &cr, &ex, &ke, &us)) {
+			now = ((unsigned long long)ke.HighPart << 32) |
+			      ke.LowPart;
+			now += ((unsigned long long)us.HighPart << 32) |
+			       us.LowPart;
+			if (c->d->smp_ft_prev != 0 &&
+			    now == c->d->smp_ft_prev)
+				c->d->smp_ft_stalls++;
+			c->d->smp_ft_prev = now;
+			c->d->smp_ft_now = now;
+		}
+	}
 	slot = c->d->smp_n & 3u;
 	c->d->smp_rip[slot] = rip;
 	c->d->smp_rsp[slot] = rsp;
@@ -4035,6 +4059,7 @@ void uml_nt_sample_dump(const struct uml_nt_stub_conn *c)
 	}
 	os_info("[smp] pid %d taken=%u calls=%u skip=%u fail=%u ok=%u "
 		"susp_nonzero=%u susp_fail=%u resume_fail=%u "
+		"cpustall=%llu cpu=%llu "
 		"step=%u 4 last (rip rsp):\n",
 		(int)c->pid, (unsigned)c->d->smp_n,
 		(unsigned)c->d->smp_calls, (unsigned)c->d->smp_skip_step,
@@ -4042,6 +4067,7 @@ void uml_nt_sample_dump(const struct uml_nt_stub_conn *c)
 		(unsigned)c->d->smp_susp_nonzero,
 		(unsigned)c->d->smp_susp_fail,
 		(unsigned)c->d->smp_resume_fail,
+		c->d->smp_ft_stalls, c->d->smp_ft_now,
 		(unsigned)c->d->round_step);
 	for (k = 3; k >= 0; k--) {
 		unsigned slot = (c->d->smp_n + k) & 3u;
