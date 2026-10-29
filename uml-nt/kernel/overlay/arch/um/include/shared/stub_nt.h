@@ -215,6 +215,18 @@ struct uml_nt_stub_data {
 	unsigned long long prot_rip_book;	/* what the VMA table says */
 	unsigned long long prot_real_nonexec;	/* rounds whose page lacks exec */
 	unsigned long long prot_checked;	/* positive counter */
+	/* Shelley 246: the dispatcher builds its frame on the stack, so the
+	 * page under Rsp matters as much as the page under Rip — and it was
+	 * never measured. Guard/NOACCESS/read-only there means the exception
+	 * cannot be delivered at all, which is exactly what this hunt sees. */
+	unsigned long long rsp_checked;
+	unsigned long long rsp_bad;
+	unsigned long long rsp_guard;
+	unsigned long long rsp_nowrite;
+	unsigned long long rsp_real;
+	unsigned long long rsp_vma_start;
+	unsigned long long rsp_vma_end;
+	unsigned long long rsp_vma_flags;
 	u32_nt xs_lever;		/* 1 = drop CONTEXT_XSTATE for this conn */
 	u32_nt xs_dropped;		/* positive counter: times we did */
 	unsigned long long xs_zmm_nonzero;	/* nonzero 8-byte words */
