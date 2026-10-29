@@ -869,6 +869,22 @@ void userspace(struct uml_pt_regs *regs)
 				continue;
 			}
 			if (w == 258u /*WAIT_TIMEOUT*/) {
+				/* Shelley 233: the sample must be taken on every
+				 * tick, before anything looks at the exit code —
+				 * placed after the death block it could only run
+				 * once the death was already found (calls=0).
+				 * The tick line is the positive counter that
+				 * proves this clock runs at all. */
+				if (login_conn(c)) {
+					uml_nt_sample_push(c);
+					if ((c->d->smp_calls % 200u) == 0)
+						os_info("[tick] pid %d n=%u "
+							"step=%u last=%llu\n",
+							(int)c->pid,
+							(unsigned)c->d->smp_calls,
+							(unsigned)c->d->round_step,
+							c->d->done_seq);
+				}
 				/* Shelley 202: the last poll happens BEFORE we
 				 * read the exit code. An event raised in the
 				 * five milliseconds we just spent in the wait
@@ -1810,8 +1826,6 @@ void userspace(struct uml_pt_regs *regs)
 					}
 					os_dump_core();
 				}
-				if (login_conn(c))
-					uml_nt_sample_push(c);
 				wait_tmo++;
 				/* Shelley 195: under the debugger every round is
 				 * slower by design — the debuggee is frozen
