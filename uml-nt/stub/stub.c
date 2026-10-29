@@ -1171,6 +1171,44 @@ static void job_report(const char *when)
 	fflush(stderr);
 }
 
+/* Shelley 239: an independent observer. This thread belongs to whichever
+ * stub happens to run it, but the job is shared, so its accounting moves the
+ * instant a process in the job dies — before, and independently of, the
+ * kernel's one-second wait noticing anything. A rise here is the death
+ * timestamp from outside the loop that has been measuring it. */
+static DWORD WINAPI job_watch(LPVOID arg)
+{
+	unsigned long prev = (unsigned long)-1;
+	unsigned long long t0 = GetTickCount64();
+	int prints = 0;
+
+	(void)arg;
+	for (;;) {
+		JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION acc;
+
+		Sleep(100);
+		memset(&acc, 0, sizeof(acc));
+		if (!QueryInformationJobObject(NULL,
+				JobObjectBasicAndIoAccountingInformation,
+				&acc, sizeof(acc), NULL))
+			continue;
+		if (prev != (unsigned long)-1 &&
+		    acc.BasicInfo.TotalTerminatedProcesses != prev &&
+		    prints < 24) {
+			prints++;
+			fprintf(stderr, "[job-watch] pid %lu t=%llu ms "
+				"terminated %lu -> %lu active=%lu\n",
+				(unsigned long)GetCurrentProcessId(),
+				GetTickCount64() - t0, prev,
+				(unsigned long)acc.BasicInfo.TotalTerminatedProcesses,
+				(unsigned long)acc.BasicInfo.ActiveProcesses);
+			fflush(stderr);
+		}
+		prev = (unsigned long)acc.BasicInfo.TotalTerminatedProcesses;
+	}
+	return 0;
+}
+
 static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep)
 {
 	publish_unhandled(ep ? ep->ExceptionRecord : NULL,
@@ -2921,6 +2959,12 @@ int main(int argc, char **argv)
 		d->tsc_per_us = dqpc ? (dtsc * freq) / (dqpc * 1000000ull) : 0;
 	}
 	job_report("boot");
+	{
+		const char *jw = getenv("UML_NT_JOB_WATCH");
+
+		if (jw == NULL || strcmp(jw, "0") != 0)
+			CreateThread(NULL, 0, job_watch, NULL, 0, NULL);
+	}
 	CreateThread(NULL, 0, dump_watchdog, NULL, 0, NULL);
 	_set_invalid_parameter_handler(crt_invalid_parameter);
 	_set_purecall_handler(crt_purecall);
