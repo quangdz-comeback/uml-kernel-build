@@ -410,6 +410,29 @@ jobs:
           # must pass in TWO CONSECUTIVE runs before the milestone
           # closes — re-dispatch and confirm, tracked in STATUS.
 
+      - name: Windows error events (faulting module + offset)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        run: |
+          # Shelley 246: WER dumps never appeared on this runner, but the
+          # Application log still records an event 1000 for an unhandled
+          # exception, and that record names the FAULTING MODULE and the
+          # offset inside it — the one fact seventeen dumps could not give.
+          $since = (Get-Date).AddMinutes(-40)
+          try {
+            $ev = Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000,1001; StartTime=$since} -ErrorAction Stop
+            Write-Host "app error events: $($ev.Count)"
+            foreach ($e in $ev | Select-Object -First 10) {
+              Write-Host "--- $($e.TimeCreated.ToString('o')) id=$($e.Id)"
+              Write-Host $e.Message
+            }
+          } catch { Write-Host "no application error events: $($_.Exception.Message)" }
+          try {
+            $ev2 = Get-WinEvent -FilterHashtable @{LogName='System'; Id=1000; StartTime=$since} -ErrorAction SilentlyContinue
+            foreach ($e in $ev2 | Select-Object -First 5) { Write-Host "sys1000 $($e.TimeCreated.ToString('o')) $($e.Message)" }
+          } catch { }
+
       - name: ETW window (convert + find the victim)
         if: always()
         shell: powershell
