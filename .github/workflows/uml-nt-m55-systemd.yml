@@ -252,32 +252,6 @@ jobs:
           New-ItemProperty -Path $k -Name DumpCount -Value 4 -PropertyType DWord -Force | Out-Null
           Write-Host "LocalDumps -> $dir (Type=2 full)"
 
-      # Shelley 243: the last instrument of the user tier. Everything we own
-      # says the process is taken away while it sleeps, with an access
-      # violation code and no dispatcher entry — and nothing in the process
-      # sees it happen. The kernel's own process provider records the
-      # termination with its status and timestamp; if this run's trace has no
-      # ProcessTerminate for the stub pid at all, that is itself the answer
-      # and it narrows the remaining surface to a driver-level edge.
-      - name: ETW kernel-process trace (start)
-        shell: powershell
-        continue-on-error: true
-        run: |
-          $etl = Join-Path $env:RUNNER_TEMP "uml-kproc.etl"
-          Write-Host "etl -> $etl"
-          # -f bin with an .etl target: csv as a format is only valid for
-          # csv/tsv targets, and the previous spelling failed with
-          # E_INVALIDARG (0x80070057) before the boot even started.
-          # Shelley 244: 424 events over a five-minute boot is far too few,
-          # and the trace window ended long before the death — small buffers
-          # with no flush timer drop events silently. Flush every second and
-          # give the session room.
-          $out = logman start umlnt -ets -p Microsoft-Windows-Kernel-Process 0x10 -o $etl -ct perf -f bin -max 512 -bs 256 -ft 1 2>&1 | Out-String
-          $rc = $LASTEXITCODE
-          Write-Host "logman-start-exit=$rc"
-          Write-Host $out
-          logman query -ets 2>&1 | Out-String | Write-Host
-
       - name: NATIVE systemd boot (M5.5a + M5.5b-1 login feed)
         shell: msys2 {0}
         env:
@@ -324,6 +298,32 @@ jobs:
           if [ "${{ inputs.debugger }}" = "true" ]; then
             DBG_ARG="uml_nt_dbg=1"
           fi
+          # Shelley 245: capture only the window that matters. The trace is
+          # armed the moment the kernel logs the login exec and stopped as
+          # soon as a death appears, so the file stays small enough to convert
+          # inside a step instead of dying on a hundred and twenty megabytes.
+          ETL=$(cygpath -w "$PWD/../uml-kproc.etl")
+          (
+            for _ in $(seq 1 600); do
+              if grep -q "login chain armed" systemd.log 2>/dev/null; then
+                logman.exe start umlnt -ets -p Microsoft-Windows-Kernel-Process 0x10 \
+                  -o "$ETL" -ct perf -f bin -max 64 -bs 64 -ft 1 >/dev/null 2>&1 \
+                  && echo "[etw] armed at $(date +%H:%M:%S)" >> etw-trace.log
+                break
+              fi
+              sleep 1
+            done
+            for _ in $(seq 1 900); do
+              if grep -q "died silently" systemd.log 2>/dev/null; then
+                sleep 2
+                logman.exe stop umlnt -ets >/dev/null 2>&1 \
+                  && echo "[etw] stopped at $(date +%H:%M:%S) (death seen)" >> etw-trace.log
+                exit 0
+              fi
+              sleep 1
+            done
+          ) &
+          ETW_WATCH=$!
           {
             i=0
             while [ $i -lt 36 ]; do
@@ -353,6 +353,8 @@ jobs:
             > systemd.log 2>&1
           code=$?
           set -e
+          logman.exe stop umlnt -ets >/dev/null 2>&1 || true
+          cat etw-trace.log 2>/dev/null || true
           echo "launcher exit: $code (124 = still running at timeout — expected while systemd boots)"
           echo "--- first 25 log lines (ubd attach / early boot) ---"
           head -25 systemd.log
@@ -408,63 +410,39 @@ jobs:
           # must pass in TWO CONSECUTIVE runs before the milestone
           # closes — re-dispatch and confirm, tracked in STATUS.
 
-      - name: ETW kernel-process trace (stop + upload)
+      - name: ETW window (convert + find the victim)
         if: always()
         shell: powershell
+        timeout-minutes: 20
         continue-on-error: true
         run: |
-          # ask the session what it thinks before stopping it: Events Lost
-          # tells us whether a missing pid means "not recorded" or "dropped".
+          # Shelley 245: the trace is now a window, not the whole boot, so a
+          # conversion fits in a step. The victim's pid is read from this
+          # run's own log and matched in BOTH spellings — a decimal pid and a
+          # hex pid have already caused one silent miss.
+          $etl = "uml-nt\uml-kproc.etl"
+          if (!(Test-Path $etl)) { Write-Host "no etl: $etl"; exit 0 }
+          Get-Item $etl | Format-List Name,Length | Out-String | Write-Host
           logman query umlnt -ets 2>&1 | Out-String | Write-Host
-          logman stop umlnt -ets 2>&1 | Out-String | Write-Host
-          $dying = Select-String -Path (Join-Path $env:RUNNER_TEMP "..\..\uml-nt\launcher\systemd.log") -Pattern 'exit-req\] pid (\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($dying) { Write-Host "dying-pid-line: $($dying.Line)" }
-          $etl = Join-Path $env:RUNNER_TEMP "uml-kproc.etl"
-          if (Test-Path $etl) { Get-Item $etl | Format-List Name,Length | Out-String | Write-Host }
-          else { Write-Host "no etl written" }
-          # Shelley 244: tracerpt over a hundred-megabyte trace is too slow
-          # for a step and its csv did not survive. Get-WinEvent reads the
-          # same file directly and can be filtered while reading, so the
-          # victim's own events come out as text without a conversion.
-          $logp = "uml-nt\launcher\systemd.log"
-          $m = Select-String -Path $logp -Pattern 'exit-req\] pid (\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
-          $dec = 0
-          if ($m) { $dec = [int]$m.Matches[0].Groups[1].Value }
-          Write-Host "victim pid $dec (0x$('{0:X4}' -f $dec))"
+          $csv = Join-Path $env:RUNNER_TEMP "uml-kproc.csv"
+          tracerpt "$etl" -of CSV -o $csv -y 2>&1 | Select-Object -Last 2 | Out-String | Write-Host
+          if (!(Test-Path $csv)) { Write-Host "tracerpt produced no csv"; exit 0 }
+          $lines = Get-Content $csv
+          Write-Host "csv lines: $($lines.Count)"
+          $m = Select-String -Path "uml-nt\launcher\systemd.log" -Pattern 'exit-req\] pid (\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (!$m) { Write-Host "victim pid not found in the log"; exit 0 }
+          $dec = [int]$m.Matches[0].Groups[1].Value
+          $hex = '0x{0:X}' -f $dec
+          $hex4 = '0x{0:X4}' -f $dec
+          Write-Host "victim pid $dec ($hex / $hex4)"
+          $hits = $lines | Select-String -Pattern @($hex, $hex4, "\b$dec\b") -SimpleMatch:$false
+          Write-Host "victim rows: $($hits.Count)"
+          $hits | Select-Object -First 30 | ForEach-Object { Write-Host $_.Line }
           $out = Join-Path $env:RUNNER_TEMP "uml-kproc-victim.txt"
-          $lines = New-Object System.Collections.Generic.List[string]
-          try {
-            $ev = Get-WinEvent -Path $etl -Oldest -ErrorAction Stop
-            Write-Host "events in trace: $($ev.Count)"
-            $first = $ev[0].TimeCreated; $last = $ev[$ev.Count-1].TimeCreated
-            Write-Host "trace window: $first .. $last"
-            foreach ($e in $ev) {
-              $s = $e.Message
-              if ($s -and ($s -match "\b$dec\b" -or $e.Id -eq 2)) {
-                if ($e.Properties.Count -gt 0) {
-                  $pidv = $e.Properties[0].Value
-                  if ($pidv -eq $dec) {
-                    $lines.Add("$($e.TimeCreated.ToString('o')) id=$($e.Id) $($s -replace "`r?`n"," | ")")
-                  }
-                }
-              }
-              if ($lines.Count -ge 40) { break }
-            }
-          } catch { Write-Host "Get-WinEvent failed: $($_.Exception.Message)" }
-          Write-Host "victim rows: $($lines.Count)"
-          $lines | ForEach-Object { Write-Host $_ }
-          $lines | Set-Content $out
-
-      - name: Upload ETW trace
-        if: always()
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: m55a-etw-kproc
-          path: |
-            ${{ runner.temp }}/uml-kproc-victim.txt
-            ${{ runner.temp }}/uml-kproc.etl
-          if-no-files-found: warn
+          $hits | ForEach-Object { $_.Line } | Set-Content $out
+          # the stop events of the last twenty seconds are the scene of the crime
+          Write-Host "--- last 20 Stop rows ---"
+          $lines | Select-String -Pattern ', *Stop *,' | Select-Object -Last 20 | ForEach-Object { Write-Host $_.Line }
 
       - name: Upload systemd.log
         if: always()
