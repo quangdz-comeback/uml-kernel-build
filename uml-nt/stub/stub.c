@@ -1199,7 +1199,7 @@ static DWORD WINAPI thread_census(LPVOID arg)
 	int rounds = 0;
 
 	(void)arg;
-	fprintf(stderr, "[census] pid %lu armed nqit=%d\n",
+	fprintf(stderr, "[tcensus] pid %lu armed nqit=%d\n",
 		(unsigned long)GetCurrentProcessId(), nqit != NULL);
 	fflush(stderr);
 	for (;;) {
@@ -1238,7 +1238,7 @@ static DWORD WINAPI thread_census(LPVOID arg)
 					nqit(th, 9 /* ThreadQuerySetWin32StartAddress */,
 					     &start, sizeof(start), NULL);
 				CloseHandle(th);
-				fprintf(stderr, "[census] pid %lu r=%d tid %lu "
+				fprintf(stderr, "[tcensus] pid %lu r=%d tid %lu "
 					"cpu_us=%llu start=0x%llx\n",
 					(unsigned long)GetCurrentProcessId(),
 					rounds, (unsigned long)te.th32ThreadID,
@@ -3040,8 +3040,15 @@ int main(int argc, char **argv)
 		d->tsc_per_us = dqpc ? (dtsc * freq) / (dqpc * 1000000ull) : 0;
 	}
 	job_report("boot");
-	if (getenv("UML_NT_CENSUS") != NULL)
-		CreateThread(NULL, 0, thread_census, NULL, 0, NULL);
+	{
+		const char *tc = getenv("UML_NT_CENSUS");
+
+		/* default ON: the environment of a conn stub is not ours to
+		 * count on (the census stayed silent with the variable set
+		 * on the step), and this instrument must not be silent. */
+		if (tc == NULL || strcmp(tc, "0") != 0)
+			CreateThread(NULL, 0, thread_census, NULL, 0, NULL);
+	}
 	{
 		const char *jw = getenv("UML_NT_JOB_WATCH");
 
