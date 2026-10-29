@@ -422,26 +422,38 @@ jobs:
           $etl = Join-Path $env:RUNNER_TEMP "uml-kproc.etl"
           if (Test-Path $etl) { Get-Item $etl | Format-List Name,Length | Out-String | Write-Host }
           else { Write-Host "no etl written" }
-          # Shelley 244: the etl is now seventy-five megabytes, so it covers
-          # the boot. Convert once, then pull out only the victim: the pid
-          # comes from this run's own systemd.log, and its ProcessStop line
-          # says when the kernel recorded the death and with what status.
-          $csv = Join-Path $env:RUNNER_TEMP "uml-kproc.csv"
-          tracerpt "$etl" -of CSV -o $csv -y 2>&1 | Select-Object -Last 3 | Out-String | Write-Host
-          if (Test-Path $csv) {
-            $logp = "uml-nt\launcher\systemd.log"
-            $m = Select-String -Path $logp -Pattern 'exit-req\] pid (\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($m) {
-              $dec = [int]$m.Matches[0].Groups[1].Value
-              $hex = '0x{0:X4}' -f $dec
-              Write-Host "victim pid $dec ($hex)"
-              $hits = Select-String -Path $csv -Pattern $hex -SimpleMatch | Select-Object -First 20
-              Write-Host "victim rows: $($hits.Count)"
-              $hits | ForEach-Object { Write-Host $_.Line }
-            } else { Write-Host "victim pid not found in systemd.log" }
-            $small = Join-Path $env:RUNNER_TEMP "uml-kproc-victim.txt"
-            if ($hits) { $hits | ForEach-Object { $_.Line } | Set-Content $small }
-          } else { Write-Host "tracerpt produced no csv" }
+          # Shelley 244: tracerpt over a hundred-megabyte trace is too slow
+          # for a step and its csv did not survive. Get-WinEvent reads the
+          # same file directly and can be filtered while reading, so the
+          # victim's own events come out as text without a conversion.
+          $logp = "uml-nt\launcher\systemd.log"
+          $m = Select-String -Path $logp -Pattern 'exit-req\] pid (\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+          $dec = 0
+          if ($m) { $dec = [int]$m.Matches[0].Groups[1].Value }
+          Write-Host "victim pid $dec (0x$('{0:X4}' -f $dec))"
+          $out = Join-Path $env:RUNNER_TEMP "uml-kproc-victim.txt"
+          $lines = New-Object System.Collections.Generic.List[string]
+          try {
+            $ev = Get-WinEvent -Path $etl -Oldest -ErrorAction Stop
+            Write-Host "events in trace: $($ev.Count)"
+            $first = $ev[0].TimeCreated; $last = $ev[$ev.Count-1].TimeCreated
+            Write-Host "trace window: $first .. $last"
+            foreach ($e in $ev) {
+              $s = $e.Message
+              if ($s -and ($s -match "\b$dec\b" -or $e.Id -eq 2)) {
+                if ($e.Properties.Count -gt 0) {
+                  $pidv = $e.Properties[0].Value
+                  if ($pidv -eq $dec) {
+                    $lines.Add("$($e.TimeCreated.ToString('o')) id=$($e.Id) $($s -replace "`r?`n"," | ")")
+                  }
+                }
+              }
+              if ($lines.Count -ge 40) { break }
+            }
+          } catch { Write-Host "Get-WinEvent failed: $($_.Exception.Message)" }
+          Write-Host "victim rows: $($lines.Count)"
+          $lines | ForEach-Object { Write-Host $_ }
+          $lines | Set-Content $out
 
       - name: Upload ETW trace
         if: always()
