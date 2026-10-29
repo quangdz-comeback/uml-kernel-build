@@ -252,6 +252,23 @@ jobs:
           New-ItemProperty -Path $k -Name DumpCount -Value 4 -PropertyType DWord -Force | Out-Null
           Write-Host "LocalDumps -> $dir (Type=2 full)"
 
+      # Shelley 243: the last instrument of the user tier. Everything we own
+      # says the process is taken away while it sleeps, with an access
+      # violation code and no dispatcher entry — and nothing in the process
+      # sees it happen. The kernel's own process provider records the
+      # termination with its status and timestamp; if this run's trace has no
+      # ProcessTerminate for the stub pid at all, that is itself the answer
+      # and it narrows the remaining surface to a driver-level edge.
+      - name: ETW kernel-process trace (start)
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $etl = Join-Path $env:RUNNER_TEMP "uml-kproc.etl"
+          Write-Host "etl -> $etl"
+          logman start umlnt -ets -p Microsoft-Windows-Kernel-Process 0x10 -o $etl -ct perf -f csv -max 64 -bs 64 2>&1 | Out-String | Write-Host
+          Write-Host "logman-start-exit=$LASTEXITCODE"
+          logman query -ets 2>&1 | Out-String | Write-Host
+
       - name: NATIVE systemd boot (M5.5a + M5.5b-1 login feed)
         shell: msys2 {0}
         env:
@@ -260,6 +277,10 @@ jobs:
           # the snapshots found no death to photograph and cost the run
           # thousands of files; off while the gate is what matters.
           UML_NT_DUMP_MS: "0"
+          # Shelley 242: census of every thread in the stub process, with
+          # start address and CPU time, so a thread that is not ours can be
+          # named instead of guessed at.
+          UML_NT_CENSUS: "1"
         run: |
           cd uml-nt/launcher
           set +e
@@ -377,6 +398,35 @@ jobs:
           # Close procedure (not automatable here): the M5.5b gates
           # must pass in TWO CONSECUTIVE runs before the milestone
           # closes — re-dispatch and confirm, tracked in STATUS.
+
+      - name: ETW kernel-process trace (stop + upload)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        run: |
+          logman stop umlnt -ets 2>&1 | Out-String | Write-Host
+          $etl = Join-Path $env:RUNNER_TEMP "uml-kproc.etl"
+          if (Test-Path $etl) { Get-Item $etl | Format-List Name,Length | Out-String | Write-Host }
+          else { Write-Host "no etl written" }
+          # reload into the event log so the events can be read as text too
+          tracerpt "$etl" -of CSV -o (Join-Path $env:RUNNER_TEMP "uml-kproc.csv") -y 2>&1 | Out-String | Write-Host
+          $csv = Join-Path $env:RUNNER_TEMP "uml-kproc.csv"
+          if (Test-Path $csv) {
+            $lines = Get-Content $csv
+            Write-Host "csv-lines=$($lines.Count)"
+            $lines | Select-String -Pattern 'stub|Terminate|ProcessStart|Image' | Select-Object -First 40 | Out-String | Write-Host
+          }
+
+      - name: Upload ETW trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: m55a-etw-kproc
+          path: |
+            ${{ runner.temp }}/uml-kproc.etl
+            ${{ runner.temp }}/uml-kproc.csv
+          if-no-files-found: warn
 
       - name: Upload systemd.log
         if: always()
