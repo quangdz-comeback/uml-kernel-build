@@ -268,7 +268,11 @@ jobs:
           # -f bin with an .etl target: csv as a format is only valid for
           # csv/tsv targets, and the previous spelling failed with
           # E_INVALIDARG (0x80070057) before the boot even started.
-          $out = logman start umlnt -ets -p Microsoft-Windows-Kernel-Process 0x10 -o $etl -ct perf -f bin -max 64 -bs 64 2>&1 | Out-String
+          # Shelley 244: 424 events over a five-minute boot is far too few,
+          # and the trace window ended long before the death — small buffers
+          # with no flush timer drop events silently. Flush every second and
+          # give the session room.
+          $out = logman start umlnt -ets -p Microsoft-Windows-Kernel-Process 0x10 -o $etl -ct perf -f bin -max 512 -bs 256 -ft 1 2>&1 | Out-String
           $rc = $LASTEXITCODE
           Write-Host "logman-start-exit=$rc"
           Write-Host $out
@@ -409,7 +413,12 @@ jobs:
         shell: powershell
         continue-on-error: true
         run: |
+          # ask the session what it thinks before stopping it: Events Lost
+          # tells us whether a missing pid means "not recorded" or "dropped".
+          logman query umlnt -ets 2>&1 | Out-String | Write-Host
           logman stop umlnt -ets 2>&1 | Out-String | Write-Host
+          $dying = Select-String -Path (Join-Path $env:RUNNER_TEMP "..\..\uml-nt\launcher\systemd.log") -Pattern 'exit-req\] pid (\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($dying) { Write-Host "dying-pid-line: $($dying.Line)" }
           $etl = Join-Path $env:RUNNER_TEMP "uml-kproc.etl"
           if (Test-Path $etl) { Get-Item $etl | Format-List Name,Length | Out-String | Write-Host }
           else { Write-Host "no etl written" }
