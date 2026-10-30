@@ -1184,6 +1184,23 @@ static void job_report(const char *when)
 	fflush(stderr);
 }
 
+/* Shelley 247: close the window opened at start. This thread exists only
+ * when the lever asked for it; it restores the handler so a later round can
+ * still be observed normally. */
+static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep);
+
+static DWORD WINAPI veh_window_close(LPVOID arg)
+{
+	(void)arg;
+	Sleep(4000);
+	AddVectoredExceptionHandler(1, veh_handler);
+	d->veh_window_state = 2;
+	fprintf(stderr, "[veh-window] pid %lu restored after 4 s\n",
+		(unsigned long)GetCurrentProcessId());
+	fflush(stderr);
+	return 0;
+}
+
 /* Shelley 242: who else lives in this process? The dump from 222 showed four
  * threads where we create one, and a thread that is not ours is a candidate
  * for an access violation that never reaches a dispatcher we installed. The
@@ -3098,6 +3115,8 @@ int main(int argc, char **argv)
 			CreateThread(NULL, 0, job_watch, NULL, 0, NULL);
 	}
 	CreateThread(NULL, 0, dump_watchdog, NULL, 0, NULL);
+	if (d->veh_window)
+		CreateThread(NULL, 0, veh_window_close, NULL, 0, NULL);
 	_set_invalid_parameter_handler(crt_invalid_parameter);
 	_set_purecall_handler(crt_purecall);
 	/* Shelley 188: the LAST-CHANCE record. A VEH sees everything user
@@ -3110,6 +3129,21 @@ int main(int argc, char **argv)
 	SetUnhandledExceptionFilter(unhandled_writer);
 	if (!AddVectoredExceptionHandler(1, veh_handler))
 		die("AddVectoredExceptionHandler", GetLastError());
+	/* Shelley 247: the refined A/B. Our handler is the first thing every
+	 * exception meets; taking it out of the picture for a window around
+	 * the death tells us whether the death travels the trap path at all.
+	 * The window opens immediately and closes after four seconds — the
+	 * conn that dies lives about two and a half. */
+	if (d->veh_window) {
+		PVOID vh = AddVectoredExceptionHandler(0, veh_handler);
+
+		if (vh != NULL)
+			RemoveVectoredExceptionHandler(vh);
+		d->veh_window_state = 1;
+		fprintf(stderr, "[veh-window] pid %lu removed at start\n",
+			(unsigned long)GetCurrentProcessId());
+		fflush(stderr);
+	}
 
 	veh_stk_selfcheck();
 

@@ -195,6 +195,12 @@ struct uml_nt_stub_data {
 	/* Shelley 239: every terminate path in the tree counts itself before
 	 * it acts. All zero at the death means the killer is not in this
 	 * tree, and that is a fact worth having on the record. */
+	/* Shelley 247 (refined B): remove our vectored handler for a window
+	 * around the death. Still 0xC0000005 inside the window means the kill
+	 * does not come through the trap path at all; 0xC000001D means it does
+	 * and the handler was what swallowed the report. */
+	u32_nt veh_window;
+	u32_nt veh_window_state;	/* 1 removed, 2 restored */
 	u32_nt term_calls;
 	unsigned long long term_last_pid;
 	u32_nt smp_susp_nonzero;	/* SuspendThread returned a non-zero count */

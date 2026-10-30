@@ -62,6 +62,29 @@
 #include "internal.h"
 
 static int g_xs_lever;
+static int g_veh_window;
+static int g_exec_login;	/* forward: defined with the login-chain latch */
+
+/* Shelley 247: the refined A/B — the handler is taken out of the picture for
+ * a window at the start of the conn. Boot command line only, exactly like
+ * the other levers, so the same HEAD can be run both ways. */
+static int veh_window_on(void)
+{
+	int i;
+
+	if (g_veh_window >= 0 && g_veh_window != 0)
+		return 1;
+	g_veh_window = 0;
+	for (i = 0; i < uml_boot.argc; i++)
+		if (uml_boot.argv[i] != NULL &&
+		    __builtin_strcmp(uml_boot.argv[i],
+				     "uml_nt_vehwin=1") == 0)
+			g_veh_window = 1;
+	if (g_veh_window)
+		os_info("[veh-window] uml_nt_vehwin=1 — the vectored handler is "
+			"removed for the first 4 s of every login conn\n");
+	return g_veh_window;
+}
 
 /* Ruling 223: A/B on the same HEAD — the arm only happens when the boot
  * command line asks for it, exactly like the witness and probe levers. */
@@ -10597,6 +10620,11 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	d->action = UML_STUB_ACTION_NONE;
 	d->err = 0;
 	d->halt = 0;
+	/* armed before the child runs: the stub reads this at start. The
+	 * chain flags are set later (the exec path is learned at exec), so the
+	 * lever keys on the same global the rest of the tree uses. */
+	if (veh_window_on() && (c->chain_login || g_exec_login))
+		d->veh_window = 1;
 	c->plan.kill = 0;
 	/* M5.6a (to-shelley 140 — stream atomicity): a SYSCALL trap
 	 * with plan_left > 0 means the previous plan's stream is still
@@ -11289,7 +11317,7 @@ static char g_exec_path[UML_NT_EXEC_PATH_MAX_LOCAL];
 /* Shelley 199: the last exec path the kernel handled was a login/getty
  * binary. The conn's own exec_path is still empty when its stub is being
  * created (it is adopted later), so the chain flag must come from here. */
-static int g_exec_login;
+/* g_exec_login is declared above (forward) — one definition, one latch. */
 /* Shelley 203: the death lands ~0.4s after SOMETHING; these stamps tell us
  * which something. */
 unsigned long long uml_nt_tick_spawn, uml_nt_tick_dbg;
