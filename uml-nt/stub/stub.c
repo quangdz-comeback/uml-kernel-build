@@ -75,6 +75,33 @@
 
 static struct uml_nt_stub_data *d;
 static HANDLE evt_in, evt_out; /* stub->kernel, kernel->stub */
+
+/* Shelley 249: if the process ever walks the ordinary exit path, say so —
+ * the WER record points into the CRT's thread-exit, and an exit nobody asked
+ * for is exactly what that record would look like from here. */
+static void stub_atexit(void)
+{
+	fprintf(stderr, "[thr] pid %lu atexit (ordinary process exit path)\n",
+		(unsigned long)GetCurrentProcessId());
+	fflush(stderr);
+}
+
+#define THR_ENTER(name)							\
+	do {								\
+		fprintf(stderr, "[thr] pid %lu tid %lu enter %s\n",	\
+			(unsigned long)GetCurrentProcessId(),		\
+			(unsigned long)GetCurrentThreadId(), (name));	\
+		fflush(stderr);						\
+	} while (0)
+#define THR_LEAVE(name)							\
+	do {								\
+		fprintf(stderr, "[thr] pid %lu tid %lu LEAVE %s\n",	\
+			(unsigned long)GetCurrentProcessId(),		\
+			(unsigned long)GetCurrentThreadId(), (name));	\
+		fflush(stderr);						\
+	} while (0)
+
+
 static HANDLE phys_sec; /* physmem section (per-VMA views, do_action) */
 static volatile unsigned char *flat_view; /* RO whole-section view */
 
@@ -1192,12 +1219,14 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep);
 static DWORD WINAPI veh_window_close(LPVOID arg)
 {
 	(void)arg;
+	THR_ENTER("veh_window_close");
 	Sleep(4000);
 	AddVectoredExceptionHandler(1, veh_handler);
 	d->veh_window_state = 2;
 	fprintf(stderr, "[veh-window] pid %lu restored after 4 s\n",
 		(unsigned long)GetCurrentProcessId());
 	fflush(stderr);
+	THR_LEAVE("veh_window_close");
 	return 0;
 }
 
@@ -1279,6 +1308,7 @@ static DWORD WINAPI job_watch(LPVOID arg)
 	int prints = 0;
 
 	(void)arg;
+	THR_ENTER("job_watch");
 	fprintf(stderr, "[vet] armed pid %lu t0=%llu\n",
 		(unsigned long)GetCurrentProcessId(), t0);
 	fflush(stderr);
@@ -2144,6 +2174,109 @@ static LONG CALLBACK unhandled_writer(EXCEPTION_POINTERS *ep)
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/* Shelley 249 (WER on a real machine): the fault was named inside
+ * msvcrt's thread-exit path, on an instruction that calls through an import
+ * slot. Everything this port has ever logged about an exception was about
+ * ONE thread — the guest's. This prints the first-chance record for every
+ * thread, with the module and offset of the faulting instruction, what the
+ * stack pages really are, and the words sitting on the stack, so a bad or
+ * exhausted stack shows up as numbers. */
+static void mod_of(unsigned long long va, char *out, size_t n,
+		   unsigned long long *off)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+	char path[MAX_PATH];
+	DWORD len = 0;
+
+	out[0] = 0;
+	*off = 0;
+	memset(&mbi, 0, sizeof(mbi));
+	if (VirtualQuery((void *)(uintptr_t)va, &mbi, sizeof(mbi)) != sizeof(mbi))
+		return;
+	if (mbi.AllocationBase == NULL)
+		return;
+	len = GetModuleFileNameA((HMODULE)mbi.AllocationBase, path, sizeof(path));
+	if (len == 0 || len == sizeof(path)) {
+		snprintf(out, n, "0x%llx", (unsigned long long)(uintptr_t)
+			 mbi.AllocationBase);
+	} else {
+		char *b = strrchr(path, '\\');
+
+		snprintf(out, n, "%s", b ? b + 1 : path);
+	}
+	*off = va - (unsigned long long)(uintptr_t)mbi.AllocationBase;
+}
+
+static void page_of(const char *tag, unsigned long long va)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+
+	memset(&mbi, 0, sizeof(mbi));
+	if (VirtualQuery((void *)(uintptr_t)va, &mbi, sizeof(mbi)) == sizeof(mbi))
+		fprintf(stderr, "[xcpt]   %s=0x%llx state=0x%lx prot=0x%lx "
+			"type=0x%lx base=0x%llx size=0x%llx\n", tag, va,
+			(unsigned long)mbi.State, (unsigned long)mbi.Protect,
+			(unsigned long)mbi.Type,
+			(unsigned long long)(uintptr_t)mbi.BaseAddress,
+			(unsigned long long)mbi.RegionSize);
+	else
+		fprintf(stderr, "[xcpt]   %s=0x%llx query=FAILED\n", tag, va);
+}
+
+static void xcpt_any_thread(EXCEPTION_POINTERS *ep)
+{
+	EXCEPTION_RECORD *er;
+	CONTEXT *c;
+	char mod[96];
+	unsigned long long off = 0, fault = 0;
+	unsigned long long sp;
+	int i;
+
+	if (ep == NULL || ep->ExceptionRecord == NULL ||
+	    ep->ContextRecord == NULL)
+		return;
+	er = ep->ExceptionRecord;
+	c = ep->ContextRecord;
+	if (er->ExceptionCode != 0xC0000005u &&
+	    er->ExceptionCode != 0xC000001Du)
+		return;
+	sp = (unsigned long long)c->Rsp;
+	if (er->NumberParameters > 1)
+		fault = (unsigned long long)er->ExceptionInformation[1];
+	mod_of((unsigned long long)c->Rip, mod, sizeof(mod), &off);
+	fprintf(stderr, "[xcpt] pid %lu tid %lu code=0x%lx rip=0x%llx "
+		"(%s+0x%llx) rsp=0x%llx fault=0x%llx\n",
+		(unsigned long)GetCurrentProcessId(),
+		(unsigned long)GetCurrentThreadId(),
+		(unsigned long)er->ExceptionCode,
+		(unsigned long long)c->Rip, mod, off, sp, fault);
+	page_of("rsp", sp);
+	page_of("rsp-0x1000", sp - 0x1000);
+	page_of("rsp-0x10000", sp - 0x10000);
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+
+		memset(&mbi, 0, sizeof(mbi));
+		if (VirtualQuery((void *)(uintptr_t)sp, &mbi, sizeof(mbi)) ==
+			    sizeof(mbi) &&
+		    mbi.State == MEM_COMMIT &&
+		    (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE |
+				    PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+			fprintf(stderr, "[xcpt]   stack words: %llx %llx %llx "
+				"%llx %llx %llx %llx %llx\n",
+				((unsigned long long *)(uintptr_t)sp)[0],
+				((unsigned long long *)(uintptr_t)sp)[1],
+				((unsigned long long *)(uintptr_t)sp)[2],
+				((unsigned long long *)(uintptr_t)sp)[3],
+				((unsigned long long *)(uintptr_t)sp)[4],
+				((unsigned long long *)(uintptr_t)sp)[5],
+				((unsigned long long *)(uintptr_t)sp)[6],
+				((unsigned long long *)(uintptr_t)sp)[7]);
+	}
+	(void)i;
+	fflush(stderr);
+}
+
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	/* Shelley 215: the very first thing that happens, before the switch
@@ -2154,6 +2287,7 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		((volatile LONG64 *)&d->veh_first)[0] =
 			InterlockedIncrement64((volatile LONG64 *)
 					       &d->veh_first);
+	xcpt_any_thread(ep);
 	entry_stamp(ep);
 	if (ep != NULL && ep->ContextRecord != NULL)
 		{
@@ -3099,6 +3233,7 @@ int main(int argc, char **argv)
 		d->tsc_per_us = dqpc ? (dtsc * freq) / (dqpc * 1000000ull) : 0;
 	}
 	job_report("boot");
+	atexit(stub_atexit);
 	{
 		const char *tc = getenv("UML_NT_CENSUS");
 
