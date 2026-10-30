@@ -74,12 +74,15 @@ static int veh_window_on(void)
 
 	if (g_veh_window >= 0 && g_veh_window != 0)
 		return 1;
-	g_veh_window = 0;
+	/* TEMPORARY (one referee): on unless the command line says otherwise,
+	 * because workflow_dispatch inputs are read from the default branch and
+	 * the new input cannot be passed on this ref yet. Reverted right after. */
+	g_veh_window = 1;
 	for (i = 0; i < uml_boot.argc; i++)
 		if (uml_boot.argv[i] != NULL &&
 		    __builtin_strcmp(uml_boot.argv[i],
-				     "uml_nt_vehwin=1") == 0)
-			g_veh_window = 1;
+				     "uml_nt_vehwin=0") == 0)
+			g_veh_window = 0;
 	if (g_veh_window)
 		os_info("[veh-window] uml_nt_vehwin=1 — the vectored handler is "
 			"removed for the first 4 s of every login conn\n");
