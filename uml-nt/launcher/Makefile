@@ -9,8 +9,8 @@ KINC = ../kernel/overlay/arch/um/include/shared
 
 all: launcher.exe
 
-launcher.exe: launcher.c $(KINC)/ntabi.h $(KINC)/boot-info.h
-	$(MINGW_CC) $(CFLAGS) -I $(KINC) $< -o $@
+launcher.exe: launcher.c memparse.c memparse.h $(KINC)/ntabi.h $(KINC)/boot-info.h
+	$(MINGW_CC) $(CFLAGS) -I $(KINC) launcher.c memparse.c -o $@
 
 clean:
 	rm -f launcher.exe
