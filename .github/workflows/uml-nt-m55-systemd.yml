@@ -28,6 +28,10 @@ on:
         description: "uml_nt_dbg=1 (run stub.exe under the launcher's own mini-debugger)"
         type: boolean
         default: false
+      veh_window:
+        description: 'Refined A/B: remove the vectored handler for the first 4s of a login conn'
+        type: boolean
+        default: false
       feed:
         description: "feed the console at all (false = diagnostic A/B: is the input path the killer?)"
         type: boolean
@@ -298,6 +302,10 @@ jobs:
           if [ "${{ inputs.debugger }}" = "true" ]; then
             DBG_ARG="uml_nt_dbg=1"
           fi
+          VW_ARG=""
+          if [ "${{ inputs.veh_window }}" = "true" ]; then
+            VW_ARG="uml_nt_vehwin=1"
+          fi
           # Shelley 245: capture only the window that matters. The trace is
           # armed the moment the kernel logs the login exec and stopped as
           # soon as a death appears, so the file stays small enough to convert
@@ -349,7 +357,7 @@ jobs:
             ${WITNESS_ARG:+$WITNESS_ARG} \
             ${PROBE_ARG:+$PROBE_ARG} \
             ${XSLEV_ARG:+$XSLEV_ARG} \
-            ${DBG_ARG:+$DBG_ARG} \
+            ${DBG_ARG:+$DBG_ARG} ${VW_ARG:+$VW_ARG} \
             > systemd.log 2>&1
           code=$?
           set -e

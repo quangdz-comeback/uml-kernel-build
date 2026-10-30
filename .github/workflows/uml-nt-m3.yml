@@ -187,12 +187,23 @@ jobs:
 
       - name: NATIVE boot test (M1.9 acceptance + M2 round-trip + M3.1 faults + M3.3 fork + M3.4 ELF loader)
         shell: msys2 {0}
+        env:
+          # Shelley 254: the access violation never reaches a handler of ours,
+          # and a kernel-mode dispatch offers the event to a debugger BEFORE
+          # any user-mode handler. With this on, the launcher attaches with
+          # create-with-debug and prints every exception record — code,
+          # address and thread — so the fault address stops being a guess.
+          UML_NT_CIDBG: ${{ vars.UML_NT_CIDBG || '1' }}
         run: |
           cd uml-nt/launcher
           set +e
+          DBGARG=""
+          if [ "${UML_NT_CIDBG:-0}" = "1" ]; then DBGARG="uml_nt_dbg=1"; fi
+          echo "debugger arg: '${DBGARG}'"
           timeout 180 ./launcher.exe ../../build/vmlinux \
             "uml_nt_stubtest=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "uml_nt_exec=$(cygpath -w ../../guest/guest-init.elf)" \
+            ${DBGARG:+$DBGARG} \
             > boot.log 2>&1
           code=$?
           set -e
