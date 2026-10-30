@@ -12386,6 +12386,15 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		c->d->grow_calls++;
 		if (sg > 0)
 			c->d->grow_mapped++;
+		/* Shelley 254: a counter that only prints at death is a counter
+		 * that says nothing while the boot is failing, so it speaks
+		 * every sixty-four answers too. */
+		if ((c->d->grow_calls & 63u) == 0)
+			os_info("[grow] pid %lu calls=%u mapped=%u rsp=0x%llx\n",
+				(unsigned long)c->pid,
+				(unsigned)c->d->grow_calls,
+				(unsigned)c->d->grow_mapped,
+				(unsigned long long)c->d->regs.rsp);
 
 		/* Shelley 170: WHICH mm, WHICH table, WHICH answer. Three
 		 * suspects, three fixes: (2) my scan's `start >= best` with

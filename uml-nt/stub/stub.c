@@ -1888,11 +1888,48 @@ static unsigned long long veh_now_sp(void);
 
 /* Shelley 252: depth on the outside, so every return path is covered by
  * construction rather than by remembering to decrement. */
+/* Shelley 254: the real machine's dump put the fault address in a MEM_FREE
+ * page while the guest mm believed it mapped. Whether CI shows the same
+ * shape is the question that separates the two classes, so every access
+ * violation prints the faulting address, what Windows thinks of that page,
+ * and whether it is inside the guest span at all. */
+static void fault_forensics(EXCEPTION_POINTERS *ep)
+{
+	EXCEPTION_RECORD *er;
+	unsigned long long fa = 0;
+	MEMORY_BASIC_INFORMATION mbi;
+	unsigned long long lo, hi;
+
+	if (ep == NULL || ep->ExceptionRecord == NULL)
+		return;
+	er = ep->ExceptionRecord;
+	if (er->ExceptionCode != 0xC0000005u || er->NumberParameters < 2)
+		return;
+	fa = (unsigned long long)er->ExceptionInformation[1];
+	memset(&mbi, 0, sizeof(mbi));
+	lo = d ? d->ram_base : 0;
+	hi = lo + (d ? d->ram_size : 0);
+	fprintf(stderr, "[fault-addr] pid %lu tid %lu fa=0x%llx op=%llu "
+		"page_state=0x%lx prot=0x%lx type=0x%lx base=0x%llx "
+		"in_guest_span=%s run_base=0x%llx\n",
+		(unsigned long)GetCurrentProcessId(),
+		(unsigned long)GetCurrentThreadId(), fa,
+		(unsigned long long)er->ExceptionInformation[0],
+		(unsigned long)mbi.State, (unsigned long)mbi.Protect,
+		(unsigned long)mbi.Type,
+		(unsigned long long)(uintptr_t)mbi.BaseAddress,
+		(fa >= lo && fa < hi) ? "yes" : "no", fa & ~0xffffull);
+	fflush(stderr);
+}
+
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	static __thread unsigned depth;
 	unsigned d = ++depth;
 	LONG r;
+
+	if (d == 1)
+		fault_forensics(ep);
 
 	if (d > 1)
 		fprintf(stderr, "[veh-depth] pid %lu tid %lu depth=%u code=0x%lx "
