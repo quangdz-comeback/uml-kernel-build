@@ -105,11 +105,74 @@ static void stub_atexit(void)
 static HANDLE phys_sec; /* physmem section (per-VMA views, do_action) */
 static volatile unsigned char *flat_view; /* RO whole-section view */
 
+static void host_rsp_guard(const char *tag);
+
 static void die(const char *what, DWORD err)
 {
+	host_rsp_guard("die");
 	fprintf(stderr, "stub: %s failed (%lu)\n", what,
 		(unsigned long)err);
 	ExitProcess(120);
+}
+
+/* Shelley 249 (WER full dump, real machine): the thread that died was HOST
+ * code — msvcrt's save/restore-LastError wrapper calling through an import
+ * slot — running with rsp inside the GUEST address span, where the page was
+ * MEM_FREE. The call's push had nowhere to go.
+ *
+ * Two invariants follow, and both are measured rather than assumed. */
+static unsigned long host_on_guest_rsp_seen;
+static void host_rsp_guard(const char *tag);
+
+/* 1. No host code may run on a guest stack. Called at every host entrance
+ * the guest path can reach: publish (the trap), wait_answer, and die. */
+static void host_rsp_guard(const char *tag)
+{
+	unsigned long long sp = (unsigned long long)(uintptr_t)&sp;
+	unsigned long long lo = d ? d->ram_base : 0;
+	unsigned long long hi = lo + (d ? d->ram_size : 0);
+
+	if (d == NULL || sp < lo || sp >= hi)
+		return;
+	if (host_on_guest_rsp_seen++ < 8)
+		fprintf(stderr, "[host-rsp] pid %lu tid %lu HOST-ON-GUEST-RSP "
+			"tag=%s rsp=0x%llx guest=[0x%llx,0x%llx) caller=%p\n",
+			(unsigned long)GetCurrentProcessId(),
+			(unsigned long)GetCurrentThreadId(), tag, sp, lo, hi,
+			__builtin_return_address(0));
+	fflush(stderr);
+}
+
+/* 2. The guest stack VMA must be committed for its whole range — the page
+ * under the top of the stack is where a host call's push lands first. */
+static void stack_commit_witness(void)
+{
+	unsigned long long lo, hi, a;
+	unsigned long free_pages = 0, total = 0;
+	unsigned long long first_free = 0;
+	MEMORY_BASIC_INFORMATION mbi;
+
+	if (d == NULL || d->stack_va == 0)
+		return;
+	lo = d->stack_va;
+	hi = d->stack_va + 0x10000ull;
+	for (a = lo; a < hi; a += 0x1000) {
+		memset(&mbi, 0, sizeof(mbi));
+		total++;
+		if (VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof(mbi)) !=
+			    sizeof(mbi) ||
+		    mbi.State != MEM_COMMIT) {
+			if (free_pages == 0)
+				first_free = a;
+			free_pages++;
+		}
+	}
+	fprintf(stderr, "[stack-commit] pid %lu vma=[0x%llx,0x%llx) "
+		"pages=%lu free=%lu first_free=0x%llx %s\n",
+		(unsigned long)GetCurrentProcessId(), lo, hi, total,
+		free_pages, first_free,
+		free_pages ? "==> GUEST STACK NOT FULLY COMMITTED" : "ok");
+	fflush(stderr);
 }
 
 /* ---- VEH: the syscall/fault interception point --------------------- */
@@ -233,6 +296,7 @@ static void publish_stack_hints(void)
 
 static void publish(unsigned cmd)
 {
+	host_rsp_guard("publish");
 	/* before the kernel is woken: it reads these at answer time */
 	publish_stack_hints();
 	sample_stub_stack();
@@ -246,6 +310,7 @@ static void publish(unsigned cmd)
 
 static void wait_answer(void)
 {
+	host_rsp_guard("wait_answer");
 	/* Shelley 241: never park for ever. A thread asleep on an infinite wait
 	 * gives the OS no runnable thread of ours, and the death we have been
 	 * chasing is an access violation that no dispatcher ever sees — exactly
@@ -3287,6 +3352,7 @@ int main(int argc, char **argv)
 	/* M3 model: publish INIT, stream the kernel's per-VMA map plan
 	 * (action_chain applies ops until ACTION_NONE), then jump. */
 	publish(UML_STUB_CMD_INIT);
+	stack_commit_witness();
 	action_chain();
 
 	/* D18: jump_to_guest applies the recorded base when nonzero —
