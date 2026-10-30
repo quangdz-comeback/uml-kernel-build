@@ -2054,6 +2054,8 @@ static void ctx_audit_snapshot(CONTEXT *c)
 	}
 	/* Shelley 246: and what is under the stack pointer, measured with the
 	 * same API, at the same moment, with its own positive counter. */
+	if (d == NULL)
+		return;
 	{
 		MEMORY_BASIC_INFORMATION mbi;
 		unsigned long long sp = (unsigned long long)c->Rsp;
