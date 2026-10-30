@@ -2052,6 +2052,7 @@ static void ctx_audit_snapshot(CONTEXT *c)
 					d->prot_checked);
 		}
 	}
+<<<<<<< HEAD
 	/* Shelley 246: and what is under the stack pointer, measured with the
 	 * same API, at the same moment, with its own positive counter. */
 	if (d == NULL)
@@ -2092,6 +2093,8 @@ static void ctx_audit_snapshot(CONTEXT *c)
 				d->rsp_bad, d->rsp_guard, d->rsp_nowrite,
 				d->rsp_checked);
 	}
+=======
+>>>>>>> parent of 6259cd0 (feat(M5.6a): measure the page under the stack pointer, not just under the rip)
 	ctx_entry_ok = 0;
 	if (c == NULL || d == NULL)
 		return;
@@ -2230,8 +2233,7 @@ static void ctx_audit_check(CONTEXT *c)
 			"dirty_max=%lu xs_changed=%lu xs_hdr=0x%llx "
 			"flags=0x%lx xstate=%u BV=0x%llx XCOMP=0x%llx "
 			"zmm_nz=%llu scan=%llu "
-			"prot_ok=%llu/%llu rsp_bad=%llu/%llu guard=%llu "
-			"nowrite=%llu rsp_real=0x%llx rsp_vma=[0x%llx,0x%llx) "
+			"prot_ok=%llu/%llu "
 			"xmm_diff=%lu first=%lu tid=%u other_tid=%lu\n",
 			(unsigned long)d->pid,
 			(unsigned long)d->ctx_rounds,
@@ -2243,9 +2245,6 @@ static void ctx_audit_check(CONTEXT *c)
 			d->xs_zmm_nonzero, d->xs_scan_bytes,
 			d->prot_checked - d->prot_real_nonexec,
 			d->prot_checked,
-			d->rsp_bad + d->rsp_guard + d->rsp_nowrite,
-			d->rsp_checked, d->rsp_guard, d->rsp_nowrite,
-			d->rsp_real, d->rsp_vma_start, d->rsp_vma_end,
 			(unsigned long)d->xs_xmm_diff,
 			(unsigned long)d->xs_xmm_first,
 			(unsigned)d->guest_tid,
