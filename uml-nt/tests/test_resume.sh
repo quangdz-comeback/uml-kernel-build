@@ -13,4 +13,10 @@ CC="${CC:-clang}"
 "$CC" -O1 -Wall -Wextra -Werror \
 	-I"$SRC_DIR/include/shared" \
 	-o "$TMP/test" "$HERE/test_resume.c"
+
+# The launcher's mem= contract (M5.6 groundwork): parse 128M/512M/1G/rác,
+# section sizing, and the ceiling arithmetic — host-side, no Windows needed.
+"$CC" -O1 -Wall -Wextra -Werror \
+	-o "$TMP/memparse" "$HERE/test_memparse.c" "$HERE/../launcher/memparse.c"
 "$TMP/test"
+"$TMP/memparse"

@@ -19,6 +19,7 @@
  * one header source for launcher and kernel, so ABI drift fails to
  * compile here instead of failing silently at boot.
  */
+#include "memparse.h"
 #include <windows.h>
 /* ntdll-types: OBJECT_ATTRIBUTES + IO_STATUS_BLOCK live here, not in
  * winnt.h. ntabi.h (below) reuses the host types in PE mode (D9). */
@@ -282,14 +283,35 @@ static void resolve_api_table(void)
 }
 
 /* ---- guest physmem: pagefile-backed section --------------------------- */
-#define DEFAULT_PHYSMEM (128ULL << 20) /* section is the ceiling; the
-					* kernel's mem= picks the size */
+#define DEFAULT_PHYSMEM UML_NT_MEM_DEFAULT /* section is the ceiling; the
+					    * kernel's mem= picks the size */
+#define GUEST_RAM_VA 0x60000000ULL
+
+/* The ceiling is arithmetic, not taste: the guest bank starts at
+ * GUEST_RAM_VA and must not cross the KUSER_SHARED_DATA page at 0x7FFE0000,
+ * and the vmalloc band lives directly above the bank with a VMALLOC_OFFSET
+ * hole. Everything below is derived, and a request above it is refused with
+ * the number that was asked for and the number that is possible — never by
+ * dying later inside setup_physmem. */
+#define KUSER_SHARED_DATA_VA 0x7FFE0000ULL
+#define VMALLOC_OFFSET_MIN   (8ULL << 20)
+#define BAND_MIN             (64ULL << 20)
+static unsigned long long g_physmem_size = DEFAULT_PHYSMEM;
+static unsigned long long g_band_size = 256ULL << 20;
+
+static unsigned long long physmem_ceiling(void)
+{
+	unsigned long long room = KUSER_SHARED_DATA_VA - GUEST_RAM_VA;
+
+	if (room <= VMALLOC_OFFSET_MIN + BAND_MIN)
+		return DEFAULT_PHYSMEM;
+	return room - VMALLOC_OFFSET_MIN - BAND_MIN;
+}
 
 /* Guest RAM lives at [GUEST_RAM_VA, GUEST_RAM_VA + physmem) — ONE view
  * of the section covering the whole bank, image loaded straight into
  * it. This is the memfd analogue: guest physical X == GUEST_RAM_VA+X,
  * so os_map_memory is identity and fd-style r/w is a memcpy. */
-#define GUEST_RAM_VA 0x60000000ULL
 
 static HANDLE create_physmem_section(unsigned long long size, void **base)
 {
@@ -337,13 +359,13 @@ static HANDLE create_physmem_section(unsigned long long size, void **base)
  * band_size below for the sizing vs the 2GiB line. */
 static void reserve_vmalloc_band(void)
 {
-	unsigned long long band = GUEST_RAM_VA + DEFAULT_PHYSMEM;
+	unsigned long long band = GUEST_RAM_VA + g_physmem_size;
 	/* 256MiB: the free gap under the 2GiB line is 384MiB minus the
 	 * KUSER_SHARED_DATA page at 0x7FFE0000 (a 512MiB request
 	 * crossed it — gle=487, run 36794554367); 256MiB covers band
 	 * ends for any mem= up to the section ceiling (mem=128M: band
 	 * [0x68800000, 0x70800000)) with 120MiB spare. */
-	SIZE_T band_size = 256ULL << 20;
+	SIZE_T band_size = (SIZE_T)g_band_size;
 	PVOID r = g_api.VirtualAlloc((PVOID)(uintptr_t)band, band_size,
 				     MEM_RESERVE, PAGE_NOACCESS);
 
@@ -542,6 +564,46 @@ int main(int argc, char **argv)
 	 * guest-RAM window (load_exec_section's fopen below allocates;
 	 * see the function comment). */
 	resolve_api_table();
+	/* mem= decides how big the bank is, so it is read before anything
+	 * is reserved or created. */
+	{
+		unsigned long long mem = 0, sec, ceil;
+		int rc = uml_nt_mem_arg(argc, argv, &mem);
+
+		if (rc < 0) {
+			fprintf(stderr, "[launcher] mem= is not a size I can "
+				"read (try 128M, 512M, 1G)\n");
+			return 2;
+		}
+		if (rc == 0)
+			mem = DEFAULT_PHYSMEM;
+		sec = uml_nt_mem_section_size(mem);
+		ceil = physmem_ceiling();
+		if (sec > ceil) {
+			fprintf(stderr, "[launcher] mem=%lluM exceeds launcher "
+				"physmem ceiling (max %lluM: the bank starts at "
+				"0x%llx and must stay below KUSER_SHARED_DATA "
+				"0x%llx with a vmalloc band above it)\n",
+				mem >> 20, ceil >> 20,
+				(unsigned long long)GUEST_RAM_VA,
+				(unsigned long long)KUSER_SHARED_DATA_VA);
+			return 2;
+		}
+		g_physmem_size = sec;
+		/* the band takes what is left, never more than 256MiB */
+		{
+			unsigned long long room = KUSER_SHARED_DATA_VA -
+				(GUEST_RAM_VA + sec) - VMALLOC_OFFSET_MIN;
+
+			g_band_size = room > (256ULL << 20) ?
+				(256ULL << 20) : (room & ~(UML_NT_MEM_MIB - 1));
+			if (g_band_size < BAND_MIN)
+				g_band_size = BAND_MIN;
+		}
+		fprintf(stderr, "[launcher] mem=%lluM -> section %llu MiB, "
+			"band %llu MiB (ceiling %lluM)\n", mem >> 20,
+			g_physmem_size >> 20, g_band_size >> 20, ceil >> 20);
+	}
 	create_boot_job();
 	uml_nt_dump_hook = launcher_dump;
 	reserve_vmalloc_band();
@@ -568,13 +630,13 @@ int main(int argc, char **argv)
 
 	/* Section + shadow first: map_elf mirrors the loaded image into
 	 * the shadow (guest RAM backing for image pages). */
-	section = create_physmem_section(DEFAULT_PHYSMEM, &physmem_base);
+	section = create_physmem_section(g_physmem_size, &physmem_base);
 	image_base = map_elf(argv[1], &entry, &img_base, &img_size);
 	fprintf(stderr, "[launcher] image mapped at %p [%llu KiB], "
 			"entry=0x%llx; physmem section %llu MiB "
 			"(shadow %p)\n", image_base,
 		(unsigned long long)img_size >> 10,
-		(unsigned long long)entry, DEFAULT_PHYSMEM >> 20,
+		(unsigned long long)entry, g_physmem_size >> 20,
 		physmem_base);
 
 	/* Fresh stack; everything the kernel reads at boot sits at its
@@ -671,7 +733,7 @@ int main(int argc, char **argv)
 	bi->api = &g_api;
 	bi->physmem_section = section;
 	bi->physmem_base = physmem_base;
-	bi->physmem_size = DEFAULT_PHYSMEM;
+	bi->physmem_size = g_physmem_size;
 	bi->image_base = (void *)(uintptr_t)img_base;
 	bi->image_size = img_size;
 	bi->stdio_out = std_out;
