@@ -280,9 +280,21 @@ static unsigned long UML_NTABI_CC dbg_pump(void *arg)
 				de_u32(u, UML_NT_U_EXC_FIRSTCH) ? "1" : "2",
 				de_u32(u, UML_NT_U_EXC_CODE),
 				de_u64(u, UML_NT_U_EXC_ADDR), np, info, tid);
-			/* never steal: the stub's own handlers see it
-			 * exactly as they would without us */
-			st = UML_NT_DBG_NOT_HANDLED;
+			/* Shelley 255: the FIRST breakpoint after
+			 * create-with-debug is the loader's, and it must be
+			 * continued — answering NOT_HANDLED to it leaves the
+			 * debuggee stopped, which is why the second event
+			 * never arrived and the process never reached its
+			 * death. Every other exception is left unhandled, so
+			 * the stub's own handlers see exactly what they would
+			 * see without us. */
+			if (de_u32(u, UML_NT_U_EXC_CODE) == 0x80000003u) {
+				os_info("[dbg] bp-continue pid %lu tid %u\n",
+					pid, tid);
+				st = UML_NT_DBG_CONTINUE;
+			} else {
+				st = UML_NT_DBG_NOT_HANDLED;
+			}
 		} else if (code == UML_NT_EXIT_PROCESS) {
 			os_info("[dbg] pid %lu EXIT_PROCESS code=0x%x "
 				"(GetExitCodeProcess will agree)\n",
