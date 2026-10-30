@@ -12002,6 +12002,13 @@ static int dbg_want(const struct uml_nt_stub_conn *c)
 
 	if (!uml_nt_dbg_flag() || c == NULL)
 		return 0;
+	/* Shelley 254: in the stub test the interesting conn is not a login
+	 * chain — it is whatever the test just created — so the gate that
+	 * narrows the debugger to login conns leaves the dying process
+	 * unwatched (referee 41116344916: four [dbg] lines, debug=0 on every
+	 * spawn, and the fault never reported). Every conn is watched. */
+	if (uml_nt_stub_path() != NULL)
+		return 1;
 	/* the flag this conn inherited across fork, or discovered itself */
 	want = uml_nt_chain_child(c->chain_login,
 				  path_is_login_chain(c->exec_path) ||
