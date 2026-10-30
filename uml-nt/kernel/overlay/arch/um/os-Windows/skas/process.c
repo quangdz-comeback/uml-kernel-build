@@ -1206,7 +1206,11 @@ void userspace(struct uml_pt_regs *regs)
 							dt = now - c->d->hop_ts;
 						if (c->d->tsc_per_us != 0)
 							us = dt / c->d->tsc_per_us;
-						os_info("[term-audit] pid %d "
+						os_info("[grow] pid %d calls=%u mapped=%u\n",
+						mm_id->pid,
+						(unsigned)c->d->grow_calls,
+						(unsigned)c->d->grow_mapped);
+					os_info("[term-audit] pid %d "
 						"in-tree kills=%u last_pid=%llu "
 						"%s\n", mm_id->pid,
 						(unsigned)c->d->term_calls,

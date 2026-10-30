@@ -12370,13 +12370,22 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * page under rsp writes into the reservation hole and dies with no
 	 * handler at all. The kernel has rsp here and owns the plan, so
 	 * this costs one MAP op in an answer we were sending anyway. */
-	if (c->d->action == UML_STUB_ACTION_NONE && c->mm != NULL) {
+	/* Shelley 251: the grow used to be skipped for every answer that
+	 * carried an action (a fault, a syscall), which is most of them — so a
+	 * guest that is busy faulting never gets its stack grown and dies at
+	 * exactly one 64 KiB run. It now runs on every answer; the plan budget
+	 * is the only thing that can say no. */
+	if (c->mm != NULL) {
 		int sg = uml_nt_stack_precommit(c->mm, c->ph,
 						c->d->regs.rsp,
 						c->d->stack_bottom,
 						c->d->stack_top_hint,
 						c->d->stack_alloc_hint,
 						&c->plan);
+
+		c->d->grow_calls++;
+		if (sg > 0)
+			c->d->grow_mapped++;
 
 		/* Shelley 170: WHICH mm, WHICH table, WHICH answer. Three
 		 * suspects, three fixes: (2) my scan's `start >= best` with

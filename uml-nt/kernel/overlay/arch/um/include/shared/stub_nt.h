@@ -199,6 +199,12 @@ struct uml_nt_stub_data {
 	 * around the death. Still 0xC0000005 inside the window means the kill
 	 * does not come through the trap path at all; 0xC000001D means it does
 	 * and the handler was what swallowed the report. */
+	/* Shelley 251: the CI native job is a reproducer — the guest reaches
+	 * the bottom of its 64 KiB run and dies with STACK_OVERFLOW. Whether
+	 * the grow ever ran is a number, not an opinion. */
+	u32_nt grow_calls;
+	u32_nt grow_mapped;
+	u32_nt grow_skipped_action;
 	u32_nt veh_window;
 	u32_nt veh_window_state;	/* 1 removed, 2 restored */
 	u32_nt term_calls;
