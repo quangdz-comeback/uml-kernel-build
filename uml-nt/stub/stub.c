@@ -1216,6 +1216,10 @@ static DWORD WINAPI thread_census(LPVOID arg)
 	int rounds = 0;
 
 	(void)arg;
+	fprintf(stderr, "[console] pid %lu console=0x%llx cp=%lu\n",
+		(unsigned long)GetCurrentProcessId(),
+		(unsigned long long)(uintptr_t)GetConsoleWindow(),
+		(unsigned long)GetConsoleCP());
 	fprintf(stderr, "[tcensus] pid %lu armed nqit=%d\n",
 		(unsigned long)GetCurrentProcessId(), nqit != NULL);
 	fflush(stderr);

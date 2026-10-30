@@ -12107,7 +12107,14 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				 * it does not exist yet (referee 40420877602:
 				 * 0 events and a stub that never ran). */
 				0x2 /*DEBUG_ONLY_THIS_PROCESS*/ :
-				0x4 /*CREATE_SUSPENDED*/),
+				/* Shelley 248: a conn shares the parent's
+				 * console by inheritance, which is the one
+				 * configuration a broken console or LPC
+				 * connection punishes. CREATE_NO_WINDOW
+				 * gives the conn no console at all — one
+				 * variable, same HEAD. */
+				(0x4 /*CREATE_SUSPENDED*/ |
+				 0x08000000 /*CREATE_NO_WINDOW*/)),
 				NULL, NULL, &si, &pi))
 		goto fail;
 	if (dbg_want(c)) {
