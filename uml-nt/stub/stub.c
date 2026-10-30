@@ -1883,8 +1883,50 @@ extern long veh_switch_call(long (*fn)(EXCEPTION_POINTERS *),
 /* One private dispatch stack per thread: 64 KiB, 16-byte aligned, no
  * stack guard of its own (it is TLS storage, not a thread stack). */
 static __thread unsigned long long veh_save[17];
+static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep);
+static unsigned long long veh_now_sp(void);
+
+/* Shelley 252: depth on the outside, so every return path is covered by
+ * construction rather than by remembering to decrement. */
+static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
+{
+	static __thread unsigned depth;
+	unsigned d = ++depth;
+	LONG r;
+
+	if (d > 1)
+		fprintf(stderr, "[veh-depth] pid %lu tid %lu depth=%u code=0x%lx "
+			"rip=0x%llx rsp=0x%llx\n",
+			(unsigned long)GetCurrentProcessId(),
+			(unsigned long)GetCurrentThreadId(), d,
+			(ep && ep->ExceptionRecord) ?
+				(unsigned long)ep->ExceptionRecord->ExceptionCode : 0ul,
+			(ep && ep->ContextRecord) ?
+				(unsigned long long)ep->ContextRecord->Rip : 0ull,
+			(unsigned long long)veh_now_sp());
+	if (d > 4) {
+		fprintf(stderr, "[veh-depth] DEPTH %u — bailing out instead of "
+			"recursing (code=0x%lx)\n", d,
+			(ep && ep->ExceptionRecord) ?
+				(unsigned long)ep->ExceptionRecord->ExceptionCode : 0ul);
+		fflush(stderr);
+		depth--;
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	r = veh_handler_body(ep);
+	depth--;
+	return r;
+}
+
 static __thread struct uml_nt_veh_stack veh_stk;
-static __thread unsigned char veh_buf[64 * 1024]
+/* Shelley 252: Windows writes about twelve kilobytes of EXCEPTION_RECORD,
+ * CONTEXT and XSTATE below rsp on every dispatch, and a handler that is
+ * re-entered needs that much headroom per level. Sixty-four kilobytes left
+ * almost nothing after one level, so the dispatch stack is now a quarter of
+ * a megabyte with a canary word at the bottom. */
+#define VEH_STACK_BYTES (256 * 1024)
+#define VEH_CANARY 0x5a5a5a5a5a5a5a5aULL
+static __thread unsigned char veh_buf[VEH_STACK_BYTES]
 	__attribute__((aligned(16)));
 static __thread int veh_stk_ready;
 
@@ -1900,6 +1942,7 @@ static void veh_stk_init(void)
 {
 	if (veh_stk_ready)
 		return;
+	*(volatile unsigned long long *)veh_buf = VEH_CANARY;
 	veh_stk.buf = (unsigned long long)(uintptr_t)veh_buf;
 	veh_stk.size = sizeof(veh_buf);
 	veh_stk.depth = 0;
@@ -2370,7 +2413,7 @@ static void xcpt_any_thread(EXCEPTION_POINTERS *ep)
 	fflush(stderr);
 }
 
-static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
+static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 {
 	/* Shelley 215: the very first thing that happens, before the switch
 	 * stack and before any ring write. If this counter ever exceeds the
