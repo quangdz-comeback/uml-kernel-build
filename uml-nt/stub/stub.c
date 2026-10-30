@@ -359,8 +359,28 @@ static void publish(unsigned cmd)
 static void wait_answer(void)
 {
 	host_rsp_guard("wait_answer");
-	if (d != NULL && d->done_seq < 6)
+	if (d != NULL && d->done_seq < 6) {
+		/* Shelley 250: Windows decides "stack overflow" by comparing the
+		 * faulting address with THIS thread's TEB. If the guest runs on a
+		 * stack the TEB knows nothing about, faults there stop being
+		 * ordinary access violations. Print the TEB's own view next to
+		 * the guest's, so the mismatch is a number and not a theory. */
+		unsigned long long sb = __readgsqword(0x08);
+		unsigned long long sl = __readgsqword(0x10);
+		unsigned long long hrsp = (unsigned long long)(uintptr_t)&sb;
+
+		fprintf(stderr, "[teb] pid %lu tid %lu stackbase=0x%llx "
+			"stacklimit=0x%llx host_rsp=0x%llx guest_rsp=0x%llx "
+			"guest_stack=[0x%llx,0x%llx)\n",
+			(unsigned long)GetCurrentProcessId(),
+			(unsigned long)GetCurrentThreadId(), sb, sl, hrsp,
+			(unsigned long long)(d ? d->stack_va : 0),
+			(unsigned long long)(d ? d->stack_va & ~0xffffull : 0),
+			(unsigned long long)((d ? d->stack_va & ~0xffffull : 0) +
+					     0x10000ull));
+		fflush(stderr);
 		stack_commit_witness();
+	}
 	/* Shelley 241: never park for ever. A thread asleep on an infinite wait
 	 * gives the OS no runnable thread of ours, and the death we have been
 	 * chasing is an access violation that no dispatcher ever sees — exactly
