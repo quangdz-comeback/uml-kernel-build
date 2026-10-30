@@ -103,6 +103,37 @@ static void stub_atexit(void)
 
 
 static HANDLE phys_sec; /* physmem section (per-VMA views, do_action) */
+
+/* Shelley 250: the exit thread. Every path that leaves this world from guest
+ * context used to call ExitProcess with rsp still on the guest stack, and the
+ * CRT's own teardown then pushed a return address onto pages the guest mm
+ * had already released — the access violation a real machine's WER finally
+ * named inside msvcrt. This thread has an ordinary host stack of its own and
+ * is the only thing allowed to end the process. */
+static HANDLE exit_evt;
+static volatile LONG exit_code_req;
+
+static DWORD WINAPI exit_thread(LPVOID arg)
+{
+	(void)arg;
+	THR_ENTER("exit_thread");
+	WaitForSingleObject(exit_evt, INFINITE);
+	fflush(stderr);
+	ExitProcess((UINT)exit_code_req);
+	return 0;
+}
+
+static void stub_exit(unsigned code)
+{
+	exit_code_req = (LONG)code;
+	if (exit_evt != NULL) {
+		SetEvent(exit_evt);
+		for (;;)
+			Sleep(1000);	/* never run CRT teardown here */
+	}
+	ExitProcess(code);
+}
+
 static volatile unsigned char *flat_view; /* RO whole-section view */
 
 static void host_rsp_guard(const char *tag);
@@ -122,6 +153,8 @@ static void die(const char *what, DWORD err)
  *
  * Two invariants follow, and both are measured rather than assumed. */
 static unsigned long host_on_guest_rsp_seen;
+typedef unsigned short (WINAPI *pfn_csb_t)(ULONG, PVOID *, ULONG, PULONG);
+static pfn_csb_t capture_stack;
 static void host_rsp_guard(const char *tag);
 
 /* 1. No host code may run on a guest stack. Called at every host entrance
@@ -134,12 +167,22 @@ static void host_rsp_guard(const char *tag)
 
 	if (d == NULL || sp < lo || sp >= hi)
 		return;
-	if (host_on_guest_rsp_seen++ < 8)
+	if (host_on_guest_rsp_seen++ < 8) {
+		void *bt[16];
+		unsigned short nbt = 0;
+		unsigned i;
+
+		memset(bt, 0, sizeof(bt));
+		if (capture_stack != NULL)
+			nbt = capture_stack(0, (PVOID *)bt, 16, NULL);
 		fprintf(stderr, "[host-rsp] pid %lu tid %lu HOST-ON-GUEST-RSP "
 			"tag=%s rsp=0x%llx guest=[0x%llx,0x%llx) caller=%p\n",
 			(unsigned long)GetCurrentProcessId(),
 			(unsigned long)GetCurrentThreadId(), tag, sp, lo, hi,
 			__builtin_return_address(0));
+		for (i = 0; i < nbt; i++)
+			fprintf(stderr, "[host-rsp]   bt[%u]=%p\n", i, bt[i]);
+	}
 	fflush(stderr);
 }
 
@@ -316,6 +359,8 @@ static void publish(unsigned cmd)
 static void wait_answer(void)
 {
 	host_rsp_guard("wait_answer");
+	if (d != NULL && d->done_seq < 6)
+		stack_commit_witness();
 	/* Shelley 241: never park for ever. A thread asleep on an infinite wait
 	 * gives the OS no runnable thread of ours, and the death we have been
 	 * chasing is an access violation that no dispatcher ever sees — exactly
@@ -328,7 +373,7 @@ static void wait_answer(void)
 		if (w == WAIT_OBJECT_0)
 			return;
 		if (w != WAIT_TIMEOUT)
-			ExitProcess(121);
+			stub_exit(121);
 	}
 }
 
@@ -3304,6 +3349,12 @@ int main(int argc, char **argv)
 	}
 	job_report("boot");
 	atexit(stub_atexit);
+	capture_stack = (pfn_csb_t)(uintptr_t)
+		GetProcAddress(GetModuleHandleA("ntdll.dll"),
+			       "RtlCaptureStackBackTrace");
+	exit_evt = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (exit_evt != NULL)
+		CreateThread(NULL, 0, exit_thread, NULL, 0, NULL);
 	{
 		const char *tc = getenv("UML_NT_CENSUS");
 
@@ -3366,6 +3417,8 @@ int main(int argc, char **argv)
 	 * conn_bootstrap published it into d->fs_base). */
 	fs_tramp_base = d->fs_base;
 	jump_to_guest(&d->init_regs, d->stack_va, d->entry_va);
-	/* not reached */
-	ExitProcess(122);
+	/* not reached — and if it ever is, the stack is still the guest's, so
+	 * the exit must happen on the exit thread's host stack. */
+	host_rsp_guard("after-jump");
+	stub_exit(122);
 }
