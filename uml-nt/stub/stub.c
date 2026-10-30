@@ -356,6 +356,62 @@ static void publish(unsigned cmd)
 	SetEvent(evt_in);
 }
 
+/* Shelley 256: the answer path is where the truth is — no exception needed.
+ * The values the engine is about to load into the CONTEXT must be runnable:
+ * the rip needs a committed page that can execute, the rsp one that can take
+ * a write. If either is not, the process will die later with no handler and
+ * no explanation; here it dies with a number and a syscall id instead. */
+static void ans_check(const char *when)
+{
+	static unsigned long ans_bad;
+	unsigned long long va[2];
+	int i;
+
+	if (d == NULL)
+		return;
+	va[0] = (unsigned long long)d->regs.rip;
+	va[1] = (unsigned long long)d->regs.rsp;
+	for (i = 0; i < 2; i++) {
+		MEMORY_BASIC_INFORMATION q;
+		const char *which = i ? "rsp" : "rip";
+		int bad = 0;
+
+		memset(&q, 0, sizeof(q));
+		if (va[i] == 0) {
+			bad = 1;
+		} else if (VirtualQuery((void *)(uintptr_t)va[i], &q,
+					sizeof(q)) != sizeof(q)) {
+			bad = 1;
+		} else if (q.State != MEM_COMMIT) {
+			bad = 1;
+		} else if (i == 0 &&
+			   !(q.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+					  PAGE_EXECUTE_READWRITE |
+					  PAGE_EXECUTE_WRITECOPY))) {
+			bad = 1;
+		} else if (i == 1 &&
+			   !(q.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
+					  PAGE_EXECUTE_READWRITE |
+					  PAGE_EXECUTE_WRITECOPY))) {
+			bad = 1;
+		}
+		if (!bad)
+			continue;
+		ans_bad++;
+		if (ans_bad <= 8)
+			fprintf(stderr, "[ans-bad] pid %lu tid %lu which=%s "
+				"va=0x%llx state=0x%lx prot=0x%lx base=0x%llx "
+				"seq=%llu cmd=%u when=%s n=%lu\n",
+				(unsigned long)GetCurrentProcessId(),
+				(unsigned long)GetCurrentThreadId(), which, va[i],
+				(unsigned long)q.State, (unsigned long)q.Protect,
+				(unsigned long long)(uintptr_t)q.BaseAddress,
+				(unsigned long long)d->pub_seq, (unsigned)d->cmd,
+				when, ans_bad);
+		fflush(stderr);
+	}
+}
+
 static void wait_answer(void)
 {
 	host_rsp_guard("wait_answer");
@@ -395,6 +451,7 @@ static void wait_answer(void)
 		if (w != WAIT_TIMEOUT)
 			stub_exit(121);
 	}
+	ans_check("answer");
 }
 
 static void park_forever(void)
