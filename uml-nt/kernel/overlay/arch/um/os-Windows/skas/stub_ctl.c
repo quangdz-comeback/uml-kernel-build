@@ -12575,7 +12575,8 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				break;
 			c->d->grow_mapped++;
 		}
-		if (c->mm->ca_n != 0 && c->mm->ca_n <= 6)
+		if (c->mm->ca_n != 0 && (c->mm->ca_n <= 6 ||
+					 (c->mm->ca_n & 31u) == 0))
 			os_info("[commit-ahead] pid %lu n=%u rsp=0x%llx "
 				"committed=0x%llx top=0x%llx limit=0x%llx "
 				"want=0x%llx mapped=%u\n",
@@ -12590,7 +12591,8 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				(unsigned long)c->pid, c->mm->ca_alloc,
 				c->mm->ca_vma, c->mm->ca_plan, c->mm->ca_nvma,
 				c->mm->ca_free);
-		if (c->d->grow_mapped != 0 && c->d->grow_mapped <= 8)
+		if (c->d->grow_mapped != 0 && (c->d->grow_mapped <= 8 ||
+					       (c->d->grow_mapped & 31u) == 0))
 			os_info("[grow-ahead] pid %lu runs=%u rsp_eff=0x%llx "
 				"ops=%d want=0x40000\n",
 				(unsigned long)c->pid,

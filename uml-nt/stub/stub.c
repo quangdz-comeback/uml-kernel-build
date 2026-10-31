@@ -865,7 +865,11 @@ static int do_action(void)
 		{
 			static unsigned nviews_logged;
 
-			if (nviews_logged < 8) {
+			/* Shelley 279: the stack range matters most and was the
+			 * first thing a cap hid. Log it separately and deeper. */
+			if (nviews_logged < 8 ||
+			    (d->map_va >= 0x62000000ull &&
+			     d->map_va < 0x62900000ull && nviews_logged < 48)) {
 				nviews_logged++;
 				fprintf(stderr, "[map-view] pid %lu va=0x%llx "
 					"len=0x%llx prot=0x%x base=%p n=%u\n",
