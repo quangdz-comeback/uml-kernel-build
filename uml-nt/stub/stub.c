@@ -2666,7 +2666,10 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 		unsigned long long sb = __readgsqword(0x08);
 		unsigned long long sl = __readgsqword(0x10);
 
-		if ((entries++ & 63u) == 0 && sb > sl) {
+		/* first entry as well as every 64th: a counter that only
+		 * speaks after 64 entries says nothing in a run that dies
+		 * before them (rule #11). */
+		if ((entries++ == 0 || (entries & 63u) == 0) && sb > sl) {
 			unsigned long long used = sb - sp_in;
 
 			fprintf(stderr, "[veh-enter] pid %lu tid %lu rsp=0x%llx "
