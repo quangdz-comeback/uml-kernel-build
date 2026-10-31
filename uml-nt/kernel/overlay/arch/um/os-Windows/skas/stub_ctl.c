@@ -12513,6 +12513,10 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		int k;
 		int sg = 0;
 
+		/* Shelley 274 (c): the plan carries a fixed number of ops and a
+		 * reserve that is never booked simply refuses them, which is how
+		 * four runs turned into zero. Reserve first. */
+		uml_nt_sc_plan_reserve(c, 4);
 		for (k = 0; k < 4; k++) {
 			unsigned long long rsp_eff = c->d->regs.rsp ?
 				c->d->regs.rsp : c->d->stack_va;
