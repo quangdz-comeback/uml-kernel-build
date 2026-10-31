@@ -2722,7 +2722,12 @@ static void teb_swap_to_guest(void)
 		teb_saved_limit = __readgsqword(0x10);
 	}
 	__writegsqword(0x08, top);
-	__writegsqword(0x10, bot);
+	/* Shelley 277: the dispatcher asks _chkstk whether there is room below
+	 * the stack pointer. Windows answers from the TEB, and a limit that sits
+	 * exactly at the committed bottom says "no room at all". One page lower
+	 * gives it the room it needs to probe, and the page below is committed by
+	 * the reserve anyway. */
+	__writegsqword(0x10, bot > 0x1000 ? bot - 0x1000 : bot);
 	{
 		static unsigned long applied;
 
