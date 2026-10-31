@@ -862,6 +862,20 @@ static int do_action(void)
 		/* The view came in RWX (raisable, see map_access): drop
 		 * the page protection to what the kernel asked for. A
 		 * later PROTECT op can move it either way. */
+		{
+			static unsigned nviews_logged;
+
+			if (nviews_logged < 8) {
+				nviews_logged++;
+				fprintf(stderr, "[map-view] pid %lu va=0x%llx "
+					"len=0x%llx prot=0x%x base=%p n=%u\n",
+					(unsigned long)GetCurrentProcessId(),
+					(unsigned long long)d->map_va,
+					(unsigned long long)view_len,
+					(unsigned)d->map_prot, base, nviews_logged);
+				fflush(stderr);
+			}
+		}
 		if (!VirtualProtect(base, view_len, d->map_prot,
 				    &old_prot)) {
 			fprintf(stderr, "stub: map VirtualProtect(%p, "

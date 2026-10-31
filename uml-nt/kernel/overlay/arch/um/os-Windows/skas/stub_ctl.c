@@ -12552,10 +12552,13 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				c->mm->ca_vma, c->mm->ca_plan, c->mm->ca_nvma,
 				c->mm->ca_free);
 		if (c->d->grow_mapped != 0 && c->d->grow_mapped <= 8)
-			os_info("[grow-ahead] pid %lu runs=%u rsp=0x%llx want=0x40000\n",
+			os_info("[grow-ahead] pid %lu runs=%u rsp_eff=0x%llx "
+				"ops=%d want=0x40000\n",
 				(unsigned long)c->pid,
 				(unsigned)c->d->grow_mapped,
-				(unsigned long long)c->d->regs.rsp);
+				(unsigned long long)(c->d->regs.rsp ?
+					c->d->regs.rsp : c->d->stack_va),
+				c->plan.n_ops);
 		c->d->grow_calls++;
 		/* Shelley 254: a counter that only prints at death is a counter
 		 * that says nothing while the boot is failing, so it speaks
