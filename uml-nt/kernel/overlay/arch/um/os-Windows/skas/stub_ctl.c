@@ -12991,6 +12991,12 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 				if (code != 259u /*STILL_ACTIVE*/) {
 					conn_parent.exit_code = code;
 					conn_parent.alive = 0;
+					/* Shelley 257: this is the death the CI
+					 * keeps showing; the answer ring has to
+					 * speak here, not only on the
+					 * userspace path. */
+					uml_nt_ans_ring_dump(&conn_parent,
+							     "stubtest-death");
 					os_info("[stubtest] parent died "
 						"silently: %lu veh=[phase=%llu "
 						"in=0x%llx body=0x%llx "
