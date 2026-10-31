@@ -730,6 +730,24 @@ static void dbg_event(unsigned char *de)
 					fc ? 1 : 2, exc, addr, mod, np,
 					info[0], info[1], info[2], info[3],
 					tid, pid);
+			/* Shelley 264: the fault address of a two-parameter
+			 * exception is the address the thread touched. Say
+			 * whether it is inside the guest span at all, and
+			 * which 64 KiB run it belongs to — the chain that
+			 * matters is #UD then stack-overflow then AV, and
+			 * this is the only way to say where the second one
+			 * was aimed. */
+			if (np > 1 && info[1] != 0)
+				os_info("[dbg]   fault addr=0x%llx in_guest_span=%s "
+					"run_base=0x%llx guest=[0x%llx,0x%llx)\n",
+					(unsigned long long)info[1],
+					(info[1] >= UML_STUB_RAM_BASE &&
+					 info[1] < UML_STUB_RAM_BASE +
+						   uml_boot.physmem_size) ? "yes" : "no",
+					(unsigned long long)info[1] & ~0xffffull,
+					(unsigned long long)UML_STUB_RAM_BASE,
+					(unsigned long long)(UML_STUB_RAM_BASE +
+							     uml_boot.physmem_size));
 		}
 		/* Shelley 263: an exception event that is never continued
 		 * leaves the debuggee stopped — which is exactly the shape of
