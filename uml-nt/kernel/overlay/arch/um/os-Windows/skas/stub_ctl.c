@@ -12515,9 +12515,14 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 
 		for (k = 0; k < 4; k++) {
 			int r = uml_nt_stack_commit_ahead(c->mm, c->ph,
-							  c->d->regs.rsp,
-							  0x40000ull /* 256 KiB */,
-							  &c->plan);
+					c->d->regs.rsp ? c->d->regs.rsp :
+						c->d->stack_va,
+					c->d->stack_bottom,
+					c->d->stack_top_hint,
+					c->d->stack_top_hint > 0x800000ull ?
+						c->d->stack_top_hint - 0x800000ull : 0,
+					0x40000ull /* 256 KiB */,
+					&c->plan);
 
 			sg = r;
 			if (r <= 0)

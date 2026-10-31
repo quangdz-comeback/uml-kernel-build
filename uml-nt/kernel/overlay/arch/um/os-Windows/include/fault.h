@@ -245,6 +245,9 @@ int uml_nt_stack_grow(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
  * MAP op), 0 = enough headroom, -1 = below the floor. */
 int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			      unsigned long long rsp,
+			      unsigned long long committed,
+			      unsigned long long top,
+			      unsigned long long limit,
 			      unsigned long long want,
 			      struct uml_nt_fault_plan *plan);
 int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,

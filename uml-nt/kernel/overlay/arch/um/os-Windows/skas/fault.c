@@ -257,48 +257,30 @@ int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
  * instead of a single headroom check. */
 int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			      unsigned long long rsp,
+			      unsigned long long committed,
+			      unsigned long long top,
+			      unsigned long long limit,
 			      unsigned long long want,
 			      struct uml_nt_fault_plan *plan)
 {
-	unsigned long long committed = 0, start = 0, off, lim;
-	int i, d;
+	unsigned long long start = 0, off;
+	int d;
 
 	if (mm == 0 || ph == 0 || plan == 0)
 		return 0;
-	for (i = 0; i < mm->nvma; i++) {
-		struct uml_nt_vma *v = &mm->vma[i];
-
-		if (rsp >= v->start && rsp < v->end && v->start >= committed)
-			committed = v->start;
-	}
-	/* Shelley 274: the counter was silent, which is a fact about this
-	 * path, not about the mechanism. Say the inputs once per connection. */
-	{
-		static unsigned long said;
-
-		if (said < 6) {
-			said++;
-			/* no os_info in this module: record the numbers in the
-			 * mm so the caller's line can print them (Shelley 274) */
-			mm->ca_rsp = rsp;
-			mm->ca_committed = committed;
-			mm->ca_top = mm->stack_top;
-			mm->ca_limit = mm->stack_limit;
-			mm->ca_want = want;
-			mm->ca_n++;
-		}
-	}
-	if (committed == 0)
+	/* Shelley 274: rsp and the committed bottom come from the stub's own
+	 * publication — at an action answer the kernel's register copy is
+	 * empty, and a scan of the VMA table at that moment finds nothing.
+	 * The stub knows; the kernel uses what it said. */
+	mm->ca_rsp = rsp;
+	mm->ca_committed = committed;
+	mm->ca_top = top;
+	mm->ca_limit = limit;
+	mm->ca_want = want;
+	mm->ca_n++;
+	if (rsp == 0 || committed == 0 || top == 0 || limit == 0)
 		return 0;
-	/* the deepest VMA start at or below rsp is the committed bottom */
-	for (i = 0; i < mm->nvma; i++) {
-		struct uml_nt_vma *v = &mm->vma[i];
-
-		if (v->end <= rsp && v->start < committed)
-			committed = v->start;
-	}
-	lim = mm->stack_limit ? mm->stack_limit : 0;
-	d = uml_nt_sg_commit_ahead(mm->stack_top, lim, rsp, committed,
+	d = uml_nt_sg_commit_ahead(top, limit, rsp, committed,
 				   UML_NT_SG_RUN, want, &start);
 	if (d <= 0)
 		return d;
