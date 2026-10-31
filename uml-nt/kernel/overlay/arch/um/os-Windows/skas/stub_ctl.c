@@ -12514,13 +12514,16 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		int sg = 0;
 
 		for (k = 0; k < 4; k++) {
+			unsigned long long rsp_eff = c->d->regs.rsp ?
+				c->d->regs.rsp : c->d->stack_va;
+			unsigned long long top_eff = c->d->stack_top_hint ?
+				c->d->stack_top_hint : ((rsp_eff | 0xffffull) + 1);
+			unsigned long long bot_eff = c->d->stack_bottom ?
+				c->d->stack_bottom : (rsp_eff & ~0xffffull);
+			unsigned long long lim_eff = top_eff > 0x800000ull ?
+				top_eff - 0x800000ull : 0;
 			int r = uml_nt_stack_commit_ahead(c->mm, c->ph,
-					c->d->regs.rsp ? c->d->regs.rsp :
-						c->d->stack_va,
-					c->d->stack_bottom,
-					c->d->stack_top_hint,
-					c->d->stack_top_hint > 0x800000ull ?
-						c->d->stack_top_hint - 0x800000ull : 0,
+					rsp_eff, bot_eff, top_eff, lim_eff,
 					0x40000ull /* 256 KiB */,
 					&c->plan);
 
