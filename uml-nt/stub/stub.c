@@ -1506,8 +1506,34 @@ static DWORD WINAPI thread_census(LPVOID arg)
 	int rounds = 0;
 
 	(void)arg;
-	fprintf(stderr, "[tcensus] pid %lu armed nqit=%d\n",
-		(unsigned long)GetCurrentProcessId(), nqit != NULL);
+	/* Shelley 267: the census must prove it can see threads at all — a
+	 * silent census and a process with one thread look identical. */
+	{
+		HANDLE s0 = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+		THREADENTRY32 t0;
+		int seen0 = 0;
+		DWORD err0 = 0;
+
+		if (s0 == INVALID_HANDLE_VALUE) {
+			err0 = GetLastError();
+		} else {
+			memset(&t0, 0, sizeof(t0));
+			t0.dwSize = sizeof(t0);
+			if (Thread32First(s0, &t0)) {
+				do {
+					if (t0.th32OwnerProcessID ==
+					    GetCurrentProcessId())
+						seen0++;
+				} while (Thread32Next(s0, &t0));
+			} else {
+				err0 = GetLastError();
+			}
+			CloseHandle(s0);
+		}
+		fprintf(stderr, "[tcensus] pid %lu armed nqit=%d first_scan=%d "
+			"err=%lu\n", (unsigned long)GetCurrentProcessId(),
+			nqit != NULL, seen0, (unsigned long)err0);
+	}
 	fflush(stderr);
 	for (;;) {
 		HANDLE snap;
