@@ -2692,8 +2692,17 @@ static void teb_swap_to_guest(void)
 		return;
 	top = d->stack_top_hint;
 	bot = d->stack_bottom;
-	if (top == 0 || bot == 0 || top <= bot)
+	if (top < 0x10000ull || bot < 0x10000ull || top <= bot) {
+		static int warned;
+
+		if (!warned++) {
+			fprintf(stderr, "[teb-swap] pid %lu REFUSED implausible "
+				"bounds top=0x%llx bot=0x%llx (TEB left alone)\n",
+				(unsigned long)GetCurrentProcessId(), top, bot);
+			fflush(stderr);
+		}
 		return;
+	}
 	if (teb_saved_base == 0) {
 		teb_saved_base = __readgsqword(0x08);
 		teb_saved_limit = __readgsqword(0x10);
@@ -3834,11 +3843,14 @@ int main(int argc, char **argv)
 	 * describes the host stack here, the very first #UD is dispatched onto
 	 * the guest stack with the wrong stack classification and dies in the
 	 * cascade before any handler exists. */
-	if (d->stack_top_hint == 0 || d->stack_bottom == 0) {
-		d->stack_bottom = (unsigned long long)d->init_regs.rsp &
-				  ~0xffffull;
+	/* Shelley 271: init_regs is empty at this point — the entry values ride
+	 * the jump parameters, not the struct — so deriving the stack bounds
+	 * from it produces [0x0,0x10000) and a TEB that describes nothing.
+	 * The bounds come from the stack the jump will actually install. */
+	if (d->stack_bottom == 0 || d->stack_top_hint == 0)
+		d->stack_bottom = (unsigned long long)d->stack_va & ~0xffffull;
+	if (d->stack_top_hint == 0)
 		d->stack_top_hint = d->stack_bottom + 0x10000ull;
-	}
 	fprintf(stderr, "[first-entry] pid %lu tid %lu rip=0x%llx rsp=0x%llx "
 		"guest_stack=[0x%llx,0x%llx)\n",
 		(unsigned long)GetCurrentProcessId(),
