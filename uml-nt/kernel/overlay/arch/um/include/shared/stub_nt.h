@@ -202,6 +202,17 @@ struct uml_nt_stub_data {
 	/* Shelley 251: the CI native job is a reproducer — the guest reaches
 	 * the bottom of its 64 KiB run and dies with STACK_OVERFLOW. Whether
 	 * the grow ever ran is a number, not an opinion. */
+#define UML_NT_ANS_RING 8
+	/* Shelley 257: the last answers this conn received, so the death can be
+	 * read backwards: which command, which syscall, which rip/rsp. */
+	struct {
+		unsigned long long seq;
+		unsigned long long nr;
+		unsigned long long rip;
+		unsigned long long rsp;
+		u32_nt cmd;
+	} ans_ring[UML_NT_ANS_RING];
+	u32_nt ans_ring_n;
 	u32_nt grow_calls;
 	u32_nt grow_mapped;
 	u32_nt grow_skipped_action;

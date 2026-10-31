@@ -12564,6 +12564,10 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		c->ans_regs[14] = g->r14; c->ans_regs[15] = g->r15;
 		c->ans_regs[16] = g->rip;
 	}
+	uml_nt_ans_ring_push(c, (unsigned)c->d->cmd,
+			     (unsigned long long)c->last_nr,
+			     (unsigned long long)c->d->regs.rip,
+			     (unsigned long long)c->d->regs.rsp);
 	c->ans_pub = c->d->pub_seq;
 	c->ans_rip = c->d->regs.rip;
 	c->ans_rsp = c->d->regs.rsp;
@@ -13112,3 +13116,82 @@ static int __init uml_nt_stubtest_init(void)
 	return 0;
 }
 __initcall(uml_nt_stubtest_init);
+
+/* Shelley 257: the answer path judged the values and found them good, so the
+ * death happens after the resume — and the answer that preceded it was a
+ * PROT_DONE, the last step of an action. The question the ring answers is
+ * which action, and the question the sweep answers is whether a live conn's
+ * saved rip or rsp sits inside a range that is being released underneath it.
+ */
+void uml_nt_ans_ring_push(struct uml_nt_stub_conn *c, unsigned cmd,
+			  unsigned long long nr, unsigned long long rip,
+			  unsigned long long rsp)
+{
+	unsigned i;
+
+	if (c == NULL)
+		return;
+	i = c->d->ans_ring_n % UML_NT_ANS_RING;
+	c->d->ans_ring[i].cmd = cmd;
+	c->d->ans_ring[i].nr = nr;
+	c->d->ans_ring[i].rip = rip;
+	c->d->ans_ring[i].rsp = rsp;
+	c->d->ans_ring[i].seq = c->d->pub_seq;
+	c->d->ans_ring_n++;
+}
+
+void uml_nt_ans_ring_dump(struct uml_nt_stub_conn *c, const char *why)
+{
+	unsigned i, n;
+	int k;
+
+	if (c == NULL || c->d == NULL)
+		return;
+	n = c->d->ans_ring_n;
+	os_info("[ans-ring] pid %lu %s n=%u\n", (unsigned long)c->pid, why, n);
+	if (n == 0)
+		return;
+	for (k = (int)(n < UML_NT_ANS_RING ? n : UML_NT_ANS_RING) - 1;
+	     k >= 0; k--) {
+		i = (n - 1 - (unsigned)k) % UML_NT_ANS_RING;
+		os_info("[ans-ring]   cmd=%u seq=%llu nr=%llu rip=0x%llx "
+			"rsp=0x%llx\n",
+			(unsigned)c->d->ans_ring[i].cmd,
+			c->d->ans_ring[i].seq, c->d->ans_ring[i].nr,
+			c->d->ans_ring[i].rip, c->d->ans_ring[i].rsp);
+	}
+}
+
+/* Is this virtual address inside the range about to be released? */
+static int va_in(unsigned long long va, unsigned long long lo,
+		 unsigned long long hi)
+{
+	return va >= lo && va < hi;
+}
+
+void uml_nt_ans_free_live(unsigned long long lo, unsigned long long hi,
+			  const char *why)
+{
+	int i;
+
+	if (hi <= lo)
+		return;
+	for (i = 0; i < conn_reg_n; i++) {
+		struct uml_nt_stub_conn *c = conn_reg[i];
+
+		if (c == NULL || c->d == NULL || !c->alive)
+			continue;
+		if (va_in(c->d->regs.rip, lo, hi))
+			os_info("[ans-free-live] conn pid %lu which=rip "
+				"va=0x%llx range=[0x%llx,0x%llx) why=%s\n",
+				(unsigned long)c->pid,
+				(unsigned long long)c->d->regs.rip, lo, hi,
+				why);
+		if (va_in(c->d->regs.rsp, lo, hi))
+			os_info("[ans-free-live] conn pid %lu which=rsp "
+				"va=0x%llx range=[0x%llx,0x%llx) why=%s\n",
+				(unsigned long)c->pid,
+				(unsigned long long)c->d->regs.rsp, lo, hi,
+				why);
+	}
+}

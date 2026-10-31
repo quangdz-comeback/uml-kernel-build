@@ -6,6 +6,9 @@
  */
 #include <vma.h>
 
+void uml_nt_ans_free_live(unsigned long long lo, unsigned long long hi,
+			  const char *why);
+
 /* The translate boundary (048): a physmem section offset is only
  * valid BELOW this line. Boot pins it to uml_boot.physmem_size
  * (main.c) — no allocation can ever hand out a run at/above it, so
@@ -465,8 +468,15 @@ void uml_nt_mm_drop_for(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 {
 	int i;
 
-	for (i = 0; i < mm->nvma; i++)
+	for (i = 0; i < mm->nvma; i++) {
+		/* Shelley 257: a live conn whose saved rip or rsp sits in the
+		 * range being released is the exact shape of the silent death
+		 * — the memory goes away underneath a thread that will be
+		 * resumed into it. */
+		uml_nt_ans_free_live(mm->vma[i].start, mm->vma[i].end,
+				     "mm-drop");
 		span_unref_for(ph, &mm->vma[i], owner);
+	}
 	mm->nvma = 0;
 	mm->nguard = 0;
 }

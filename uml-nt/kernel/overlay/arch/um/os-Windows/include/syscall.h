@@ -113,6 +113,13 @@ struct uml_nt_lazy_region {
 /* [conn-reg] (Shelley 157 (b)): the census registry. */
 struct uml_nt_stub_conn;
 void uml_nt_conn_register(struct uml_nt_stub_conn *c);
+/* Shelley 257: the answer ring and the release sweep. */
+void uml_nt_ans_ring_push(struct uml_nt_stub_conn *c, unsigned cmd,
+			  unsigned long long nr, unsigned long long rip,
+			  unsigned long long rsp);
+void uml_nt_ans_ring_dump(struct uml_nt_stub_conn *c, const char *why);
+void uml_nt_ans_free_live(unsigned long long lo, unsigned long long hi,
+			  const char *why);
 void uml_nt_conn_unregister(struct uml_nt_stub_conn *c);
 int uml_nt_conn_reg_count(void);
 struct uml_nt_stub_conn *uml_nt_conn_reg_at(int i);
