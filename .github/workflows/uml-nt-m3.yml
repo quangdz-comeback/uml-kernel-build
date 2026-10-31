@@ -196,7 +196,7 @@ jobs:
           # Shelley 256: the debugger is kept but off by default — three
           # rounds produced one loader breakpoint and no real event, and the
           # answer-time invariant is the path that needs no exception.
-          UML_NT_CIDBG: ${{ vars.UML_NT_CIDBG || '0' }}
+          UML_NT_CIDBG: ${{ vars.UML_NT_CIDBG || '1' }}
         run: |
           cd uml-nt/launcher
           set +e
