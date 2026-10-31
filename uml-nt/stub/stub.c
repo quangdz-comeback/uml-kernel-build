@@ -1514,8 +1514,10 @@ static DWORD WINAPI thread_census(LPVOID arg)
 		THREADENTRY32 te;
 
 		Sleep(200);
-		if (rounds >= 10)
-			continue;
+		/* Shelley 266: keep watching forever, but only speak when a
+		 * thread appears that we have not seen — the death can happen
+		 * long after the first two seconds, and the tid that faults
+		 * has to be matchable to a start address when it does. */
 		rounds++;
 		snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
 		if (snap == INVALID_HANDLE_VALUE)
@@ -1545,11 +1547,23 @@ static DWORD WINAPI thread_census(LPVOID arg)
 					nqit(th, 9 /* ThreadQuerySetWin32StartAddress */,
 					     &start, sizeof(start), NULL);
 				CloseHandle(th);
-				fprintf(stderr, "[tcensus] pid %lu r=%d tid %lu "
-					"cpu_us=%llu start=0x%llx\n",
-					(unsigned long)GetCurrentProcessId(),
-					rounds, (unsigned long)te.th32ThreadID,
-					cpu / 10, start);
+				{
+					static unsigned long seen[64];
+					static int nseen;
+					int k, known = 0;
+
+					for (k = 0; k < nseen; k++)
+						if (seen[k] == te.th32ThreadID)
+							known = 1;
+					if (!known && nseen < 64) {
+						seen[nseen++] = te.th32ThreadID;
+						fprintf(stderr, "[tcensus] pid %lu NEW tid %lu "
+							"cpu_us=%llu start=0x%llx n=%d\n",
+							(unsigned long)GetCurrentProcessId(),
+							(unsigned long)te.th32ThreadID,
+							cpu / 10, start, nseen);
+					}
+				}
 				fflush(stderr);
 			} while (Thread32Next(snap, &te));
 		}
