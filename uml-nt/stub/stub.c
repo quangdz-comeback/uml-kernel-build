@@ -3861,6 +3861,14 @@ int main(int argc, char **argv)
 		(unsigned long long)d->stack_top_hint);
 	fflush(stderr);
 	teb_swap_to_guest();
+	fprintf(stderr, "[teb-swap] pid %lu verify base=0x%llx limit=0x%llx "
+		"(written top=0x%llx bot=0x%llx)\n",
+		(unsigned long)GetCurrentProcessId(),
+		(unsigned long long)__readgsqword(0x08),
+		(unsigned long long)__readgsqword(0x10),
+		(unsigned long long)d->stack_top_hint,
+		(unsigned long long)d->stack_bottom);
+	fflush(stderr);
 	fs_tramp_base = d->fs_base;
 	jump_to_guest(&d->init_regs, d->stack_va, d->entry_va);
 	/* not reached — and if it ever is, the stack is still the guest's, so
