@@ -12610,6 +12610,11 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			(unsigned)c->d->cmd);
 		c->d->term_calls++;
 		c->d->term_last_pid = (unsigned long long)c->pid;
+		c->d->death_reason = 1;
+		os_info("[kill-proc] pid %lu code=0x%llx why=self-kill caller=%p\n",
+			(unsigned long)c->pid,
+			(unsigned long long)(unsigned int)c->d->retval,
+			__builtin_return_address(0));
 		nt->NtTerminateProcess(c->proc,
 				       (NTSTATUS)c->d->retval);
 		c->exit_code = c->d->retval;
@@ -12997,6 +13002,14 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 					 * userspace path. */
 					uml_nt_ans_ring_dump(&conn_parent,
 							     "stubtest-death");
+					if (conn_parent.d != NULL &&
+					    conn_parent.d->death_reason == 0)
+						os_info("[ext-death] pid %lu "
+							"no kill-proc and no exit-begin "
+							"preceded it — nothing in this "
+							"tree did it\n",
+							(unsigned long)
+								conn_parent.pid);
 					os_info("[stubtest] parent died "
 						"silently: %lu veh=[phase=%llu "
 						"in=0x%llx body=0x%llx "

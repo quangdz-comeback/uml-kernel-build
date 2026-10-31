@@ -214,7 +214,12 @@ struct uml_nt_stub_data {
 	} ans_ring[UML_NT_ANS_RING];
 	u32_nt ans_ring_n;
 	u32_nt ans_regs_bad;	/* action answers whose answer carried no regs */
-	u32_nt ans_window_bad;	/* answers where the 16K under rsp was not there */
+	u32_nt ans_window_bad;
+	/* Shelley 262: the three sides of the blame matrix. 0 = nobody has
+	 * explained this death yet; 1 = we terminated it; 2 = it walked its
+	 * own exit path. A death with 0 is a death nothing in this tree
+	 * caused, which is the last thing user-mode can tell us. */
+	u32_nt death_reason;	/* answers where the 16K under rsp was not there */
 	u32_nt grow_calls;
 	u32_nt grow_mapped;
 	u32_nt grow_skipped_action;

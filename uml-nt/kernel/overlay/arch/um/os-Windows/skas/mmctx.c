@@ -201,7 +201,10 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 		if (c->d != NULL) {
 			c->d->term_calls++;
 			c->d->term_last_pid = (unsigned long long)c->pid;
+			c->d->death_reason = 1;
 		}
+		os_info("[kill-proc] pid %lu code=0 why=mmctx-destroy caller=%p\n",
+			(unsigned long)c->pid, __builtin_return_address(0));
 		nt->NtTerminateProcess(c->proc, 0);
 		c->alive = 0;
 	}

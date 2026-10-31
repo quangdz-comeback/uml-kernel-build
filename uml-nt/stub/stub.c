@@ -144,6 +144,8 @@ static void exit_begin(const char *why, unsigned code)
 static void stub_exit(unsigned code)
 {
 	exit_begin("stub_exit", code);
+	if (d != NULL)
+		d->death_reason = 2;
 	exit_code_req = (LONG)code;
 	if (exit_evt != NULL) {
 		SetEvent(exit_evt);
@@ -163,6 +165,8 @@ static void die(const char *what, DWORD err)
 	fprintf(stderr, "stub: %s failed (%lu)\n", what,
 		(unsigned long)err);
 	exit_begin("die", 120);
+	if (d != NULL)
+		d->death_reason = 2;
 	ExitProcess(120);
 }
 
