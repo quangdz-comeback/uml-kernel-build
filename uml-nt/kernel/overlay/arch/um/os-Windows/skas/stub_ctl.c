@@ -649,6 +649,42 @@ void dbg_drain(void)
 			dbg_wfd_false);
 }
 
+/* The conn whose pid matches, so its main-thread handle can be used for the
+ * context read. The debugger already tracks which pid it is attached to. */
+extern struct uml_nt_stub_conn *uml_nt_conn_by_pid(unsigned long pid);
+
+static struct uml_nt_stub_conn *dbg_conn_by_pid(unsigned long pid)
+{
+	return uml_nt_conn_by_pid(pid);
+}
+
+static int dbg_fault_ctx(unsigned int tid, unsigned long pid)
+{
+	struct uml_nt_stub_conn *c = dbg_conn_by_pid(pid);
+	unsigned char cbuf[0x4d0];
+	unsigned long long rip = 0, rsp = 0;
+	unsigned long long words[8];
+	SIZE_T got = 0;
+	int k;
+
+	if (c == NULL || c->thread == NULL)
+		return 0;
+	memset(cbuf, 0, sizeof(cbuf));
+	*(unsigned int *)(void *)(cbuf + 0x30) = 0x00100007u;
+	if (!nt->GetThreadContext(c->thread, cbuf))
+		return 0;
+	rip = *(unsigned long long *)(void *)(cbuf + 0xf8);
+	rsp = *(unsigned long long *)(void *)(cbuf + 0x98);
+	os_info("[dbg]   ctx tid=%u rip=0x%llx rsp=0x%llx\n", tid, rip, rsp);
+	memset(words, 0, sizeof(words));
+	if (rsp != 0 &&
+	    nt->ReadProcessMemory(c->proc, (PVOID)(uintptr_t)rsp, words,
+				  sizeof(words), &got) && got >= 8)
+		for (k = 0; k < 8; k++)
+			os_info("[dbg]   stk[%d]=0x%llx\n", k, words[k]);
+	return 1;
+}
+
 static void dbg_event(unsigned char *de)
 {
 	unsigned int code = de_u32(de, UML_NT_DE_CODE);
@@ -737,6 +773,14 @@ static void dbg_event(unsigned char *de)
 			 * matters is #UD then stack-overflow then AV, and
 			 * this is the only way to say where the second one
 			 * was aimed. */
+			/* Shelley 267: the debug event means that thread is
+			 * stopped, so its context can be read right here — and
+			 * the faulting thread is the main thread, whose handle
+			 * we already hold. An overflow then names its own
+			 * instruction instead of being guessed at. */
+			if ((exc == 0xC00000FDu || exc == 0xC0000005u) &&
+			    dbg_fault_ctx(tid, pid))
+				;
 			if (np > 1 && info[1] != 0)
 				os_info("[dbg]   fault addr=0x%llx in_guest_span=%s "
 					"run_base=0x%llx guest=[0x%llx,0x%llx)\n",
@@ -5324,6 +5368,16 @@ void uml_nt_conn_register(struct uml_nt_stub_conn *c)
 		conn_reg[conn_reg_n++] = c;
 	else
 		os_warn("[conn-reg] registry full (%d)\n", conn_reg_n);
+}
+
+struct uml_nt_stub_conn *uml_nt_conn_by_pid(unsigned long pid)
+{
+	int i;
+
+	for (i = 0; i < conn_reg_n; i++)
+		if (conn_reg[i] != NULL && conn_reg[i]->pid == pid)
+			return conn_reg[i];
+	return NULL;
 }
 
 void uml_nt_conn_unregister(struct uml_nt_stub_conn *c)
