@@ -123,8 +123,27 @@ static DWORD WINAPI exit_thread(LPVOID arg)
 	return 0;
 }
 
+/* Shelley 261: does the process ever walk the ordinary exit path, and which
+ * helper threads are still alive when it does? A teardown that runs while a
+ * helper thread is still touching state produces an exception no handler can
+ * see — the exit code becomes the exception code, which is exactly what the
+ * harness reads. */
+static volatile LONG alive_watchdog, alive_census, alive_jobw, alive_vehwin;
+
+static void exit_begin(const char *why, unsigned code)
+{
+	fprintf(stderr, "[exit-begin] pid %lu tid %lu why=%s code=%u "
+		"alive[watchdog=%ld census=%ld jobwatch=%ld vehwin=%ld]\n",
+		(unsigned long)GetCurrentProcessId(),
+		(unsigned long)GetCurrentThreadId(), why, code,
+		(long)alive_watchdog, (long)alive_census,
+		(long)alive_jobw, (long)alive_vehwin);
+	fflush(stderr);
+}
+
 static void stub_exit(unsigned code)
 {
+	exit_begin("stub_exit", code);
 	exit_code_req = (LONG)code;
 	if (exit_evt != NULL) {
 		SetEvent(exit_evt);
@@ -143,6 +162,7 @@ static void die(const char *what, DWORD err)
 	host_rsp_guard("die");
 	fprintf(stderr, "stub: %s failed (%lu)\n", what,
 		(unsigned long)err);
+	exit_begin("die", 120);
 	ExitProcess(120);
 }
 
@@ -1335,6 +1355,7 @@ static void crt_purecall(void)
  * Gated by UML_NT_DUMP_EVERY (seconds); off by default. */
 static DWORD WINAPI dump_watchdog(LPVOID arg)
 {
+	alive_watchdog = 1;
 	typedef BOOL (WINAPI *mwd_t)(HANDLE, DWORD, HANDLE, int, void *, void *,
 				     void *);
 	HMODULE dbg;
@@ -1454,6 +1475,7 @@ static DWORD WINAPI veh_window_close(LPVOID arg)
 {
 	(void)arg;
 	THR_ENTER("veh_window_close");
+	alive_vehwin = 1;
 	Sleep(4000);
 	AddVectoredExceptionHandler(1, veh_handler);
 	d->veh_window_state = 2;
@@ -1461,6 +1483,7 @@ static DWORD WINAPI veh_window_close(LPVOID arg)
 		(unsigned long)GetCurrentProcessId());
 	fflush(stderr);
 	THR_LEAVE("veh_window_close");
+	alive_vehwin = 0;
 	return 0;
 }
 
@@ -1543,6 +1566,7 @@ static DWORD WINAPI job_watch(LPVOID arg)
 
 	(void)arg;
 	THR_ENTER("job_watch");
+	alive_jobw = 1;
 	fprintf(stderr, "[vet] armed pid %lu t0=%llu\n",
 		(unsigned long)GetCurrentProcessId(), t0);
 	fflush(stderr);
@@ -3482,6 +3506,7 @@ int main(int argc, char **argv)
 	if (d->magic != UML_STUB_MAGIC || d->version != UML_STUB_VERSION) {
 		fprintf(stderr, "stub: bad handshake magic=%08x ver=%u\n",
 			d->magic, d->version);
+		exit_begin("bad-handshake", 111);
 		ExitProcess(111);
 	}
 
