@@ -2088,11 +2088,21 @@ static __thread struct uml_nt_veh_stack veh_stk;
  * re-entered needs that much headroom per level. Sixty-four kilobytes left
  * almost nothing after one level, so the dispatch stack is now a quarter of
  * a megabyte with a canary word at the bottom. */
+/* Shelley 264: a TLS buffer is not a stack. Windows gives a thread stack a
+ * guard page that grows it on first touch and reports a fault exactly at the
+ * boundary; a __thread array lives in the thread's TLS block, which has
+ * neither. Running the dispatcher on it turns any overrun into a silent
+ * cascade — stack-overflow at one address, access violation three pages lower,
+ * and no handler anywhere.
+ *
+ * The dispatch stack is therefore a real allocation with a real guard page at
+ * its bottom, and it says where it is so a fault address can be matched
+ * against it. */
 #define VEH_STACK_BYTES (256 * 1024)
 #define VEH_CANARY 0x5a5a5a5a5a5a5a5aULL
-static __thread unsigned char veh_buf[VEH_STACK_BYTES]
-	__attribute__((aligned(16)));
+static __thread unsigned char *veh_buf;
 static __thread int veh_stk_ready;
+static __thread int veh_stk_logged;
 
 static unsigned long long veh_now_sp(void)
 {
@@ -2106,9 +2116,41 @@ static void veh_stk_init(void)
 {
 	if (veh_stk_ready)
 		return;
-	*(volatile unsigned long long *)veh_buf = VEH_CANARY;
+	if (veh_buf == NULL) {
+		unsigned char *p = (unsigned char *)VirtualAlloc(
+			NULL, VEH_STACK_BYTES + 0x1000,
+			MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+
+		if (p == NULL) {
+			veh_stk_ready = -1;
+			return;
+		}
+		/* the lowest page is the guard: touching it faults here, at the
+		 * boundary, instead of somewhere below in unnamed memory */
+		{
+			DWORD oldp = 0;
+
+			VirtualProtect(p, 0x1000, PAGE_READWRITE | PAGE_GUARD,
+				       &oldp);
+		}
+		veh_buf = p + 0x1000;	/* usable stack starts above the guard */
+		*(volatile unsigned long long *)veh_buf = VEH_CANARY;
+		if (!veh_stk_logged) {
+			veh_stk_logged = 1;
+			fprintf(stderr, "[veh-stk] pid %lu tid %lu guard=0x%llx "
+				"base=0x%llx top=0x%llx size=%u\n",
+				(unsigned long)GetCurrentProcessId(),
+				(unsigned long)GetCurrentThreadId(),
+				(unsigned long long)(uintptr_t)p,
+				(unsigned long long)(uintptr_t)veh_buf,
+				(unsigned long long)((uintptr_t)veh_buf +
+						     VEH_STACK_BYTES),
+				(unsigned)VEH_STACK_BYTES);
+			fflush(stderr);
+		}
+	}
 	veh_stk.buf = (unsigned long long)(uintptr_t)veh_buf;
-	veh_stk.size = sizeof(veh_buf);
+	veh_stk.size = VEH_STACK_BYTES;
 	veh_stk.depth = 0;
 	veh_stk_ready = 1;
 }
