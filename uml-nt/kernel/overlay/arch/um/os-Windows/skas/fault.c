@@ -271,6 +271,19 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		if (rsp >= v->start && rsp < v->end && v->start >= committed)
 			committed = v->start;
 	}
+	/* Shelley 274: the counter was silent, which is a fact about this
+	 * path, not about the mechanism. Say the inputs once per connection. */
+	{
+		static unsigned long said;
+
+		if (said < 6) {
+			said++;
+			os_info("[commit-ahead] rsp=0x%llx committed=0x%llx "
+				"top=0x%llx limit=0x%llx want=0x%llx\n",
+				rsp, committed, mm->stack_top,
+				mm->stack_limit, want);
+		}
+	}
 	if (committed == 0)
 		return 0;
 	/* the deepest VMA start at or below rsp is the committed bottom */
