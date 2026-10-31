@@ -12503,16 +12503,33 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * exactly one 64 KiB run. It now runs on every answer; the plan budget
 	 * is the only thing that can say no. */
 	if (c->mm != NULL) {
-		int sg = uml_nt_stack_precommit(c->mm, c->ph,
-						c->d->regs.rsp,
-						c->d->stack_bottom,
-						c->d->stack_top_hint,
-						c->d->stack_alloc_hint,
-						&c->plan);
+		/* Shelley 272: a Linux stack grows inside the kernel; a guest stack
+		 * on Windows cannot, because delivering the grow fault itself needs
+		 * to write below the stack pointer — into the very hole it is
+		 * faulting on. That catch-22 is why every deep excursion ends at
+		 * the commit boundary. The answer therefore commits AHEAD: three
+		 * runs below the stack pointer on every answer, which is 192 KiB
+		 * of headroom the fault path never has to find. */
+		int k;
+		int sg = 0;
 
-		c->d->grow_calls++;
-		if (sg > 0)
+		for (k = 0; k < 3; k++) {
+			int r = uml_nt_stack_precommit(c->mm, c->ph,
+						       c->d->regs.rsp,
+						       c->d->stack_bottom,
+						       c->d->stack_top_hint,
+						       c->d->stack_alloc_hint,
+						       &c->plan);
+
+			if (r != 0)
+				sg = r;
+			if (r <= 0)
+				break;
 			c->d->grow_mapped++;
+			c->d->stack_bottom = c->d->stack_top_hint ?
+				c->d->stack_bottom : c->d->stack_bottom;
+		}
+		c->d->grow_calls++;
 		/* Shelley 254: a counter that only prints at death is a counter
 		 * that says nothing while the boot is failing, so it speaks
 		 * every sixty-four answers too. */
