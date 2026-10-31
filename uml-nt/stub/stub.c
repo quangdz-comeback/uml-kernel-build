@@ -2699,6 +2699,16 @@ static void teb_swap_to_guest(void)
 	}
 	__writegsqword(0x08, top);
 	__writegsqword(0x10, bot);
+	{
+		static unsigned long applied;
+
+		applied++;
+		if ((applied & 63ul) == 1)
+			fprintf(stderr, "[teb-swap] pid %lu applied=%lu "
+				"top=0x%llx bot=0x%llx\n",
+				(unsigned long)GetCurrentProcessId(), applied,
+				top, bot);
+	}
 }
 
 static void teb_swap_back(void)
@@ -3720,6 +3730,8 @@ int main(int argc, char **argv)
 	}
 	job_report("boot");
 	atexit(stub_atexit);
+	(void)teb_swap_enabled();	/* Shelley 270: the lever must print it is
+					 * alive before anyone judges it */
 	/* Shelley 265 (c): ask Windows to report a nearly-exhausted stack
 	 * early instead of letting the guard fault cascade into an access
 	 * violation at an address nobody can attribute. */
