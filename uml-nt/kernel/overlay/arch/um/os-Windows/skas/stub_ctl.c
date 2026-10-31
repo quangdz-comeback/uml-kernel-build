@@ -62,6 +62,26 @@
 #include <physalloc.h>
 #include "internal.h"
 
+/* The kernel has no getenv; the boot command line is the environment this
+ * port reads its levers from. */
+static const char *uml_nt_getenv(const char *name)
+{
+	int i;
+
+	for (i = 0; i < uml_boot.argc; i++) {
+		const char *a = uml_boot.argv[i];
+		int n = 0;
+
+		if (a == NULL)
+			continue;
+		while (name[n] != 0 && a[n] == name[n])
+			n++;
+		if (name[n] == 0 && a[n] == '=')
+			return a + n + 1;
+	}
+	return NULL;
+}
+
 static int g_xs_lever;
 static int g_veh_window;
 static int g_exec_login;	/* forward: defined with the login-chain latch */
@@ -12513,11 +12533,29 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		int k;
 		int sg = 0;
 
-		/* Shelley 274 (c): the plan carries a fixed number of ops and a
-		 * reserve that is never booked simply refuses them, which is how
-		 * four runs turned into zero. Reserve first. */
-		uml_nt_sc_plan_reserve(c, 4);
-		for (k = 0; k < 4; k++) {
+		/* Shelley 278: the discriminating experiment. Committing the
+		 * whole reservation at once separates "some page the probe needs
+		 * is not committed" from "Windows refuses to dispatch on a region
+		 * that is not a thread stack". UML_NT_STACK_FULLCOMMIT=1 makes
+		 * every answer commit all 8 MiB of the reservation instead of the
+		 * 256 KiB reserve. */
+		{
+			static int want_runs = -1;
+
+			if (want_runs < 0) {
+				const char *e = uml_nt_getenv(
+					"UML_NT_STACK_FULLCOMMIT");
+
+				want_runs = (e != NULL && e[0] == '1') ? 128 : 4;
+				os_info("[stack-reserve] pid %lu fullcommit=%d "
+					"runs_per_answer=%d\n",
+					(unsigned long)c->pid,
+					want_runs == 128, want_runs);
+			}
+			uml_nt_sc_plan_reserve(c, (unsigned)want_runs);
+			c->mm->ca_full = want_runs;
+		}
+		for (k = 0; k < (c->mm->ca_full ? c->mm->ca_full : 4); k++) {
 			unsigned long long rsp_eff = c->d->regs.rsp ?
 				c->d->regs.rsp : c->d->stack_va;
 			unsigned long long top_eff = c->d->stack_top_hint ?
@@ -12528,8 +12566,9 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				top_eff - 0x800000ull : 0;
 			int r = uml_nt_stack_commit_ahead(c->mm, c->ph,
 					rsp_eff, bot_eff, top_eff, lim_eff,
-					0x40000ull /* 256 KiB */,
-					&c->plan);
+					(c->mm->ca_full == 128) ?
+						0x800000ull /* the whole 8 MiB */ :
+						0x40000ull, &c->plan);
 
 			sg = r;
 			if (r <= 0)

@@ -206,6 +206,7 @@ jobs:
           timeout 180 ./launcher.exe ../../build/vmlinux \
             "uml_nt_stubtest=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "uml_nt_exec=$(cygpath -w ../../guest/guest-init.elf)" \
+            "UML_NT_STACK_FULLCOMMIT=1" \
             ${DBGARG:+$DBGARG} \
             > boot.log 2>&1
           code=$?
