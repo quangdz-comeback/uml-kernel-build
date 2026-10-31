@@ -13025,6 +13025,21 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 				if (code != 259u) {
 					conn_child.exit_code = code;
 					conn_child.alive = 0;
+					/* Shelley 259: the child is part of the
+					 * same question — its exit code and the
+					 * last answers it received say whether
+					 * it died the same way. */
+					uml_nt_ans_ring_dump(&conn_child,
+							     "child-death");
+					os_info("[child-exit] pid %lu code=%lu "
+						"cmd=%u rip=0x%llx rsp=0x%llx\n",
+						(unsigned long)conn_child.pid,
+						(unsigned long)code,
+						(unsigned)conn_child.d->cmd,
+						(unsigned long long)
+							conn_child.d->regs.rip,
+						(unsigned long long)
+							conn_child.d->regs.rsp);
 					os_info("[stubtest] child died "
 						"silently: %lu\n",
 						(unsigned long)code);

@@ -398,6 +398,45 @@ static void ans_check(const char *when)
 					  PAGE_EXECUTE_WRITECOPY))) {
 			bad = 1;
 		}
+		/* Shelley 259: the dispatch itself needs room. Windows writes
+		 * the exception record, context and xstate — sixteen kilobytes
+		 * — BELOW the stack pointer of the thread it is dispatching
+		 * for. The guest stack is not a Windows thread stack and has no
+		 * guard page that grows it, so if that window is not committed
+		 * the write that builds the record faults and the dispatch dies
+		 * before any handler is reached: the process ends with the
+		 * original code and no handler ever runs. */
+		if (i == 1 && va[i] != 0) {
+			unsigned k;
+
+			for (k = 0; k < 4; k++) {
+				MEMORY_BASIC_INFORMATION w;
+				unsigned long long a = va[i] - (k + 1) * 0x1000ull;
+
+				memset(&w, 0, sizeof(w));
+				if (VirtualQuery((void *)(uintptr_t)a, &w,
+						 sizeof(w)) == sizeof(w) &&
+				    w.State == MEM_COMMIT &&
+				    (w.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
+						  PAGE_EXECUTE_READWRITE |
+						  PAGE_EXECUTE_WRITECOPY)))
+					continue;
+				if (d->ans_window_bad < 8) {
+					d->ans_window_bad++;
+					fprintf(stderr, "[ans-window] pid %lu tid %lu "
+						"rsp=0x%llx page=0x%llx state=0x%lx "
+						"prot=0x%lx seq=%llu n=%u\n",
+						(unsigned long)GetCurrentProcessId(),
+						(unsigned long)GetCurrentThreadId(),
+						va[i], a, (unsigned long)w.State,
+						(unsigned long)w.Protect,
+						(unsigned long long)d->pub_seq,
+						d->ans_window_bad);
+					fflush(stderr);
+				}
+				break;
+			}
+		}
 		if (!bad)
 			continue;
 		ans_bad++;
