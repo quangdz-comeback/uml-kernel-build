@@ -2055,8 +2055,6 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 	unsigned d = ++depth;
 	LONG r;
 
-	if (d == 1)
-		fault_forensics(ep);
 
 	if (d > 1)
 		fprintf(stderr, "[veh-depth] pid %lu tid %lu depth=%u code=0x%lx "
@@ -2658,7 +2656,27 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 					  ep->ContextRecord);
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
+	/* Shelley 265: everything that logs runs AFTER the switch, on the
+	 * dispatch stack with its guard page — never on the thread's own
+	 * stack, which is the one that ran out. */
+	fault_forensics(ep);
 	in_veh = 1;
+	{
+		static unsigned long long entries;
+		unsigned long long sb = __readgsqword(0x08);
+		unsigned long long sl = __readgsqword(0x10);
+
+		if ((entries++ & 63u) == 0 && sb > sl) {
+			unsigned long long used = sb - sp_in;
+
+			fprintf(stderr, "[veh-enter] pid %lu tid %lu rsp=0x%llx "
+				"limit=0x%llx base=0x%llx used_pct=%llu n=%llu\n",
+				(unsigned long)GetCurrentProcessId(),
+				(unsigned long)GetCurrentThreadId(), sp_in, sl,
+				sb, (used * 100ull) / (sb - sl), entries);
+			fflush(stderr);
+		}
+	}
 	veh_stk_init();
 	if (uml_nt_veh_enter(&veh_stk, sp_in) == 0) {
 		/* the outermost entry runs on the stub's own buffer, never
@@ -3598,6 +3616,10 @@ int main(int argc, char **argv)
 	}
 	job_report("boot");
 	atexit(stub_atexit);
+	/* Shelley 265 (c): ask Windows to report a nearly-exhausted stack
+	 * early instead of letting the guard fault cascade into an access
+	 * violation at an address nobody can attribute. */
+	SetThreadStackGuarantee((ULONG[1]){ 64u << 10 });
 	capture_stack = (pfn_csb_t)(uintptr_t)
 		GetProcAddress(GetModuleHandleA("ntdll.dll"),
 			       "RtlCaptureStackBackTrace");
