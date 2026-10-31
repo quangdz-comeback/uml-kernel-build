@@ -58,6 +58,7 @@
 #include <syscall.h>
 #include <mm_id.h>
 #include <uaccess_walk.h>
+#include <dbg_map.h>
 #include <physalloc.h>
 #include "internal.h"
 
@@ -729,6 +730,24 @@ static void dbg_event(unsigned char *de)
 					fc ? 1 : 2, exc, addr, mod, np,
 					info[0], info[1], info[2], info[3],
 					tid, pid);
+		}
+		/* Shelley 263: an exception event that is never continued
+		 * leaves the debuggee stopped — which is exactly the shape of
+		 * every run so far: one event, then silence. The map decides:
+		 * the loader's breakpoint is continued, everything else is
+		 * handed back to the debuggee's own handlers. */
+		{
+			static int first_bp;
+			unsigned ans = uml_nt_dbg_answer(
+				UML_NT_DBG_EV_EXCEPTION, exc, &first_bp);
+
+			if (ans == UML_NT_DBG_ANS_CONTINUE)
+				os_info("[dbg] bp-continue pid=%u tid=%u\n",
+					pid, tid);
+			nt->ContinueDebugEvent(pid, tid,
+					       ans == UML_NT_DBG_ANS_CONTINUE ?
+					       UML_NT_DBG_CONTINUE :
+					       UML_NT_DBG_NOT_HANDLED);
 		}
 	}
 }
@@ -12150,9 +12169,18 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 				de_u32(fe, UML_NT_DE_TID));
 			dbg_pid_add((unsigned long)pi.dwProcessId);
 			dbg_active_pid = (unsigned long)pi.dwProcessId;
-			nt->ContinueDebugEvent(de_u32(fe, UML_NT_DE_PID),
-					       de_u32(fe, UML_NT_DE_TID),
-					       UML_NT_DBG_CONTINUE);
+			{
+				int first_bp = 0;
+				unsigned ans = uml_nt_dbg_answer(
+					de_u32(fe, UML_NT_DE_CODE), 0,
+					&first_bp);
+
+				nt->ContinueDebugEvent(de_u32(fe, UML_NT_DE_PID),
+						       de_u32(fe, UML_NT_DE_TID),
+						       ans == UML_NT_DBG_ANS_CONTINUE ?
+						       UML_NT_DBG_CONTINUE :
+						       UML_NT_DBG_NOT_HANDLED);
+			}
 		} else {
 			os_info("[dbg] no first event within 5s — the "
 				"debugger attach did not take (check the Job "

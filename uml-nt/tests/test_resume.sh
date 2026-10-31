@@ -18,5 +18,11 @@ CC="${CC:-clang}"
 # section sizing, and the ceiling arithmetic — host-side, no Windows needed.
 "$CC" -O1 -Wall -Wextra -Werror \
 	-o "$TMP/memparse" "$HERE/test_memparse.c" "$HERE/../launcher/memparse.c"
+
+# The debug continue map: which event is continued, which is left to the
+# debuggee.
+"$CC" -O1 -Wall -Wextra -Werror -o "$TMP/dbgmap" "$HERE/test_dbgmap.c"
+
 "$TMP/test"
 "$TMP/memparse"
+"$TMP/dbgmap"
