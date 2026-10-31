@@ -303,16 +303,30 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		return 0;
 	}
 	mm->ca_alloc = 1;
+	/* Shelley 276: the reservation is already a VMA, so growing inside it is
+	 * not "add a VMA" — it is "commit within the one that exists". Adding
+	 * failed with overlap on every attempt, which is why the reserve never
+	 * mapped a single run. */
 	{
-		int v = uml_nt_vma_add_gen(mm, start, start + UML_NT_SG_RUN,
-					   (unsigned long long)off, 0x04u, 0,
-					   (unsigned long long)
-					   uml_nt_phys_gen(ph, off));
+		struct uml_nt_vma *inside = uml_nt_vma_find(mm, start);
 
-		mm->ca_vma = v;
-		if (v < 0) {
-			uml_nt_phys_unref(ph, off);
-			return 0;
+		if (inside != 0 && start >= inside->start &&
+		    start + UML_NT_SG_RUN <= inside->end) {
+			mm->ca_inside = 1;
+			mm->ca_vma = 1;
+		} else {
+			int v = uml_nt_vma_add_gen(mm, start,
+						   start + UML_NT_SG_RUN,
+						   (unsigned long long)off,
+						   0x04u, 0,
+						   (unsigned long long)
+						   uml_nt_phys_gen(ph, off));
+
+			mm->ca_vma = v;
+			if (v < 0) {
+				uml_nt_phys_unref(ph, off);
+				return 0;
+			}
 		}
 	}
 	{
