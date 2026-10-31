@@ -342,8 +342,11 @@ static void publish_stack_hints(void)
 	d->stack_alloc_hint = (unsigned long long)(uintptr_t)q.AllocationBase;
 }
 
+static unsigned g_last_pub_cmd;
+
 static void publish(unsigned cmd)
 {
+	g_last_pub_cmd = cmd;
 	host_rsp_guard("publish");
 	/* before the kernel is woken: it reads these at answer time */
 	publish_stack_hints();
@@ -3064,7 +3067,28 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * re-executes on the now-fixed view (the kernel-pushed SIGSEGV
 	 * handler state from S4d rides the same verbatim shape). */
 	d->vstage = 5;		/* answer consumed, registers applied */
-	gp_to_context(c, &d->regs);
+	/* Shelley 258: the answer only carries registers when the kernel
+	 * produced them — a syscall round (rip advanced past the ud2, rax =
+	 * retval) or a fault round. A PROT_DONE answer is the result of an
+	 * ACTION_* and resumes from the trap context already in this CONTEXT;
+	 * loading d->regs there means resuming at whatever the kernel left in
+	 * the shared page, which is zero, and a thread that resumes at rip=0
+	 * dies with no handler to see it. */
+	if (g_last_pub_cmd == UML_STUB_CMD_SYSCALL ||
+	    g_last_pub_cmd == UML_STUB_CMD_FAULT) {
+		gp_to_context(c, &d->regs);
+	} else if (d != NULL) {
+		if (d->ans_regs_bad < 8) {
+			d->ans_regs_bad++;
+			fprintf(stderr, "[ans-keep] pid %lu cmd=%u keeping trap "
+				"context (answer rip=0x%llx rsp=0x%llx)\n",
+				(unsigned long)GetCurrentProcessId(),
+				g_last_pub_cmd,
+				(unsigned long long)d->regs.rip,
+				(unsigned long long)d->regs.rsp);
+			fflush(stderr);
+		}
+	}
 	d->round_step = 7;
 
 	/* v13: re-assert the watchpoints at every resume — the context

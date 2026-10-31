@@ -213,6 +213,7 @@ struct uml_nt_stub_data {
 		u32_nt cmd;
 	} ans_ring[UML_NT_ANS_RING];
 	u32_nt ans_ring_n;
+	u32_nt ans_regs_bad;	/* action answers whose answer carried no regs */
 	u32_nt grow_calls;
 	u32_nt grow_mapped;
 	u32_nt grow_skipped_action;
