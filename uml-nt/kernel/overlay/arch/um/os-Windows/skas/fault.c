@@ -284,20 +284,48 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 				   UML_NT_SG_RUN, want, &start);
 	if (d <= 0)
 		return d;
+	/* Shelley 275: a refusal without a reason costs another run. */
+	mm->ca_alloc = 0;
+	mm->ca_vma = 0;
+	mm->ca_plan = 0;
+	mm->ca_nvma = (int)mm->nvma;
 	off = uml_nt_phys_alloc_span(ph, UML_NT_SG_RUN / UML_NT_PHYS_RUN_SIZE);
-	if (off < 0)
-		return 0;
-	if (uml_nt_vma_add_gen(mm, start, start + UML_NT_SG_RUN,
-			       (unsigned long long)off, 0x04u, 0,
-			       (unsigned long long)uml_nt_phys_gen(ph, off)) < 0) {
-		uml_nt_phys_unref(ph, off);
+	if (off < 0) {
+		mm->ca_alloc = (int)off;
+		{
+			int i, free_runs = 0;
+
+			for (i = 0; i < (int)(ph->size >> 16); i++)
+				if (ph->refs[i] == 0)
+					free_runs++;
+			mm->ca_free = free_runs;
+		}
 		return 0;
 	}
-	if (plan_op(plan, UML_NT_FOP_MAP, 0x04u, start, UML_NT_SG_RUN,
-		    (unsigned long long)off) < 0) {
-		uml_nt_phys_unref(ph, off);
-		return 0;
+	mm->ca_alloc = 1;
+	{
+		int v = uml_nt_vma_add_gen(mm, start, start + UML_NT_SG_RUN,
+					   (unsigned long long)off, 0x04u, 0,
+					   (unsigned long long)
+					   uml_nt_phys_gen(ph, off));
+
+		mm->ca_vma = v;
+		if (v < 0) {
+			uml_nt_phys_unref(ph, off);
+			return 0;
+		}
 	}
+	{
+		int p = plan_op(plan, UML_NT_FOP_MAP, 0x04u, start,
+				UML_NT_SG_RUN, (unsigned long long)off);
+
+		mm->ca_plan = p;
+		if (p < 0) {
+			uml_nt_phys_unref(ph, off);
+			return 0;
+		}
+	}
+	mm->ca_plan = 1;
 	return 1;
 }
 
