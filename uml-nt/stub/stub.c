@@ -3828,6 +3828,27 @@ int main(int argc, char **argv)
 	 * the fork child's first guest code is the fork return and no
 	 * arch_prctl is coming (the base was inherited via the conn;
 	 * conn_bootstrap published it into d->fs_base). */
+	/* Shelley 271: the FIRST entry into the guest is not one of the
+	 * handler's resume sites — the guest is entered once from main and
+	 * never returns until a trap brings the handler in. If the TEB still
+	 * describes the host stack here, the very first #UD is dispatched onto
+	 * the guest stack with the wrong stack classification and dies in the
+	 * cascade before any handler exists. */
+	if (d->stack_top_hint == 0 || d->stack_bottom == 0) {
+		d->stack_bottom = (unsigned long long)d->init_regs.rsp &
+				  ~0xffffull;
+		d->stack_top_hint = d->stack_bottom + 0x10000ull;
+	}
+	fprintf(stderr, "[first-entry] pid %lu tid %lu rip=0x%llx rsp=0x%llx "
+		"guest_stack=[0x%llx,0x%llx)\n",
+		(unsigned long)GetCurrentProcessId(),
+		(unsigned long)GetCurrentThreadId(),
+		(unsigned long long)d->init_regs.rip,
+		(unsigned long long)d->init_regs.rsp,
+		(unsigned long long)d->stack_bottom,
+		(unsigned long long)d->stack_top_hint);
+	fflush(stderr);
+	teb_swap_to_guest();
 	fs_tramp_base = d->fs_base;
 	jump_to_guest(&d->init_regs, d->stack_va, d->entry_va);
 	/* not reached — and if it ever is, the stack is still the guest's, so
