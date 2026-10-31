@@ -103,6 +103,10 @@ struct uml_nt_guard {
 /* One guest process address space. VMAs sorted by start, non-overlap
  * (the guest mmap contract). */
 struct uml_nt_mm {
+	/* Shelley 274: commit-ahead diagnostics, filled by fault.c and printed
+	 * by the answer path (that module has no os_info of its own). */
+	unsigned long long ca_rsp, ca_committed, ca_top, ca_limit, ca_want;
+	unsigned ca_n;
 	struct uml_nt_vma vma[UML_NT_VMA_MAX];
 	int nvma;
 	/* brk bookkeeping (M3.7, grown since M4 slice 4): [heap_start,

@@ -278,10 +278,14 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 
 		if (said < 6) {
 			said++;
-			os_info("[commit-ahead] rsp=0x%llx committed=0x%llx "
-				"top=0x%llx limit=0x%llx want=0x%llx\n",
-				rsp, committed, mm->stack_top,
-				mm->stack_limit, want);
+			/* no os_info in this module: record the numbers in the
+			 * mm so the caller's line can print them (Shelley 274) */
+			mm->ca_rsp = rsp;
+			mm->ca_committed = committed;
+			mm->ca_top = mm->stack_top;
+			mm->ca_limit = mm->stack_limit;
+			mm->ca_want = want;
+			mm->ca_n++;
 		}
 	}
 	if (committed == 0)
