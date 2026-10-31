@@ -2657,6 +2657,59 @@ static void xcpt_any_thread(EXCEPTION_POINTERS *ep)
 	fflush(stderr);
 }
 
+/* Shelley 269: the thread resumes the guest with a guest stack pointer, but
+ * its TEB still describes the host stack. Windows classifies and probes a
+ * fault against the TEB, so the very first dispatch of a guest exception
+ * nests: the probe itself faults, the dispatcher marches down, and by the time
+ * it reaches an uncommitted page the process is gone before any handler runs.
+ *
+ * The TEB is therefore pointed at the guest stack for the duration of the
+ * guest run and restored the moment an exception brings us back.
+ */
+static unsigned long long teb_saved_base, teb_saved_limit;
+static int teb_swap_off = -1;
+
+static int teb_swap_enabled(void)
+{
+	if (teb_swap_off < 0) {
+		const char *e = getenv("UML_NT_TEBSTACK");
+
+		teb_swap_off = (e != NULL && e[0] == '0');
+		fprintf(stderr, "[teb-swap] pid %lu %s\n",
+			(unsigned long)GetCurrentProcessId(),
+			teb_swap_off ? "OFF (A/B leg)" : "ON");
+		fflush(stderr);
+	}
+	return !teb_swap_off;
+}
+
+static void teb_swap_to_guest(void)
+{
+	unsigned long long top, bot;
+
+	if (d == NULL || !teb_swap_enabled())
+		return;
+	top = d->stack_top_hint;
+	bot = d->stack_bottom;
+	if (top == 0 || bot == 0 || top <= bot)
+		return;
+	if (teb_saved_base == 0) {
+		teb_saved_base = __readgsqword(0x08);
+		teb_saved_limit = __readgsqword(0x10);
+	}
+	__writegsqword(0x08, top);
+	__writegsqword(0x10, bot);
+}
+
+static void teb_swap_back(void)
+{
+	if (teb_saved_base == 0)
+		return;
+	__writegsqword(0x08, teb_saved_base);
+	__writegsqword(0x10, teb_saved_limit);
+	teb_saved_base = 0;
+}
+
 static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 {
 	/* Shelley 215: the very first thing that happens, before the switch
@@ -2700,6 +2753,7 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 	 * dispatch stack with its guard page — never on the thread's own
 	 * stack, which is the one that ran out. */
 	fault_forensics(ep);
+	teb_swap_back();
 	in_veh = 1;
 	{
 		static unsigned long long entries;
@@ -2843,7 +2897,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 				    (v >= d->dr_heap_lo && v < d->dr_heap_hi) ||
 				    v == slot_va - 0x10 || v == slot_va - 0x18) {
 					if (d->ss_page == 0)
-						return EXCEPTION_CONTINUE_EXECUTION;
+						teb_swap_to_guest();
+			return EXCEPTION_CONTINUE_EXECUTION;
 					/* dl10 (37279719927): a
 					 * fault-repaired store INTO a
 					 * watched slot fires ONE #DB
@@ -2863,7 +2918,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 								 fs_tramp_target,
 								 tf_lo, tf_hi);
 					if (cls == UML_NT_SS_STRAY)
-						return EXCEPTION_CONTINUE_EXECUTION;
+						teb_swap_to_guest();
+			return EXCEPTION_CONTINUE_EXECUTION;
 				} else {
 					is_watch = 1;
 					watch_va = slot_va;
@@ -2888,6 +2944,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			 * instead of calling it a host injection. */
 			d->tramp_va = (unsigned long long)(uintptr_t)
 				fs_tramp_base;
+			teb_swap_to_guest();
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 		if (d->tf_trace != 0 &&
@@ -3045,6 +3102,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 					(uintptr_t)c->Rip;
 				d->tramp_arm++;
 			}
+			teb_swap_to_guest();
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 		if (!is_step && cls == UML_NT_SS_STRAY) {
@@ -3059,6 +3117,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			ss_stray_record(c, dr6, 0, (unsigned int)er->ExceptionCode);
 			c->EFlags &= ~(DWORD)0x100;
 			d->ss_page = 0;
+			teb_swap_to_guest();
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 		/* is_watch / is_step: fall through into the common
@@ -3188,6 +3247,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			 * quietly (a TF trampoline would re-hop forever). */
 			if (d->tf_trace != 0)
 				d->tf_stop = 1;
+			teb_swap_to_guest();
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 	}
@@ -3331,6 +3391,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		apply_watchpoints(c);
 		d->round_step = 12;
 		note_resume(c, 2);
+		teb_swap_to_guest();
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
