@@ -12997,40 +12997,6 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 					 * userspace path. */
 					uml_nt_ans_ring_dump(&conn_parent,
 							     "stubtest-death");
-					/* Shelley 261: if the thread context is
-					 * still readable after the death, where
-					 * it stopped says whether the process
-					 * died in user code or inside a kernel
-					 * transition. */
-					if (conn_parent.thread != NULL) {
-						CONTEXT pc;
-
-						memset(&pc, 0, sizeof(pc));
-						pc.ContextFlags = 0x00100007u;
-						if (nt->GetThreadContext(
-							    conn_parent.thread,
-							    &pc))
-							os_info("[post-death-ctx] pid %lu "
-								"rip=0x%llx rsp=0x%llx "
-								"efl=0x%lx\n",
-								(unsigned long)
-									conn_parent.pid,
-								(unsigned long long)pc.Rip,
-								(unsigned long long)pc.Rsp,
-								(unsigned long)pc.EFlags);
-						else
-							os_info("[post-death-ctx] pid %lu "
-								"unreadable win32=%lu\n",
-								(unsigned long)
-									conn_parent.pid,
-								(unsigned long)
-									nt->RtlGetLastWin32Error());
-					}
-					os_info("[ans-window] pid %lu total_bad=%u "
-						"regs_bad=%u\n",
-						(unsigned long)conn_parent.pid,
-						(unsigned)conn_parent.d->ans_window_bad,
-						(unsigned)conn_parent.d->ans_regs_bad);
 					os_info("[stubtest] parent died "
 						"silently: %lu veh=[phase=%llu "
 						"in=0x%llx body=0x%llx "
