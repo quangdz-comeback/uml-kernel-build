@@ -40,7 +40,8 @@
  *      exit code (0xC000013D, M2.1 CI).
  *
  * VEH resume semantics (M0/S1 4/4): modify the CONTEXT Windows hands
- * us and return EXCEPTION_CONTINUE_EXECUTION; RIP redirect + reg
+ * us and RESUME_SITE("veh-continue-0");
+		return EXCEPTION_CONTINUE_EXECUTION; RIP redirect + reg
  * writes stick.
  *
  * This is PE-land code: windows.h + ntdll imports are fine (D9 keeps
@@ -2720,6 +2721,22 @@ static void teb_swap_back(void)
 	teb_saved_base = 0;
 }
 
+/* Shelley 270: which resume path does the guest actually take? One line per
+ * site, once, beats guessing at which return statement runs. */
+#define RESUME_SITE(tag)						\
+	do {								\
+		static int once_;					\
+									\
+		if (!once_) {						\
+			once_ = 1;					\
+			fprintf(stderr, "[resume-path] pid %lu tid %lu "	\
+				"site=%s\n",				\
+				(unsigned long)GetCurrentProcessId(),	\
+				(unsigned long)GetCurrentThreadId(), (tag)); \
+			fflush(stderr);					\
+		}							\
+	} while (0)
+
 static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 {
 	/* Shelley 215: the very first thing that happens, before the switch
@@ -2908,7 +2925,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 				    v == slot_va - 0x10 || v == slot_va - 0x18) {
 					if (d->ss_page == 0)
 						teb_swap_to_guest();
-			return EXCEPTION_CONTINUE_EXECUTION;
+			RESUME_SITE("veh-continue-1");
+		return EXCEPTION_CONTINUE_EXECUTION;
 					/* dl10 (37279719927): a
 					 * fault-repaired store INTO a
 					 * watched slot fires ONE #DB
@@ -2929,7 +2947,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 								 tf_lo, tf_hi);
 					if (cls == UML_NT_SS_STRAY)
 						teb_swap_to_guest();
-			return EXCEPTION_CONTINUE_EXECUTION;
+			RESUME_SITE("veh-continue-2");
+		return EXCEPTION_CONTINUE_EXECUTION;
 				} else {
 					is_watch = 1;
 					watch_va = slot_va;
@@ -2955,7 +2974,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			d->tramp_va = (unsigned long long)(uintptr_t)
 				fs_tramp_base;
 			teb_swap_to_guest();
-			return EXCEPTION_CONTINUE_EXECUTION;
+			RESUME_SITE("veh-continue-3");
+		return EXCEPTION_CONTINUE_EXECUTION;
 		}
 		if (d->tf_trace != 0 &&
 		    (unsigned long long)(uintptr_t)c->Rip >=
@@ -3113,7 +3133,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 				d->tramp_arm++;
 			}
 			teb_swap_to_guest();
-			return EXCEPTION_CONTINUE_EXECUTION;
+			RESUME_SITE("veh-continue-4");
+		return EXCEPTION_CONTINUE_EXECUTION;
 		}
 		if (!is_step && cls == UML_NT_SS_STRAY) {
 			/* Nothing armed, or a rip the window does not
@@ -3128,7 +3149,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			c->EFlags &= ~(DWORD)0x100;
 			d->ss_page = 0;
 			teb_swap_to_guest();
-			return EXCEPTION_CONTINUE_EXECUTION;
+			RESUME_SITE("veh-continue-5");
+		return EXCEPTION_CONTINUE_EXECUTION;
 		}
 		/* is_watch / is_step: fall through into the common
 		 * report flow */
@@ -3258,7 +3280,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 			if (d->tf_trace != 0)
 				d->tf_stop = 1;
 			teb_swap_to_guest();
-			return EXCEPTION_CONTINUE_EXECUTION;
+			RESUME_SITE("veh-continue-6");
+		return EXCEPTION_CONTINUE_EXECUTION;
 		}
 	}
 
@@ -3306,6 +3329,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	 * verbatim, rip unchanged — the faulting instruction
 	 * re-executes on the now-fixed view (the kernel-pushed SIGSEGV
 	 * handler state from S4d rides the same verbatim shape). */
+	RESUME_SITE("veh-apply");
 	d->vstage = 5;		/* answer consumed, registers applied */
 	/* Shelley 258: the answer only carries registers when the kernel
 	 * produced them — a syscall round (rip advanced past the ud2, rax =
@@ -3402,6 +3426,7 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 		d->round_step = 12;
 		note_resume(c, 2);
 		teb_swap_to_guest();
+		RESUME_SITE("veh-continue-7");
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
@@ -3546,7 +3571,8 @@ static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
 	d->hop_seq = d->req_seq;
 	d->hop_ts = 0;
 	d->hop_stage = 0;
-	return EXCEPTION_CONTINUE_EXECUTION;
+	RESUME_SITE("veh-continue-8");
+		return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 /* ---- guest entry ---------------------------------------------------- */
