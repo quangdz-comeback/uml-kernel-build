@@ -12997,6 +12997,11 @@ static unsigned long __attribute__((ms_abi)) stubtest_thread(void *arg)
 					 * userspace path. */
 					uml_nt_ans_ring_dump(&conn_parent,
 							     "stubtest-death");
+					os_info("[ans-window] pid %lu total_bad=%u "
+						"regs_bad=%u\n",
+						(unsigned long)conn_parent.pid,
+						(unsigned)conn_parent.d->ans_window_bad,
+						(unsigned)conn_parent.d->ans_regs_bad);
 					os_info("[stubtest] parent died "
 						"silently: %lu veh=[phase=%llu "
 						"in=0x%llx body=0x%llx "
