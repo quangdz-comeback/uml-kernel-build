@@ -53,4 +53,37 @@ static inline int uml_nt_sg_precommit(unsigned long long top,
 	return 1;
 }
 
+/* Shelley 273: commit AHEAD, not on demand. The guest stack cannot grow the
+ * way a Linux stack does — delivering the growth fault needs to write below
+ * the stack pointer, into the hole it is faulting on. So the kernel keeps a
+ * fixed reserve of committed pages under the stack pointer at all times and
+ * the fault path never has to find headroom at the worst possible moment.
+ * Returns 1 while more is wanted, 0 when the reserve is deep enough, -1 at
+ * the limit. */
+static inline int uml_nt_sg_commit_ahead(unsigned long long top,
+					 unsigned long long limit,
+					 unsigned long long rsp,
+					 unsigned long long committed_bottom,
+					 unsigned long long run,
+					 unsigned long long want,
+					 unsigned long long *start)
+{
+	if (top == 0 || limit == 0 || limit >= top)
+		return 0;
+	if (rsp == 0 || committed_bottom == 0 || rsp < committed_bottom)
+		return 0;
+	if (rsp >= top)
+		return 0;
+	if (rsp - committed_bottom >= want)
+		return 0;
+	if (committed_bottom <= limit)
+		return -1;
+	if (start != 0)
+		*start = (committed_bottom >= run) ? committed_bottom - run :
+							    limit;
+	if (start != 0 && *start < limit)
+		*start = limit;
+	return 1;
+}
+
 #endif

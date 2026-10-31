@@ -12513,22 +12513,22 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		int k;
 		int sg = 0;
 
-		for (k = 0; k < 3; k++) {
-			int r = uml_nt_stack_precommit(c->mm, c->ph,
-						       c->d->regs.rsp,
-						       c->d->stack_bottom,
-						       c->d->stack_top_hint,
-						       c->d->stack_alloc_hint,
-						       &c->plan);
+		for (k = 0; k < 4; k++) {
+			int r = uml_nt_stack_commit_ahead(c->mm, c->ph,
+							  c->d->regs.rsp,
+							  0x40000ull /* 256 KiB */,
+							  &c->plan);
 
-			if (r != 0)
-				sg = r;
+			sg = r;
 			if (r <= 0)
 				break;
 			c->d->grow_mapped++;
-			c->d->stack_bottom = c->d->stack_top_hint ?
-				c->d->stack_bottom : c->d->stack_bottom;
 		}
+		if (c->d->grow_mapped != 0 && c->d->grow_mapped <= 8)
+			os_info("[grow-ahead] pid %lu runs=%u rsp=0x%llx want=0x40000\n",
+				(unsigned long)c->pid,
+				(unsigned)c->d->grow_mapped,
+				(unsigned long long)c->d->regs.rsp);
 		c->d->grow_calls++;
 		/* Shelley 254: a counter that only prints at death is a counter
 		 * that says nothing while the boot is failing, so it speaks

@@ -252,6 +252,56 @@ int uml_nt_stack_precommit(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	return 1;
 }
 
+/* Shelley 273: the proactive reserve. Same machinery as the opportunistic
+ * grow, but the target is a fixed number of bytes below the stack pointer
+ * instead of a single headroom check. */
+int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			      unsigned long long rsp,
+			      unsigned long long want,
+			      struct uml_nt_fault_plan *plan)
+{
+	unsigned long long committed = 0, start = 0, off, lim;
+	int i, d;
+
+	if (mm == 0 || ph == 0 || plan == 0)
+		return 0;
+	for (i = 0; i < mm->nvma; i++) {
+		struct uml_nt_vma *v = &mm->vma[i];
+
+		if (rsp >= v->start && rsp < v->end && v->start >= committed)
+			committed = v->start;
+	}
+	if (committed == 0)
+		return 0;
+	/* the deepest VMA start at or below rsp is the committed bottom */
+	for (i = 0; i < mm->nvma; i++) {
+		struct uml_nt_vma *v = &mm->vma[i];
+
+		if (v->end <= rsp && v->start < committed)
+			committed = v->start;
+	}
+	lim = mm->stack_limit ? mm->stack_limit : 0;
+	d = uml_nt_sg_commit_ahead(mm->stack_top, lim, rsp, committed,
+				   UML_NT_SG_RUN, want, &start);
+	if (d <= 0)
+		return d;
+	off = uml_nt_phys_alloc_span(ph, UML_NT_SG_RUN / UML_NT_PHYS_RUN_SIZE);
+	if (off < 0)
+		return 0;
+	if (uml_nt_vma_add_gen(mm, start, start + UML_NT_SG_RUN,
+			       (unsigned long long)off, 0x04u, 0,
+			       (unsigned long long)uml_nt_phys_gen(ph, off)) < 0) {
+		uml_nt_phys_unref(ph, off);
+		return 0;
+	}
+	if (plan_op(plan, UML_NT_FOP_MAP, 0x04u, start, UML_NT_SG_RUN,
+		    (unsigned long long)off) < 0) {
+		uml_nt_phys_unref(ph, off);
+		return 0;
+	}
+	return 1;
+}
+
 int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		    unsigned long long addr, unsigned type,
 		    struct uml_nt_fault_plan *plan)
