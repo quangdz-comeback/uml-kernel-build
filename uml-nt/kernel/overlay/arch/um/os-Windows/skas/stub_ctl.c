@@ -317,6 +317,10 @@ static unsigned long UML_NTABI_CC dbg_pump(void *arg)
  * active pid decides who gets the detailed lines (Shelley 193). */
 static unsigned long dbg_pids[8];
 static unsigned long dbg_active_pid;
+/* Shelley 268: the conn being debugged, remembered at spawn — the stubtest
+ * path creates conns outside the registry, so a lookup by pid found nothing
+ * and the context read stayed silent. */
+static struct uml_nt_stub_conn *dbg_ctx_conn;
 
 static void dbg_pid_add(unsigned long pid)
 {
@@ -655,6 +659,8 @@ extern struct uml_nt_stub_conn *uml_nt_conn_by_pid(unsigned long pid);
 
 static struct uml_nt_stub_conn *dbg_conn_by_pid(unsigned long pid)
 {
+	if (dbg_ctx_conn != NULL && dbg_ctx_conn->pid == pid)
+		return dbg_ctx_conn;
 	return uml_nt_conn_by_pid(pid);
 }
 
@@ -12268,6 +12274,8 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	c->proc = pi.hProcess;
 	c->thread = pi.hThread;
 	c->pid = pi.dwProcessId;
+	if (dbg_want(c))
+		dbg_ctx_conn = c;
 	c->alive = 1;
 	c->exit_code = 0;
 	c->plan_next = 0;
