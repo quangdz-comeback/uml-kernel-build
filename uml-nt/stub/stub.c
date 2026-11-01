@@ -2693,7 +2693,12 @@ static int teb_swap_enabled(void)
 	if (teb_swap_off < 0) {
 		const char *e = getenv("UML_NT_TEBSTACK");
 
-		teb_swap_off = (e != NULL && e[0] == '0');
+		/* Shelley 281: the swap is OFF unless the boot command line asks
+		 * for it. The mainline referee — which dispatches thousands of
+		 * exceptions on the guest stack view quite happily — stopped
+		 * booting after this lever went in at the first entry, so it
+		 * cannot be left on by default while it is still an experiment. */
+		teb_swap_off = !(e != NULL && e[0] == '1');
 		fprintf(stderr, "[teb-swap] pid %lu %s\n",
 			(unsigned long)GetCurrentProcessId(),
 			teb_swap_off ? "OFF (A/B leg)" : "ON");
