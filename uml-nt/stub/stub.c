@@ -49,6 +49,15 @@
  */
 #include <windows.h>
 #include <tlhelp32.h>
+
+/* Shelley 282: the thread-lifecycle prints are off; the call sites stay. */
+#define THR_ENTER(name) do { (void)(name); } while (0)
+#define THR_LEAVE(name) do { (void)(name); } while (0)
+
+/* Shelley 282: the resume-path witness is off; the call sites stay. */
+#define RESUME_SITE(tag) do { (void)(tag); } while (0)
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -104,13 +113,6 @@ static DWORD WINAPI exit_thread(LPVOID arg)
  * harness reads. */
 static volatile LONG alive_watchdog, alive_census, alive_jobw, alive_vehwin;
 static unsigned long g_main_tid;
-
-/* Shelley 282: the thread-lifecycle prints are off; the call sites stay. */
-#define THR_ENTER(name) do { (void)(name); } while (0)
-#define THR_LEAVE(name) do { (void)(name); } while (0)
-
-/* Shelley 282: the resume-path witness is off; the call sites stay. */
-#define RESUME_SITE(tag) do { (void)(tag); } while (0)
 
 /* Shelley 282: the TEB swap experiment is off by default; these are the two
  * entry points the resume paths call, and they do nothing unless the boot
