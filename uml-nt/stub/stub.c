@@ -105,6 +105,17 @@ static DWORD WINAPI exit_thread(LPVOID arg)
 static volatile LONG alive_watchdog, alive_census, alive_jobw, alive_vehwin;
 static unsigned long g_main_tid;
 
+/* Shelley 282: the TEB swap experiment is off by default; these are the two
+ * entry points the resume paths call, and they do nothing unless the boot
+ * command line asks for the experiment. */
+static void teb_swap_to_guest(void)
+{
+}
+
+static void teb_swap_back(void)
+{
+}
+
 static void exit_begin(const char *why, unsigned code)
 {
 	fprintf(stderr, "[exit-begin] pid %lu tid %lu why=%s code=%u "
@@ -1471,22 +1482,12 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep);
 static DWORD WINAPI veh_window_close(LPVOID arg)
 {
 	(void)arg;
-<<<<<<< HEAD
-	THR_ENTER("veh_window_close");
-	alive_vehwin = 1;
-=======
->>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	Sleep(4000);
 	AddVectoredExceptionHandler(1, veh_handler);
 	d->veh_window_state = 2;
 	fprintf(stderr, "[veh-window] pid %lu restored after 4 s\n",
 		(unsigned long)GetCurrentProcessId());
 	fflush(stderr);
-<<<<<<< HEAD
-	THR_LEAVE("veh_window_close");
-	alive_vehwin = 0;
-=======
->>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	return 0;
 }
 
@@ -1608,11 +1609,6 @@ static DWORD WINAPI job_watch(LPVOID arg)
 	int prints = 0;
 
 	(void)arg;
-<<<<<<< HEAD
-	THR_ENTER("job_watch");
-	alive_jobw = 1;
-=======
->>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	fprintf(stderr, "[vet] armed pid %lu t0=%llu\n",
 		(unsigned long)GetCurrentProcessId(), t0);
 	fflush(stderr);
@@ -2091,36 +2087,6 @@ static void fault_forensics(EXCEPTION_POINTERS *ep)
 	fflush(stderr);
 }
 
-static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
-{
-	static __thread unsigned depth;
-	unsigned d = ++depth;
-	LONG r;
-
-
-	if (d > 1)
-		fprintf(stderr, "[veh-depth] pid %lu tid %lu depth=%u code=0x%lx "
-			"rip=0x%llx rsp=0x%llx\n",
-			(unsigned long)GetCurrentProcessId(),
-			(unsigned long)GetCurrentThreadId(), d,
-			(ep && ep->ExceptionRecord) ?
-				(unsigned long)ep->ExceptionRecord->ExceptionCode : 0ul,
-			(ep && ep->ContextRecord) ?
-				(unsigned long long)ep->ContextRecord->Rip : 0ull,
-			(unsigned long long)veh_now_sp());
-	if (d > 4) {
-		fprintf(stderr, "[veh-depth] DEPTH %u — bailing out instead of "
-			"recursing (code=0x%lx)\n", d,
-			(ep && ep->ExceptionRecord) ?
-				(unsigned long)ep->ExceptionRecord->ExceptionCode : 0ul);
-		fflush(stderr);
-		depth--;
-		return EXCEPTION_CONTINUE_SEARCH;
-	}
-	r = veh_handler_body(ep);
-	depth--;
-	return r;
-}
 
 static __thread struct uml_nt_veh_stack veh_stk;
 /* Shelley 252: Windows writes about twelve kilobytes of EXCEPTION_RECORD,
@@ -2556,212 +2522,7 @@ static LONG CALLBACK unhandled_writer(EXCEPTION_POINTERS *ep)
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
-<<<<<<< HEAD
-/* Shelley 249 (WER on a real machine): the fault was named inside
- * msvcrt's thread-exit path, on an instruction that calls through an import
- * slot. Everything this port has ever logged about an exception was about
- * ONE thread — the guest's. This prints the first-chance record for every
- * thread, with the module and offset of the faulting instruction, what the
- * stack pages really are, and the words sitting on the stack, so a bad or
- * exhausted stack shows up as numbers. */
-static void mod_of(unsigned long long va, char *out, size_t n,
-		   unsigned long long *off)
-{
-	MEMORY_BASIC_INFORMATION mbi;
-	char path[MAX_PATH];
-	DWORD len = 0;
-
-	out[0] = 0;
-	*off = 0;
-	memset(&mbi, 0, sizeof(mbi));
-	if (VirtualQuery((void *)(uintptr_t)va, &mbi, sizeof(mbi)) != sizeof(mbi))
-		return;
-	if (mbi.AllocationBase == NULL)
-		return;
-	len = GetModuleFileNameA((HMODULE)mbi.AllocationBase, path, sizeof(path));
-	if (len == 0 || len == sizeof(path)) {
-		snprintf(out, n, "0x%llx", (unsigned long long)(uintptr_t)
-			 mbi.AllocationBase);
-	} else {
-		char *b = strrchr(path, '\\');
-
-		snprintf(out, n, "%s", b ? b + 1 : path);
-	}
-	*off = va - (unsigned long long)(uintptr_t)mbi.AllocationBase;
-}
-
-static void page_of(const char *tag, unsigned long long va)
-{
-	MEMORY_BASIC_INFORMATION mbi;
-
-	memset(&mbi, 0, sizeof(mbi));
-	if (VirtualQuery((void *)(uintptr_t)va, &mbi, sizeof(mbi)) == sizeof(mbi))
-		fprintf(stderr, "[xcpt]   %s=0x%llx state=0x%lx prot=0x%lx "
-			"type=0x%lx base=0x%llx size=0x%llx\n", tag, va,
-			(unsigned long)mbi.State, (unsigned long)mbi.Protect,
-			(unsigned long)mbi.Type,
-			(unsigned long long)(uintptr_t)mbi.BaseAddress,
-			(unsigned long long)mbi.RegionSize);
-	else
-		fprintf(stderr, "[xcpt]   %s=0x%llx query=FAILED\n", tag, va);
-}
-
-static void xcpt_any_thread(EXCEPTION_POINTERS *ep)
-{
-	EXCEPTION_RECORD *er;
-	CONTEXT *c;
-	char mod[96];
-	unsigned long long off = 0, fault = 0;
-	unsigned long long sp;
-	int i;
-
-	if (ep == NULL || ep->ExceptionRecord == NULL ||
-	    ep->ContextRecord == NULL)
-		return;
-	er = ep->ExceptionRecord;
-	c = ep->ContextRecord;
-	if (er->ExceptionCode != 0xC0000005u &&
-	    er->ExceptionCode != 0xC000001Du)
-		return;
-	sp = (unsigned long long)c->Rsp;
-	if (er->NumberParameters > 1)
-		fault = (unsigned long long)er->ExceptionInformation[1];
-	mod_of((unsigned long long)c->Rip, mod, sizeof(mod), &off);
-	fprintf(stderr, "[xcpt] pid %lu tid %lu code=0x%lx rip=0x%llx "
-		"(%s+0x%llx) rsp=0x%llx fault=0x%llx\n",
-		(unsigned long)GetCurrentProcessId(),
-		(unsigned long)GetCurrentThreadId(),
-		(unsigned long)er->ExceptionCode,
-		(unsigned long long)c->Rip, mod, off, sp, fault);
-	page_of("rsp", sp);
-	page_of("rsp-0x1000", sp - 0x1000);
-	page_of("rsp-0x10000", sp - 0x10000);
-	{
-		MEMORY_BASIC_INFORMATION mbi;
-
-		memset(&mbi, 0, sizeof(mbi));
-		if (VirtualQuery((void *)(uintptr_t)sp, &mbi, sizeof(mbi)) ==
-			    sizeof(mbi) &&
-		    mbi.State == MEM_COMMIT &&
-		    (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE |
-				    PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
-			fprintf(stderr, "[xcpt]   stack words: %llx %llx %llx "
-				"%llx %llx %llx %llx %llx\n",
-				((unsigned long long *)(uintptr_t)sp)[0],
-				((unsigned long long *)(uintptr_t)sp)[1],
-				((unsigned long long *)(uintptr_t)sp)[2],
-				((unsigned long long *)(uintptr_t)sp)[3],
-				((unsigned long long *)(uintptr_t)sp)[4],
-				((unsigned long long *)(uintptr_t)sp)[5],
-				((unsigned long long *)(uintptr_t)sp)[6],
-				((unsigned long long *)(uintptr_t)sp)[7]);
-	}
-	(void)i;
-	fflush(stderr);
-}
-
-/* Shelley 269: the thread resumes the guest with a guest stack pointer, but
- * its TEB still describes the host stack. Windows classifies and probes a
- * fault against the TEB, so the very first dispatch of a guest exception
- * nests: the probe itself faults, the dispatcher marches down, and by the time
- * it reaches an uncommitted page the process is gone before any handler runs.
- *
- * The TEB is therefore pointed at the guest stack for the duration of the
- * guest run and restored the moment an exception brings us back.
- */
-static unsigned long long teb_saved_base, teb_saved_limit;
-static int teb_swap_off = -1;
-
-static int teb_swap_enabled(void)
-{
-	if (teb_swap_off < 0) {
-		const char *e = getenv("UML_NT_TEBSTACK");
-
-		/* Shelley 281: the swap is OFF unless the boot command line asks
-		 * for it. The mainline referee — which dispatches thousands of
-		 * exceptions on the guest stack view quite happily — stopped
-		 * booting after this lever went in at the first entry, so it
-		 * cannot be left on by default while it is still an experiment. */
-		teb_swap_off = !(e != NULL && e[0] == '1');
-		fprintf(stderr, "[teb-swap] pid %lu %s\n",
-			(unsigned long)GetCurrentProcessId(),
-			teb_swap_off ? "OFF (A/B leg)" : "ON");
-		fflush(stderr);
-	}
-	return !teb_swap_off;
-}
-
-static void teb_swap_to_guest(void)
-{
-	unsigned long long top, bot;
-
-	if (d == NULL || !teb_swap_enabled())
-		return;
-	top = d->stack_top_hint;
-	bot = d->stack_bottom;
-	if (top < 0x10000ull || bot < 0x10000ull || top <= bot) {
-		static int warned;
-
-		if (!warned++) {
-			fprintf(stderr, "[teb-swap] pid %lu REFUSED implausible "
-				"bounds top=0x%llx bot=0x%llx (TEB left alone)\n",
-				(unsigned long)GetCurrentProcessId(), top, bot);
-			fflush(stderr);
-		}
-		return;
-	}
-	if (teb_saved_base == 0) {
-		teb_saved_base = __readgsqword(0x08);
-		teb_saved_limit = __readgsqword(0x10);
-	}
-	__writegsqword(0x08, top);
-	/* Shelley 277: the dispatcher asks _chkstk whether there is room below
-	 * the stack pointer. Windows answers from the TEB, and a limit that sits
-	 * exactly at the committed bottom says "no room at all". One page lower
-	 * gives it the room it needs to probe, and the page below is committed by
-	 * the reserve anyway. */
-	__writegsqword(0x10, bot > 0x1000 ? bot - 0x1000 : bot);
-	{
-		static unsigned long applied;
-
-		applied++;
-		if ((applied & 63ul) == 1)
-			fprintf(stderr, "[teb-swap] pid %lu applied=%lu "
-				"top=0x%llx bot=0x%llx\n",
-				(unsigned long)GetCurrentProcessId(), applied,
-				top, bot);
-	}
-}
-
-static void teb_swap_back(void)
-{
-	if (teb_saved_base == 0)
-		return;
-	__writegsqword(0x08, teb_saved_base);
-	__writegsqword(0x10, teb_saved_limit);
-	teb_saved_base = 0;
-}
-
-/* Shelley 270: which resume path does the guest actually take? One line per
- * site, once, beats guessing at which return statement runs. */
-#define RESUME_SITE(tag)						\
-	do {								\
-		static int once_;					\
-									\
-		if (!once_) {						\
-			once_ = 1;					\
-			fprintf(stderr, "[resume-path] pid %lu tid %lu "	\
-				"site=%s\n",				\
-				(unsigned long)GetCurrentProcessId(),	\
-				(unsigned long)GetCurrentThreadId(), (tag)); \
-			fflush(stderr);					\
-		}							\
-	} while (0)
-
-static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
-=======
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
->>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 {
 	/* Shelley 215: the very first thing that happens, before the switch
 	 * stack and before any ring write. If this counter ever exceeds the
@@ -2771,16 +2532,6 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 		((volatile LONG64 *)&d->veh_first)[0] =
 			InterlockedIncrement64((volatile LONG64 *)
 					       &d->veh_first);
-<<<<<<< HEAD
-	/* Shelley 282: this instrument prints for the thread that is running the
-	 * guest. Doing it from every thread — helper threads included — reads
-	 * host contexts that are not ours to read and faults inside the handler
-	 * itself, which is what collapsed the mainline boot from forty-nine
-	 * thousand log lines to four hundred. */
-	if (GetCurrentThreadId() == g_main_tid)
-		xcpt_any_thread(ep);
-=======
->>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	entry_stamp(ep);
 	if (ep != NULL && ep->ContextRecord != NULL)
 		{
@@ -3788,23 +3539,6 @@ int main(int argc, char **argv)
 		d->tsc_per_us = dqpc ? (dtsc * freq) / (dqpc * 1000000ull) : 0;
 	}
 	job_report("boot");
-<<<<<<< HEAD
-	atexit(stub_atexit);
-	g_main_tid = (unsigned long)GetCurrentThreadId();
-	(void)teb_swap_enabled();	/* Shelley 270: the lever must print it is
-					 * alive before anyone judges it */
-	/* Shelley 265 (c): ask Windows to report a nearly-exhausted stack
-	 * early instead of letting the guard fault cascade into an access
-	 * violation at an address nobody can attribute. */
-	SetThreadStackGuarantee((ULONG[1]){ 64u << 10 });
-	capture_stack = (pfn_csb_t)(uintptr_t)
-		GetProcAddress(GetModuleHandleA("ntdll.dll"),
-			       "RtlCaptureStackBackTrace");
-	exit_evt = CreateEventW(NULL, TRUE, FALSE, NULL);
-	if (exit_evt != NULL)
-		CreateThread(NULL, 0, exit_thread, NULL, 0, NULL);
-=======
->>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	{
 		const char *tc = getenv("UML_NT_CENSUS");
 
