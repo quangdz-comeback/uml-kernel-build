@@ -76,33 +76,6 @@
 
 static struct uml_nt_stub_data *d;
 static HANDLE evt_in, evt_out; /* stub->kernel, kernel->stub */
-
-/* Shelley 249: if the process ever walks the ordinary exit path, say so —
- * the WER record points into the CRT's thread-exit, and an exit nobody asked
- * for is exactly what that record would look like from here. */
-static void stub_atexit(void)
-{
-	fprintf(stderr, "[thr] pid %lu atexit (ordinary process exit path)\n",
-		(unsigned long)GetCurrentProcessId());
-	fflush(stderr);
-}
-
-#define THR_ENTER(name)							\
-	do {								\
-		fprintf(stderr, "[thr] pid %lu tid %lu enter %s\n",	\
-			(unsigned long)GetCurrentProcessId(),		\
-			(unsigned long)GetCurrentThreadId(), (name));	\
-		fflush(stderr);						\
-	} while (0)
-#define THR_LEAVE(name)							\
-	do {								\
-		fprintf(stderr, "[thr] pid %lu tid %lu LEAVE %s\n",	\
-			(unsigned long)GetCurrentProcessId(),		\
-			(unsigned long)GetCurrentThreadId(), (name));	\
-		fflush(stderr);						\
-	} while (0)
-
-
 static HANDLE phys_sec; /* physmem section (per-VMA views, do_action) */
 
 /* Shelley 250: the exit thread. Every path that leaves this world from guest
@@ -1498,16 +1471,22 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep);
 static DWORD WINAPI veh_window_close(LPVOID arg)
 {
 	(void)arg;
+<<<<<<< HEAD
 	THR_ENTER("veh_window_close");
 	alive_vehwin = 1;
+=======
+>>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	Sleep(4000);
 	AddVectoredExceptionHandler(1, veh_handler);
 	d->veh_window_state = 2;
 	fprintf(stderr, "[veh-window] pid %lu restored after 4 s\n",
 		(unsigned long)GetCurrentProcessId());
 	fflush(stderr);
+<<<<<<< HEAD
 	THR_LEAVE("veh_window_close");
 	alive_vehwin = 0;
+=======
+>>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	return 0;
 }
 
@@ -1629,8 +1608,11 @@ static DWORD WINAPI job_watch(LPVOID arg)
 	int prints = 0;
 
 	(void)arg;
+<<<<<<< HEAD
 	THR_ENTER("job_watch");
 	alive_jobw = 1;
+=======
+>>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	fprintf(stderr, "[vet] armed pid %lu t0=%llu\n",
 		(unsigned long)GetCurrentProcessId(), t0);
 	fflush(stderr);
@@ -2574,6 +2556,7 @@ static LONG CALLBACK unhandled_writer(EXCEPTION_POINTERS *ep)
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
+<<<<<<< HEAD
 /* Shelley 249 (WER on a real machine): the fault was named inside
  * msvcrt's thread-exit path, on an instruction that calls through an import
  * slot. Everything this port has ever logged about an exception was about
@@ -2776,6 +2759,9 @@ static void teb_swap_back(void)
 	} while (0)
 
 static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
+=======
+static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
+>>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 {
 	/* Shelley 215: the very first thing that happens, before the switch
 	 * stack and before any ring write. If this counter ever exceeds the
@@ -2785,6 +2771,7 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 		((volatile LONG64 *)&d->veh_first)[0] =
 			InterlockedIncrement64((volatile LONG64 *)
 					       &d->veh_first);
+<<<<<<< HEAD
 	/* Shelley 282: this instrument prints for the thread that is running the
 	 * guest. Doing it from every thread — helper threads included — reads
 	 * host contexts that are not ours to read and faults inside the handler
@@ -2792,6 +2779,8 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 	 * thousand log lines to four hundred. */
 	if (GetCurrentThreadId() == g_main_tid)
 		xcpt_any_thread(ep);
+=======
+>>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	entry_stamp(ep);
 	if (ep != NULL && ep->ContextRecord != NULL)
 		{
@@ -3799,6 +3788,7 @@ int main(int argc, char **argv)
 		d->tsc_per_us = dqpc ? (dtsc * freq) / (dqpc * 1000000ull) : 0;
 	}
 	job_report("boot");
+<<<<<<< HEAD
 	atexit(stub_atexit);
 	g_main_tid = (unsigned long)GetCurrentThreadId();
 	(void)teb_swap_enabled();	/* Shelley 270: the lever must print it is
@@ -3813,6 +3803,8 @@ int main(int argc, char **argv)
 	exit_evt = CreateEventW(NULL, TRUE, FALSE, NULL);
 	if (exit_evt != NULL)
 		CreateThread(NULL, 0, exit_thread, NULL, 0, NULL);
+=======
+>>>>>>> parent of 862ca55 (feat(M5.6a): print the first-chance record for every thread, not just the guest)
 	{
 		const char *tc = getenv("UML_NT_CENSUS");
 
