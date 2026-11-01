@@ -130,6 +130,7 @@ static DWORD WINAPI exit_thread(LPVOID arg)
  * see — the exit code becomes the exception code, which is exactly what the
  * harness reads. */
 static volatile LONG alive_watchdog, alive_census, alive_jobw, alive_vehwin;
+static unsigned long g_main_tid;
 
 static void exit_begin(const char *why, unsigned code)
 {
@@ -2784,7 +2785,13 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 		((volatile LONG64 *)&d->veh_first)[0] =
 			InterlockedIncrement64((volatile LONG64 *)
 					       &d->veh_first);
-	xcpt_any_thread(ep);
+	/* Shelley 282: this instrument prints for the thread that is running the
+	 * guest. Doing it from every thread — helper threads included — reads
+	 * host contexts that are not ours to read and faults inside the handler
+	 * itself, which is what collapsed the mainline boot from forty-nine
+	 * thousand log lines to four hundred. */
+	if (GetCurrentThreadId() == g_main_tid)
+		xcpt_any_thread(ep);
 	entry_stamp(ep);
 	if (ep != NULL && ep->ContextRecord != NULL)
 		{
@@ -3793,6 +3800,7 @@ int main(int argc, char **argv)
 	}
 	job_report("boot");
 	atexit(stub_atexit);
+	g_main_tid = (unsigned long)GetCurrentThreadId();
 	(void)teb_swap_enabled();	/* Shelley 270: the lever must print it is
 					 * alive before anyone judges it */
 	/* Shelley 265 (c): ask Windows to report a nearly-exhausted stack
