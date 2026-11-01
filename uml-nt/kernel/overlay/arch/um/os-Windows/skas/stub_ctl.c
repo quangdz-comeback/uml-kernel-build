@@ -12542,20 +12542,28 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		{
 			static int want_runs = -1;
 
+
 			if (want_runs < 0) {
 				const char *e = uml_nt_getenv(
 					"UML_NT_STACK_FULLCOMMIT");
 
-				want_runs = (e != NULL && e[0] == '1') ? 128 : 4;
+				/* Shelley 281: the proactive reserve is an
+				 * experiment too. Reserved plan slots on every
+				 * answer starve the ops the boot actually needs,
+				 * which is why the mainline referee stopped
+				 * booting after it landed. Off unless asked. */
+				want_runs = (e != NULL && e[0] == '1') ? 128 : 0;
 				os_info("[stack-reserve] pid %lu fullcommit=%d "
 					"runs_per_answer=%d\n",
 					(unsigned long)c->pid,
 					want_runs == 128, want_runs);
 			}
-			uml_nt_sc_plan_reserve(c, (unsigned)want_runs);
-			c->mm->ca_full = want_runs;
+			if (want_runs > 0) {
+				uml_nt_sc_plan_reserve(c, (unsigned)want_runs);
+				c->mm->ca_full = want_runs;
+			}
 		}
-		for (k = 0; k < (c->mm->ca_full ? c->mm->ca_full : 4); k++) {
+		for (k = 0; k < c->mm->ca_full; k++) {
 			unsigned long long rsp_eff = c->d->regs.rsp ?
 				c->d->regs.rsp : c->d->stack_va;
 			unsigned long long top_eff = c->d->stack_top_hint ?
