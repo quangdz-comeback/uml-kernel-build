@@ -26,3 +26,10 @@ CC="${CC:-clang}"
 "$TMP/test"
 "$TMP/memparse"
 "$TMP/dbgmap"
+
+# Shelley 287/288 (Astra S2b/S2c): the VEH diagnostic placement, wired here
+# because this runner is the one CI already calls — no workflow change and no
+# gate change. Source-only and deterministic: it reads stub/stub.c and never
+# builds, executes or inspects a binary, so a missing PE can never read as a
+# pass.
+bash "$HERE/test_veh_diag_order.sh"

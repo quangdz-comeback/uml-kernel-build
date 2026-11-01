@@ -2248,7 +2248,7 @@ static void veh_stk_selfcheck(void)
 		veh_now_sp() == sp_before ? "exact" : "MISMATCH");
 }
 
-static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep);
+static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep);
 
 /* Shelley 173: the first line of the handler owns the record. Nothing
  * has been read, decided or overwritten yet — if an entry is missing
@@ -2347,7 +2347,7 @@ static void ctx_audit_snapshot(CONTEXT *c)
 			if (d->census_other <= 8)
 				fprintf(stderr, "[census] pid %lu exception on "
 					"thread %u — NOT the guest thread %u "
-					"(#%lu): veh_body would treat it as "
+					"(#%lu): the body would treat it as "
 					"guest state\n",
 					(unsigned long)d->pid, tid,
 					(unsigned)d->guest_tid,
@@ -2531,6 +2531,62 @@ static LONG CALLBACK unhandled_writer(EXCEPTION_POINTERS *ep)
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/*
+ * Shelley 286 (Astra S2): the diagnostics run on the private dispatch stack,
+ * never on the stack that faulted. Two things are checked before any CRT call:
+ * the buffer is initialised, and the rsp we are actually running on lies
+ * inside it. The marker keeps both stack pointers — the incoming one saved at
+ * entry and the one this frame really has — because a single number called
+ * "rsp" is what made the old line ambiguous.
+ */
+static void veh_diag(EXCEPTION_POINTERS *ep)
+{
+	unsigned long long buf = veh_stk.buf;
+	unsigned long long end = veh_stk.buf + veh_stk.size;
+	unsigned long long body_rsp = veh_now_sp();
+	unsigned long long sb, sl, used, all;
+	static unsigned long long entries;
+
+	if (buf == 0 || veh_stk.size < UML_NT_VEH_MIN_SIZE)
+		return;
+	if (body_rsp < buf || body_rsp >= end)
+		return;		/* not on the private stack: say nothing */
+
+	sb = __readgsqword(0x08);
+	sl = __readgsqword(0x10);
+
+	/* first entry as well as every 64th: a counter that only speaks
+	 * after 64 entries says nothing in a run that dies before them
+	 * (rule #11). */
+	if ((entries++ == 0 || (entries & 63u) == 0) && sb > sl) {
+		/* Shelley 287 (Astra S2b): the incoming sp is the one the
+		 * stack model already saved at the outermost entry —
+		 * uml_nt_veh_enter() stores sp_now in veh_stk.guest_sp. A
+		 * separate __thread copy put a cold emulated-TLS lookup
+		 * (__emutls_get_address for __emutls_v.veh_sp_in) on the very
+		 * path this change exists to make safe. */
+		used = sb > veh_stk.guest_sp ? sb - veh_stk.guest_sp : 0;
+		all = sb - sl;
+		fprintf(stderr, "[veh-enter] pid %lu tid %lu "
+			"incoming_rsp=0x%llx body_rsp=0x%llx "
+			"buf=[0x%llx,0x%llx) in_buf=1 "
+			"limit=0x%llx base=0x%llx used_pct=%llu n=%llu\n",
+			(unsigned long)GetCurrentProcessId(),
+			(unsigned long)GetCurrentThreadId(), veh_stk.guest_sp,
+			body_rsp,
+			buf, end, sl, sb, (used * 100ull) / all, entries);
+		fflush(stderr);
+	}
+	fault_forensics(ep);
+}
+
+/* Runs ON the private buffer (veh_switch_call installed it). */
+static LONG CALLBACK veh_dispatch(EXCEPTION_POINTERS *ep)
+{
+	veh_diag(ep);
+	return veh_handler_body(ep);
+}
+
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 {
 	/* Shelley 215: the very first thing that happens, before the switch
@@ -2569,38 +2625,20 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 					  ep->ContextRecord);
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
-	/* Shelley 265: everything that logs runs AFTER the switch, on the
-	 * dispatch stack with its guard page — never on the thread's own
-	 * stack, which is the one that ran out. */
-	fault_forensics(ep);
+	/* Shelley 286 (Astra S2): the diagnostics used to run HERE, before
+	 * the switch — every CRT call (fault_forensics, the [veh-enter]
+	 * fprintf/fflush) executed on the very stack this handler exists to
+	 * leave. They now run from veh_dispatch(), i.e. only after
+	 * veh_switch_call has installed the private buffer. */
 	teb_swap_back();
 	in_veh = 1;
-	{
-		static unsigned long long entries;
-		unsigned long long sb = __readgsqword(0x08);
-		unsigned long long sl = __readgsqword(0x10);
-
-		/* first entry as well as every 64th: a counter that only
-		 * speaks after 64 entries says nothing in a run that dies
-		 * before them (rule #11). */
-		if ((entries++ == 0 || (entries & 63u) == 0) && sb > sl) {
-			unsigned long long used = sb - sp_in;
-
-			fprintf(stderr, "[veh-enter] pid %lu tid %lu rsp=0x%llx "
-				"limit=0x%llx base=0x%llx used_pct=%llu n=%llu\n",
-				(unsigned long)GetCurrentProcessId(),
-				(unsigned long)GetCurrentThreadId(), sp_in, sl,
-				sb, (used * 100ull) / (sb - sl), entries);
-			fflush(stderr);
-		}
-	}
 	veh_stk_init();
 	if (uml_nt_veh_enter(&veh_stk, sp_in) == 0) {
 		/* the outermost entry runs on the stub's own buffer, never
 		 * on the guest's stack: a dispatcher frame can no longer
 		 * land on a guest PROT_NONE/PAGE_GUARD page */
 		r = (LONG)veh_switch_call((long (*)(EXCEPTION_POINTERS *))
-					  veh_body, ep,
+					  veh_dispatch, ep,
 					  (void *)(uintptr_t)veh_stk.sp,
 					  veh_save);
 		(void)uml_nt_veh_leave(&veh_stk, &sp_out);
@@ -2613,13 +2651,18 @@ static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
 					sp_out, veh_now_sp());
 		}
 	} else {
-		r = veh_body(ep);	/* refused: old behaviour */
+		/* refused: old behaviour, and NO diagnostics — the buffer is
+		 * not ours, so a CRT call here would run on the stack this
+		 * handler was called on. */
+		r = veh_handler_body(ep);
 	}
 	in_veh = 0;
 	return r;
 }
 
-static LONG CALLBACK veh_body(EXCEPTION_POINTERS *ep)
+static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep);
+
+static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 {
 	EXCEPTION_RECORD *er = ep->ExceptionRecord;
 	CONTEXT *c = ep->ContextRecord;
