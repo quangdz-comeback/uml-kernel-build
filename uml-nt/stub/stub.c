@@ -105,6 +105,10 @@ static DWORD WINAPI exit_thread(LPVOID arg)
 static volatile LONG alive_watchdog, alive_census, alive_jobw, alive_vehwin;
 static unsigned long g_main_tid;
 
+/* Shelley 282: the thread-lifecycle prints are off; the call sites stay. */
+#define THR_ENTER(name) do { (void)(name); } while (0)
+#define THR_LEAVE(name) do { (void)(name); } while (0)
+
 /* Shelley 282: the resume-path witness is off; the call sites stay. */
 #define RESUME_SITE(tag) do { (void)(tag); } while (0)
 
