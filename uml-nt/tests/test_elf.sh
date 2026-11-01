@@ -24,7 +24,8 @@ fi
 	-I"$OS_DIR/include" -I"$SRC_DIR/include/shared" \
 	-o "$TMP/test" "$HERE/test_elf.c" \
 	"$OS_DIR/skas/elf.c" "$OS_DIR/skas/elf_split.c" "$OS_DIR/skas/vma.c" \
-	"$OS_DIR/skas/physalloc.c" "$OS_DIR/skas/scan_patch.c"
+	"$OS_DIR/skas/physalloc.c" \
+	"$HERE/ans_free_live_fake.c" "$OS_DIR/skas/scan_patch.c"
 
 # the REAL S3 init fixture — the rootfs recipe verbatim (rootfs/
 # Makefile): -static -nostdlib -no-pie links at 0x400000, so this

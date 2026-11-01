@@ -22,6 +22,7 @@
 #include <vma.h>
 #include <physalloc.h>
 #include <stub_nt.h>
+#include "ans_free_live_fake.h"
 
 static int fails;
 
@@ -238,11 +239,26 @@ static void test_phys_d22(void)
 	CHECK(uml_nt_mm_clone(&child, &parent, &p, 0) == 0);
 	CHECK(uml_nt_phys_refs(&p, r) == 2);
 
+	/* Shelley 284 (Astra S0): the release witness is part of the mm-drop
+	 * contract, not a decoration — it is the one thing that would tell a
+	 * live conn that the memory under it is going away. Assert the range
+	 * and the reason, so a harness that loses the witness fails here
+	 * instead of passing with a symbol nobody defines. */
+	ans_free_live_fake_reset();
 	uml_nt_mm_drop_for(&parent, &p, &connA);
+	CHECK(ans_free_live_fake_count() == 1);
+	CHECK(ans_free_live_fake_lo(0) == RAM);
+	CHECK(ans_free_live_fake_hi(0) == RAM + 2 * RUN);
+	CHECK(ans_free_live_fake_why(0) != NULL &&
+	      strcmp(ans_free_live_fake_why(0), "mm-drop") == 0);
 	CHECK(uml_nt_phys_refs(&p, r) == 1);
 	CHECK(mock_taken[0]);
 
+	ans_free_live_fake_reset();
 	uml_nt_mm_drop_for(&child, &p, &connB);
+	CHECK(ans_free_live_fake_count() == 1);
+	CHECK(ans_free_live_fake_lo(0) == RAM);
+	CHECK(ans_free_live_fake_hi(0) == RAM + 2 * RUN);
 	CHECK(uml_nt_phys_parked(&p) == 1);
 	CHECK(mock_taken[0]);
 

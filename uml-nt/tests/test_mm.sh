@@ -14,5 +14,6 @@ CC="${CC:-clang}"
 	-I"$OS_DIR/include" -I"$SRC_DIR/include/shared" \
 	-o "$TMP/test" "$HERE/test_mm.c" \
 	"$OS_DIR/skas/fault.c" "$OS_DIR/skas/vma.c" \
-	"$OS_DIR/skas/physalloc.c"
+	"$OS_DIR/skas/physalloc.c" \
+	"$HERE/ans_free_live_fake.c"
 "$TMP/test"
