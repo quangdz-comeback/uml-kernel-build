@@ -22,6 +22,7 @@
  * M3.8 boot-failure pointer ("cứ thêm + unit test").
  */
 #include <linux/kernel.h>
+#include <diag_record.h>
 #include <linux/binfmts.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -3388,6 +3389,124 @@ static void abrt_arena_audit(struct uml_nt_stub_conn *c,
  * that explains why the text never reached the console. Signature-
  * gated on the glibc fatal-message family (abrt_text_match) so every
  * normal fd-2 writev stays silent. */
+/* ---- S11b capget (nr=125) round witness ---------------------------------
+ *
+ * The deterministic death in the referees is a fork child of /sbin/init that
+ * never execs: 79 VMAs, a trap at a glibc capget stub, and a death outside
+ * every handler. One line per round, framed by diag_record.h (one host write,
+ * one attempt), answers the questions the death log cannot: which conn, seeded
+ * from which parent, which guest VA pair, whether the data write would have
+ * been granted, what the emulation returned, and what the plan held after the
+ * handler ran.
+ */
+/* S11b-REC-BEGIN (extracted verbatim by tests/test_capget_witness.sh) */
+struct uml_nt_capget_rec {
+	unsigned long pid;
+	unsigned long parent_pid;
+	unsigned long long a0;
+	unsigned long long a1;
+	unsigned long long len;
+	int granted;		/* 1 = the a1 data write would be served */
+	const char *why;	/* uacc verdict: ok/translate/refs0/gen/prot */
+	unsigned long long run_off;
+	unsigned long long run_gen;
+	long long retval;
+	int plan_ops;
+	unsigned long long trap_rip;
+	int fork_seeded;
+};
+/* S11b-REC-END */
+
+/* S11b-WITNESS-BEGIN (extracted verbatim by tests/test_capget_witness.sh) */
+static int uml_nt_capget_emit(char *buf, unsigned int cap,
+			      const struct uml_nt_diag_ops *ops,
+			      const struct uml_nt_capget_rec *r)
+{
+	return uml_nt_diag_record(buf, cap, ops,
+				  "[capget] pid=%lu parent=%lu "
+				  "fork_seeded=%d a0=0x%llx a1=0x%llx len=%llu "
+				  "uacc=%s why=%s run_off=0x%llx run_gen=0x%llx "
+				  "ret=%lld plan_ops=%d trap_rip=0x%llx",
+				  r->pid, r->parent_pid, r->fork_seeded,
+				  r->a0, r->a1, r->len,
+				  r->granted ? "granted" : "refused", r->why,
+				  r->run_off, r->run_gen, r->retval,
+				  r->plan_ops, r->trap_rip);
+}
+/* S11b-WITNESS-END */
+
+static int capget_console_format(char *buf, unsigned int cap, const char *fmt,
+				 va_list ap)
+{
+	return vsnprintf(buf, cap, fmt, ap);
+}
+
+static int capget_console_sink(const char *buf, unsigned int len)
+{
+	nt_console_write(buf, len);
+	return UML_NT_DIAG_SINK_UNKNOWN_VALUE;
+}
+
+static const struct uml_nt_diag_ops capget_console_ops = {
+	capget_console_format, capget_console_sink
+};
+
+/* First 32 rounds per conn: enough to see a pattern, bounded so a guest that
+ * loops cannot flood the console. Read-only: nothing here changes the round. */
+static void uml_nt_capget_witness(struct uml_nt_stub_conn *c,
+				  unsigned long long nr,
+				  const unsigned long long *a, long long ret)
+{
+	struct uml_nt_capget_rec r;
+	unsigned long long len, off;
+	long long tr;
+	struct uml_nt_vma *v;
+	char buf[UML_NT_DIAG_CAP];
+
+	if (c == 0 || a == 0 || nr != 125)
+		return;
+	if (c->capget_rounds >= 32)
+		return;
+	c->capget_rounds++;
+
+	memset(&r, 0, sizeof(r));
+	r.pid = (unsigned long)c->pid;
+	r.parent_pid = (unsigned long)c->fork_seed_parent;
+	r.fork_seeded = c->fork_seed_parent != 0;
+	r.a0 = a[0];
+	r.a1 = a[1];
+	len = a[2] != 0 ? a[2] : 8;	/* the struct capget writes back */
+	r.len = len;
+	r.retval = ret;
+	r.plan_ops = c->plan.n_ops;
+	r.trap_rip = c->d != 0 ? c->d->regs.rip : 0;
+	r.why = "translate";
+
+	/* Would the write to a1 have been served? Translate, then check that the
+	 * run is owned and that the claim's generation still matches. */
+	if (c->mm != 0 && c->ph != 0 && (tr = uml_nt_vma_translate(c->mm,
+						      a[1], len)) >= 0) {
+		off = (unsigned long long)tr &
+		      ~(unsigned long long)(UML_NT_PHYS_RUN_SIZE - 1);
+		r.run_off = (unsigned long long)tr;
+		r.run_gen = uml_nt_phys_gen(c->ph, (long long)off);
+		v = uml_nt_vma_find(c->mm, a[1]);
+		if (uml_nt_phys_refs(c->ph, (long long)off) <= 0) {
+			r.why = "refs0";
+		} else if (v != 0 && v->gen != 0 &&
+			   v->gen != uml_nt_phys_gen(c->ph, (long long)off)) {
+			r.why = "gen";
+		} else if (v != 0 && (v->prot & 0x04u) == 0) {
+			r.why = "prot";
+		} else {
+			r.granted = 1;
+			r.why = "ok";
+		}
+	}
+	(void)uml_nt_capget_emit(buf, sizeof(buf), &capget_console_ops, &r);
+}
+
+
 static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 				const struct uml_nt_stub_data *d,
 				const unsigned long long *a,
@@ -4630,12 +4749,17 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		break;
 	}
 
+
 	if (exec_pending) {
 		/* The exec destroyed this conn (and d): touch neither.
 		 * The out: teardown below only clears the globals. */
 		goto out;
 	}
 	d->retval = ret;
+	/* Shelley 301: after the handler has answered, before anything else
+	 * touches the round. The witness is read-only and never gated on the
+	 * debugger/veh_window levers. */
+	uml_nt_capget_witness(c, nr, a, ret);
 	d->err = ((long long)ret < 0 && (long long)ret > -512) ? 1 : 0;
 	/* M5.4 c3 diag: feed the SIGSEGV print (stub_ctl.c) — see the
 	 * conn field comment. */

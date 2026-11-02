@@ -12022,9 +12022,14 @@ no_zero:
 			(unsigned long)parent->pid);
 		}
 	}
+	/* Shelley 301 (Astra S11b): the same parent pid the line prints is
+	 * recorded on the child, so a later round can say "this conn never
+	 * exec'd, it was seeded from N" without consulting the sticky
+	 * login-chain globals. */
+	child->fork_seed_parent = parent->pid;
 	os_info("fork: child conn pid %lu seeded (%d vma(s), parent "
 		"pid %lu)\n", (unsigned long)child->pid,
-		child->mm->nvma, (unsigned long)parent->pid);
+		child->mm->nvma, (unsigned long)child->fork_seed_parent);
 	return 0;
 }
 

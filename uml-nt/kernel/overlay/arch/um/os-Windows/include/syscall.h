@@ -144,6 +144,14 @@ struct uml_nt_stub_conn {
 	 * ancestor execed a login/getty binary). Inherited across fork —
 	 * the debug tax is paid only where the disease lives. */
 	u32_nt chain_login;
+	/* Shelley 301 (Astra S11b): the fork-seed parent, and how many
+	 * capget rounds this conn has already reported. fork_seed_parent is
+	 * the SAME pid the "fork: child conn ... seeded (..., parent pid N)"
+	 * line prints; it is set at the seed and only read elsewhere — it is
+	 * deliberately NOT chain_login/g_exec_login, whose sticky global made
+	 * a login-chain label stop meaning "a login process". */
+	ULONG fork_seed_parent;
+	unsigned int capget_rounds;
 	ULONG exit_code;
 	/* [ss-stray] rows consumed from d->ss_stray_n (stub_nt.h v14) */
 	unsigned int ss_stray_seen;

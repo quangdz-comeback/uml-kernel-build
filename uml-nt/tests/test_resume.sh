@@ -44,3 +44,8 @@ bash "$HERE/test_diag_record.sh"
 # the kernel's own link leaves the symbol at address 0 and the guard loads
 # through it. Links the guard without the launcher, as the kernel does.
 bash "$HERE/test_dump_hook.sh"
+
+# Shelley 301 (Astra S11b): the capget round witness — the emitter is
+# extracted verbatim from skas/syscall.c and driven through the production
+# framing helper, so every field and the one-write rule are checked together.
+bash "$HERE/test_capget_witness.sh"
