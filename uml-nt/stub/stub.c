@@ -66,6 +66,8 @@
 
 #include "../kernel/overlay/arch/um/include/shared/stub_nt.h"
 #include "../kernel/overlay/arch/um/include/shared/diag_record.h"
+#include "../kernel/overlay/arch/um/include/shared/hop_live.h"
+#include "../kernel/overlay/arch/um/include/shared/hop_live_asm.h"
 #include "resume_model.h"
 #include <ctxaudit_model.h>
 #include "../kernel/overlay/arch/um/include/shared/veh_model.h"
@@ -658,10 +660,98 @@ static volatile unsigned long long fs_tramp_snap_id, fs_tramp_ent_id;
 volatile unsigned char *fs_stage __attribute__((used));
 volatile unsigned long long *fs_seq __attribute__((used));
 volatile unsigned long long *fs_ts __attribute__((used));
+/* S13: where the plain trampolines write their pre-jmp observation. It always
+ * points somewhere (a private dummy before the shared page exists), so the
+ * trampolines need no null test and therefore change no flags. */
+struct uml_nt_hop_live hop_live_dummy;
+struct uml_nt_hop_live *volatile fs_live_ptr __attribute__((used)) =
+	&hop_live_dummy;
+/*
+ * S13 (Astra review 304): ONE finalizer, on the switched-stack dispatch path.
+ *
+ * Returns that reach the diagnostic wrapper pass through veh_dispatch, so the
+ * decision "was this return a plain hop?" belongs there and nowhere else. Two
+ * paths deliberately do NOT: the re-entrant (in_veh) path returns SEARCH
+ * before the switch, and a refused stack calls the body directly — both keep
+ * an unsupported/invalid witness and are never promoted to a current hop.
+ * The body still owns its control flow; this only reads the FINAL context and
+ * the returned status afterwards, and it never changes either.
+ *
+ * Captured at dispatch entry (on the private stack): the VEH-entry identity of
+ * THIS attempt. Any return that is not a supported plain hop keeps an invalid
+ * witness, so a newer unsampled return can never inherit a previous entry's
+ * comparable record.
+ */
+static void fs_trampoline_sys(void);
+static void fs_trampoline_fault(void);
+
+static unsigned long long hop_entry_id;	/* this attempt's VEH entry */
+static unsigned long long hop_arm_seq;	/* per-return arm identity */
+
+/* S13-FINALIZER-BEGIN (extracted verbatim by tests/test_hop_live_dispatch.sh) */
+/*
+ * Pure decision: which kind does this return arm, given the result and the
+ * FINAL context rip? 0 = do not sample.
+ */
+static int hop_live_arm_kind(LONG result, unsigned long long ctx_rip,
+			     unsigned long long sys_va,
+			     unsigned long long fault_va)
+{
+	if (result != EXCEPTION_CONTINUE_EXECUTION)
+		return 0;		/* SEARCH / handled elsewhere */
+	if (ctx_rip == sys_va)
+		return UML_NT_HOP_KIND_SYS;
+	if (ctx_rip == fault_va)
+		return UML_NT_HOP_KIND_FAULT;
+	return 0;			/* TF, plain resume, anything else */
+}
+/* S13-FINALIZER-END */
+
+static void hop_live_begin_attempt(void)
+{
+	/* The raw veh_handler already incremented d->veh_entries for THIS entry
+	 * before it switched stacks and called us, so the current identity is
+	 * the count as it stands — no +1. (Report 305 claimed the body did the
+	 * increment; it does not, and that off-by-one made every real sample
+	 * read as belonging to the NEXT entry.) */
+	hop_entry_id = (unsigned long long)(d != 0 ? d->veh_entries : 0);
+	uml_nt_hop_live_invalidate(fs_live_ptr);
+}
+
+static void hop_live_finalize(EXCEPTION_POINTERS *ep, LONG result)
+{
+	struct uml_nt_hop_live *l = fs_live_ptr;
+	unsigned long long rip = 0;
+	int kind;
+
+	if (ep != 0 && ep->ContextRecord != 0)
+		rip = (unsigned long long)ep->ContextRecord->Rip;
+	kind = hop_live_arm_kind(result,
+				 rip,
+				 (unsigned long long)(uintptr_t)
+				 &fs_trampoline_sys,
+				 (unsigned long long)(uintptr_t)
+				 &fs_trampoline_fault);
+	if (kind == 0 || d == 0 || l == &hop_live_dummy || fs_tramp_target == 0)
+		return;
+	hop_arm_seq++;
+	if (hop_arm_seq == 0)
+		hop_arm_seq = 1;
+	(void)uml_nt_hop_live_arm(l, hop_arm_seq, (unsigned)kind,
+				  fs_tramp_target,
+				  (unsigned long long)ep->ContextRecord->Rax,
+				  (unsigned long long)d->req_seq,
+				  (unsigned long long)d->done_seq,
+				  hop_entry_id);
+}
 
 __attribute__((naked)) static void fs_trampoline_sys(void)
 {
 	__asm__ volatile (
+		/* S13: the entry mark is the FIRST thing this hop does, so a
+		 * death anywhere in the prefix is reported as entered (not
+		 * "armed only"). MOV-only, no flags, no stack. */
+		HOP_LIVE_STAMP_ENTER()
 		"movq	fs_stage(%rip), %r11\n\t"
 		"testq	%r11, %r11\n\t"
 		"jz	1f\n\t"
@@ -702,6 +792,7 @@ __attribute__((naked)) static void fs_trampoline_sys(void)
 		"popq	%rdx\n\t"
 		"popq	%rax\n\t"
 		"4:\n\t"
+		HOP_LIVE_STAMP_COMMIT("1")
 		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
@@ -713,6 +804,8 @@ __attribute__((naked)) static void fs_trampoline_sys(void)
 __attribute__((naked)) static void fs_trampoline_fault(void)
 {
 	__asm__ volatile (
+		/* S13: entry mark first — see fs_trampoline_sys. */
+		HOP_LIVE_STAMP_ENTER()
 		"movq	fs_tramp_base(%rip), %r11\n\t"
 		"wrfsbase %r11\n\t"
 		"movq	fs_tramp_snap_id(%rip), %r11\n\t"
@@ -740,6 +833,7 @@ __attribute__((naked)) static void fs_trampoline_fault(void)
 		"popq	%rdx\n\t"
 		"popq	%rax\n\t"
 		"4:\n\t"
+		HOP_LIVE_STAMP_COMMIT("2")
 		"movq	fs_save_r11(%rip), %r11\n\t"
 		"jmp	*fs_tramp_target(%rip)\n\t"
 	);
@@ -2637,8 +2731,18 @@ static void veh_diag(EXCEPTION_POINTERS *ep)
 /* Runs ON the private buffer (veh_switch_call installed it). */
 static LONG CALLBACK veh_dispatch(EXCEPTION_POINTERS *ep)
 {
+	LONG r;
+
+	/* S13: this wrapper is the one place every return from the body passes
+	 * through, and it already runs on the private stack. Capture this
+	 * attempt's VEH-entry identity and invalidate the witness here, then
+	 * arm it — once — from the FINAL context and the body's own result. No
+	 * scattered arm/finish calls, no latch, and nothing before the switch. */
+	hop_live_begin_attempt();
 	veh_diag(ep);
-	return veh_handler_body(ep);
+	r = veh_handler_body(ep);
+	hop_live_finalize(ep, r);
+	return r;
 }
 
 static LONG CALLBACK veh_handler(EXCEPTION_POINTERS *ep)
@@ -3363,6 +3467,8 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 				c->Rip;
 			d->tramp_arm++;
 		} else {
+			/* plain resume: no trampoline, so nothing may be
+			 * sampled — do not inherit the previous return. */
 			c->Rip = (DWORD64)target;
 			d->tramp_arm++;
 		}
@@ -3389,6 +3495,9 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 				((d->ss_page != 0 || d->tf_trace != 0) ?
 				 &fs_trampoline_fault_tf
 					 : &fs_trampoline_fault);
+			/* S13: the dispatch finalizer decides whether this
+			 * return is a supported plain hop from the final
+			 * context; nothing is armed here. */
 			d->tramp_va = (unsigned long long)(uintptr_t)
 				c->Rip;
 			d->tramp_arm++;
@@ -3633,6 +3742,11 @@ int main(int argc, char **argv)
 		fs_stage = (volatile unsigned char *)&d->hop_stage;
 		fs_seq = &d->hop_seq;
 		fs_ts = &d->hop_ts;
+		/* S13: point the trampolines at the shared witness record BEFORE
+		 * any instrumented hop can run. Until this line they wrote the
+		 * private dummy, which no reader ever reads. */
+		uml_nt_hop_live_invalidate(&d->hop_live);
+		fs_live_ptr = &d->hop_live;
 		/* one-calibration: TSC ticks per microsecond, from QPC */
 		QueryPerformanceCounter(&q0);
 		t0 = __rdtsc();

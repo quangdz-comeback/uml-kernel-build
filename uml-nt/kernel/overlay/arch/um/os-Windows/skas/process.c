@@ -29,6 +29,7 @@
  *   probe keeps its own service loop — two paths, one protocol.
  */
 #include <linux/errno.h>
+#include <hop_live.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
 #include <as-layout.h>
@@ -182,6 +183,45 @@ static void uml_nt_guestsite(const char *what, unsigned long long va,
  *         guest jumped to a return value. Fix = whoever computed the
  *         target.
  */
+/*
+ * S13: what the LAST plain hop recorded, and what that does and does not mean.
+ *
+ * The two plain trampolines write their observation directly into the shared
+ * page immediately before the final restore+jmp, so this reads the producer's
+ * own words rather than a copy taken later. A committed sample says the
+ * trampoline reached its pre-jmp snapshot with these values in flight; it does
+ * NOT say the jmp executed, the guest instruction ran, or the kernel is
+ * innocent. Everything short of a committed, sequence-matching sample is
+ * reported as absent / armed-only / entered-only / stale.
+ */
+static int hop_live_sink(const char *buf, unsigned int len)
+{
+	nt_console_write(buf, len);
+	return UML_NT_DIAG_SINK_UNKNOWN_VALUE;
+}
+
+static int hop_live_format(char *buf, unsigned int cap, const char *fmt,
+			   va_list ap)
+{
+	return vsnprintf(buf, cap, fmt, ap);
+}
+
+static void uml_nt_hop_live_report(struct uml_nt_stub_conn *c)
+{
+	static const struct uml_nt_diag_ops ops = { hop_live_format,
+						    hop_live_sink };
+	char buf[UML_NT_DIAG_CAP];
+
+	if (c == 0 || c->d == 0) {
+		os_info("[hop-live] no conn\n");
+		return;
+	}
+	(void)uml_nt_hop_live_format(buf, sizeof(buf), &ops, &c->d->hop_live,
+				     (__u64)c->d->req_seq,
+				     (__u64)c->d->done_seq,
+				     (__u64)c->d->veh_entries, (int)c->pid);
+}
+
 static void uml_nt_death_site(struct uml_nt_stub_conn *c)
 {
 	unsigned long long rip = c->d->regs.rip;
@@ -1303,6 +1343,7 @@ void userspace(struct uml_pt_regs *regs)
 					        "a2=0x%llx nr=%llu\n",
 					        c->d->regs.rax, c->d->args[0], c->d->args[1],
 					        c->d->args[2], c->d->req_seq);
+					uml_nt_hop_live_report(c);
 					os_info("[crumbs] pid %d "
 						"round_step=%llu veh_entries=%llu "
 						"unhandled_calls=%llu "

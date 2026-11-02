@@ -43,7 +43,9 @@ typedef long long s64_nt;
 
 /* "USTB". */
 #define UML_STUB_MAGIC   0x42545355u
-#define UML_STUB_VERSION 6u /* v6: + xstate FP round-trip (S4d) */
+#include "hop_live.h"
+
+#define UML_STUB_VERSION 7u /* v7: + the plain-hop witness record (S13) */
 /* Section size (also the map granularity guard). */
 #define UML_STUB_SECTION_SIZE 0x10000u
 
@@ -797,6 +799,24 @@ struct uml_nt_stub_data {
 	unsigned long long xstate_cleared;
 	unsigned long long xstate_kept;
 	unsigned long long veh_sc_size;
+	/* S13: the plain-hop witness, appended so no existing offset moves.
+	 * The trampolines write it through the pinned offsets in hop_live.h. */
+	struct uml_nt_hop_live hop_live;
 };
+
+/*
+ * S13: the shared block's own ABI, asserted at COMPILE time on every target.
+ * A layout that only shifts in the PE build (or that pushes the block past the
+ * shared section) must fail here, not slip past a host-only runtime check.
+ */
+_Static_assert(__builtin_offsetof(struct uml_nt_stub_data, hop_live) ==
+	       UML_NT_STUB_DATA_HOP_LIVE_OFF, "hop_live append offset");
+_Static_assert(sizeof(struct uml_nt_stub_data) == UML_NT_STUB_DATA_SIZE_V7,
+	       "shared stub block size");
+_Static_assert(sizeof(struct uml_nt_stub_data) <= UML_NT_STUB_SECTION_LIMIT,
+	       "shared stub block fits its section");
+_Static_assert(sizeof(struct uml_nt_stub_data) % 8 == 0,
+	       "shared stub block stays 8-byte sized");
+_Static_assert(UML_STUB_VERSION == 7u, "protocol version for the layout");
 
 #endif /* __UML_STUB_NT_H */

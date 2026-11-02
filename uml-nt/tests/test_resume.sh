@@ -49,3 +49,9 @@ bash "$HERE/test_dump_hook.sh"
 # extracted verbatim from skas/syscall.c and driven through the production
 # framing helper, so every field and the one-write rule are checked together.
 bash "$HERE/test_capget_witness.sh"
+
+# Shelley 303 (Astra S13): the plain-hop witness — arm/read/format logic, the
+# exact added assembly sequence on this CPU, the shared record's ABI on ELF and
+# PE, and the source binding of the real call sites.
+bash "$HERE/test_hop_live.sh"
+bash "$HERE/test_hop_live_dispatch.sh"
