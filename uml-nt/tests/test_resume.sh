@@ -55,3 +55,8 @@ bash "$HERE/test_capget_witness.sh"
 # PE, and the source binding of the real call sites.
 bash "$HERE/test_hop_live.sh"
 bash "$HERE/test_hop_live_dispatch.sh"
+
+# Shelley 310 (Astra S14): the sysbench report must arrive as whole lines —
+# the production output helpers and summary producer, driven through a
+# recording sys_write with diagnostics injected between guest writes.
+bash "$HERE/test_sysbench_report.sh"

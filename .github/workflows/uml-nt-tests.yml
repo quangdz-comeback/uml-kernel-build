@@ -11,6 +11,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # S14: the unit runner calls test_resume.sh, which compiles the shared
+      # stub block's layout assertions for BOTH targets — the PE half needs the
+      # cross-compiler, so it has to exist BEFORE this step, not after it in
+      # the ntabi step. A missing compiler stays a hard failure.
+      # Bounded like the M3 job's "Install deps": one stuck apt round must not
+      # eat the unit step's budget.
+      - name: Provision MinGW (the unit runner's PE ABI assertions need it)
+        timeout-minutes: 8
+        run: |
+          if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y gcc-mingw-w64-x86-64
+          fi
+          x86_64-w64-mingw32-gcc --version
+
       - name: Unit tests (pure logic, no network)
         run: |
           bash uml-nt/tests/test_fetch.sh
@@ -67,7 +82,7 @@ jobs:
 
       - name: ntabi ABI checks (ELF freestanding + mingw PE)
         run: |
-          sudo apt-get install -y gcc-mingw-w64-x86-64
+          # MinGW is provisioned above (the unit runner needs it first).
           bash uml-nt/tests/test_ntabi.sh
 
       - name: Pin check (network, cheap — validates tarball + file URLs + sha256 pin)

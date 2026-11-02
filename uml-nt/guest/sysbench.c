@@ -101,51 +101,105 @@ static unsigned long long prime_sweep(void)
 }
 
 /* ---- output helpers ------------------------------------------------- */
+/*
+ * S14: a report LINE is built in bounded storage and written with ONE
+ * sys_write. The console is shared with the stub's diagnostics, and a line
+ * assembled from several writes can have a diagnostic printed inside it —
+ * natively the gate saw "events per second: [ctx-audit] ..." followed by the
+ * number on its own line, and its EPS pattern stopped matching. The workload,
+ * the arithmetic and the text are unchanged; only the write boundaries are.
+ */
+struct line_buf {
+	char b[160];
+	unsigned n;
+};
 
-static void put(const char *s)
+static void lb_reset(struct line_buf *l)
 {
-	unsigned n = 0;
-
-	while (s[n])
-		n++;
-	sys_write(1, s, n);
+	l->n = 0;
 }
 
-static void put_u64(unsigned long long v)
+static void lb_str(struct line_buf *l, const char *s)
+{
+	while (*s != '\0' && l->n < sizeof(l->b))
+		l->b[l->n++] = *s++;
+}
+
+static void lb_u64(struct line_buf *l, unsigned long long v)
 {
 	char tmp[24];
-	unsigned i = 0, j = 0;
-	char buf[26];
+	unsigned i = 0;
 
 	do {
 		tmp[i++] = (char)('0' + (v % 10));
 		v /= 10;
 	} while (v);
-	while (i)
-		buf[j++] = tmp[--i];
-	sys_write(1, buf, j);
+	while (i != 0 && l->n < sizeof(l->b))
+		l->b[l->n++] = tmp[--i];
 }
 
-static void put_f64_frac(unsigned long long whole, unsigned frac,
-			 unsigned long long frac_val)
+/* the same decimal/truncation math as put_f64_frac, into the line buffer */
+static void lb_f64_frac(struct line_buf *l, unsigned long long whole,
+			unsigned frac, unsigned long long frac_val)
 {
-	put_u64(whole);
+	lb_u64(l, whole);
 	if (frac) {
 		char d[8];
 		unsigned i, j;
 		unsigned long long v = frac_val;
 
-		put(".");
+		if (l->n < sizeof(l->b))
+			l->b[l->n++] = '.';
 		for (i = 0; i < frac; i++) {
 			d[i] = (char)('0' + (v % 10));
 			v /= 10;
 		}
 		for (j = frac; j > 0; j--)
-			sys_write(1, &d[j - 1], 1);
+			if (l->n < sizeof(l->b))
+				l->b[l->n++] = d[j - 1];
 	}
 }
 
+/* the single write of a finished line */
+static void lb_flush(struct line_buf *l)
+{
+	if (l->n != 0)
+		sys_write(1, l->b, l->n);
+	l->n = 0;
+}
+
+
+
 /* ---- main (post-realign) ------------------------------------------- */
+
+/*
+ * S14: the report's numeric lines, produced by the REAL code the guest runs.
+ * Factored out (same math, same text) so a host test can execute it with a
+ * recording sys_write and prove one write per line.
+ */
+static void report_summary(unsigned long long events, double eps, double elapsed)
+{
+	struct line_buf lb;
+	unsigned long long whole, frac_val;
+
+	whole = (unsigned long long)eps;
+	frac_val = (unsigned long long)((eps - (double)whole) * 100.0);
+	lb_reset(&lb);
+	lb_str(&lb, "events per second: ");
+	lb_f64_frac(&lb, whole, 2, frac_val);
+	lb_str(&lb, "\n");
+	lb_flush(&lb);
+
+	whole = (unsigned long long)elapsed;
+	frac_val = (unsigned long long)((elapsed - (double)whole) * 100.0);
+	lb_reset(&lb);
+	lb_str(&lb, "total time: ");
+	lb_f64_frac(&lb, whole, 2, frac_val);
+	lb_str(&lb, "s\n");
+	lb_flush(&lb);
+
+	(void)events;
+}
 
 void sysbench_main(void);
 void _start(void) __attribute__((naked, noreturn));
@@ -163,12 +217,18 @@ void sysbench_main(void)
 {
 	double t0, t1, elapsed, eps;
 	unsigned long long events = 0, primes = 0;
-	unsigned long long whole, frac_val;
 
-	put("sysbench (uml-nt) cpu benchmark\n");
-	put("Prime numbers limit: ");
-	put_u64(CPU_MAX_PRIME);
-	put("\n");
+	{
+		struct line_buf lb;
+
+		lb_reset(&lb);
+		lb_str(&lb, "sysbench (uml-nt) cpu benchmark\n");
+		lb_flush(&lb);
+		lb_str(&lb, "Prime numbers limit: ");
+		lb_u64(&lb, CPU_MAX_PRIME);
+		lb_str(&lb, "\n");
+		lb_flush(&lb);
+	}
 
 	t0 = now_secs();
 	if (t0 < 0.0)
@@ -185,11 +245,19 @@ void sysbench_main(void)
 	elapsed = t1 - t0;
 	eps = (double)events / elapsed;
 
-	put("total number of events: ");
-	put_u64(events);
-	put("\nPRIMES=");
-	put_u64(primes);
-	put("\n");
+	{
+		struct line_buf lb;
+
+		lb_reset(&lb);
+		lb_str(&lb, "total number of events: ");
+		lb_u64(&lb, events);
+		lb_str(&lb, "\n");
+		lb_flush(&lb);
+		lb_str(&lb, "PRIMES=");
+		lb_u64(&lb, primes);
+		lb_str(&lb, "\n");
+		lb_flush(&lb);
+	}
 
 	/* The sweep is deterministic: primes in [3, 10000) = 1228
 	 * (pi(10000) = 1229 minus the skipped 2). Anything else means
@@ -197,22 +265,24 @@ void sysbench_main(void)
 	if (primes != 1228ull)
 		goto fail;
 
-	whole = (unsigned long long)eps;
-	frac_val = (unsigned long long)((eps - (double)whole) * 100.0);
-	put("events per second: ");
-	put_f64_frac(whole, 2, frac_val);
-	put("\n");
+	report_summary(events, eps, elapsed);
 
-	whole = (unsigned long long)elapsed;
-	frac_val = (unsigned long long)((elapsed - (double)whole) * 100.0);
-	put("total time: ");
-	put_f64_frac(whole, 2, frac_val);
-	put("s\n");
+	{
+		struct line_buf lb;
 
-	put("SYSBENCH-OK\n");
+		lb_reset(&lb);
+		lb_str(&lb, "SYSBENCH-OK\n");
+		lb_flush(&lb);
+	}
 	sys_exit(0);
 
 fail:
-	put("SYSBENCH-FAIL\n");
+	{
+		struct line_buf lb;
+
+		lb_reset(&lb);
+		lb_str(&lb, "SYSBENCH-FAIL\n");
+		lb_flush(&lb);
+	}
 	sys_exit(9);
 }
