@@ -64,8 +64,9 @@ void dbg_drain(void);
 void uml_nt_death_scan_exec(struct uml_nt_stub_conn *c);
 /* Shelley 216: the launcher installs this if dbghelp is available; a weak
  * default keeps the kernel linkable on its own. */
-extern int (*uml_nt_dump_hook)(unsigned long pid)
-	__attribute__((weak));
+/* S11a-HOOK-BEGIN (extracted verbatim by tests/test_dump_hook.sh) */
+int (*uml_nt_dump_hook)(unsigned long pid) __attribute__((weak)) = NULL;
+/* S11a-HOOK-END */
 void uml_nt_host_mod(unsigned long long va, char *out, int len);
 void uml_nt_death_rip_vma(struct uml_nt_stub_conn *c);
 

@@ -39,3 +39,8 @@ bash "$HERE/test_veh_diag_order.sh"
 # the selected emitters and the two kernel formatters. Host logic only: it is
 # not evidence about Windows write atomicity.
 bash "$HERE/test_diag_record.sh"
+
+# Shelley 301 (Astra S11a): the launcher's dump hook needs a weak DEFAULT, or
+# the kernel's own link leaves the symbol at address 0 and the guard loads
+# through it. Links the guard without the launcher, as the kernel does.
+bash "$HERE/test_dump_hook.sh"
