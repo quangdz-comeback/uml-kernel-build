@@ -11,7 +11,8 @@ CFLAGS  += -I$(KERNELDIR)/include/shared
 
 all: stub.exe
 
-stub.exe: stub.c $(KERNELDIR)/include/shared/stub_nt.h
+stub.exe: stub.c $(KERNELDIR)/include/shared/stub_nt.h \
+	   $(KERNELDIR)/include/shared/diag_record.h
 	$(MINGW_CC) $(CFLAGS) -o $@ stub.c -lntdll
 
 clean:

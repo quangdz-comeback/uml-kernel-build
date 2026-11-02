@@ -23,6 +23,12 @@ src = open(path, encoding="utf-8", errors="replace").read()
 lines = src.split("\n")
 failures = []
 
+# [veh-enter] may be printed by the CRT directly or through the one-write
+# record helper (S8). Both spellings name the same record, so the S2
+# assertions keep checking the same thing either way.
+VEH_PRINT = (r'(?:fprintf\(stderr, |uml_nt_diag_record\([^;]*?|'
+             r'STUB_DIAG\(\s*\w+\s*,)\s*"\[veh-enter\]')
+
 
 def fail(msg):
     failures.append(msg)
@@ -72,7 +78,7 @@ else:
     handler = "\n".join(lines[a - 1:b])
 
 DIAGS = (("fault_forensics", r"\bfault_forensics\(\s*ep\s*\)"),
-         ("[veh-enter] fprintf", r'fprintf\(stderr, "\[veh-enter\]'))
+         ("[veh-enter] print", VEH_PRINT))
 
 for name, pat in DIAGS:
     if not re.search(pat, src):
@@ -103,7 +109,7 @@ if switch_target:
         if not re.search(r"\bfault_forensics\(\s*ep\s*\)", reach):
             fail("%s() cannot reach fault_forensics: the diagnostic left the "
                  "switched stack" % switch_target)
-        if not re.search(r'fprintf\(stderr, "\[veh-enter\]', reach):
+        if not re.search(VEH_PRINT, reach):
             fail("%s() cannot reach the [veh-enter] print" % switch_target)
         if not re.search(r"\bveh_handler_body\s*\(", body):
             fail("%s() does not call the exception body" % switch_target)
@@ -116,12 +122,12 @@ if ref_ln == 0:
 else:
     around = "\n".join(lines[max(0, ref_ln - 3):ref_ln + 1])
     for pat, name in ((r"\bfault_forensics\(\s*ep\s*\)", "fault_forensics"),
-                      (r'fprintf\(stderr, "\[veh-enter\]', "[veh-enter]")):
+                      (VEH_PRINT, "[veh-enter]")):
         if re.search(pat, around):
             fail("the refused path runs %s — it must not" % name)
 
 # --- the marker must distinguish the two stack pointers -------------------
-enter_ln = line_of(r'fprintf\(stderr, "\[veh-enter\]')
+enter_ln = line_of(VEH_PRINT)
 if enter_ln:
     blk = "\n".join(lines[enter_ln - 1:enter_ln + 8])
     for field in ("incoming_rsp=", "body_rsp=", "in_buf="):

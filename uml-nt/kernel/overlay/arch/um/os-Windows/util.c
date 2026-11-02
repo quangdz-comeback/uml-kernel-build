@@ -15,6 +15,7 @@
 #include <ntabi.h>
 #include <os.h>
 #include "internal.h"
+#include <diag_record.h>
 
 /* um_arch.c page-offset anchors (PAGE_OFFSET / RAM top) — the D19
  * canary in uml_nt_physmem_check below compares against them. */
@@ -66,14 +67,40 @@ void um_early_printk(const char *s, unsigned int n)
 	nt_console_write(s, n);
 }
 
+/* Shelley 295 (Astra S8): one diagnostic record, one host write.
+ *
+ * The body and its newline used to be two NtWriteFile calls, and the console
+ * is append-shared with the stub process — so another writer could land
+ * between them and cut the record in half. The framing now happens inside the
+ * buffer (diag_record.h) and the record goes out once. nt_console_write has no
+ * completion status, so the sink reports "unknown" rather than claiming
+ * delivery, and this path does not pretend otherwise. */
+static int diag_console_format(char *buf, unsigned int cap, const char *fmt,
+			       va_list ap)
+{
+	return vsnprintf(buf, cap, fmt, ap);
+}
+
+/* S8b-ADAPTER-BEGIN (extracted verbatim by tests/test_diag_record.sh) */
+static int diag_console_sink(const char *buf, unsigned int len)
+{
+	nt_console_write(buf, len);
+	return UML_NT_DIAG_SINK_UNKNOWN_VALUE;
+}
+/* S8b-ADAPTER-END */
+
+static const struct uml_nt_diag_ops diag_console_ops = {
+	diag_console_format, diag_console_sink
+};
+
 void os_info(const char *fmt, ...)
 {
 	/* M5.6b: host env UML_NT_QUIET=any-value silences the diag firehose
 	 * (real-machine UX; CI never sets it). os_warn/os_err stay loud. */
 	static int quiet = -1;
-	char buf[256];
+	char buf[UML_NT_DIAG_CAP];
 	va_list args;
-	int n;
+	unsigned int len = 0;
 
 	if (quiet < 0)
 		quiet = nt && nt->GetEnvironmentVariableA &&
@@ -81,25 +108,21 @@ void os_info(const char *fmt, ...)
 	if (quiet)
 		return;
 	va_start(args, fmt);
-	n = vscnprintf(buf, sizeof(buf), fmt, args);
+	(void)uml_nt_diag_emit(buf, sizeof(buf), &diag_console_ops, fmt, args,
+			       &len);
 	va_end(args);
-	if (n > 0)
-		nt_console_write(buf, n);
-	nt_console_write("\n", 1);
 }
 
 void os_warn(const char *fmt, ...)
 {
-	char buf[256];
+	char buf[UML_NT_DIAG_CAP];
 	va_list args;
-	int n;
+	unsigned int len = 0;
 
 	va_start(args, fmt);
-	n = vscnprintf(buf, sizeof(buf), fmt, args);
+	(void)uml_nt_diag_emit(buf, sizeof(buf), &diag_console_ops, fmt, args,
+			       &len);
 	va_end(args);
-	if (n > 0)
-		nt_console_write(buf, n);
-	nt_console_write("\n", 1);
 }
 
 void os_dump_core(void)

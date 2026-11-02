@@ -65,6 +65,7 @@
 #include <intrin.h>
 
 #include "../kernel/overlay/arch/um/include/shared/stub_nt.h"
+#include "../kernel/overlay/arch/um/include/shared/diag_record.h"
 #include "resume_model.h"
 #include <ctxaudit_model.h>
 #include "../kernel/overlay/arch/um/include/shared/veh_model.h"
@@ -113,6 +114,47 @@ static DWORD WINAPI exit_thread(LPVOID arg)
  * harness reads. */
 static volatile LONG alive_watchdog, alive_census, alive_jobw, alive_vehwin;
 static unsigned long g_main_tid;
+
+/* Shelley 295 (Astra S8): a diagnostic record is handed to the host in ONE
+ * write. The console is shared with the kernel process and with the guest's
+ * own output, and it keeps no record boundaries — a record built in two
+ * writes can have another writer's bytes wedged into the middle of it
+ * (observed: "[te" + guest "hi" + the rest of "[teb] ...").
+ *
+ * No retry, no fallback, no second write of any part: a retried tail is how
+ * the fragmentation comes back, and a retried record is how bytes get
+ * duplicated. The result is truthful and the callers ignore it, exactly as
+ * they ignored fprintf's return. */
+static int stub_diag_format(char *buf, unsigned int cap, const char *fmt,
+			    va_list ap)
+{
+	return vsnprintf(buf, cap, fmt, ap);
+}
+
+/* S8b-ADAPTER-BEGIN (extracted verbatim by tests/test_diag_record.sh) */
+static int stub_diag_sink(const char *buf, unsigned int len)
+{
+	HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+	DWORD wrote = 0;
+
+	/* A handle we do not have is a known failure, not an unknown one. */
+	if (h == NULL || h == INVALID_HANDLE_VALUE)
+		return -1;
+	if (!WriteFile(h, buf, (DWORD)len, &wrote, NULL))
+		return -1;
+	return (int)wrote;	/* a short write stays visible as one */
+}
+/* S8b-ADAPTER-END */
+
+static const struct uml_nt_diag_ops stub_diag_ops = {
+	stub_diag_format, stub_diag_sink
+};
+
+#define STUB_DIAG(buf, fmt, ...)					\
+	do {								\
+		(void)uml_nt_diag_record((buf), sizeof(buf), &stub_diag_ops, \
+					 fmt, __VA_ARGS__);		\
+	} while (0)
 
 /* Shelley 282: the TEB swap experiment is off by default; these are the two
  * entry points the resume paths call, and they do nothing unless the boot
@@ -234,12 +276,14 @@ static void stack_commit_witness(void)
 			free_pages++;
 		}
 	}
-	fprintf(stderr, "[stack-commit] pid %lu rsp=0x%llx run=[0x%llx,0x%llx) "
+	{ char rb[UML_NT_DIAG_CAP];
+
+	  STUB_DIAG(rb, "[stack-commit] pid %lu rsp=0x%llx run=[0x%llx,0x%llx) "
 		"pages=%lu free=%lu first_free=0x%llx last_free=0x%llx %s\n",
 		(unsigned long)GetCurrentProcessId(), sp, run_lo, run_hi,
 		total, free_pages, first_free, last_free,
 		free_pages ? "==> RUN NOT FULLY COMMITTED" : "ok");
-	fflush(stderr);
+	}
 }
 
 /* ---- VEH: the syscall/fault interception point --------------------- */
@@ -442,7 +486,9 @@ static void ans_check(const char *when)
 					continue;
 				if (d->ans_window_bad < 8) {
 					d->ans_window_bad++;
-					fprintf(stderr, "[ans-window] pid %lu tid %lu "
+					{ char rb[UML_NT_DIAG_CAP];
+
+					  STUB_DIAG(rb, "[ans-window] pid %lu tid %lu "
 						"rsp=0x%llx page=0x%llx state=0x%lx "
 						"prot=0x%lx seq=%llu n=%u\n",
 						(unsigned long)GetCurrentProcessId(),
@@ -451,7 +497,7 @@ static void ans_check(const char *when)
 						(unsigned long)w.Protect,
 						(unsigned long long)d->pub_seq,
 						d->ans_window_bad);
-					fflush(stderr);
+					}
 				}
 				break;
 			}
@@ -460,7 +506,9 @@ static void ans_check(const char *when)
 			continue;
 		ans_bad++;
 		if (ans_bad <= 8)
-			fprintf(stderr, "[ans-bad] pid %lu tid %lu which=%s "
+			{ char rb[UML_NT_DIAG_CAP];
+
+			  STUB_DIAG(rb, "[ans-bad] pid %lu tid %lu which=%s "
 				"va=0x%llx state=0x%lx prot=0x%lx base=0x%llx "
 				"seq=%llu cmd=%u when=%s n=%lu\n",
 				(unsigned long)GetCurrentProcessId(),
@@ -469,7 +517,7 @@ static void ans_check(const char *when)
 				(unsigned long long)(uintptr_t)q.BaseAddress,
 				(unsigned long long)d->pub_seq, (unsigned)d->cmd,
 				when, ans_bad);
-		fflush(stderr);
+			}
 	}
 }
 
@@ -486,7 +534,9 @@ static void wait_answer(void)
 		unsigned long long sl = __readgsqword(0x10);
 		unsigned long long hrsp = (unsigned long long)(uintptr_t)&sb;
 
-		fprintf(stderr, "[teb] pid %lu tid %lu stackbase=0x%llx "
+		{ char rb[UML_NT_DIAG_CAP];
+
+		  STUB_DIAG(rb, "[teb] pid %lu tid %lu stackbase=0x%llx "
 			"stacklimit=0x%llx host_rsp=0x%llx guest_rsp=0x%llx "
 			"guest_stack=[0x%llx,0x%llx)\n",
 			(unsigned long)GetCurrentProcessId(),
@@ -495,7 +545,7 @@ static void wait_answer(void)
 			(unsigned long long)(d ? d->stack_va & ~0xffffull : 0),
 			(unsigned long long)((d ? d->stack_va & ~0xffffull : 0) +
 					     0x10000ull));
-		fflush(stderr);
+		}
 		stack_commit_witness();
 	}
 	/* Shelley 241: never park for ever. A thread asleep on an infinite wait
@@ -2083,7 +2133,9 @@ static void fault_forensics(EXCEPTION_POINTERS *ep)
 	memset(&mbi, 0, sizeof(mbi));
 	lo = d ? d->ram_base : 0;
 	hi = lo + (d ? d->ram_size : 0);
-	fprintf(stderr, "[fault-addr] pid %lu tid %lu fa=0x%llx op=%llu "
+	{ char rb[UML_NT_DIAG_CAP];
+
+	  STUB_DIAG(rb, "[fault-addr] pid %lu tid %lu fa=0x%llx op=%llu "
 		"page_state=0x%lx prot=0x%lx type=0x%lx base=0x%llx "
 		"in_guest_span=%s run_base=0x%llx\n",
 		(unsigned long)GetCurrentProcessId(),
@@ -2093,7 +2145,7 @@ static void fault_forensics(EXCEPTION_POINTERS *ep)
 		(unsigned long)mbi.Type,
 		(unsigned long long)(uintptr_t)mbi.BaseAddress,
 		(fa >= lo && fa < hi) ? "yes" : "no", fa & ~0xffffull);
-	fflush(stderr);
+	}
 }
 
 
@@ -2567,7 +2619,9 @@ static void veh_diag(EXCEPTION_POINTERS *ep)
 		 * path this change exists to make safe. */
 		used = sb > veh_stk.guest_sp ? sb - veh_stk.guest_sp : 0;
 		all = sb - sl;
-		fprintf(stderr, "[veh-enter] pid %lu tid %lu "
+		{ char rb[UML_NT_DIAG_CAP];
+
+		  STUB_DIAG(rb, "[veh-enter] pid %lu tid %lu "
 			"incoming_rsp=0x%llx body_rsp=0x%llx "
 			"buf=[0x%llx,0x%llx) in_buf=1 "
 			"limit=0x%llx base=0x%llx used_pct=%llu n=%llu\n",
@@ -2575,7 +2629,7 @@ static void veh_diag(EXCEPTION_POINTERS *ep)
 			(unsigned long)GetCurrentThreadId(), veh_stk.guest_sp,
 			body_rsp,
 			buf, end, sl, sb, (used * 100ull) / all, entries);
-		fflush(stderr);
+		}
 	}
 	fault_forensics(ep);
 }
@@ -3180,13 +3234,15 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 	} else if (d != NULL) {
 		if (d->ans_regs_bad < 8) {
 			d->ans_regs_bad++;
-			fprintf(stderr, "[ans-keep] pid %lu cmd=%u keeping trap "
+			{ char rb[UML_NT_DIAG_CAP];
+
+			  STUB_DIAG(rb, "[ans-keep] pid %lu cmd=%u keeping trap "
 				"context (answer rip=0x%llx rsp=0x%llx)\n",
 				(unsigned long)GetCurrentProcessId(),
 				g_last_pub_cmd,
 				(unsigned long long)d->regs.rip,
 				(unsigned long long)d->regs.rsp);
-			fflush(stderr);
+			}
 		}
 	}
 	d->round_step = 7;

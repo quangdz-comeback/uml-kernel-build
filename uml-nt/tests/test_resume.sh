@@ -33,3 +33,9 @@ CC="${CC:-clang}"
 # builds, executes or inspects a binary, so a missing PE can never read as a
 # pass.
 bash "$HERE/test_veh_diag_order.sh"
+
+# Shelley 295 (Astra S8): one diagnostic record is one host write — the
+# production framing helper through a recording sink, plus the source shape of
+# the selected emitters and the two kernel formatters. Host logic only: it is
+# not evidence about Windows write atomicity.
+bash "$HERE/test_diag_record.sh"
