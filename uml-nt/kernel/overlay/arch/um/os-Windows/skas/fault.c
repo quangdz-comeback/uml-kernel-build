@@ -263,8 +263,9 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			      unsigned long long want,
 			      struct uml_nt_fault_plan *plan)
 {
-	unsigned long long start = 0, off;
-	int d;
+	unsigned long long start = 0;
+	long long alloc;
+	int d, i, v, p;
 
 	if (mm == 0 || ph == 0 || plan == 0)
 		return 0;
@@ -289,55 +290,69 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	mm->ca_vma = 0;
 	mm->ca_plan = 0;
 	mm->ca_nvma = (int)mm->nvma;
-	off = uml_nt_phys_alloc_span(ph, UML_NT_SG_RUN / UML_NT_PHYS_RUN_SIZE);
-	if (off < 0) {
-		mm->ca_alloc = (int)off;
-		{
-			int i, free_runs = 0;
 
-			for (i = 0; i < (int)(ph->size >> 16); i++)
-				if (ph->refs[i] == 0)
+	/* Shelley 291 (Astra S5): this helper only ever ADDS a new run-backed
+	 * VMA and its MAP. A target that any existing VMA already covers is
+	 * not ours to touch: it may be shared, COW, span-backed, dead-ref or
+	 * stale, and remapping it — or unref'ing it to "make room" — invents
+	 * ownership and can hand a live mapping to a different run. Say
+	 * nothing, change nothing, return 0. An occupied target is also not
+	 * proof that the reservation is satisfied; that question belongs to
+	 * the progress model, not here. */
+	for (i = 0; i < mm->nvma; i++) {
+		if (mm->vma[i].start == mm->vma[i].end)
+			continue;
+		if (start < mm->vma[i].end &&
+		    start + UML_NT_SG_RUN > mm->vma[i].start) {
+			mm->ca_inside = 1;
+			return 0;
+		}
+	}
+
+	/* Capacity preflight, BEFORE anything is allocated: a full plan or a
+	 * full table must not leave a run that no VMA owns. The plan's ops and
+	 * its copy/kill state stay exactly as they were. */
+	if (plan->n_ops >= UML_NT_FAULT_MAX_OPS || mm->nvma >= UML_NT_VMA_MAX)
+		return 0;
+
+	/* Signed, and validated before any use: -1 is not an offset. */
+	alloc = (long long)uml_nt_phys_alloc_span(ph,
+						 UML_NT_SG_RUN /
+						 UML_NT_PHYS_RUN_SIZE);
+	if (alloc < 0) {
+		mm->ca_alloc = (int)(alloc < -32767 ? -1 : alloc);
+		{
+			int k, free_runs = 0;
+
+			for (k = 0; k < (int)(ph->size >> 16); k++)
+				if (ph->refs[k] == 0)
 					free_runs++;
 			mm->ca_free = free_runs;
 		}
 		return 0;
 	}
 	mm->ca_alloc = 1;
-	/* Shelley 276: the reservation is already a VMA, so growing inside it is
-	 * not "add a VMA" — it is "commit within the one that exists". Adding
-	 * failed with overlap on every attempt, which is why the reserve never
-	 * mapped a single run. */
-	{
-		struct uml_nt_vma *inside = uml_nt_vma_find(mm, start);
-
-		if (inside != 0 && start >= inside->start &&
-		    start + UML_NT_SG_RUN <= inside->end) {
-			mm->ca_inside = 1;
-			mm->ca_vma = 1;
-		} else {
-			int v = uml_nt_vma_add_gen(mm, start,
-						   start + UML_NT_SG_RUN,
-						   (unsigned long long)off,
-						   0x04u, 0,
-						   (unsigned long long)
-						   uml_nt_phys_gen(ph, off));
-
-			mm->ca_vma = v;
-			if (v < 0) {
-				uml_nt_phys_unref(ph, off);
-				return 0;
-			}
-		}
+	v = uml_nt_vma_add_gen(mm, start, start + UML_NT_SG_RUN,
+			       (unsigned long long)alloc, 0x04u, 0,
+			       (unsigned long long)uml_nt_phys_gen(ph, alloc));
+	mm->ca_vma = v;
+	if (v < 0) {
+		/* nothing was registered: release only the new run */
+		uml_nt_phys_unref(ph, alloc);
+		mm->ca_alloc = 0;
+		return 0;
 	}
-	{
-		int p = plan_op(plan, UML_NT_FOP_MAP, 0x04u, start,
-				UML_NT_SG_RUN, (unsigned long long)off);
-
-		mm->ca_plan = p;
-		if (p < 0) {
-			uml_nt_phys_unref(ph, off);
-			return 0;
-		}
+	p = plan_op(plan, UML_NT_FOP_MAP, 0x04u, start, UML_NT_SG_RUN,
+		    (unsigned long long)alloc);
+	mm->ca_plan = p;
+	if (p < 0) {
+		/* undoing the registration BEFORE releasing its run: no VMA
+		 * may survive pointing at a run this helper has released */
+		(void)uml_nt_vma_del(mm, start, start + UML_NT_SG_RUN);
+		mm->ca_vma = 0;
+		uml_nt_phys_unref(ph, alloc);
+		mm->ca_alloc = 0;
+		return 0;
 	}
 	mm->ca_plan = 1;
 	return 1;

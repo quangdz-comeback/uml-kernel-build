@@ -42,10 +42,22 @@ static int fails;
 #define MOCK_RUNS 16
 #define MOCK_BASE (1ull << 20) /* 1 MiB — deliberately not the head */
 static unsigned char mock_taken[MOCK_RUNS];
+/* Shelley 291 (Astra S5): the ownership regression needs to see an
+ * allocation that should not happen and a free that should not happen, and
+ * it needs to force the allocator to fail on demand. Recording only — the
+ * buddy above stays the same allocator. */
+static int mock_alloc_calls;	/* attempts, including the failing ones */
+static int mock_alloc_ok;	/* successful allocations */
+static int mock_free_calls;	/* frees */
+static int mock_fail_alloc;	/* 1 = the next allocation fails */
 
 static void mock_reset(void)
 {
 	memset(mock_taken, 0, sizeof(mock_taken));
+	mock_alloc_calls = 0;
+	mock_alloc_ok = 0;
+	mock_free_calls = 0;
+	mock_fail_alloc = 0;
 }
 
 static int mock_need(int nruns)
@@ -60,6 +72,12 @@ static int mock_need(int nruns)
 long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 {
 	int i, j, need = mock_need(nruns);
+
+	mock_alloc_calls++;
+	if (mock_fail_alloc) {
+		mock_fail_alloc = 0;
+		return -1;
+	}
 
 	for (i = 0; i + need <= MOCK_RUNS; i++) {
 		int ok = 1;
@@ -76,6 +94,7 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 		for (j = 0; j < need; j++)
 			mock_taken[i + j] = 1;
 		*page_out = &mock_taken[i];
+		mock_alloc_ok++;
 		return MOCK_BASE + (long long)i * RUN;
 	}
 	return -1;
@@ -86,6 +105,7 @@ void uml_nt_phys_backend_free(void *page, int nruns)
 	int i = (int)((char *)page - (char *)mock_taken);
 	int j, need = mock_need(nruns);
 
+	mock_free_calls++;
 	for (j = 0; j < need; j++)
 		if (i + j >= 0 && i + j < MOCK_RUNS)
 			mock_taken[i + j] = 0;
@@ -2617,9 +2637,11 @@ static void test_multirun_cow_effective_prot(void)
 }
 
 static void test_stack_grow(void);
+static void test_commit_ahead_ownership(void);
 
 int main(void)
 {
+	test_commit_ahead_ownership();
 	test_stack_grow();
 	test_phys();
 	test_span();
@@ -2666,6 +2688,412 @@ int main(void)
  * write into the interp's text (referee evidence: a 64 KiB
  * stack sitting directly above a RWX ld.so).
  * ============================================================ */
+/* ---- S5 (Astra, report 291): commit-ahead ownership --------------------
+ * uml_nt_stack_commit_ahead may add ONE new run-backed VMA plus ONE MAP.
+ * It may never touch a VMA that already covers the target — not remap it,
+ * not unref it, not "repair" it — and it may never turn a failed allocation
+ * into a queued MAP. These cases drive the REAL fault.c through the REAL
+ * vma.c/physalloc.c over the recording backend mock above.
+ *
+ * Fixture (all zero-initialised explicitly: uml_nt_mm_init does not clear
+ * every diagnostic field): committed == rsp == CA_COMMITTED, so the model
+ * asks for the run just below the committed bottom, CA_START. */
+#define CA_TOP      0x60100000ull
+#define CA_LIMIT    0x60000000ull
+#define CA_COMMITTED 0x60040000ull
+#define CA_RSP      0x60040000ull
+#define CA_START    (CA_COMMITTED - RUN)
+#define CA_WANT     0x80000ull
+
+static void ca_fixture(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+		       struct uml_nt_fault_plan *plan)
+{
+	mock_reset();
+	memset(mm, 0, sizeof(*mm));
+	memset(plan, 0, sizeof(*plan));
+	uml_nt_mm_init(mm);
+	CHECK(uml_nt_phys_init(ph, 32 * RUN) == 0);
+}
+
+static int ca_call(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+		   struct uml_nt_fault_plan *plan)
+{
+	return uml_nt_stack_commit_ahead(mm, ph, CA_RSP, CA_COMMITTED,
+					 CA_TOP, CA_LIMIT, CA_WANT, plan);
+}
+
+/* Narrow, and only what it says: no op carries the UINT64_MAX offset a
+ * backend -1 turns into, and no op has a zero length. It does NOT prove the
+ * allocator handed out every offset named here — the cases below check the
+ * one offset this helper is allowed to add against the VMA it registered. */
+static void ca_check_no_sentinel(const struct uml_nt_fault_plan *plan,
+				 int from)
+{
+	int i;
+
+	for (i = from; i < plan->n_ops; i++) {
+		CHECK(plan->ops[i].off != (unsigned long long)-1);
+		CHECK(plan->ops[i].len != 0);
+	}
+}
+
+/* A refusal must leave the plan byte-identical, including ops, n_ops,
+ * kill/kill_why and the COW copy metadata. */
+static void ca_plan_unchanged(const struct uml_nt_fault_plan *before,
+			      const struct uml_nt_fault_plan *now)
+{
+	CHECK(memcmp(before, now, sizeof(*before)) == 0);
+}
+
+static void test_commit_ahead_ownership(void)
+{
+	struct uml_nt_mm mm;
+	struct uml_nt_phys ph;
+	struct uml_nt_fault_plan plan;
+
+	/* 1. fresh uncovered target: exactly one allocation, VMA and MAP
+	 * agree in VA/off/gen, and mm_drop gives the run back. */
+	ca_fixture(&mm, &ph, &plan);
+	CHECK(ca_call(&mm, &ph, &plan) == 1);
+	CHECK(mock_alloc_calls == 1 && mock_alloc_ok == 1);
+	CHECK(mm.nvma == 1);
+	CHECK(mm.vma[0].start == CA_START && mm.vma[0].end == CA_START + RUN);
+	CHECK(plan.n_ops == 1);
+	CHECK(plan.ops[0].op == UML_NT_FOP_MAP);
+	CHECK(plan.ops[0].va == CA_START && plan.ops[0].len == RUN);
+	CHECK(plan.ops[0].off == mm.vma[0].run_off);
+	CHECK(mm.vma[0].gen == uml_nt_phys_gen(&ph,
+					       (long long)mm.vma[0].run_off));
+	ca_check_no_sentinel(&plan, 0);
+	CHECK(mock_free_calls == 0);
+	uml_nt_mm_drop(&mm, &ph);
+	CHECK(mock_free_calls == 1);
+	CHECK(uml_nt_phys_refs(&ph, (long long)mm.vma[0].run_off) == 0);
+
+	/* 2. the same call again: nothing new, nothing re-mapped, nothing
+	 * freed — TWICE: once with the first answer's plan still queued, and
+	 * again after the plan is reset, which is what the next answer does. */
+	ca_fixture(&mm, &ph, &plan);
+	CHECK(ca_call(&mm, &ph, &plan) == 1);
+	{
+		struct uml_nt_fault_plan p1 = plan;
+		struct uml_nt_vma v1 = mm.vma[0];
+		unsigned long long run0 = mm.vma[0].run_off;
+
+		/* (a) the plan still holds the MAP this helper queued */
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 1 && mock_free_calls == 0);
+		ca_plan_unchanged(&p1, &plan);
+		CHECK(mm.nvma == 1);
+		CHECK(memcmp(&mm.vma[0], &v1, sizeof(v1)) == 0);
+		CHECK(uml_nt_phys_refs(&ph, (long long)run0) == 1);
+
+		/* (b) the next answer: a drained plan */
+		memset(&plan, 0, sizeof(plan));
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 1 && mock_free_calls == 0);
+		CHECK(plan.n_ops == 0);
+		CHECK(mm.nvma == 1);
+		CHECK(memcmp(&mm.vma[0], &v1, sizeof(v1)) == 0);
+		CHECK(uml_nt_phys_refs(&ph, (long long)run0) == 1);
+	}
+
+	/* 3a. a private VMA already covering the target: keep its owner. */
+	ca_fixture(&mm, &ph, &plan);
+	{
+		unsigned long long r = uml_nt_phys_alloc(&ph);
+
+		struct uml_nt_fault_plan p0;
+		struct uml_nt_vma v0;
+		unsigned long long g0;
+
+		CHECK(uml_nt_vma_add(&mm, CA_START, CA_START + RUN, r,
+				     UML_NT_PAGE_READONLY, 0) == 0);
+		g0 = uml_nt_phys_gen(&ph, r);
+		p0 = plan;
+		v0 = mm.vma[0];
+		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 0 && mock_free_calls == 0);
+		ca_plan_unchanged(&p0, &plan);
+		CHECK(mm.nvma == 1);
+		CHECK(memcmp(&mm.vma[0], &v0, sizeof(v0)) == 0);
+		CHECK(mm.vma[0].run_off == r);
+		CHECK(mm.vma[0].prot == UML_NT_PAGE_READONLY);
+		CHECK(uml_nt_phys_gen(&ph, r) == g0);
+		CHECK(uml_nt_phys_refs(&ph, (long long)r) == 1);
+		uml_nt_mm_drop(&mm, &ph);
+	}
+
+	/* 3b. a TRUE interior target: a four-run COW span whose SECOND run is
+	 * the one this helper asks for, two of its runs shared (refs==2), and
+	 * a sub-page guard intersecting the target. Nothing may move. */
+	ca_fixture(&mm, &ph, &plan);
+	{
+		long long span = uml_nt_phys_alloc_span(&ph, 4);
+		struct uml_nt_fault_plan p0;
+		struct uml_nt_vma v0;
+		struct uml_nt_guard g0;
+		unsigned long long gens[4];
+		int i;
+
+		CHECK(span >= 0);
+		/* [CA_START-RUN, CA_START+3*RUN): the target CA_START is run #1
+		 * of 4, so it is neither the first nor the last run. */
+		CHECK(uml_nt_vma_add(&mm, CA_START - RUN, CA_START + 3 * RUN,
+				     (unsigned long long)span,
+				     UML_NT_PAGE_READWRITE,
+				     UML_NT_VMA_COW) == 0);
+		CHECK(uml_nt_phys_ref(&ph, span) == 2);
+		CHECK(uml_nt_phys_ref(&ph, span + RUN) == 2);
+		CHECK(uml_nt_guard_add(&mm, CA_START + 0x1000,
+				       CA_START + 0x2000) == 0);
+		for (i = 0; i < 4; i++)
+			gens[i] = uml_nt_phys_gen(&ph, span + i * RUN);
+
+		p0 = plan;
+		v0 = mm.vma[0];
+		g0 = mm.guard[0];
+		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
+
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 0 && mock_free_calls == 0);
+		ca_plan_unchanged(&p0, &plan);
+		CHECK(mm.nvma == 1);
+		CHECK(memcmp(&mm.vma[0], &v0, sizeof(v0)) == 0);
+		CHECK(mm.vma[0].start == CA_START - RUN);
+		CHECK(mm.vma[0].end == CA_START + 3 * RUN);
+		CHECK(mm.vma[0].run_off == (unsigned long long)span);
+		CHECK(mm.vma[0].prot == UML_NT_PAGE_READWRITE);
+		CHECK((mm.vma[0].flags & UML_NT_VMA_COW) == UML_NT_VMA_COW);
+		CHECK(mm.nguard == 1);
+		CHECK(memcmp(&mm.guard[0], &g0, sizeof(g0)) == 0);
+		CHECK(uml_nt_guard_hit(&mm, CA_START + 0x1000) == 1);
+		/* the shared runs keep BOTH references, and every epoch stands */
+		CHECK(uml_nt_phys_refs(&ph, span) == 2);
+		CHECK(uml_nt_phys_refs(&ph, span + RUN) == 2);
+		CHECK(uml_nt_phys_refs(&ph, span + 2 * RUN) == 1);
+		CHECK(uml_nt_phys_refs(&ph, span + 3 * RUN) == 1);
+		for (i = 0; i < 4; i++)
+			CHECK(uml_nt_phys_gen(&ph, span + i * RUN) == gens[i]);
+		/* leave the shared refs before the drop unrefs the span */
+		CHECK(uml_nt_phys_unref(&ph, span) == 1);
+		CHECK(uml_nt_phys_unref(&ph, span + RUN) == 1);
+		uml_nt_mm_drop(&mm, &ph);
+	}
+
+	/* 3c. PARTIAL overlap: still occupied, still not ours to fix. */
+	ca_fixture(&mm, &ph, &plan);
+	{
+		unsigned long long r = uml_nt_phys_alloc(&ph);
+
+		struct uml_nt_fault_plan p0;
+		struct uml_nt_vma v0;
+
+		CHECK(uml_nt_vma_add(&mm, CA_START + RUN / 2,
+				     CA_START + RUN + RUN / 2, r,
+				     UML_NT_PAGE_READWRITE, 0) == 0);
+		p0 = plan;
+		v0 = mm.vma[0];
+		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 0 && mock_free_calls == 0);
+		ca_plan_unchanged(&p0, &plan);
+		CHECK(mm.nvma == 1);
+		CHECK(memcmp(&mm.vma[0], &v0, sizeof(v0)) == 0);
+		CHECK(mm.vma[0].start == CA_START + RUN / 2);
+		CHECK(uml_nt_phys_refs(&ph, (long long)r) == 1);
+		uml_nt_mm_drop(&mm, &ph);
+	}
+
+	/* 4. dead backing (refs==0) and a stale generation: a VMA that covers
+	 * the target is still not repaired, unref'd or replaced. */
+	ca_fixture(&mm, &ph, &plan);
+	{
+		unsigned long long r = uml_nt_phys_alloc(&ph);
+
+		struct uml_nt_fault_plan p0;
+		struct uml_nt_vma v0;
+
+		CHECK(uml_nt_vma_add_gen(&mm, CA_START, CA_START + RUN, r,
+					 UML_NT_PAGE_READWRITE, 0,
+					 0x1234ull /* stale gen */) == 0);
+		CHECK(uml_nt_phys_unref(&ph, (long long)r) == 0);
+		CHECK(uml_nt_phys_refs(&ph, (long long)r) == 0);
+		p0 = plan;
+		v0 = mm.vma[0];
+		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 0 && mock_free_calls == 0);
+		ca_plan_unchanged(&p0, &plan);
+		CHECK(mm.nvma == 1 && mm.vma[0].run_off == r);
+		CHECK(mm.vma[0].gen == 0x1234ull);
+		CHECK(memcmp(&mm.vma[0], &v0, sizeof(v0)) == 0);
+		CHECK(uml_nt_phys_refs(&ph, (long long)r) == 0);
+	}
+
+	/* 4b. a DISTINCT stale-generation case: the old claim stays, the run is
+	 * freed and re-handed to a DIFFERENT owner/mm under a NEW epoch at the
+	 * same VA. commit-ahead must touch neither claim, and the live owner's
+	 * reference must still be the only one. */
+	ca_fixture(&mm, &ph, &plan);
+	{
+		struct uml_nt_mm other;
+		struct uml_nt_vma v_old, v_new, v_guard;
+		struct uml_nt_fault_plan p0;
+		long long r = uml_nt_phys_alloc(&ph);
+		long long r2;
+		unsigned long long g1, g2;
+
+		CHECK(r >= 0);
+		g1 = uml_nt_phys_gen(&ph, r);
+		CHECK(uml_nt_vma_add_gen(&mm, CA_START, CA_START + RUN, r,
+					 UML_NT_PAGE_READWRITE, 0,
+					 g1) == 0);
+		v_old = mm.vma[0];
+		/* the stale claim is left behind on purpose */
+		CHECK(uml_nt_phys_unref(&ph, r) == 0);
+		CHECK(uml_nt_phys_refs(&ph, r) == 0);
+		/* a different owner takes the same offset under a new epoch */
+		r2 = uml_nt_phys_alloc(&ph);
+		CHECK(r2 == r);
+		g2 = uml_nt_phys_gen(&ph, r2);
+		CHECK(g2 != 0 && g2 != g1);
+		uml_nt_mm_init(&other);
+		CHECK(uml_nt_vma_add_gen(&other, CA_START, CA_START + RUN, r2,
+					 UML_NT_PAGE_READWRITE, 0,
+					 g2) == 0);
+		v_new = other.vma[0];
+		v_guard = mm.vma[0];
+		p0 = plan;
+		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
+
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 0 && mock_free_calls == 0);
+		ca_plan_unchanged(&p0, &plan);
+		CHECK(mm.nvma == 1);
+		CHECK(memcmp(&mm.vma[0], &v_old, sizeof(v_old)) == 0);
+		CHECK(mm.vma[0].gen == g1);
+		CHECK(other.nvma == 1);
+		CHECK(memcmp(&other.vma[0], &v_new, sizeof(v_new)) == 0);
+		CHECK(other.vma[0].gen == g2);
+		CHECK(memcmp(&mm.vma[0], &v_guard, sizeof(v_guard)) == 0);
+		/* the live owner's claim is intact and is the only one */
+		CHECK(uml_nt_phys_refs(&ph, r) == 1);
+		CHECK(uml_nt_phys_gen(&ph, r) == g2);
+		/* drop ONLY the live owner: mm keeps its stale claim, so dropping
+		 * it here would release someone else's reference */
+		uml_nt_mm_drop(&other, &ph);
+		CHECK(uml_nt_phys_refs(&ph, r) == 0);
+	}
+
+	/* 5. allocator failure on an uncovered target: no VMA, no MAP, no
+	 * sentinel, no diagnostic claiming a mapping — and a populated
+	 * unrelated VMA and its run survive untouched. */
+	ca_fixture(&mm, &ph, &plan);
+	{
+		struct uml_nt_fault_plan p0;
+		struct uml_nt_vma v0;
+		long long un = uml_nt_phys_alloc(&ph);
+
+		CHECK(un >= 0);
+		CHECK(uml_nt_vma_add(&mm, CA_START + 8 * RUN,
+				     CA_START + 9 * RUN, un,
+				     UML_NT_PAGE_READWRITE, 0) == 0);
+		v0 = mm.vma[0];
+		plan.n_ops = 1;		/* an unrelated op must survive */
+		plan.ops[0].op = UML_NT_FOP_PROTECT;
+		plan.ops[0].va = 0x60001000ull;
+		plan.ops[0].len = 0x1000ull;
+		plan.ops[0].off = 0;
+		plan.ops[0].prot = UML_NT_PAGE_READONLY;
+		plan.copy_src_off = 0x11110000ull;
+		plan.copy_dst_off = 0x22220000ull;
+		plan.cap_gen_src = 0x33ull;
+		plan.cap_gen_dst = 0x44ull;
+		p0 = plan;
+		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
+		mock_fail_alloc = 1;
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 1 && mock_alloc_ok == 0);
+		CHECK(mock_free_calls == 0);
+		CHECK(mm.nvma == 1);
+		CHECK(memcmp(&mm.vma[0], &v0, sizeof(v0)) == 0);
+		CHECK(uml_nt_phys_refs(&ph, un) == 1);
+		ca_plan_unchanged(&p0, &plan);
+		ca_check_no_sentinel(&plan, 0);
+		CHECK(mm.ca_alloc <= 0);
+		uml_nt_mm_drop(&mm, &ph);
+	}
+
+	/* 6a. plan saturated: refuse BEFORE allocating, keep every op and the
+	 * whole copy/kill state; a populated unrelated VMA survives too. */
+	ca_fixture(&mm, &ph, &plan);
+	{
+		struct uml_nt_fault_plan p0;
+		struct uml_nt_vma v0;
+		long long un = uml_nt_phys_alloc(&ph);
+		int i;
+
+		CHECK(un >= 0);
+		CHECK(uml_nt_vma_add(&mm, CA_START + 8 * RUN,
+				     CA_START + 9 * RUN, un,
+				     UML_NT_PAGE_READWRITE, 0) == 0);
+		v0 = mm.vma[0];
+		plan.n_ops = UML_NT_FAULT_MAX_OPS;
+		for (i = 0; i < 3; i++) {
+			plan.ops[i].op = UML_NT_FOP_PROTECT;
+			plan.ops[i].va = 0x60002000ull + (unsigned long long)i *
+					 0x1000ull;
+			plan.ops[i].len = 0x1000ull;
+			plan.ops[i].prot = UML_NT_PAGE_READONLY;
+		}
+		plan.kill = 1;
+		plan.kill_why = 'p';
+		plan.cap_gen_src = 0x55ull;
+		plan.cap_gen_dst = 0x66ull;
+		p0 = plan;
+		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 0 && mock_alloc_ok == 0);
+		CHECK(mm.nvma == 1);
+		CHECK(memcmp(&mm.vma[0], &v0, sizeof(v0)) == 0);
+		CHECK(uml_nt_phys_refs(&ph, un) == 1);
+		ca_plan_unchanged(&p0, &plan);
+		uml_nt_mm_drop(&mm, &ph);
+	}
+
+	/* 6b. VMA table full with REAL geometry: sorted, non-overlapping,
+	 * page-sized entries away from the target. The runs are NOT backed —
+	 * this is a capacity fixture, not an address space (a limitation of
+	 * the fixture, not of the helper). The table must come out of the
+	 * refusal byte-identical. */
+	ca_fixture(&mm, &ph, &plan);
+	{
+		static struct uml_nt_vma table0[UML_NT_VMA_MAX];
+		int i;
+
+		for (i = 0; i < UML_NT_VMA_MAX; i++) {
+			mm.vma[i].start = 0x70000000ull +
+					  (unsigned long long)i * 0x2000ull;
+			mm.vma[i].end = mm.vma[i].start + 0x1000ull;
+			mm.vma[i].run_off = 0;
+			mm.vma[i].prot = UML_NT_PAGE_READWRITE;
+			mm.vma[i].flags = 0;
+			mm.vma[i].gen = 1;
+		}
+		mm.nvma = UML_NT_VMA_MAX;
+		memcpy(table0, mm.vma, sizeof(mm.vma));
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
+		CHECK(mock_alloc_calls == 0 && mock_alloc_ok == 0);
+		CHECK(mm.nvma == UML_NT_VMA_MAX);
+		CHECK(memcmp(table0, mm.vma, sizeof(mm.vma)) == 0);
+		CHECK(plan.n_ops == 0);
+		/* the helper's own overflow guard must not have fired either */
+		CHECK(mm.ca_alloc == 0 && mm.ca_plan == 0);
+	}
+}
+
 static void test_stack_grow(void)
 {
 	unsigned long long top = 0x60060000ull;
