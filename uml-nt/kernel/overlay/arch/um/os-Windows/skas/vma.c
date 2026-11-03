@@ -24,6 +24,11 @@ void uml_nt_mm_init(struct uml_nt_mm *mm)
 	mm->heap_end = 0;
 	mm->brk = 0;
 	mm->nguard = 0;
+	/* S21: the allocator now steers around the stack reservation, so "no
+	 * stack on this mm" has to be a defined zero, not whatever the caller's
+	 * frame happened to hold. */
+	mm->stack_top = 0;
+	mm->stack_limit = 0;
 }
 
 /* ---- sub-run PROT_NONE guards (M4 slice 5, vma.h note) ---- */
@@ -235,16 +240,34 @@ unsigned long long uml_nt_vma_find_free(const struct uml_nt_mm *mm,
 					unsigned long long limit)
 {
 	unsigned long long cand = base;
+	/* S21: [stack_limit, stack_top) is the guest's stack RESERVATION. It is
+	 * not a VMA until a fault commits part of it, so a gap search walked
+	 * straight through it and handed the next mapping an address inside the
+	 * guest's own stack. A large stack frame (the PAM helpers dip ~256 KiB)
+	 * then grew into that mapping's read-only page and the store faulted.
+	 * The reservation is excluded from allocation: new mappings land outside
+	 * it, so a dip meets free reservation and the fault is deliverable. */
+	unsigned long long ex_lo = mm->stack_limit;
+	unsigned long long ex_hi = mm->stack_top;
 	int i;
 
 	if (len == 0 || base > limit)
 		return 0;
 	for (i = 0; i < mm->nvma; i++) {
-		if (cand + len <= mm->vma[i].start)
-			return cand; /* the gap before this VMA fits */
+		if (cand + len <= mm->vma[i].start) {
+			/* the gap before this VMA fits — unless it bites into the
+			 * stack reservation, in which case step past it */
+			if (ex_hi > ex_lo && cand < ex_hi && cand + len > ex_lo) {
+				cand = ex_hi;
+				continue;
+			}
+			return cand;
+		}
 		if (mm->vma[i].end > cand)
 			cand = mm->vma[i].end;
 	}
+	if (ex_hi > ex_lo && cand < ex_hi && cand + len > ex_lo)
+		cand = ex_hi;
 	if (cand + len <= limit)
 		return cand;
 	return 0;

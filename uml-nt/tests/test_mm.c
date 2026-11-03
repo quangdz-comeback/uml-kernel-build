@@ -2638,6 +2638,7 @@ static void test_multirun_cow_effective_prot(void)
 
 static void test_stack_grow(void);
 static void test_clone_carries_stack_bounds(void);
+static void test_find_free_avoids_stack_reserve(void);
 static void test_commit_ahead_ownership(void);
 
 int main(void)
@@ -2645,6 +2646,7 @@ int main(void)
 	test_commit_ahead_ownership();
 	test_stack_grow();
 	test_clone_carries_stack_bounds();
+	test_find_free_avoids_stack_reserve();
 	test_phys();
 	test_span();
 	test_phys_d22();
@@ -3131,6 +3133,41 @@ static void test_clone_carries_stack_bounds(void)
 	CHECK(uml_nt_stack_want_grow(child.stack_top, child.stack_limit,
 				     RAM - 0x2000, RAM - 0x1f00,
 				     UML_NT_STACK_GROW_UNIT) != 0);
+}
+
+/*
+ * S21: the stack reservation is not a VMA, so a bottom-up gap search does not
+ * see it — and hands the next mapping an address inside the guest's own stack
+ * reservation. The guest then grows into a library page and the store faults.
+ * The allocator must treat [stack_limit, stack_top) as excluded.
+ */
+static void test_find_free_avoids_stack_reserve(void)
+{
+	struct uml_nt_mm mm;
+	unsigned long long lo = RAM, hi = RAM + 0x2000000ull;
+	unsigned long long got;
+
+	uml_nt_mm_init(&mm);
+	mm.stack_top = RAM + 0x100000ull;
+	mm.stack_limit = mm.stack_top - 0x800000ull;	/* 8 MiB reserve */
+
+	/* nothing else mapped: the first gap starts at the bottom and the
+	 * reserve must push the answer above stack_top */
+	got = uml_nt_vma_find_free(&mm, 0x10000ull, lo, hi);
+	CHECK(got != 0);
+	CHECK(!(got < mm.stack_top && got + 0x10000ull > mm.stack_limit));
+
+	/* an allocation that would land in the middle of the reserve */
+	got = uml_nt_vma_find_free(&mm, 0x10000ull,
+				   mm.stack_limit + 0x100000ull, hi);
+	CHECK(got != 0);
+	CHECK(got >= mm.stack_top);
+
+	/* a window that exists ONLY inside the reserve has nothing to give */
+	got = uml_nt_vma_find_free(&mm, 0x10000ull,
+				   mm.stack_limit + 0x1000ull,
+				   mm.stack_top - 0x10000ull);
+	CHECK(got == 0);
 }
 
 static void test_stack_grow(void)
