@@ -47,21 +47,27 @@ int main(void)
 		v[1].va = 0; v[1].len = 0;
 
 		/* free target inside the reservation */
-		CHECK(uml_nt_ca_target(rsp, lo, hi, 1, 0, v, 1, &t) == 1);
+		CHECK(uml_nt_ca_target(rsp, lo, hi, 1, 0, v, 1, 1, &t) == 1);
 		CHECK(t == 0x607e0000ull);	/* run below the one holding rsp */
 
 		/* the same target, now overlapping an existing view */
 		v[0].va = 0x607d8000ull; v[0].len = 0x10000ull;
-		CHECK(uml_nt_ca_target(rsp, lo, hi, 1, 0, v, 1, &t) == 0);
+		CHECK(uml_nt_ca_target(rsp, lo, hi, 1, 0, v, 1, 1, &t) == 0);
 
 		/* rsp outside the reservation */
-		CHECK(uml_nt_ca_target(0x1000ull, lo, hi, 1, 0, v, 1, &t) == 0);
+		CHECK(uml_nt_ca_target(0x1000ull, lo, hi, 1, 0, v, 1, 1, &t) == 0);
 
 		/* no registers to anchor on */
-		CHECK(uml_nt_ca_target(rsp, lo, hi, 0, 0, v, 0, &t) == 0);
+		CHECK(uml_nt_ca_target(rsp, lo, hi, 0, 0, v, 0, 1, &t) == 0);
 
 		/* no reservation at all */
-		CHECK(uml_nt_ca_target(rsp, 0, 0, 1, 0, v, 0, &t) == 0);
+		CHECK(uml_nt_ca_target(rsp, 0, 0, 1, 0, v, 0, 1, &t) == 0);
+
+		/* S23: and only the login chain reserves — the conn this
+		 * milestone is about. Every other condition can be true. */
+		v[0].va = 0x1000; v[0].len = 0x1000;
+		CHECK(uml_nt_ca_target(rsp, lo, hi, 1, 0, v, 1, 0, &t) == 0);
+		CHECK(uml_nt_ca_target(rsp, lo, hi, 1, 0, v, 1, 1, &t) == 1);
 	}
 	if (fails) { printf("ca_runs: %d failure(s)\n", fails); return 1; }
 	printf("ca_runs: 4 runs per ordinary answer, 128 only by experiment\n");

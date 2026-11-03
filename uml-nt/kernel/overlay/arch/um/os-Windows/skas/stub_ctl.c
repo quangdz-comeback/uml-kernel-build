@@ -12597,7 +12597,9 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				if (!uml_nt_ca_target(r, c->mm->stack_limit,
 						      c->mm->stack_top,
 						      c->d->regs.rsp != 0,
-						      fullcommit, views, nv, &t))
+						      fullcommit, views, nv,
+						      c->chain_login || g_exec_login,
+						      &t))
 					want_runs = 0;
 			}
 			if (want_runs > 0) {

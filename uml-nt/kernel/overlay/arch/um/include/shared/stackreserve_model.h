@@ -52,12 +52,20 @@ static inline int uml_nt_ca_target(unsigned long long rsp, unsigned long long lo
 				   unsigned long long hi, int has_regs,
 				   int fullcommit,
 				   const struct uml_nt_ca_view *views, int nviews,
+				   int login_chain,
 				   unsigned long long *target)
 {
 	unsigned long long t;
 	int i;
 
 	if (uml_nt_ca_runs(fullcommit, has_regs) == 0)
+		return 0;
+	/* S23: scoped to the conn this milestone is about. The reserve exists
+	 * to keep one particular stack alive — the login chain's — and enabling
+	 * it for every conn made an unrelated gate fail: a canary conn's own
+	 * probe mapping was in the way of an UNMAP. Until that is understood,
+	 * only the login chain reserves. */
+	if (!login_chain)
 		return 0;
 	if (lo == 0 || hi == 0 || lo >= hi)
 		return 0;
