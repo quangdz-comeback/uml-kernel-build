@@ -12100,6 +12100,34 @@ void uml_nt_fork_reprotect_parent(struct uml_nt_stub_conn *c)
 		if (!uml_nt_prot_writable(pv->prot) ||
 		    !(pv->flags & UML_NT_VMA_COW))
 			continue;
+		{
+			/* S31: release only what exists. A VMA whose view the
+			 * stub never received (a reserve still owed its MAP)
+			 * must NOT be unmapped — the MAP alone materializes
+			 * it, and pays the debt the reserve left. */
+			int has_view = 0, li;
+
+			for (li = 0; li < c->nviews; li++)
+				if (c->views[li].va == pv->start) {
+					has_view = 1;
+					break;
+				}
+			if (!has_view)
+				c->mm->reprotect_addonly++;
+			if (!uml_nt_reprotect_release_first(has_view) &&
+			    uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
+					       uml_nt_prot_readonly(pv->prot),
+					       pv->start, len,
+					       pv->run_off) < 0) {
+				os_info("fork: reprotect plan full at view %d — "
+					"%d view(s) [0x%llx..] stay WRITABLE on "
+					"shared runs\n", vi,
+					c->mm->nvma - vi, pv->start);
+				break;
+			}
+			if (!uml_nt_reprotect_release_first(has_view))
+				goto reprotected;
+		}
 		if (uml_nt_sc_plan_add(c, UML_NT_FOP_UNMAP, 0, pv->start,
 				       len, 0) < 0 ||
 		    uml_nt_sc_plan_add(c, UML_NT_FOP_MAP,
@@ -12121,6 +12149,7 @@ void uml_nt_fork_reprotect_parent(struct uml_nt_stub_conn *c)
 				pv->start);
 			break;
 		}
+reprotected:
 		vi_reprotect++;
 	}
 	if (vi_reprotect)

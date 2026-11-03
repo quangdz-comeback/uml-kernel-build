@@ -69,6 +69,21 @@ static inline int uml_nt_ca_plan_ok(unsigned long long plan_left,
 	return plan_left == 0 && plan_next == 0;
 }
 
+/*
+ * S31: the release side has a contract too — only release a view that exists.
+ *
+ * The fork's COW re-protect walks every writable shared VMA and queues
+ * UNMAP+MAP: drop the writable view, put a read-only one back. For a VMA whose
+ * view the stub never received (a reserve whose MAP was still owed) the UNMAP
+ * names an address the stub has no view for — 487, a KILL, and init dead. When
+ * the ledger has no view, the pair is wrong in both halves: there is nothing to
+ * release, and the MAP that was owed is exactly what materializes it.
+ */
+static inline int uml_nt_reprotect_release_first(int has_view)
+{
+	return has_view ? 1 : 0;
+}
+
 /* One view of the conn, as the predicate needs it. */
 struct uml_nt_ca_view {
 	unsigned long long va, len;
