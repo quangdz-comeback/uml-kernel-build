@@ -810,6 +810,15 @@ struct uml_nt_stub_data {
 	struct {
 		unsigned long long s0, s8, s16, rbp, rbp8;
 	} ans_slot[UML_NT_ANS_RING];
+	/* S20: the excursion window as the STUB's own view sees it, sampled at
+	 * the trap — kernel VQ of the stub process is not available, so the
+	 * stub answers instead. 8 pages, top-down from 0x6082d000. */
+#define UML_NT_EXC_PAGES 8
+	unsigned long long exc_va0;
+	unsigned int exc_state[UML_NT_EXC_PAGES];
+	unsigned int exc_prot[UML_NT_EXC_PAGES];
+	unsigned int exc_committed;
+	unsigned int exc_sampled;
 };
 
 /*

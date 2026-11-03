@@ -368,7 +368,7 @@ static inline int uml_nt_hop_live_format(char *buf,
  */
 #define UML_NT_STUB_DATA_HOP_LIVE_OFF	0x3350u	/* append offset */
 #define UML_NT_STUB_DATA_SIZE_V7	0x33C0u	/* sizeof the block (v7) */
-#define UML_NT_STUB_DATA_SIZE_V8	0x3530u	/* + slots, rbp chain, ring copies */
+#define UML_NT_STUB_DATA_SIZE_V8	0x3580u	/* + slots, rbp chain, ring copies */
 #define UML_NT_STUB_SECTION_LIMIT	0x10000u /* UML_STUB_SECTION_SIZE */
 
 _Static_assert(sizeof(struct uml_nt_hop_live) == UML_NT_HOP_LIVE_SIZE,

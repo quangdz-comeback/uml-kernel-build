@@ -420,6 +420,65 @@ static unsigned g_last_pub_cmd;
  * ride the answer so the kernel's [ans-ring] can print them against the
  * postmortem [stackwin].
  */
+
+/*
+ * S20: what does the STUB's own view say about the excursion window?
+ *
+ * The guest resumes at the trap, returns, and the PAM helper subtracts 0x40028
+ * from RSP — a dip that lands far below the committed stack run. The kernel
+ * cannot query the stub's views (no usable process handle at postmortem), so
+ * the stub answers here, page by page, before it can die.
+ */
+typedef int (*exc_query_fn)(void *ctx, unsigned long long va,
+			    unsigned long long *state, unsigned long long *prot);
+
+static void sample_excursion_view_with(struct uml_nt_stub_data *sd,
+				       unsigned long long va0,
+				       exc_query_fn q, void *ctx)
+{
+	unsigned i;
+
+	if (sd == NULL || q == NULL)
+		return;
+	sd->exc_va0 = va0;
+	sd->exc_committed = 0;
+	sd->exc_sampled = 0;
+	for (i = 0; i < UML_NT_EXC_PAGES; i++) {
+		unsigned long long st = 0, pr = 0, va = va0 - (unsigned long long)i *
+								0x1000ull;
+
+		sd->exc_state[i] = 0;
+		sd->exc_prot[i] = 0;
+		if (q(ctx, va, &st, &pr) != 0)
+			continue;
+		sd->exc_state[i] = (unsigned)st;
+		sd->exc_prot[i] = (unsigned)pr;
+		sd->exc_sampled++;
+		if (st == MEM_COMMIT)
+			sd->exc_committed++;
+	}
+}
+
+static int exc_query_here(void *ctx, unsigned long long va,
+			  unsigned long long *state, unsigned long long *prot)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+
+	(void)ctx;
+	memset(&mbi, 0, sizeof(mbi));
+	if (VirtualQuery((void *)(uintptr_t)va, &mbi, sizeof(mbi)) !=
+	    sizeof(mbi))
+		return -1;
+	*state = (unsigned long long)mbi.State;
+	*prot = (unsigned long long)mbi.Protect;
+	return 0;
+}
+
+static void sample_excursion_view(void)
+{
+	sample_excursion_view_with(d, 0x6082d000ull, exc_query_here, NULL);
+}
+
 static void slot_read_guest(void *ctx, unsigned long long va,
 			    unsigned long long *out)
 {
@@ -479,8 +538,10 @@ static void publish(unsigned cmd)
 {
 	g_last_pub_cmd = cmd;
 	host_rsp_guard("publish");
-	if (cmd == UML_STUB_CMD_SYSCALL || cmd == UML_STUB_CMD_FAULT)
+	if (cmd == UML_STUB_CMD_SYSCALL || cmd == UML_STUB_CMD_FAULT) {
 		sample_slot_words();
+		sample_excursion_view();
+	}
 	/* before the kernel is woken: it reads these at answer time */
 	publish_stack_hints();
 	sample_stub_stack();

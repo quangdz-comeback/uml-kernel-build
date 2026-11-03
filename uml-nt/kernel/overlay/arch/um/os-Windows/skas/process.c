@@ -382,6 +382,47 @@ static void uml_nt_mapinfo_one(struct uml_nt_stub_conn *c, const char *what,
 	os_info("%s\n", line);
 }
 
+
+/*
+ * S20 [excursion-view] — the dip the PAM frame makes, as the stub saw it.
+ *
+ * The stub sampled eight pages top-down from 0x6082d000 at the trap and
+ * recorded each page's state and protection. If those pages were committed the
+ * store could not have faulted there (so the fault is elsewhere); if they were
+ * free or only reserved the proactive grow never reached this conn.
+ */
+static void uml_nt_excursion_report(struct uml_nt_stub_conn *c)
+{
+	char line[UML_NT_DIAG_CAP];
+	int i, n;
+
+	if (c == 0 || c->d == 0)
+		return;
+	n = snprintf(line, sizeof(line),
+		     "[excursion-view] pid %d va0=0x%llx pages=%u sampled=%u "
+		     "committed=%u grow_calls=%u grow_mapped=%u "
+		     "ca_bottom=0x%llx ca_top=0x%llx ca_limit=0x%llx",
+		     (int)c->pid, c->d->exc_va0,
+		     (unsigned)UML_NT_EXC_PAGES, c->d->exc_sampled,
+		     c->d->exc_committed, (unsigned)c->d->grow_calls,
+		     (unsigned)c->d->grow_mapped,
+		     (unsigned long long)c->mm->ca_committed,
+		     (unsigned long long)c->mm->ca_top,
+		     (unsigned long long)c->mm->ca_limit);
+	for (i = 0; i < UML_NT_EXC_PAGES && n > 0 &&
+	     n < (int)sizeof(line) - 40; i++)
+		n += snprintf(line + n, sizeof(line) - n,
+			      " p%d=%lx/%lx", i,
+			      (unsigned long)c->d->exc_state[i],
+			      (unsigned long)c->d->exc_prot[i]);
+	if (n < 0)
+		return;
+	if (n >= (int)sizeof(line))
+		n = (int)sizeof(line) - 1;
+	line[n] = '\0';
+	os_info("%s\n", line);
+}
+
 static void uml_nt_mapinfo_report(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_memwin_stack s;
@@ -1640,6 +1681,7 @@ void userspace(struct uml_pt_regs *regs)
 					        c->d->args[2], c->d->req_seq);
 					uml_nt_stackwin_report(c);
 					uml_nt_mapinfo_report(c);
+					uml_nt_excursion_report(c);
 					uml_nt_capdata_report(c);
 					uml_nt_hop_live_report(c);
 					os_info("[crumbs] pid %d "
