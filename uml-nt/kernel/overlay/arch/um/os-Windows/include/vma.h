@@ -110,6 +110,10 @@ struct uml_nt_mm {
 	unsigned int ca_plan_skip;	/* S25: reserves deferred, plan mid-drain */
 	unsigned int op_sent_n;		/* S29: [op-sent] per conn, stack window */
 	unsigned int reprotect_addonly;	/* S31: views materialized, none released */
+	/* S32: the reserve's own counters live on the mm, not on the shared
+	 * answer block — a counter keyed to the log is rule #23's mistake. */
+	unsigned int ca_src_n, ca_src_v;
+	unsigned int ca_skip_nomem, ca_skip_round, ca_skip_plan;
 	unsigned ca_n;
 	int ca_alloc, ca_vma, ca_plan, ca_nvma, ca_free, ca_inside, ca_full;
 	struct uml_nt_vma vma[UML_NT_VMA_MAX];

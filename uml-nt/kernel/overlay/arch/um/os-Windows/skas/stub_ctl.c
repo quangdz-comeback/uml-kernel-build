@@ -12612,6 +12612,18 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	 * guest that is busy faulting never gets its stack grown and dies at
 	 * exactly one 64 KiB run. It now runs on every answer; the plan budget
 	 * is the only thing that can say no. */
+	if (c->mm == NULL) {
+		/* S32: name the other door, so a conn with no reserve records is
+		 * never again an inference. */
+		static unsigned nomem_done;
+
+		if (nomem_done < 4) {
+			nomem_done++;
+			os_info("[ca-skip] pid %lu reason=no-mm cmd=%u "
+				"(the reserve never sees this conn)\n",
+				(unsigned long)c->pid, (unsigned)c->d->cmd);
+		}
+	}
 	if (c->mm != NULL) {
 		/* Shelley 272: a Linux stack grows inside the kernel; a guest stack
 		 * on Windows cannot, because delivering the grow fault itself needs
@@ -12674,6 +12686,14 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			 * next ordinary answer, which is idempotent anyway. */
 			if (!uml_nt_ca_round_ok((unsigned)c->d->cmd,
 						fork_round_now(c))) {
+				if (c->mm->ca_skip_round++ < 2)
+					os_info("[ca-skip] pid %lu reason=round "
+						"cmd=%u fork_round=%d chain=%d\n",
+						(unsigned long)c->pid,
+						(unsigned)c->d->cmd,
+						fork_round_now(c),
+						(int)(c->chain_login ||
+						      g_exec_login));
 				/* S24: a fork round IS a syscall round, so the
 				 * command alone cannot name it — the armed
 				 * handoff does. */
@@ -12687,6 +12707,12 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				 * the unissued tail and leave the reserve's VMA
 				 * without its MAP. Wait for a quiescent plan. */
 				c->mm->ca_plan_skip++;
+				if (c->mm->ca_skip_plan++ < 2)
+					os_info("[ca-skip] pid %lu reason=plan "
+						"left=%d next=%d ops=%d\n",
+						(unsigned long)c->pid,
+						c->plan_left, c->plan_next,
+						c->plan.n_ops);
 				if (c->mm->ca_plan_skip <= 4)
 					os_info("[ca-orphan] pid %lu skip "
 						"plan_left=%d plan_next=%d "
@@ -12725,11 +12751,11 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				 * the rounds that matter — 520 records, all
 				 * "decline", hid a reserve that was running.
 				 * Speak when the verdict CHANGES instead. */
-				if (c->d->ca_src_n < 12 &&
-				    (int)c->d->ca_src_n == 0 ?
-				    1 : (int)ok0 != (int)c->d->ca_src_v) {
-					c->d->ca_src_n++;
-					c->d->ca_src_v = ok0;
+				if (c->mm->ca_src_n < 12 &&
+				    (c->mm->ca_src_n == 0 ||
+				     (int)ok0 != (int)c->mm->ca_src_v)) {
+					c->mm->ca_src_n++;
+					c->mm->ca_src_v = (unsigned)ok0;
 					snprintf(ca, sizeof(ca),
 						 "[ca-src] pid %lu cmd=%u "
 						 "chain_login=%u gexec=%d "
