@@ -61,6 +61,7 @@
 #include <dbg_map.h>
 #include <physalloc.h>
 #include "internal.h"
+#include <stackreserve_model.h>
 
 /* The kernel has no getenv; the boot command line is the environment this
  * port reads its levers from. */
@@ -12552,12 +12553,17 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				const char *e = uml_nt_getenv(
 					"UML_NT_STACK_FULLCOMMIT");
 
-				/* Shelley 281: the proactive reserve is an
-				 * experiment too. Reserved plan slots on every
-				 * answer starve the ops the boot actually needs,
-				 * which is why the mainline referee stopped
-				 * booting after it landed. Off unless asked. */
-				want_runs = (e != NULL && e[0] == '1') ? 128 : 0;
+				/* S22: a small reserve is back by default. The
+				 * helper that used to storm (allocating over an
+				 * occupied target on every answer) is add-only
+				 * and idempotent since S5, so 4 runs per answer
+				 * is bounded: once the run below the committed
+				 * bottom exists, the next answer finds the target
+				 * occupied and does nothing. FULLCOMMIT=1 still
+				 * asks for the whole 8 MiB experiment. */
+				want_runs = uml_nt_ca_runs(
+					e != NULL && e[0] == '1',
+					c->d->regs.rsp != 0);
 				os_info("[stack-reserve] pid %lu fullcommit=%d "
 					"runs_per_answer=%d\n",
 					(unsigned long)c->pid,
