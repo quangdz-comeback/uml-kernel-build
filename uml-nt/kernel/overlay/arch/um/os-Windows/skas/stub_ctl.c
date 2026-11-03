@@ -11061,6 +11061,20 @@ static struct {
 	unsigned long long rsp;
 } fork_handoffs[UML_NT_FORK_HANDOFF_N];
 
+/* S24: is this conn's clone(2) in flight right now? arm and seed run on the
+ * same kernel thread, so an entry for this pid means the round being answered
+ * is the fork's. */
+static int fork_round_now(struct uml_nt_stub_conn *c)
+{
+	int i;
+
+	for (i = 0; i < UML_NT_FORK_HANDOFF_N; i++)
+		if (fork_handoffs[i].conn == c &&
+		    fork_handoffs[i].pid == current->pid)
+			return 1;
+	return 0;
+}
+
 static struct uml_nt_stub_conn *fork_handoff_rsp(unsigned long long *rsp)
 {
 	int i;
@@ -12588,9 +12602,15 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			 * into an UNMAP the stub has no view for (487). Only
 			 * real trap rounds reserve; a fork round defers to the
 			 * next ordinary answer, which is idempotent anyway. */
-			if (c->d->cmd != UML_STUB_CMD_SYSCALL &&
-			    c->d->cmd != UML_STUB_CMD_FAULT)
+			if (!uml_nt_ca_round_ok((unsigned)c->d->cmd,
+						fork_round_now(c))) {
+				/* S24: a fork round IS a syscall round, so the
+				 * command alone cannot name it — the armed
+				 * handoff does. */
+				if (want_runs > 0)
+					c->mm->ca_round_skip++;
 				want_runs = 0;
+			}
 			{
 				char ca[UML_NT_DIAG_CAP];
 				unsigned long long r0 = c->d->regs.rsp ?
@@ -12614,8 +12634,17 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 							       c->chain_login || g_exec_login,
 							       &t0);
 				}
-				if (c->d->ca_src_n < 4) {
+				/* S24: the first four answers of a conn are
+				 * INIT/PROT, which carry no registers and
+				 * decline for a reason that says nothing about
+				 * the rounds that matter — 520 records, all
+				 * "decline", hid a reserve that was running.
+				 * Speak when the verdict CHANGES instead. */
+				if (c->d->ca_src_n < 12 &&
+				    (int)c->d->ca_src_n == 0 ?
+				    1 : (int)ok0 != (int)c->d->ca_src_v) {
 					c->d->ca_src_n++;
+					c->d->ca_src_v = ok0;
 					snprintf(ca, sizeof(ca),
 						 "[ca-src] pid %lu cmd=%u "
 						 "chain_login=%u gexec=%d "

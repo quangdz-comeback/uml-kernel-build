@@ -807,6 +807,7 @@ struct uml_nt_stub_data {
 	 * keeps its own copies beside each entry. */
 	unsigned long long slot_q0, slot_q8, slot_q16;
 	u32_nt ca_src_n;	/* S23: how many [ca-src] records were printed */
+	u32_nt ca_src_v;	/* S24: the last verdict printed (change log) */
 	unsigned long long slot_rbp, slot_rbp8;
 	struct {
 		unsigned long long s0, s8, s16, rbp, rbp8;

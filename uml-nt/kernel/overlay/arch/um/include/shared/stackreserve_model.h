@@ -34,6 +34,24 @@ static inline int uml_nt_ca_runs(int fullcommit, int has_regs)
 	return has_regs ? UML_NT_CA_DEFAULT_RUNS : 0;
 }
 
+/*
+ * S24: which rounds may reserve at all.
+ *
+ * A fork round is a SYSCALL round — the guest's clone(2) — so the command
+ * number cannot tell it apart from an ordinary syscall, and the reserve booked
+ * its run into the plan the child's spawn consumes. The parent kept the VMA and
+ * never sent the MAP, and the teardown's UNMAP for that address had no view to
+ * remove (487, "Attempted to kill init"). The round is identified by the fork
+ * handoff that is armed for this conn while the clone is in flight, and a fork
+ * round never reserves: the next ordinary answer does, and it is idempotent.
+ */
+static inline int uml_nt_ca_round_ok(unsigned int cmd, int fork_round)
+{
+	if (fork_round)
+		return 0;
+	return cmd == 1u /* SYSCALL */ || cmd == 3u /* FAULT */;
+}
+
 /* One view of the conn, as the predicate needs it. */
 struct uml_nt_ca_view {
 	unsigned long long va, len;

@@ -63,7 +63,15 @@ int main(void)
 		/* no reservation at all */
 		CHECK(uml_nt_ca_target(rsp, 0, 0, 1, 0, v, 0, 1, &t) == 0);
 
-		/* S23: and only the login chain reserves — the conn this
+		/* S24: the round gate. A fork round is a SYSCALL round, so the
+	 * command number cannot name it — the armed handoff does. */
+	CHECK(uml_nt_ca_round_ok(1u, 1) == 0);
+	CHECK(uml_nt_ca_round_ok(1u, 0) == 1);
+	CHECK(uml_nt_ca_round_ok(3u, 0) == 1);
+	CHECK(uml_nt_ca_round_ok(4u, 0) == 0);
+	CHECK(uml_nt_ca_round_ok(5u, 0) == 0);
+
+	/* S23: and only the login chain reserves — the conn this
 		 * milestone is about. Every other condition can be true. */
 		v[0].va = 0x1000; v[0].len = 0x1000;
 		CHECK(uml_nt_ca_target(rsp, lo, hi, 1, 0, v, 1, 0, &t) == 0);

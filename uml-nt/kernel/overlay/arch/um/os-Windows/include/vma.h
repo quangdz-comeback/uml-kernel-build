@@ -106,6 +106,7 @@ struct uml_nt_mm {
 	/* Shelley 274: commit-ahead diagnostics, filled by fault.c and printed
 	 * by the answer path (that module has no os_info of its own). */
 	unsigned long long ca_rsp, ca_committed, ca_top, ca_limit, ca_want;
+	unsigned int ca_round_skip;	/* S24: rounds a fork handoff skipped */
 	unsigned ca_n;
 	int ca_alloc, ca_vma, ca_plan, ca_nvma, ca_free, ca_inside, ca_full;
 	struct uml_nt_vma vma[UML_NT_VMA_MAX];
