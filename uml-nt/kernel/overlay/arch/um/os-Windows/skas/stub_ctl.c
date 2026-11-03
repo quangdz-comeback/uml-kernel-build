@@ -2443,13 +2443,22 @@ int uml_nt_view_release_complete(struct uml_nt_stub_conn *c)
 
 		start = c->plan_next;
 		if (merge_budget > 0) {
+			/* S27: name the tail that must survive — the op at
+			 * the drain cursor and the last op of the stream. */
 			merge_budget--;
 			os_info("[streamsync] pid %lu MID-DRAIN prime "
-				"(left=%d next=%d n=%d copy_pend=%d) — "
-				"MERGE, the reset-at-op0 is forbidden\n",
+				"(left=%d next=%d n=%d copy_pend=%d) "
+				"head_va=0x%llx tail_va=0x%llx "
+				"tail_op=%d — MERGE, the reset-at-op0 "
+				"is forbidden\n",
 				(unsigned long)c->pid, c->plan_left,
 				c->plan_next, c->plan.n_ops,
-				c->copy_pend_kind);
+				c->copy_pend_kind,
+				(unsigned long long)
+				c->plan.ops[c->plan_next].va,
+				(unsigned long long)
+				c->plan.ops[c->plan.n_ops - 1].va,
+				(int)c->plan.ops[c->plan.n_ops - 1].op);
 		}
 	}
 
@@ -10186,11 +10195,16 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					d->fault_addr, d->regs.rsp,
 					c->mm->stack_limit);
 			}
-			else if (lz == 0)
+			else if (lz == 0) {
+				/* S27: ops queued but not yet sent are part of
+				 * the stream — the repair appends, never resets. */
+				c->plan.keep_tail = c->plan_left > 0;
 				rc = uml_nt_mm_fault(c->mm, c->ph,
 						     d->fault_addr,
 						     d->fault_type,
 						     &c->plan);
+				c->plan.keep_tail = 0;
+			}
 		}
 		/* [replay-check] arm AFTER the repair decision: only a
 		 * plan the guest will resume into (no kill) replays

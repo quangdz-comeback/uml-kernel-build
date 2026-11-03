@@ -209,6 +209,11 @@ struct uml_nt_fault_plan {
 			  * 's' split fail, '?' unknown access class;
 			  * 0 = not a kill decision */
 	int n_ops;
+	/* S27: the caller's stream still has UNSENT ops (plan_left > 0). A new
+	 * repair must APPEND to that tail, not reset it: the reset dropped a
+	 * queued MAP whose VMA was already registered, and the orphan's
+	 * teardown UNMAP then named an address the stub never mapped. */
+	int keep_tail;
 	struct uml_nt_fault_op ops[UML_NT_FAULT_MAX_OPS];
 	/* COW copy directive (integration: kernel memcpy through its
 	 * own flat view, 64K run, BEFORE the ops reach the stub).

@@ -367,7 +367,13 @@ int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 
 	plan->kill = 0;
 	plan->kill_why = 0;
-	plan->n_ops = 0;
+	/* S27: a stream with unsent ops is NOT reset — the repair appends to its
+	 * tail. Resetting dropped a queued MAP whose VMA was already in the
+	 * table; the run then had no view and the teardown's UNMAP for it was
+	 * answered 487. Every op the stream carries is an op whose VMA exists,
+	 * so the tail must survive. */
+	if (!plan->keep_tail)
+		plan->n_ops = 0;
 	plan->copy_src_off = 0;
 	plan->copy_dst_off = 0;
 	plan->cap_gen_src = 0;
