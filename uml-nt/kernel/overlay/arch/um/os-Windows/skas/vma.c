@@ -438,6 +438,14 @@ int uml_nt_mm_clone(struct uml_nt_mm *dst, const struct uml_nt_mm *src,
 	dst->heap_start = src->heap_start;
 	dst->heap_end = src->heap_end;
 	dst->brk = src->brk;
+	/* S19a: the stack bounds are metadata, not a VMA — and every stack
+	 * decision reads them. Without them the child's own stack is invisible
+	 * to the fault machinery: a dip below the committed run stops being a
+	 * stack fault and becomes a wild access (the referee victim's zeroes).
+	 * The child shares the parent's stack shape; the reservation below it
+	 * is still not committed, so nothing is allocated here. */
+	dst->stack_top = src->stack_top;
+	dst->stack_limit = src->stack_limit;
 	{
 		int gi;
 

@@ -424,12 +424,28 @@ static void slot_read_guest(void *ctx, unsigned long long va,
 			    unsigned long long *out)
 {
 	struct uml_nt_stub_data *sd = (struct uml_nt_stub_data *)ctx;
+	MEMORY_BASIC_INFORMATION mbi;
 
 	*out = 0;
 	if (sd == NULL || va == 0)
 		return;
 	/* the stub's own identity view of guest RAM */
 	if (va < sd->ram_base || va + 8 > sd->ram_base + sd->ram_size)
+		return;
+	/* S19b: never read blind. A guest VA inside the span is not proof that
+	 * the page is there in THIS process — the stack below the committed run
+	 * is exactly the region where it is not, and a blind read faults the
+	 * stub itself. Ask the OS first; anything but plain committed memory
+	 * reads as zero. */
+	memset(&mbi, 0, sizeof(mbi));
+	if (VirtualQuery((void *)(uintptr_t)va, &mbi, sizeof(mbi)) !=
+	    sizeof(mbi))
+		return;
+	if (mbi.State != MEM_COMMIT)
+		return;
+	if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))
+		return;
+	if ((uintptr_t)va + 8 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize)
 		return;
 	memcpy(out, (const void *)(uintptr_t)va, 8);
 }

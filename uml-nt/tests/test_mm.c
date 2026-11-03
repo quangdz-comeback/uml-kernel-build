@@ -2637,12 +2637,14 @@ static void test_multirun_cow_effective_prot(void)
 }
 
 static void test_stack_grow(void);
+static void test_clone_carries_stack_bounds(void);
 static void test_commit_ahead_ownership(void);
 
 int main(void)
 {
 	test_commit_ahead_ownership();
 	test_stack_grow();
+	test_clone_carries_stack_bounds();
 	test_phys();
 	test_span();
 	test_phys_d22();
@@ -3092,6 +3094,43 @@ static void test_commit_ahead_ownership(void)
 		/* the helper's own overflow guard must not have fired either */
 		CHECK(mm.ca_alloc == 0 && mm.ca_plan == 0);
 	}
+}
+
+/*
+ * S19a: a fork child must inherit the parent's stack bounds.
+ *
+ * The child's mm is built by uml_nt_mm_clone, and every stack decision (is this
+ * a stack fault? may it grow? where is the floor?) reads stack_top and
+ * stack_limit. A clone that leaves them zero makes the child's own stack
+ * invisible to the fault machinery: a dip below the committed run stops being a
+ * stack fault and becomes a wild access. The victim's referee logs show exactly
+ * that pair of zeros.
+ */
+static void test_clone_carries_stack_bounds(void)
+{
+	struct uml_nt_mm parent, child;
+	struct uml_nt_phys ph;
+	unsigned long long r;
+
+	mock_reset();
+	CHECK(uml_nt_phys_init(&ph, 32 * RUN) == 0);
+	uml_nt_mm_init(&parent);
+	r = (unsigned long long)uml_nt_phys_alloc(&ph);
+	CHECK((long long)r >= 0);
+	CHECK(uml_nt_vma_add(&parent, RAM, RAM + RUN, r,
+			     UML_NT_PAGE_READWRITE, 0) == 0);
+	parent.stack_top = RAM + RUN;
+	parent.stack_limit = RAM - 0x7f0000ull;
+
+	CHECK(uml_nt_mm_clone(&child, &parent, &ph, RAM + RUN - 0x10) == 0);
+	CHECK(child.stack_top == parent.stack_top);
+	CHECK(child.stack_limit == parent.stack_limit);
+
+	/* the machinery must now agree that a dip below the run is a stack
+	 * fault for the CHILD too */
+	CHECK(uml_nt_stack_want_grow(child.stack_top, child.stack_limit,
+				     RAM - 0x2000, RAM - 0x1f00,
+				     UML_NT_STACK_GROW_UNIT) != 0);
 }
 
 static void test_stack_grow(void)
