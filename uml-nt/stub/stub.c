@@ -1119,12 +1119,40 @@ static int do_action(void)
 					     view_len,
 					     (PVOID)(uintptr_t)d->map_va);
 
+		/* S29: the other half of [op-sent] — what the stub was asked to
+		 * map, before the call, and whether the call took it. */
+		if (d->map_va >= 0x60800000ull && d->map_va < 0x60900000ull) {
+			fprintf(stderr, "[op-map] pid %lu va=0x%llx len=0x%llx "
+				"off=0x%llx prot=0x%x\n",
+				(unsigned long)GetCurrentProcessId(),
+				(unsigned long long)d->map_va,
+				(unsigned long long)d->map_len,
+				(unsigned long long)d->map_off,
+				(unsigned)d->map_prot);
+			fflush(stderr);
+		}
 		if (base == NULL) {
+			if (d->map_va >= 0x60800000ull &&
+			    d->map_va < 0x60900000ull) {
+				fprintf(stderr, "[op-map] pid %lu va=0x%llx "
+					"result=failed (%lu)\n",
+					(unsigned long)GetCurrentProcessId(),
+					(unsigned long long)d->map_va,
+					GetLastError());
+				fflush(stderr);
+			}
 			fprintf(stderr, "stub: MapViewOfFileEx(va=%#llx "
 				"len=%#llx off=%#llx) failed (%lu)\n",
 				d->map_va, d->map_len, d->map_off,
 				GetLastError());
 			return 0;
+		}
+		if (d->map_va >= 0x60800000ull && d->map_va < 0x60900000ull) {
+			fprintf(stderr, "[op-map] pid %lu va=0x%llx "
+				"result=ok base=%p\n",
+				(unsigned long)GetCurrentProcessId(),
+				(unsigned long long)d->map_va, base);
+			fflush(stderr);
 		}
 		/* The view came in RWX (raisable, see map_access): drop
 		 * the page protection to what the kernel asked for. A

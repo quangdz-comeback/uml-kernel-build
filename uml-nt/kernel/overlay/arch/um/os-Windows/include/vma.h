@@ -108,6 +108,7 @@ struct uml_nt_mm {
 	unsigned long long ca_rsp, ca_committed, ca_top, ca_limit, ca_want;
 	unsigned int ca_round_skip;	/* S24: rounds a fork handoff skipped */
 	unsigned int ca_plan_skip;	/* S25: reserves deferred, plan mid-drain */
+	unsigned int op_sent_n;		/* S29: [op-sent] per conn, stack window */
 	unsigned ca_n;
 	int ca_alloc, ca_vma, ca_plan, ca_nvma, ca_free, ca_inside, ca_full;
 	struct uml_nt_vma vma[UML_NT_VMA_MAX];
