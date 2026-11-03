@@ -2396,6 +2396,25 @@ static void issue_plan_op(struct uml_nt_stub_conn *c,
 		d->map_len = op->len;
 		break;
 	}
+	/* S28: what the kernel ISSUES is not what the stub APPLIES. The two
+	 * records ([op-sent] here, [map-view]/[op-unmapped] in the stub) are the
+	 * only way to tell a lost answer from a lost op. The stack window is
+	 * logged without a cap that can hide it; the total says how many were
+	 * issued. */
+	{
+		static unsigned op_sent_n;
+
+		if (op->va >= 0x60800000ull && op->va < 0x60900000ull &&
+		    op_sent_n < 16) {
+		op_sent_n++;
+		os_info("[op-sent] pid %lu idx=%d op=%d va=0x%llx len=0x%llx "
+			"prot=0x%x n_ops=%d next=%d\n",
+			(unsigned long)c->pid, c->plan_next, (int)op->op,
+			(unsigned long long)op->va,
+			(unsigned long long)op->len, (unsigned)op->prot,
+			c->plan.n_ops, c->plan_next);
+		}
+	}
 	c->plan_next++;
 }
 

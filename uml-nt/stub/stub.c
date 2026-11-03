@@ -1220,6 +1220,15 @@ static int do_action(void)
 	case UML_STUB_ACTION_UNMAP:
 		/* UnmapViewOfFile releases a WHOLE view — the kernel
 		 * plans exact view ranges only (fault.h geometry). */
+		/* S28: the answer to "was the op applied" — one line per
+		 * unmap in the stack window, whatever the outcome. */
+		if (d->map_va >= 0x60800000ull && d->map_va < 0x60900000ull) {
+			fprintf(stderr, "[op-unmap] pid %lu va=0x%llx len=0x%llx\n",
+				(unsigned long)GetCurrentProcessId(),
+				(unsigned long long)d->map_va,
+				(unsigned long long)d->map_len);
+			fflush(stderr);
+		}
 		if (!UnmapViewOfFile((PVOID)(uintptr_t)d->map_va)) {
 			fprintf(stderr, "stub: UnmapViewOfFile(%#llx) "
 				"failed (%lu)\n", d->map_va,
