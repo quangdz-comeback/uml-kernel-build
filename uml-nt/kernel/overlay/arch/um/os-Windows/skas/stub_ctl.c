@@ -12577,6 +12577,22 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				want_runs = uml_nt_ca_runs(fullcommit,
 							   c->d->regs.rsp != 0);
 			}
+			/* S22c: the reserve only exists inside a conn's own stack
+			 * reservation. Without one (a conn with no stack VMA, or an
+			 * rsp outside [limit, top)) there is nothing to reserve —
+			 * and mapping anyway placed a run where the caller's own
+			 * probe mapping lives: the fork/COW canary's UnmapViewOfFile
+			 * then failed with 487 and the stub was killed. */
+			if (want_runs > 0) {
+				unsigned long long r = c->d->regs.rsp ?
+					c->d->regs.rsp : c->d->stack_va;
+
+				if (c->mm->stack_top <= c->mm->stack_limit ||
+				    r < c->mm->stack_limit ||
+				    r > c->mm->stack_top ||
+				    uml_nt_vma_find(c->mm, r) == 0)
+					want_runs = 0;
+			}
 			if (want_runs > 0) {
 				uml_nt_sc_plan_reserve(c, (unsigned)want_runs);
 				c->mm->ca_full = want_runs;
