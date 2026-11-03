@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 	golang.zx2c4.com/wireguard v0.0.0-20261006164505-2631ce99a06f
 	gopkg.in/yaml.v3 v3.0.1
