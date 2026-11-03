@@ -12582,6 +12582,58 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			 * already has — a caller's probe mapping lives in exactly
 			 * such a place (the fork/COW canary's UnmapViewOfFile was
 			 * failing with 487 before this predicate). */
+			/* S23: a fork answer carries the parent's plan to the
+			 * CHILD's spawn, so an op queued here is never applied
+			 * by the parent — and the VMA entry left behind turns
+			 * into an UNMAP the stub has no view for (487). Only
+			 * real trap rounds reserve; a fork round defers to the
+			 * next ordinary answer, which is idempotent anyway. */
+			if (c->d->cmd != UML_STUB_CMD_SYSCALL &&
+			    c->d->cmd != UML_STUB_CMD_FAULT)
+				want_runs = 0;
+			{
+				char ca[UML_NT_DIAG_CAP];
+				unsigned long long r0 = c->d->regs.rsp ?
+					c->d->regs.rsp : c->d->stack_va;
+				unsigned long long t0 = 0;
+				int ok0 = 0;
+
+				if (want_runs > 0) {
+					static struct uml_nt_ca_view v0[64];
+					int vi0, nv0 = 0;
+
+					for (vi0 = 0; vi0 < (int)c->nviews && vi0 < 64; vi0++) {
+						v0[nv0].va = c->views[vi0].va;
+						v0[nv0].len = c->views[vi0].len;
+						nv0++;
+					}
+					ok0 = uml_nt_ca_target(r0, c->mm->stack_limit,
+							       c->mm->stack_top,
+							       c->d->regs.rsp != 0,
+							       fullcommit, v0, nv0,
+							       c->chain_login || g_exec_login,
+							       &t0);
+				}
+				if (c->d->ca_src_n < 4) {
+					c->d->ca_src_n++;
+					snprintf(ca, sizeof(ca),
+						 "[ca-src] pid %lu cmd=%u "
+						 "chain_login=%u gexec=%d "
+						 "d_bottom=0x%llx d_top=0x%llx "
+						 "lim=0x%llx top=0x%llx rsp=0x%llx "
+						 "target=0x%llx verdict=%s",
+						 (unsigned long)c->pid,
+						 (unsigned)c->d->cmd,
+						 (unsigned)c->chain_login,
+						 (int)g_exec_login,
+						 (unsigned long long)c->d->stack_bottom,
+						 (unsigned long long)c->d->stack_top_hint,
+						 (unsigned long long)c->mm->stack_limit,
+						 (unsigned long long)c->mm->stack_top,
+						 r0, t0, ok0 ? "reserve" : "decline");
+					os_info("%s\n", ca);
+				}
+			}
 			if (want_runs > 0) {
 				static struct uml_nt_ca_view views[64];
 				unsigned long long r = c->d->regs.rsp ?
