@@ -1134,9 +1134,31 @@ static int do_action(void)
 
 			/* Shelley 279: the stack range matters most and was the
 			 * first thing a cap hid. Log it separately and deeper. */
+			/* S26: `nviews_logged < 8` made "no [map-view] for
+			 * this address" mean "the ninth view onwards", not
+			 * "no view" — and three reports read it the second
+			 * way. The stack reservation window is always
+			 * logged, however many views came before, and a
+			 * per-process total accompanies it so a capped log
+			 * can never again pass for an empty one. */
+			static unsigned view_total;
+
+			view_total++;
+			if (d->map_va >= 0x60800000ull &&
+			    d->map_va < 0x60900000ull) {
+				fprintf(stderr, "[view-total] pid %lu n=%u "
+					"va=0x%llx (stack window — always "
+					"logged)\n",
+					(unsigned long)GetCurrentProcessId(),
+					view_total,
+					(unsigned long long)d->map_va);
+				fflush(stderr);
+			}
 			if (nviews_logged < 8 ||
 			    (d->map_va >= 0x62000000ull &&
-			     d->map_va < 0x62900000ull && nviews_logged < 48)) {
+			     d->map_va < 0x62900000ull && nviews_logged < 48) ||
+			    (d->map_va >= 0x60800000ull &&
+			     d->map_va < 0x60900000ull)) {
 				nviews_logged++;
 				fprintf(stderr, "[map-view] pid %lu va=0x%llx "
 					"len=0x%llx prot=0x%x base=%p n=%u\n",
