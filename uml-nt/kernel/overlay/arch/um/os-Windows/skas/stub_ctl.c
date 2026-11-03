@@ -12546,10 +12546,15 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		 * every answer commit all 8 MiB of the reservation instead of the
 		 * 256 KiB reserve. */
 		{
-			static int want_runs = -1;
+			/* S22b: only the EXPERIMENT flag is latched. The number of
+			 * runs is decided per answer — latching that too meant the
+			 * first answer of the process (which may carry no
+			 * registers) fixed the policy at zero for every conn that
+			 * followed, and the reserve then never ran at all. */
+			static int fullcommit = -1;
+			int want_runs;
 
-
-			if (want_runs < 0) {
+			if (fullcommit < 0) {
 				const char *e = uml_nt_getenv(
 					"UML_NT_STACK_FULLCOMMIT");
 
@@ -12561,13 +12566,16 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				 * bottom exists, the next answer finds the target
 				 * occupied and does nothing. FULLCOMMIT=1 still
 				 * asks for the whole 8 MiB experiment. */
-				want_runs = uml_nt_ca_runs(
-					e != NULL && e[0] == '1',
-					c->d->regs.rsp != 0);
+				fullcommit = (e != NULL && e[0] == '1');
+				want_runs = uml_nt_ca_runs(fullcommit,
+							   c->d->regs.rsp != 0);
 				os_info("[stack-reserve] pid %lu fullcommit=%d "
 					"runs_per_answer=%d\n",
 					(unsigned long)c->pid,
 					want_runs == 128, want_runs);
+			} else {
+				want_runs = uml_nt_ca_runs(fullcommit,
+							   c->d->regs.rsp != 0);
 			}
 			if (want_runs > 0) {
 				uml_nt_sc_plan_reserve(c, (unsigned)want_runs);

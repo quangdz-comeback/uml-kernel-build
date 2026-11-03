@@ -26,6 +26,15 @@ int main(void)
 	/* the deliberate experiment still asks for the whole reservation */
 	CHECK(uml_nt_ca_runs(1, 1) == 128);
 	CHECK(uml_nt_ca_runs(1, 0) == 128);
+	/* S22b: the policy is per answer. An answer without registers (the
+	 * first one a process may see) must not latch zero for every answer
+	 * that follows — that is what kept the reserve from ever running. */
+	{
+		int latched = uml_nt_ca_runs(0, 0);	/* first answer: no regs */
+
+		CHECK(latched == 0);
+		CHECK(uml_nt_ca_runs(0, 1) == UML_NT_CA_DEFAULT_RUNS);
+	}
 	if (fails) { printf("ca_runs: %d failure(s)\n", fails); return 1; }
 	printf("ca_runs: 4 runs per ordinary answer, 128 only by experiment\n");
 	return 0;
