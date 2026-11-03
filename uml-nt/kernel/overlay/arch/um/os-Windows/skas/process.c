@@ -241,9 +241,29 @@ static void memwin_find(void *ctx, __u64 va, struct uml_nt_memwin_vma *out)
  * The return address a `ret` reads is exactly the qword at RSP; if no VMA
  * covers it, the guest was about to return into a hole and that is said LOUD.
  */
+/*
+ * S16b: ONE logical record per observation.
+ *
+ * Both producers used to assemble their record from several os_info calls, and
+ * each call is framed — and written — on its own. The console is shared with
+ * the stub's diagnostics, so a competing writer could land between the pieces
+ * and split the record: exactly the hazard S8/S14 closed elsewhere. Each line
+ * is now built in a bounded buffer and emitted with a single call.
+ *
+ * Provenance, stated in the output itself because it bounds what the numbers
+ * mean: everything here is read at POSTMORTEM from the kernel's guest backing
+ * memory, at the LAST PUBLISHED trap's RSP — not a measured fault context, and
+ * not proof that a RET, a jump or a guest instruction ever happened.
+ */
+static const char *const memwin_prov =
+	"postmortem snapshot at last-trap rsp; not a fault context, not proof a "
+	"ret/jmp ran";
+
 static void uml_nt_stackwin_report(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_memwin_stack s;
+	char line[UML_NT_DIAG_CAP];
+	int n = 0;
 	__u64 rsp;
 
 	if (c == 0 || c->d == 0)
@@ -252,57 +272,97 @@ static void uml_nt_stackwin_report(struct uml_nt_stub_conn *c)
 	uml_nt_memwin_stack(memwin_read, c, memwin_find, c, rsp, &s);
 	if (!s.readable) {
 		os_info("[stackwin] pid %d rsp=0x%llx UNREADABLE err=%d "
-			"==> the window around rsp cannot be read\n",
-			(int)c->pid, rsp, s.err);
+			"==> the window around rsp cannot be read (%s)\n",
+			(int)c->pid, rsp, s.err, memwin_prov);
 		return;
 	}
-	os_info("[stackwin] pid %d rsp=0x%llx [rsp]=0x%llx "
-		"w-0x20=[0x%llx,0x%llx,0x%llx,0x%llx] "
-		"w+0x08=[0x%llx,0x%llx,0x%llx] "
-		"retaddr=%s\n",
-		(int)c->pid, rsp, s.q[4],
-		s.q[0], s.q[1], s.q[2], s.q[3],
-		s.q[5], s.q[6], s.q[7],
-		s.retaddr_vma ? "in-vma" : "NO-VMA");
-	if (s.retaddr_vma)
-		os_info("[stackwin] retaddr vma=[0x%llx,0x%llx) prot=0x%x "
-			"flags=0x%x\n", s.retaddr_where.start,
-			s.retaddr_where.end, s.retaddr_where.prot,
-			s.retaddr_where.flags);
-	else
-		os_info("[stackwin] LOUD retaddr=NO-VMA: the return address "
-			"0x%llx is outside every mapped region\n", s.q[4]);
+	n = snprintf(line, sizeof(line),
+		      "[stackwin] pid %d rsp=0x%llx [rsp]=0x%llx "
+		      "w-0x20=[0x%llx,0x%llx,0x%llx,0x%llx] "
+		      "w+0x08=[0x%llx,0x%llx,0x%llx] ",
+		      (int)c->pid, rsp, s.q[4],
+		      s.q[0], s.q[1], s.q[2], s.q[3],
+		      s.q[5], s.q[6], s.q[7]);
+	if (n < 0)
+		n = 0;
+	if (n > (int)sizeof(line) - 96)
+		n = (int)sizeof(line) - 96;
+	if (s.retaddr_vma) {
+		n += snprintf(line + n, sizeof(line) - n,
+			       "retaddr=in-vma vma=[0x%llx,0x%llx) prot=0x%x "
+			       "flags=0x%x candidate-ret=%s",
+			       s.retaddr_where.start, s.retaddr_where.end,
+			       s.retaddr_where.prot, s.retaddr_where.flags,
+			       memwin_prov);
+	} else {
+		n += snprintf(line + n, sizeof(line) - n,
+			       "retaddr=NO-VMA LOUD: 0x%llx is outside every "
+			       "mapped region (candidate-ret; %s)",
+			       s.q[4], memwin_prov);
+	}
+	if (n < 0)
+		return;
+	if (n >= (int)sizeof(line))
+		n = (int)sizeof(line) - 1;
+	line[n] = '\0';
+	os_info("%s\n", line);
 }
 
 /*
- * S16 [capdata] — did the kernel actually fill the capability buffer?
- * The [capget] witness's "granted" is a prediction made from the VMA/run
- * state; these bytes are the answer.
+ * S16 [capdata] — what the buffer held at postmortem.
+ *
+ * The [capget] witness's "granted" is a prediction from the VMA/run state; the
+ * bytes are the observation. They do NOT establish that capget wrote them,
+ * when, or through the victim's own view: this is a kernel-side snapshot of
+ * guest backing memory, so a raw 24-byte dump is not a verified v2/v3 syscall
+ * write (the header/version would be needed for that).
  */
 static void uml_nt_capdata_report(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_memwin_capdata d;
-	int i;
+	char line[UML_NT_DIAG_CAP];
+	int i, n;
+	int capget_round;
 
 	if (c == 0 || c->d == 0)
 		return;
-	uml_nt_memwin_capdata(memwin_read, c, c->d->req_seq != 0 &&
-			      c->last_nr == 125, c->d->args[1], &d);
-	if (!d.attempted) {
-		os_info("[capdata] pid %d no capget round on this conn\n",
-			(int)c->pid);
+	capget_round = (c->d->req_seq != 0 && c->last_nr == 125);
+	if (!capget_round) {
+		os_info("[capdata] pid %d no capget round on this conn "
+			"(last_nr=%llu)\n", (int)c->pid,
+			(unsigned long long)c->last_nr);
+		return;
+	}
+	uml_nt_memwin_capdata(memwin_read, c, capget_round, c->d->args[1], &d);
+	/* a NULL data pointer is the legitimate version-query shape, not
+	 * evidence that no round happened — say that before trying to read */
+	if (c->d->args[1] == 0) {
+		os_info("[capdata] pid %d a1=0x0 (NULL data: version query "
+			"shape, nothing to read)\n", (int)c->pid);
 		return;
 	}
 	if (!d.readable) {
-		os_info("[capdata] pid %d a1=0x%llx UNREADABLE err=%d\n",
-			(int)c->pid, d.va, d.err);
+		os_info("[capdata] pid %d a1=0x%llx UNREADABLE err=%d "
+			"==> the observation failed; this is NOT all-zero "
+			"data\n", (int)c->pid, d.va, d.err);
 		return;
 	}
-	os_info("[capdata] pid %d a1=0x%llx", (int)c->pid, d.va);
-	for (i = 0; i < (int)sizeof(d.b); i++)
-		os_info("%s%02x", (i % 8) == 0 ? " [" : " ",
-			(unsigned)d.b[i]);
-	os_info(" ] (24 bytes = capability data v2/v3)\n");
+	n = snprintf(line, sizeof(line), "[capdata] pid %d a1=0x%llx bytes=",
+		     (int)c->pid, d.va);
+	for (i = 0; i < (int)sizeof(d.b) && n < (int)sizeof(line) - 8; i++)
+		n += snprintf(line + n, sizeof(line) - n, "%02x",
+			      (unsigned)d.b[i]);
+	if (n < 0)
+		return;
+	if (n < (int)sizeof(line) - 96)
+		n += snprintf(line + n, sizeof(line) - n,
+			      " (24 raw bytes from guest backing memory; not "
+			      "proof capget wrote them, nor a verified v2/v3 "
+			      "write)");
+	if (n >= (int)sizeof(line))
+		n = (int)sizeof(line) - 1;
+	line[n] = '\0';
+	os_info("%s\n", line);
 }
 
 static void uml_nt_hop_live_report(struct uml_nt_stub_conn *c)

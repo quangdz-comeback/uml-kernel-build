@@ -64,3 +64,4 @@ bash "$HERE/test_sysbench_report.sh"
 # Shelley 315 (Astra S16): what the death record can still read — the return
 # address a ret would take and whether capget's buffer really got its data.
 bash "$HERE/test_memwin.sh"
+bash "$HERE/test_stackwin_capdata.sh"
