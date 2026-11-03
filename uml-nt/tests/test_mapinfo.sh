@@ -37,14 +37,21 @@ struct uml_nt_stub_conn {
 	int pid; void *d, *mm, *proc; unsigned nviews;
 	view_t views[8]; struct lazy_t lazy[4];
 };
-static char last[1024]; static int n_writes;
+static char last[1024]; static int n_writes; static int competing;
 static void os_info(const char *fmt, ...)
 {
 	va_list ap; va_start(ap, fmt);
 	vsnprintf(last, sizeof(last), fmt, ap); va_end(ap); n_writes++;
+	if (competing) {
+		/* the OTHER writer lands between two kernel writes */
+		va_start(ap, fmt); va_end(ap);
+		n_writes++;
+	}
 }
+static int memwin_readable = 1;
 static int memwin_read(void *c, __u64 va, unsigned int len, char *dst)
-{ (void)c; (void)va; memcpy(dst, "\x55\x48\x89\xe5", 4); memset(dst+4,0x90,len-4); return 0; }
+{ (void)c; (void)va; if (!memwin_readable) return -14;
+  memcpy(dst, "\x55\x48\x89\xe5", 4); memset(dst+4,0x90,len-4); return 0; }
 static struct uml_nt_vma the_vma; static int have_vma = 1;
 struct uml_nt_vma *uml_nt_vma_find(void *mm, unsigned long long va)
 { (void)mm; (void)va; return have_vma ? &the_vma : 0; }
@@ -103,10 +110,28 @@ int main(void)
 	CHECK(n_writes == 1);
 	have_vma = 1;
 
-	/* bytes for offline disassembly, and an explicit unreadable case */
+	/* bytes for offline disassembly: still ONE write, bytes included */
 	n_writes = 0;
 	uml_nt_mapinfo_one(&c, "ret-candidate", 0x61401a3bull, 1);
-	CHECK(n_writes >= 2);
+	CHECK(n_writes == 1);
+	CHECK(strstr(last, "bytes@0x61401a38=") != NULL);
+	CHECK(strstr(last, "554889e5") != NULL);	/* the fake reader's bytes */
+	CHECK(strstr(last, "ctx-audit") == NULL);	/* no foreign writer spliced in */
+
+	/* with a competing writer injecting between writes, the record must still
+	 * be one emission (a split record would show a second write) */
+	n_writes = 0;
+	competing = 1;
+	uml_nt_mapinfo_one(&c, "ret-candidate", 0x61401a3bull, 1);
+	CHECK(n_writes == 2);		/* one record + the foreign line, never a split */
+
+	/* an unreadable read is reported INSIDE the same record */
+	n_writes = 0;
+	competing = 0;
+	memwin_readable = 0;
+	uml_nt_mapinfo_one(&c, "ret-candidate", 0x61401a3bull, 1);
+	CHECK(n_writes == 1);
+	CHECK(strstr(last, "UNREADABLE") != NULL);
 	if (fails) { printf("mapinfo: %d failure(s)\n", fails); return 1; }
 	printf("mapinfo: engine view, real view and file identity labelled\n");
 	return 0;

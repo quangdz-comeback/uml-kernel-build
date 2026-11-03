@@ -351,28 +351,35 @@ static void uml_nt_mapinfo_one(struct uml_nt_stub_conn *c, const char *what,
 		n += snprintf(line + n, sizeof(line) - n,
 			       "real_query=NO-PROC-HANDLE");
 	}
+	if (n < 0)
+		n = 0;
+	if (n > (int)sizeof(line) - 120)
+		n = (int)sizeof(line) - 120;
+
+	/* S18b: the bytes belong to the SAME record — one observation, one write */
+	if (with_bytes) {
+		unsigned char b[16];
+		int err = memwin_read(c, va & ~7ull, sizeof(b), (char *)b);
+
+		if (err != 0) {
+			n += snprintf(line + n, sizeof(line) - n,
+				      "bytes@0x%llx=UNREADABLE err=%d",
+				      va & ~7ull, err);
+		} else {
+			n += snprintf(line + n, sizeof(line) - n,
+				      "bytes@0x%llx=", va & ~7ull);
+			for (i = 0; i < (int)sizeof(b) &&
+			     n < (int)sizeof(line) - 48; i++)
+				n += snprintf(line + n, sizeof(line) - n, "%02x",
+					      (unsigned)b[i]);
+			n += snprintf(line + n, sizeof(line) - n,
+				      " (guest bytes via the kernel view)");
+		}
+	}
 	if (n < 0 || n >= (int)sizeof(line))
 		n = (int)sizeof(line) - 1;
 	line[n] = '\0';
 	os_info("%s\n", line);
-
-	if (!with_bytes)
-		return;
-	{
-		unsigned char b[16];
-		int err;
-
-		err = memwin_read(c, va & ~7ull, sizeof(b), (char *)b);
-		if (err != 0) {
-			os_info("[mapinfo] bytes@0x%llx UNREADABLE err=%d\n",
-				va & ~7ull, err);
-			return;
-		}
-		os_info("[mapinfo] bytes@0x%llx", va & ~7ull);
-		for (i = 0; i < (int)sizeof(b); i++)
-			os_info(" %02x", (unsigned)b[i]);
-		os_info("  (guest bytes via the kernel view; for offline disasm)\n");
-	}
 }
 
 static void uml_nt_mapinfo_report(struct uml_nt_stub_conn *c)

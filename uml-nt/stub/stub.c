@@ -409,10 +409,62 @@ static void publish_stack_hints(void)
 
 static unsigned g_last_pub_cmd;
 
+
+/*
+ * S18: sample the return slot AT THE TRAP.
+ *
+ * The wrapper's successful path is `cmp rax,-4095; jae +1; ret` with no RSP
+ * adjustment, so the word a ret would take is exactly [rsp]. Reading it here —
+ * while the guest is stopped at the syscall — says whether the slot was already
+ * bad before the round (a caller pushed a bad word) or only later. The values
+ * ride the answer so the kernel's [ans-ring] can print them against the
+ * postmortem [stackwin].
+ */
+static void slot_read_guest(void *ctx, unsigned long long va,
+			    unsigned long long *out)
+{
+	struct uml_nt_stub_data *sd = (struct uml_nt_stub_data *)ctx;
+
+	*out = 0;
+	if (sd == NULL || va == 0)
+		return;
+	/* the stub's own identity view of guest RAM */
+	if (va < sd->ram_base || va + 8 > sd->ram_base + sd->ram_size)
+		return;
+	memcpy(out, (const void *)(uintptr_t)va, 8);
+}
+
+/* S18a: the sampler takes its reader, so a host test can drive it with a
+ * real buffer and make the at-trap and postmortem words differ on purpose. */
+static void sample_slot_words_with(struct uml_nt_stub_data *sd,
+				   void (*rd)(void *, unsigned long long,
+					      unsigned long long *),
+				   void *ctx)
+{
+	if (sd == NULL || rd == NULL)
+		return;
+	sd->slot_q0 = sd->slot_q8 = sd->slot_q16 = 0;
+	sd->slot_rbp = sd->slot_rbp8 = 0;
+	rd(ctx, sd->regs.rsp, &sd->slot_q0);
+	rd(ctx, sd->regs.rsp + 8, &sd->slot_q8);
+	rd(ctx, sd->regs.rsp + 16, &sd->slot_q16);
+	/* S18c: the caller frame — SysV puts the caller's return address at
+	 * [rbp+8], so the frame chain names who called the wrapper. */
+	rd(ctx, sd->regs.rbp, &sd->slot_rbp);
+	rd(ctx, sd->regs.rbp + 8, &sd->slot_rbp8);
+}
+
+static void sample_slot_words(void)
+{
+	sample_slot_words_with(d, slot_read_guest, d);
+}
+
 static void publish(unsigned cmd)
 {
 	g_last_pub_cmd = cmd;
 	host_rsp_guard("publish");
+	if (cmd == UML_STUB_CMD_SYSCALL || cmd == UML_STUB_CMD_FAULT)
+		sample_slot_words();
 	/* before the kernel is woken: it reads these at answer time */
 	publish_stack_hints();
 	sample_stub_stack();

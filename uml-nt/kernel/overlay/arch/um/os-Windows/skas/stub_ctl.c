@@ -13380,6 +13380,12 @@ void uml_nt_ans_ring_push(struct uml_nt_stub_conn *c, unsigned cmd,
 	c->d->ans_ring[i].rip = rip;
 	c->d->ans_ring[i].rsp = rsp;
 	c->d->ans_ring[i].seq = c->d->pub_seq;
+	/* S18: the stub sampled the slot at the trap; copy it verbatim */
+	c->d->ans_slot[i].s0 = c->d->slot_q0;
+	c->d->ans_slot[i].s8 = c->d->slot_q8;
+	c->d->ans_slot[i].s16 = c->d->slot_q16;
+	c->d->ans_slot[i].rbp = c->d->slot_rbp;
+	c->d->ans_slot[i].rbp8 = c->d->slot_rbp8;
 	c->d->ans_ring_n++;
 }
 
@@ -13398,10 +13404,14 @@ void uml_nt_ans_ring_dump(struct uml_nt_stub_conn *c, const char *why)
 	     k >= 0; k--) {
 		i = (n - 1 - (unsigned)k) % UML_NT_ANS_RING;
 		os_info("[ans-ring]   cmd=%u seq=%llu nr=%llu rip=0x%llx "
-			"rsp=0x%llx\n",
+			"rsp=0x%llx [rsp]=0x%llx +8=0x%llx +16=0x%llx "
+			"rbp=0x%llx [rbp+8]=0x%llx\n",
 			(unsigned)c->d->ans_ring[i].cmd,
 			c->d->ans_ring[i].seq, c->d->ans_ring[i].nr,
-			c->d->ans_ring[i].rip, c->d->ans_ring[i].rsp);
+			c->d->ans_ring[i].rip, c->d->ans_ring[i].rsp,
+			c->d->ans_slot[i].s0, c->d->ans_slot[i].s8,
+			c->d->ans_slot[i].s16, c->d->ans_slot[i].rbp,
+			c->d->ans_slot[i].rbp8);
 	}
 }
 

@@ -45,7 +45,7 @@ typedef long long s64_nt;
 #define UML_STUB_MAGIC   0x42545355u
 #include "hop_live.h"
 
-#define UML_STUB_VERSION 7u /* v7: + the plain-hop witness record (S13) */
+#define UML_STUB_VERSION 8u /* v8: + the at-trap slot words (S18) */
 /* Section size (also the map granularity guard). */
 #define UML_STUB_SECTION_SIZE 0x10000u
 
@@ -802,6 +802,14 @@ struct uml_nt_stub_data {
 	/* S13: the plain-hop witness, appended so no existing offset moves.
 	 * The trampolines write it through the pinned offsets in hop_live.h. */
 	struct uml_nt_hop_live hop_live;
+	/* S18: qwords at the trap's rsp, +8 and +16, sampled by the stub and
+	 * appended after the hop witness so no pinned offset moves. The ring
+	 * keeps its own copies beside each entry. */
+	unsigned long long slot_q0, slot_q8, slot_q16;
+	unsigned long long slot_rbp, slot_rbp8;
+	struct {
+		unsigned long long s0, s8, s16, rbp, rbp8;
+	} ans_slot[UML_NT_ANS_RING];
 };
 
 /*
@@ -811,12 +819,15 @@ struct uml_nt_stub_data {
  */
 _Static_assert(__builtin_offsetof(struct uml_nt_stub_data, hop_live) ==
 	       UML_NT_STUB_DATA_HOP_LIVE_OFF, "hop_live append offset");
-_Static_assert(sizeof(struct uml_nt_stub_data) == UML_NT_STUB_DATA_SIZE_V7,
+_Static_assert(sizeof(struct uml_nt_stub_data) == UML_NT_STUB_DATA_SIZE_V8,
 	       "shared stub block size");
 _Static_assert(sizeof(struct uml_nt_stub_data) <= UML_NT_STUB_SECTION_LIMIT,
 	       "shared stub block fits its section");
 _Static_assert(sizeof(struct uml_nt_stub_data) % 8 == 0,
 	       "shared stub block stays 8-byte sized");
-_Static_assert(UML_STUB_VERSION == 7u, "protocol version for the layout");
+_Static_assert(UML_STUB_VERSION == 8u, "protocol version for the layout");
+_Static_assert(__builtin_offsetof(struct uml_nt_stub_data, slot_q0) >=
+	       UML_NT_STUB_DATA_HOP_LIVE_OFF + UML_NT_HOP_LIVE_SIZE,
+	       "the slot words are appended after the hop witness");
 
 #endif /* __UML_STUB_NT_H */
