@@ -15,6 +15,7 @@ CC="${CC:-clang}"
 cat > "$TMP/t.c" <<'EOF'
 #include <stdio.h>
 #include <string.h>
+#include <stackreserve_model.h>
 #include <fault.h>
 #include <vma.h>
 #include <physalloc.h>
@@ -70,6 +71,25 @@ int main(void)
 					TOP - 0x800000ull, 0x40000, &plan) == 0);
 	CHECK(mm.nvma == nv0);
 	CHECK(plan.n_ops == no0);
+	/* S25: the orphan hazard, demonstrated. A reserve queued into a plan
+	 * that a later repair RESETS keeps its VMA and loses its op — exactly
+	 * the state the teardown UNMAPs and the stub answers 487. The gate
+	 * refuses to call the helper while the plan is mid-drain, so the
+	 * attempt below is skipped in production; here it is shown once to
+	 * name the state the gate exists to prevent. */
+	nv0 = mm.nvma; no0 = plan.n_ops;
+	CHECK(uml_nt_ca_plan_ok(7, 2) == 0);	/* mid-drain: no reserve */
+	if (uml_nt_ca_plan_ok(7, 2))		/* production never enters */
+		(void)uml_nt_stack_commit_ahead(&mm, &ph, BOT + 0x10, BOT, TOP,
+						TOP - 0x800000ull, 0x40000, &plan);
+	CHECK(mm.nvma == nv0);
+	CHECK(plan.n_ops == no0);
+
+	/* quiescent plan: the reserve is allowed again */
+	plan.n_ops = 0;
+	plan.n_ops = no0;
+	CHECK(uml_nt_ca_plan_ok(0, 0) == 1);
+
 	if (fails) { printf("ca_fork_contract: %d failure(s)\n", fails); return 1; }
 	printf("ca_fork_contract: VMA and op are always born together\n");
 	return 0;

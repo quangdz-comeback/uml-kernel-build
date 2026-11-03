@@ -63,7 +63,14 @@ int main(void)
 		/* no reservation at all */
 		CHECK(uml_nt_ca_target(rsp, 0, 0, 1, 0, v, 0, 1, &t) == 0);
 
-		/* S24: the round gate. A fork round is a SYSCALL round, so the
+		/* S25: never into a plan that is mid-drain — the tail can be
+	 * dropped by a repair, which is how a VMA lost its op. */
+	CHECK(uml_nt_ca_plan_ok(0, 0) == 1);
+	CHECK(uml_nt_ca_plan_ok(5, 0) == 0);
+	CHECK(uml_nt_ca_plan_ok(0, 3) == 0);
+	CHECK(uml_nt_ca_plan_ok(5, 3) == 0);
+
+	/* S24: the round gate. A fork round is a SYSCALL round, so the
 	 * command number cannot name it — the armed handoff does. */
 	CHECK(uml_nt_ca_round_ok(1u, 1) == 0);
 	CHECK(uml_nt_ca_round_ok(1u, 0) == 1);

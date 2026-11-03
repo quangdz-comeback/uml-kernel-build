@@ -52,6 +52,23 @@ static inline int uml_nt_ca_round_ok(unsigned int cmd, int fork_round)
 	return cmd == 1u /* SYSCALL */ || cmd == 3u /* FAULT */;
 }
 
+/*
+ * S25: and never into a plan that is mid-drain.
+ *
+ * The plan is streamed a few ops per answer; when a fault arrives with ops
+ * still unsent the repair RESETS the plan and the unissued tail is dropped
+ * ("the repair supersedes the unissued tail"). A reserve that had queued its
+ * MAP into that tail kept its VMA and lost its op — the orphan the teardown
+ * later UNMAPs and the stub answers 487. Reserve only into a quiescent plan:
+ * plan_left counts ops not yet sent, plan_next the drain cursor, and both must
+ * be zero. Deferring costs nothing because the reserve is idempotent.
+ */
+static inline int uml_nt_ca_plan_ok(unsigned long long plan_left,
+				    unsigned long long plan_next)
+{
+	return plan_left == 0 && plan_next == 0;
+}
+
 /* One view of the conn, as the predicate needs it. */
 struct uml_nt_ca_view {
 	unsigned long long va, len;

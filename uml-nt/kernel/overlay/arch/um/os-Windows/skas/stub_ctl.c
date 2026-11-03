@@ -12611,6 +12611,21 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 					c->mm->ca_round_skip++;
 				want_runs = 0;
 			}
+			if (want_runs > 0 &&
+			    !uml_nt_ca_plan_ok(c->plan_left, c->plan_next)) {
+				/* S25: the plan is mid-drain; a fault would drop
+				 * the unissued tail and leave the reserve's VMA
+				 * without its MAP. Wait for a quiescent plan. */
+				c->mm->ca_plan_skip++;
+				if (c->mm->ca_plan_skip <= 4)
+					os_info("[ca-orphan] pid %lu skip "
+						"plan_left=%d plan_next=%d "
+						"ops=%d (reserve deferred)\n",
+						(unsigned long)c->pid,
+						c->plan_left, c->plan_next,
+						c->plan.n_ops);
+				want_runs = 0;
+			}
 			{
 				char ca[UML_NT_DIAG_CAP];
 				unsigned long long r0 = c->d->regs.rsp ?
