@@ -30,6 +30,7 @@
  */
 #include <linux/errno.h>
 #include <hop_live.h>
+#include <memwin.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
 #include <as-layout.h>
@@ -204,6 +205,104 @@ static int hop_live_format(char *buf, unsigned int cap, const char *fmt,
 			   va_list ap)
 {
 	return vsnprintf(buf, cap, fmt, ap);
+}
+
+
+/* S16: the death record reads the guest's own memory once more. */
+static int memwin_read(void *ctx, __u64 va, unsigned int len, char *dst)
+{
+	struct uml_nt_stub_conn *c = (struct uml_nt_stub_conn *)ctx;
+
+	if (c == 0 || c->mm == 0)
+		return -1;
+	return uml_nt_uacc_walk(c->mm, uml_boot.physmem_base, va, len, dst, 0);
+}
+
+static void memwin_find(void *ctx, __u64 va, struct uml_nt_memwin_vma *out)
+{
+	struct uml_nt_stub_conn *c = (struct uml_nt_stub_conn *)ctx;
+	struct uml_nt_vma *v;
+
+	uml_nt_memwin_zero(out, sizeof(*out));
+	if (c == 0 || c->mm == 0)
+		return;
+	v = uml_nt_vma_find(c->mm, va);
+	if (v == 0)
+		return;
+	out->present = 1;
+	out->start = v->start;
+	out->end = v->end;
+	out->prot = v->prot;
+	out->flags = v->flags;
+}
+
+/*
+ * S16 [stackwin] — what a `ret` would take, and where it points.
+ * The return address a `ret` reads is exactly the qword at RSP; if no VMA
+ * covers it, the guest was about to return into a hole and that is said LOUD.
+ */
+static void uml_nt_stackwin_report(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_memwin_stack s;
+	__u64 rsp;
+
+	if (c == 0 || c->d == 0)
+		return;
+	rsp = c->d->regs.rsp;
+	uml_nt_memwin_stack(memwin_read, c, memwin_find, c, rsp, &s);
+	if (!s.readable) {
+		os_info("[stackwin] pid %d rsp=0x%llx UNREADABLE err=%d "
+			"==> the window around rsp cannot be read\n",
+			(int)c->pid, rsp, s.err);
+		return;
+	}
+	os_info("[stackwin] pid %d rsp=0x%llx [rsp]=0x%llx "
+		"w-0x20=[0x%llx,0x%llx,0x%llx,0x%llx] "
+		"w+0x08=[0x%llx,0x%llx,0x%llx] "
+		"retaddr=%s\n",
+		(int)c->pid, rsp, s.q[4],
+		s.q[0], s.q[1], s.q[2], s.q[3],
+		s.q[5], s.q[6], s.q[7],
+		s.retaddr_vma ? "in-vma" : "NO-VMA");
+	if (s.retaddr_vma)
+		os_info("[stackwin] retaddr vma=[0x%llx,0x%llx) prot=0x%x "
+			"flags=0x%x\n", s.retaddr_where.start,
+			s.retaddr_where.end, s.retaddr_where.prot,
+			s.retaddr_where.flags);
+	else
+		os_info("[stackwin] LOUD retaddr=NO-VMA: the return address "
+			"0x%llx is outside every mapped region\n", s.q[4]);
+}
+
+/*
+ * S16 [capdata] — did the kernel actually fill the capability buffer?
+ * The [capget] witness's "granted" is a prediction made from the VMA/run
+ * state; these bytes are the answer.
+ */
+static void uml_nt_capdata_report(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_memwin_capdata d;
+	int i;
+
+	if (c == 0 || c->d == 0)
+		return;
+	uml_nt_memwin_capdata(memwin_read, c, c->d->req_seq != 0 &&
+			      c->last_nr == 125, c->d->args[1], &d);
+	if (!d.attempted) {
+		os_info("[capdata] pid %d no capget round on this conn\n",
+			(int)c->pid);
+		return;
+	}
+	if (!d.readable) {
+		os_info("[capdata] pid %d a1=0x%llx UNREADABLE err=%d\n",
+			(int)c->pid, d.va, d.err);
+		return;
+	}
+	os_info("[capdata] pid %d a1=0x%llx", (int)c->pid, d.va);
+	for (i = 0; i < (int)sizeof(d.b); i++)
+		os_info("%s%02x", (i % 8) == 0 ? " [" : " ",
+			(unsigned)d.b[i]);
+	os_info(" ] (24 bytes = capability data v2/v3)\n");
 }
 
 static void uml_nt_hop_live_report(struct uml_nt_stub_conn *c)
@@ -1343,6 +1442,8 @@ void userspace(struct uml_pt_regs *regs)
 					        "a2=0x%llx nr=%llu\n",
 					        c->d->regs.rax, c->d->args[0], c->d->args[1],
 					        c->d->args[2], c->d->req_seq);
+					uml_nt_stackwin_report(c);
+					uml_nt_capdata_report(c);
 					uml_nt_hop_live_report(c);
 					os_info("[crumbs] pid %d "
 						"round_step=%llu veh_entries=%llu "

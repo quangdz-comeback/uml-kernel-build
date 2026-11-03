@@ -60,3 +60,7 @@ bash "$HERE/test_hop_live_dispatch.sh"
 # the production output helpers and summary producer, driven through a
 # recording sys_write with diagnostics injected between guest writes.
 bash "$HERE/test_sysbench_report.sh"
+
+# Shelley 315 (Astra S16): what the death record can still read — the return
+# address a ret would take and whether capget's buffer really got its data.
+bash "$HERE/test_memwin.sh"
