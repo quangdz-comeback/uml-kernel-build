@@ -35,6 +35,34 @@ int main(void)
 		CHECK(latched == 0);
 		CHECK(uml_nt_ca_runs(0, 1) == UML_NT_CA_DEFAULT_RUNS);
 	}
+	/* S22d: the target predicate. rsp inside the reservation, the run just
+	 * below it free -> reserve; that run overlapping an existing view ->
+	 * skip; rsp outside the reservation -> skip. */
+	{
+		struct uml_nt_ca_view v[2];
+		unsigned long long lo = 0x60000000ull, hi = 0x60800000ull;
+		unsigned long long rsp = 0x607ff000ull, t = 0;
+
+		v[0].va = 0x1000; v[0].len = 0x1000;
+		v[1].va = 0; v[1].len = 0;
+
+		/* free target inside the reservation */
+		CHECK(uml_nt_ca_target(rsp, lo, hi, 1, 0, v, 1, &t) == 1);
+		CHECK(t == 0x607e0000ull);	/* run below the one holding rsp */
+
+		/* the same target, now overlapping an existing view */
+		v[0].va = 0x607d8000ull; v[0].len = 0x10000ull;
+		CHECK(uml_nt_ca_target(rsp, lo, hi, 1, 0, v, 1, &t) == 0);
+
+		/* rsp outside the reservation */
+		CHECK(uml_nt_ca_target(0x1000ull, lo, hi, 1, 0, v, 1, &t) == 0);
+
+		/* no registers to anchor on */
+		CHECK(uml_nt_ca_target(rsp, lo, hi, 0, 0, v, 0, &t) == 0);
+
+		/* no reservation at all */
+		CHECK(uml_nt_ca_target(rsp, 0, 0, 1, 0, v, 0, &t) == 0);
+	}
 	if (fails) { printf("ca_runs: %d failure(s)\n", fails); return 1; }
 	printf("ca_runs: 4 runs per ordinary answer, 128 only by experiment\n");
 	return 0;

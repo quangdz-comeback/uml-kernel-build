@@ -12577,20 +12577,27 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 				want_runs = uml_nt_ca_runs(fullcommit,
 							   c->d->regs.rsp != 0);
 			}
-			/* S22c: the reserve only exists inside a conn's own stack
-			 * reservation. Without one (a conn with no stack VMA, or an
-			 * rsp outside [limit, top)) there is nothing to reserve —
-			 * and mapping anyway placed a run where the caller's own
-			 * probe mapping lives: the fork/COW canary's UnmapViewOfFile
-			 * then failed with 487 and the stub was killed. */
+			/* S22d: the reserve must land inside this conn's own
+			 * reservation and must not collide with a view the conn
+			 * already has — a caller's probe mapping lives in exactly
+			 * such a place (the fork/COW canary's UnmapViewOfFile was
+			 * failing with 487 before this predicate). */
 			if (want_runs > 0) {
+				static struct uml_nt_ca_view views[64];
 				unsigned long long r = c->d->regs.rsp ?
 					c->d->regs.rsp : c->d->stack_va;
+				unsigned long long t = 0;
+				int vi, nv = 0;
 
-				if (c->mm->stack_top <= c->mm->stack_limit ||
-				    r < c->mm->stack_limit ||
-				    r > c->mm->stack_top ||
-				    uml_nt_vma_find(c->mm, r) == 0)
+				for (vi = 0; vi < (int)c->nviews && vi < 64; vi++) {
+					views[nv].va = c->views[vi].va;
+					views[nv].len = c->views[vi].len;
+					nv++;
+				}
+				if (!uml_nt_ca_target(r, c->mm->stack_limit,
+						      c->mm->stack_top,
+						      c->d->regs.rsp != 0,
+						      fullcommit, views, nv, &t))
 					want_runs = 0;
 			}
 			if (want_runs > 0) {
