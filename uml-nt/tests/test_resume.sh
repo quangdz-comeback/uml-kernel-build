@@ -65,3 +65,4 @@ bash "$HERE/test_sysbench_report.sh"
 # address a ret would take and whether capget's buffer really got its data.
 bash "$HERE/test_memwin.sh"
 bash "$HERE/test_stackwin_capdata.sh"
+bash "$HERE/test_mapinfo.sh"

@@ -259,6 +259,135 @@ static const char *const memwin_prov =
 	"postmortem snapshot at last-trap rsp; not a fault context, not proof a "
 	"ret/jmp ran";
 
+
+/*
+ * S17 [mapinfo] — where the two addresses of interest actually live.
+ *
+ * The death record can name a VMA range and a protection from the ledger, but
+ * the ledger's `prot` is what the ENGINE recorded, and its `off` is an engine
+ * run offset, not a file offset. What decides whether code at an address can
+ * run is the STUB's real view, so that is queried directly, and the file
+ * identity is reported as far as the kernel really retains it.
+ *
+ * Honest limits, printed with the record: the kernel keeps no path for eager
+ * file mappings (only the lazy-file model keeps a file_off), so a path is
+ * reported as unknown rather than guessed from an unrelated log line.
+ */
+static void uml_nt_mapinfo_one(struct uml_nt_stub_conn *c, const char *what,
+			       unsigned long long va, int with_bytes)
+{
+	char line[UML_NT_DIAG_CAP];
+	struct uml_nt_vma *v;
+	int n, i;
+
+	v = (c->mm != 0) ? uml_nt_vma_find(c->mm, va) : 0;
+	n = snprintf(line, sizeof(line), "[mapinfo] %s va=0x%llx ", what, va);
+	if (v == 0)
+		n += snprintf(line + n, sizeof(line) - n, "NO-VMA ");
+	else
+		n += snprintf(line + n, sizeof(line) - n,
+			       "vma=[0x%llx,0x%llx) ledger_prot=0x%x "
+			       "ledger_flags=0x%x run_off=0x%llx ",
+			       v->start, v->end, v->prot, v->flags,
+			       v->run_off);
+	/* the engine's view ledger entry, if one covers this VA */
+	{
+		int vi, found = -1;
+
+		for (vi = 0; vi < (int)c->nviews; vi++)
+			if (va >= c->views[vi].va &&
+			    va < c->views[vi].va + c->views[vi].len)
+				found = vi;
+		if (found >= 0)
+			n += snprintf(line + n, sizeof(line) - n,
+				       "view=[0x%llx,+0x%llx) engine_run_off=0x%llx "
+				       "view_prot=0x%x ",
+				       c->views[found].va, c->views[found].len,
+				       c->views[found].off,
+				       (unsigned)c->views[found].prot);
+		else
+			n += snprintf(line + n, sizeof(line) - n,
+				       "view=NONE ");
+	}
+	/* the only real file offset the kernel retains: the lazy model's */
+	{
+		int li, have = 0;
+		unsigned long long foff = 0;
+
+		for (li = 0; li < 4; li++)
+			if (c->lazy[li].used && va >= c->lazy[li].start &&
+			    va < c->lazy[li].end) {
+				foff = c->lazy[li].file_off +
+				       (va - c->lazy[li].start);
+				have = 1;
+			}
+		if (have)
+			n += snprintf(line + n, sizeof(line) - n,
+				       "file_off=0x%llx ", foff);
+		else
+			n += snprintf(line + n, sizeof(line) - n,
+				       "file_off=UNKNOWN ");
+	}
+	n += snprintf(line + n, sizeof(line) - n,
+		      "file_path=UNKNOWN(eager file mappings keep no path) ");
+	/* the STUB's real view: state and protection as Windows has them */
+	if (c->proc != 0) {
+		MEMORY_BASIC_INFORMATION mbi;
+
+		uml_nt_memwin_zero(&mbi, sizeof(mbi));
+		if (nt->VirtualQueryEx(c->proc, (void *)(uintptr_t)va, &mbi,
+				       sizeof(mbi)) > 0)
+			n += snprintf(line + n, sizeof(line) - n,
+				       "real_state=0x%lx real_prot=0x%lx "
+				       "real_base=0x%llx",
+				       (unsigned long)mbi.State,
+				       (unsigned long)mbi.Protect,
+				       (unsigned long long)(uintptr_t)
+				       mbi.BaseAddress);
+		else
+			n += snprintf(line + n, sizeof(line) - n,
+				       "real_query=FAILED");
+	} else {
+		n += snprintf(line + n, sizeof(line) - n,
+			       "real_query=NO-PROC-HANDLE");
+	}
+	if (n < 0 || n >= (int)sizeof(line))
+		n = (int)sizeof(line) - 1;
+	line[n] = '\0';
+	os_info("%s\n", line);
+
+	if (!with_bytes)
+		return;
+	{
+		unsigned char b[16];
+		int err;
+
+		err = memwin_read(c, va & ~7ull, sizeof(b), (char *)b);
+		if (err != 0) {
+			os_info("[mapinfo] bytes@0x%llx UNREADABLE err=%d\n",
+				va & ~7ull, err);
+			return;
+		}
+		os_info("[mapinfo] bytes@0x%llx", va & ~7ull);
+		for (i = 0; i < (int)sizeof(b); i++)
+			os_info(" %02x", (unsigned)b[i]);
+		os_info("  (guest bytes via the kernel view; for offline disasm)\n");
+	}
+}
+
+static void uml_nt_mapinfo_report(struct uml_nt_stub_conn *c)
+{
+	struct uml_nt_memwin_stack s;
+
+	if (c == 0 || c->d == 0)
+		return;
+	/* the death rip, and the qword a ret would take (candidate only) */
+	uml_nt_mapinfo_one(c, "death-rip", c->d->regs.rip, 0);
+	uml_nt_memwin_stack(memwin_read, c, memwin_find, c, c->d->regs.rsp, &s);
+	if (s.readable && s.q[4] != 0)
+		uml_nt_mapinfo_one(c, "ret-candidate", s.q[4], 1);
+}
+
 static void uml_nt_stackwin_report(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_memwin_stack s;
@@ -1503,6 +1632,7 @@ void userspace(struct uml_pt_regs *regs)
 					        c->d->regs.rax, c->d->args[0], c->d->args[1],
 					        c->d->args[2], c->d->req_seq);
 					uml_nt_stackwin_report(c);
+					uml_nt_mapinfo_report(c);
 					uml_nt_capdata_report(c);
 					uml_nt_hop_live_report(c);
 					os_info("[crumbs] pid %d "
