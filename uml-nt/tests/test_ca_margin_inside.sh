@@ -59,7 +59,7 @@ int main(void)
 	unsigned long long lo = ~0ull, hi = 0;
 	int nv0, added, i, saw_target = 0;
 
-	if (uml_nt_phys_init(&ph, 64 * RUN) < 0) return 2;
+	if (uml_nt_phys_init(&ph, 256 * RUN) < 0) return 2;
 	uml_nt_mm_init(&mm);
 	mm.stack_top = TOP;
 	mm.stack_limit = RES_LO;
