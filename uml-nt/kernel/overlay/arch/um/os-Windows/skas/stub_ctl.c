@@ -11709,6 +11709,11 @@ static void uml_nt_exec_path_adopt(struct uml_nt_stub_conn *c)
 }
 
 /* The binary's base name is "login" (path suffix /login or "login"). */
+int uml_nt_login_chain_seen(void)
+{
+	return g_exec_login != 0;
+}
+
 int uml_nt_conn_is_login(const struct uml_nt_stub_conn *c)
 {
 	int n = 0, i;

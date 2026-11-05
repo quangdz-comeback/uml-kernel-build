@@ -92,8 +92,19 @@ static ssize_t nt_con_tty_write(struct tty_struct *tty, const u8 *buf,
 {
 	/* S42: the prompts are what the feed waits for, so the output path is
 	 * where they are recognised. */
-	/* S46: the gate scans in nt_console_write — the one door every path goes
-	 * through. Scanning here as well would see each byte twice. */
+	/* S49: does anything reach the console through the tty driver at all?
+	 * The gate was moved off this door, so a write here would be invisible —
+	 * and a login that opens /dev/tty itself writes through the tty. */
+	{
+		static unsigned ttyfd_n;
+
+		if (ttyfd_n < 200 && len >= 4) {
+			ttyfd_n++;
+			os_info("[feedgate] src=tty-fd len=%u tail=\"%.24s\"\n",
+				(unsigned)len,
+				(const char *)buf + (len > 24 ? len - 24 : 0));
+		}
+	}
 	nt_console_write(buf, len);
 	return len;
 }

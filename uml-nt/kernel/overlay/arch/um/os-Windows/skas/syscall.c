@@ -182,6 +182,25 @@ static unsigned long long sys_write(struct uml_nt_stub_conn *c,
 			"(stolen VMA)\n", a[1], (unsigned long long)off);
 		return SC_RET(SC_EFAULT);
 	}
+	/* S49: what the guest actually writes after login starts — with the
+	 * descriptor, because "no prompt on the console" can only be answered by
+	 * knowing which fd the prompt went to. Uncapped for the window that
+	 * matters, bounded everywhere else. */
+	if (uml_nt_login_chain_seen() && a[2] >= 4 && a[2] < 4096) {
+		const char *p = (const char *)uml_boot.physmem_base + off;
+		char last = p[a[2] - 1];
+
+		if (last == ':' || last == ' ') {
+			static unsigned gw_n;
+
+			if (gw_n < 200) {
+				gw_n++;
+				os_info("[gwrite] fd=%llu len=%llu tail=\"%.24s\"\n",
+					a[0], a[2],
+					p + (a[2] > 24 ? a[2] - 24 : 0));
+			}
+		}
+	}
 	nt_console_write((char *)uml_boot.physmem_base + off,
 			 (unsigned int)a[2]);
 	/* M4.1: the bench markers ride the console path — exact-match

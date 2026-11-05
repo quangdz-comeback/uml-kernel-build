@@ -1032,4 +1032,6 @@ int uml_nt_copy_verify(char *dst, const char *src, unsigned long long len,
  * the userspace() loop restarts on the new conn. */
 int uml_nt_syscall_consume_exec(void);
 
+int uml_nt_login_chain_seen(void);
+
 #endif /* __UM_OS_WINDOWS_SYSCALL_H */

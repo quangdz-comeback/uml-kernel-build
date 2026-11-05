@@ -149,6 +149,10 @@ EOF
 "$CC" -O1 -Wall -Wextra -Werror -I"$INC" -o "$TMP/t" "$TMP/t.c"
 "$TMP/t"
 C="$HERE/../kernel/overlay/arch/um/os-Windows/console.c"
+S2="$HERE/../kernel/overlay/arch/um/os-Windows/skas/syscall.c"
+grep -q "\[gwrite\]" "$S2" || { echo "FAIL: no guest-write record"; exit 1; }
+grep -q "src=tty-fd" "$C" || { echo "FAIL: the tty door is not observed"; exit 1; }
+echo "s49: both the guest write and the tty door are named"
 grep -q "uml_nt_feed_gate_take(&uml_nt_console_gate)" "$C" || {
 	echo "FAIL: the console flush does not wait for a prompt"; exit 1; }
 echo "feedgate: the console flush waits for it"
