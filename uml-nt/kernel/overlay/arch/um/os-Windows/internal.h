@@ -24,6 +24,9 @@ void nt_console_write(const char *s, unsigned int n);
 void uml_nt_console_src_log(int on);
 void uml_nt_console_src_guest(void);
 int uml_nt_console_src(void);
+/* S50: has the login binary run? (set by the console's own observer) */
+int uml_nt_console_login_seen(void);
+void uml_nt_console_note_login(void);
 
 /* M3.8: last-chance VEH — any native exception in the kernel process
  * prints rip/fault-address (direct NtWriteFile, no console lock —

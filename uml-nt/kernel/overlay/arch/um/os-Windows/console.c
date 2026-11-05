@@ -98,7 +98,10 @@ static ssize_t nt_con_tty_write(struct tty_struct *tty, const u8 *buf,
 	{
 		static unsigned ttyfd_n;
 
-		if (ttyfd_n < 200 && len >= 4) {
+		/* S50: only after the login binary ran — the first two hundred
+		 * console writes of a boot belong to systemd, and a cap spent
+		 * there says nothing about login. */
+		if (uml_nt_console_login_seen() && ttyfd_n < 200 && len >= 4) {
 			ttyfd_n++;
 			os_info("[feedgate] src=tty-fd len=%u tail=\"%.24s\"\n",
 				(unsigned)len,

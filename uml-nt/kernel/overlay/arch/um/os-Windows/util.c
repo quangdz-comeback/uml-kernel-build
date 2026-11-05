@@ -70,6 +70,20 @@ int uml_nt_console_src(void)
 	return g_con_src;
 }
 
+/* S50: the console cannot include the conn layer, so the login latch is
+ * published here by whoever knows it. */
+static int g_con_login_seen;
+
+void uml_nt_console_note_login(void)
+{
+	g_con_login_seen = 1;
+}
+
+int uml_nt_console_login_seen(void)
+{
+	return g_con_login_seen;
+}
+
 /* S46: the console's single choke point. Every path that prints — the tty
  * driver, the printk sink, the guest's write(2), a stub panic — ends here, so
  * the feed gate reads the console here and nowhere else. The struct is

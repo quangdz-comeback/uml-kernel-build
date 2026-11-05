@@ -44,6 +44,7 @@
 #include <d20sweep_model.h>
 #include <fillrehome_model.h>
 #include <ttymodel.h>
+#include <feedgate.h>
 
 #define UML_NT_SYSCALLS_BASE UML_STUB_RAM_BASE
 
@@ -182,22 +183,40 @@ static unsigned long long sys_write(struct uml_nt_stub_conn *c,
 			"(stolen VMA)\n", a[1], (unsigned long long)off);
 		return SC_RET(SC_EFAULT);
 	}
-	/* S49: what the guest actually writes after login starts — with the
-	 * descriptor, because "no prompt on the console" can only be answered by
-	 * knowing which fd the prompt went to. Uncapped for the window that
-	 * matters, bounded everywhere else. */
-	if (uml_nt_login_chain_seen() && a[2] >= 4 && a[2] < 4096) {
+	/* S50: the prompt may be written before the login latch is set, so this
+	 * does not wait for it. Any write whose bytes contain "ogin" is printed
+	 * at once — that is the record that answers where a prompt went — and
+	 * after the first such write the window stays bounded. A per-fd table is
+	 * printed whenever a descriptor the login conn has not used yet shows up,
+	 * so "who does login talk to" is answered even if it never says
+	 * "login:".
+	 */
+	{
 		const char *p = (const char *)uml_boot.physmem_base + off;
-		char last = p[a[2] - 1];
+		unsigned len = (unsigned)a[2];
+		static unsigned gw_n, gw_seen;
+		static int fd_seen[32];
+		static unsigned fd_cnt[32], fd_bytes[32];
+		int fd = (int)a[0];
 
-		if (last == ':' || last == ' ') {
-			static unsigned gw_n;
-
-			if (gw_n < 200) {
+		if (len >= 4 && len < 4096 &&
+		    uml_nt_feed_find(p, len, "ogin")) {
+			if (gw_n < 200 && (gw_seen != 0 || 1)) {
 				gw_n++;
-				os_info("[gwrite] fd=%llu len=%llu tail=\"%.24s\"\n",
-					a[0], a[2],
-					p + (a[2] > 24 ? a[2] - 24 : 0));
+				gw_seen = 1;
+				os_info("[gwrite] fd=%d len=%u tail=\"%.32s\"\n",
+					fd, len, p + (len > 32 ? len - 32 : 0));
+			}
+		}
+		if (uml_nt_login_chain_seen() && len >= 1 && fd >= 0 &&
+		    fd < 32) {
+			fd_cnt[fd]++;
+			fd_bytes[fd] += len;
+			if (!fd_seen[fd]) {
+				fd_seen[fd] = 1;
+				os_info("[fdtab] new fd=%d count=%u bytes=%u "
+					"(login chain write)\n", fd,
+					fd_cnt[fd], fd_bytes[fd]);
 			}
 		}
 	}
