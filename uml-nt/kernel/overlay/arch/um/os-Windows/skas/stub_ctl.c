@@ -11884,17 +11884,6 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	 * syscall, so the margin has to be in the mm the clone copies. The
 	 * parent's own mm is the source of that clone; adding the runs there is
 	 * what the parent would have committed anyway at its next answer. */
-	if (child->chain_login || g_exec_login) {
-		int marg = uml_nt_ca_margin(parent->mm, child->ph);
-
-		if (marg > 0) {
-			child->mm->ca_margin_runs = (unsigned)marg;
-			os_info("[ca-margin] pid %lu runs=%d bytes=0x%llx in the "
-				"fork seed (chain child, before the clone)\n",
-				(unsigned long)child->pid, marg,
-				(unsigned long long)marg * UML_NT_SG_RUN);
-		}
-	}
 	rc_clone = uml_nt_mm_clone(child->mm, parent->mm, child->ph,
 			    seed_rsp);
 	if (rc_clone != 0) {
@@ -11937,6 +11926,25 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		}
 		uml_nt_fork_disarm();
 		return -ENOMEM;
+	}
+	/* S40: the margin goes into the CHILD's mm, after the clone, with runs
+	 * of its own. Before the clone it landed in the parent's table and the
+	 * clone made every page of it shared, so the effective protection of the
+	 * child's view came out READ-ONLY — and the PAM prologue's store into
+	 * that range faulted on a page that was already committed (referee
+	 * 42067320083: committed=8/8, prot=2, then a write fault). Private runs
+	 * keep the protection writable, which is what a stack needs. */
+	if (child->chain_login || g_exec_login) {
+		int marg = uml_nt_ca_margin(child->mm, child->ph);
+
+		if (marg > 0) {
+			child->mm->ca_margin_runs = (unsigned)marg;
+			os_info("[ca-margin] pid %lu runs=%d bytes=0x%llx "
+				"in the fork seed (chain child, private, after "
+				"the clone)\n",
+				(unsigned long)child->pid, marg,
+				(unsigned long long)marg * UML_NT_SG_RUN);
+		}
 	}
 	/* D27: the child inherits the parent's DEFERRED file regions —
 	 * a first touch in the child materializes into the child's own

@@ -72,6 +72,36 @@ int main(void)
 	CHECK(ghi == TOP - 2 * RUN);		/* stops at existing coverage */
 	CHECK(mm.nvma == nv0 + 1);
 
+	/* S40: the protection is part of the contract. A read-only margin looks
+	 * committed and then kills the guest on its first store — referee
+	 * 42067320083: committed=8/8, prot=2, write fault in the PAM prologue. */
+	{
+		int gi = -1, j;
+
+		for (j = 0; j < mm.nvma; j++)
+			if (mm.vma[j].start == TOP - 6 * RUN)
+				gi = j;
+		CHECK(gi >= 0);
+		if (gi >= 0) {
+			CHECK(uml_nt_vma_effective_prot(&mm.vma[gi], &ph) == 0x04u);
+			CHECK(uml_nt_prot_writable(uml_nt_vma_effective_prot(&mm.vma[gi], &ph)));
+		}
+		/* and the plan that brings the conn up maps it writable */
+		{
+			struct uml_nt_fault_plan init;
+			int seen = 0;
+
+			CHECK(uml_nt_mm_init_plan(&mm, &ph, &init) == 0);
+			for (j = 0; j < init.n_ops; j++)
+				if (init.ops[j].op == UML_NT_FOP_MAP &&
+				    init.ops[j].va == TOP - 6 * RUN) {
+					seen = 1;
+					CHECK(init.ops[j].prot == 0x04u);
+				}
+			CHECK(seen == 1);
+		}
+	}
+
 	/* idempotent: the gap is covered now */
 	n = uml_nt_ca_margin_gap(&mm, &ph, UML_NT_CA_MARGIN_RUNS, &glo, &ghi);
 	CHECK(n == 0);
