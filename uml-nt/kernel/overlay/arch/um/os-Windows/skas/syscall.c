@@ -43,6 +43,7 @@
 #include <lazyfile_model.h>
 #include <d20sweep_model.h>
 #include <fillrehome_model.h>
+#include <ttymodel.h>
 
 #define UML_NT_SYSCALLS_BASE UML_STUB_RAM_BASE
 
@@ -4526,6 +4527,32 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		    (a[1] == 0x540b /* TCFLSH */ &&
 		     (a[2] == 0 /* TCIFLUSH */ || a[2] == 2 /* TCIOFLUSH */)))
 			uml_nt_console_drop_input();
+		/* S41: the console answers for itself. This port has no kernel
+		 * tty, so the generic path returned ENOTTY for TCGETS (referee
+		 * 42069926848: ioctl(0x5401) -> -25) and /bin/login had nothing
+		 * to ask. Only fds 0/1/2 belong to the console; anything else
+		 * still goes to the real table. */
+		if (a[0] <= 2 && c->mm != 0) {
+			unsigned char ttybuf[UML_NT_TERMIOS_SIZE];
+			int tn = uml_nt_tty_ioctl_fill((unsigned)a[1], ttybuf,
+						       (unsigned)sizeof(ttybuf));
+
+			if (tn >= 0) {
+				if (tn > 0) {
+					long long toff = uml_nt_vma_translate(
+						c->mm, a[2], (unsigned long long)tn);
+
+					if (toff < 0) {
+						ret = SC_RET(SC_EFAULT);
+						break;
+					}
+					memcpy((char *)uml_boot.physmem_base + toff,
+					       ttybuf, (unsigned)tn);
+				}
+				ret = 0;
+				break;
+			}
+		}
 		ret = sys_vfs(nr, a);
 		if (!ioctl_once) {
 			ioctl_once = 1;
