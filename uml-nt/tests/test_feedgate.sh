@@ -127,6 +127,20 @@ int main(void)
 		CHECK(uml_nt_feed_gate_take(&q) == 0);	/* headless, no match */
 	}
 
+	/* S48: the writer declares itself. A log write between the two halves of
+	 * the guest's prompt must not join the guest's line — the source flag is
+	 * what separates them, not the text. */
+	{
+		struct uml_nt_feed_gate m;
+
+		uml_nt_feed_gate_reset(&m);
+		uml_nt_feed_gate_scan(&m, "\numl log", 8, 0);		/* guest */
+		uml_nt_feed_gate_scan(&m, "binfmt_umlnt: load_binary\n", 27, 1);
+		CHECK(uml_nt_feed_gate_take(&m) == 0);
+		uml_nt_feed_gate_scan(&m, "in: ", 4, 0);		/* guest */
+		CHECK(uml_nt_feed_gate_take(&m) == 1);
+	}
+
 	if (fails) { printf("feedgate: %d failure(s)\n", fails); return 1; }
 	printf("feedgate: one line per prompt, in order, never for a log line\n");
 	return 0;

@@ -20,6 +20,10 @@ extern struct uml_nt_api_table *nt;
 
 /* Early console: NtWriteFile to boot.stdio_out (util.c). */
 void nt_console_write(const char *s, unsigned int n);
+/* S48: who is writing: the guest console or the port log. */
+void uml_nt_console_src_log(int on);
+void uml_nt_console_src_guest(void);
+int uml_nt_console_src(void);
 
 /* M3.8: last-chance VEH — any native exception in the kernel process
  * prints rip/fault-address (direct NtWriteFile, no console lock —

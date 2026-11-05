@@ -13,6 +13,7 @@ void stub_panic(const char *why)
 	if (nt) {
 		const char *why_s = why;
 
+		uml_nt_console_src_log(1);
 		nt_console_write("\numl-nt stub_panic: ", 20);
 		while (*why_s) {
 			const char *e = why_s;

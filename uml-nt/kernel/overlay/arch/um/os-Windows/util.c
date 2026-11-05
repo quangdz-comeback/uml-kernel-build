@@ -49,6 +49,27 @@ static void con_unlock(void)
 
 extern struct uml_nt_feed_gate uml_nt_console_gate;
 
+/* S48: the writer says who it is. The gate used to guess from the text (a
+ * leading '['), and "binfmt_umlnt:" is the port's own voice without a bracket —
+ * so kernel lines filled the guest's buffer and the prompt never stood alone.
+ * Default is the guest: only the port's own log paths set this. */
+static int g_con_src;		/* 0 = guest console, 1 = port log */
+
+void uml_nt_console_src_log(int on)
+{
+	g_con_src = on ? 1 : 0;
+}
+
+void uml_nt_console_src_guest(void)
+{
+	g_con_src = 0;
+}
+
+int uml_nt_console_src(void)
+{
+	return g_con_src;
+}
+
 /* S46: the console's single choke point. Every path that prints — the tty
  * driver, the printk sink, the guest's write(2), a stub panic — ends here, so
  * the feed gate reads the console here and nowhere else. The struct is
@@ -59,7 +80,7 @@ static void feed_gate_sink(const char *s, unsigned int n)
 	 * write — the port's own voice. Everything else is the guest's console,
 	 * whatever path carried it. Keeping the two apart is what lets a prompt
 	 * assemble while the kernel's lines interleave with it. */
-	int src = (n > 0 && s[0] == '[') ? 1 : 0;
+	int src = g_con_src;
 
 	uml_nt_feed_gate_scan(&uml_nt_console_gate, s, n, src);
 	if (uml_nt_console_gate.armed &&
@@ -113,7 +134,11 @@ void nt_console_write(const char *s, unsigned int n)
 
 void um_early_printk(const char *s, unsigned int n)
 {
+	int was = g_con_src;
+
+	uml_nt_console_src_log(1);
 	nt_console_write(s, n);
+	uml_nt_console_src_log(was);
 }
 
 /* Shelley 295 (Astra S8): one diagnostic record, one host write.
@@ -142,6 +167,18 @@ static const struct uml_nt_diag_ops diag_console_ops = {
 	diag_console_format, diag_console_sink
 };
 
+/* S48: every port log goes out with the log flag set, so the console's feed gate
+ * keeps those bytes out of the guest's line buffer. */
+#define DIAG_EMIT_LOGGED(buf, cap, fmt, args, lenp)			\
+	do {								\
+		int was_ = g_con_src;					\
+									\
+		uml_nt_console_src_log(1);				\
+		(void)uml_nt_diag_emit((buf), (cap), &diag_console_ops,	\
+				       (fmt), (args), (lenp));		\
+		uml_nt_console_src_log(was_);				\
+	} while (0)
+
 void os_info(const char *fmt, ...)
 {
 	/* M5.6b: host env UML_NT_QUIET=any-value silences the diag firehose
@@ -157,8 +194,7 @@ void os_info(const char *fmt, ...)
 	if (quiet)
 		return;
 	va_start(args, fmt);
-	(void)uml_nt_diag_emit(buf, sizeof(buf), &diag_console_ops, fmt, args,
-			       &len);
+	DIAG_EMIT_LOGGED(buf, sizeof(buf), fmt, args, &len);
 	va_end(args);
 }
 
@@ -169,8 +205,7 @@ void os_warn(const char *fmt, ...)
 	unsigned int len = 0;
 
 	va_start(args, fmt);
-	(void)uml_nt_diag_emit(buf, sizeof(buf), &diag_console_ops, fmt, args,
-			       &len);
+	DIAG_EMIT_LOGGED(buf, sizeof(buf), fmt, args, &len);
 	va_end(args);
 }
 
@@ -178,6 +213,7 @@ void os_dump_core(void)
 {
 	/* Upstream: dump logs + core file via host tools. NT M1: flush
 	 * the console and terminate the process (dump-to-file at M4). */
+	uml_nt_console_src_log(1);
 	nt_console_write("\numl-nt: os_dump_core — terminating\n", 37);
 	if (nt != NULL)
 		nt->NtTerminateProcess(UML_NT_CURRENT_PROCESS, 1);
