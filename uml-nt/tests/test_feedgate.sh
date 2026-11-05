@@ -34,6 +34,18 @@ int main(void)
 	scan(&g, "/bin/login: /bin/login: no version information available\n");
 	CHECK(uml_nt_feed_gate_take(&g) == 0);
 
+	/* S43: the prompt split across writes still counts */
+	scan(&g, "\numl log");
+	CHECK(uml_nt_feed_gate_take(&g) == 0);
+	scan(&g, "in: ");
+	CHECK(uml_nt_feed_gate_take(&g) == 1);
+	scan(&g, "\n");
+	/* ... and a kernel log line landing inside it does not lose the prompt */
+	scan(&g, "uml log");
+	scan(&g, "in: [commit-ahead] pid 1");
+	CHECK(uml_nt_feed_gate_take(&g) == 1);
+	scan(&g, "\n");
+
 	/* the prompt itself: one line, once */
 	scan(&g, "\numl login: ");
 	CHECK(uml_nt_feed_gate_take(&g) == 1);
@@ -47,14 +59,14 @@ int main(void)
 	/* the shell: one command line */
 	scan(&g, "\r\n# ");
 	CHECK(uml_nt_feed_gate_take(&g) == 1);
-	CHECK(g.lines == 3);
+	CHECK(g.lines == 5);	/* 2 from the split cases above, then 3 prompts */
 
 	/* a second login prompt re-arms, and order is preserved */
 	scan(&g, "\r\numl login: ");
 	CHECK(uml_nt_feed_gate_take(&g) == 1);
 	scan(&g, "Password: ");
 	CHECK(uml_nt_feed_gate_take(&g) == 1);
-	CHECK(g.lines == 5);
+	CHECK(g.lines == 7);
 
 	if (fails) { printf("feedgate: %d failure(s)\n", fails); return 1; }
 	printf("feedgate: one line per prompt, in order, never for a log line\n");

@@ -1,28 +1,31 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * feedgate.h — the console feed follows the prompts, not the clock.
+ * feedgate.h — the console feed follows the prompts, and the prompt is a LINE.
  *
  * The referee feeds credentials on stdin from the moment the guest starts, so
- * the bytes arrive long before login asks anything. login's own
- * tcsetattr(TCSAFLUSH) then discards whatever is pending — correctly, that is
- * what TCSAFLUSH means — and the feed is wiped at the exact moment it was
- * needed (referee 42078765811: three "[confeed] dropped ... at a tty input
- * flush", and no "Password:" ever appeared).
+ * the bytes are pending long before login asks. login's own
+ * tcsetattr(TCSAFLUSH) then discards them — correctly — and the feed is wiped at
+ * the moment it was needed (referee 42078765811: three "[confeed] dropped ... at
+ * a tty input flush", no "Password:").
  *
- * So the feed waits for the prompt. This is a small state machine on the
- * console's OUTPUT: a line that begins "login: " arms the first line, a
- * "Password:" arms the second, and a shell prompt arms the rest. "/bin/login:"
- * in a log message is not a prompt — the preceding byte is '/', and that is
- * exactly the false positive the log itself produced.
+ * The first attempt matched prompts inside a single write and never armed: a
+ * prompt can arrive split across writes, and kernel log lines interleave with
+ * guest output character by character (the "[commit-ahead]" line landing inside
+ * "login: " is exactly that). So the gate scans the ACCUMULATED line — bytes are
+ * appended, the line is examined as a whole, and only a newline starts a new one.
  */
 #ifndef UML_NT_FEEDGATE_H
 #define UML_NT_FEEDGATE_H
 
-/* how many feed lines are held back until their prompt appears */
+#define UML_NT_FEED_LINE_MAX 160
+
 struct uml_nt_feed_gate {
 	int armed;	/* a prompt is waiting for one line */
-	int stage;	/* 0 = before login, 1 = after username, 2 = shell */
+	int stage;	/* 0 = before login, 1 = user, 2 = password, 3 = shell */
 	int lines;	/* lines released so far */
+	int last_armed_stage;	/* for the one-shot arm record */
+	unsigned len;		/* bytes of the line in progress */
+	char line[UML_NT_FEED_LINE_MAX];
 };
 
 static inline void uml_nt_feed_gate_reset(struct uml_nt_feed_gate *g)
@@ -30,32 +33,82 @@ static inline void uml_nt_feed_gate_reset(struct uml_nt_feed_gate *g)
 	g->armed = 0;
 	g->stage = 0;
 	g->lines = 0;
+	g->last_armed_stage = 0;
+	g->len = 0;
 }
 
-/* true when out[i..] starts a token at the beginning of a line */
-static inline int uml_nt_feed_at_line_start(const char *out, unsigned len,
-					    unsigned i)
+static inline int uml_nt_feed_find(const char *hay, unsigned len,
+				   const char *tok)
 {
-	(void)len;
-	if (i == 0)
-		return 1;
-	return out[i - 1] == '\n' || out[i - 1] == '\r';
-}
+	unsigned n = 0, i;
 
-static inline int uml_nt_feed_tok(const char *out, unsigned len, unsigned i,
-				  const char *tok)
-{
-	unsigned n = 0;
-
-	while (tok[n] != 0) {
-		if (i + n >= len || out[i + n] != tok[n])
-			return 0;
+	while (tok[n] != 0)
 		n++;
+	if (n == 0 || len < n)
+		return 0;
+	for (i = 0; i + n <= len; i++) {
+		unsigned k = 0;
+
+		while (k < n && hay[i + k] == tok[k])
+			k++;
+		if (k == n)
+			return 1;
 	}
-	return 1;
+	return 0;
 }
 
-/* Scan console output. Arms one line per prompt seen, in order. */
+/* A prompt token, but not a path that merely ends in it: "/bin/login:" is a
+ * log line, and the referee's own output produced exactly that false positive. */
+static inline int uml_nt_feed_find_prompt(const char *hay, unsigned len,
+					  const char *tok)
+{
+	unsigned n = 0, i;
+
+	while (tok[n] != 0)
+		n++;
+	if (n == 0 || len < n)
+		return 0;
+	for (i = 0; i + n <= len; i++) {
+		unsigned k = 0;
+
+		if (i > 0 && hay[i - 1] == '/')
+			continue;
+		while (k < n && hay[i + k] == tok[k])
+			k++;
+		if (k == n)
+			return 1;
+	}
+	return 0;
+}
+
+/* Examine the accumulated line and arm what it asks for. */
+static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g)
+{
+	if (g->len == 0)
+		return;
+	/* the MOST RECENT prompt wins: a line can still carry the login prompt
+	 * when the password prompt is printed after it (the console does not
+	 * always start a new line), so the later stage is checked first */
+	if (uml_nt_feed_find_prompt(g->line, g->len, "Password:")) {
+		g->armed = 1;
+		g->stage = 2;
+		return;
+	}
+	if (g->stage >= 2 &&
+	    (uml_nt_feed_find(g->line, g->len, "# ") ||
+	     uml_nt_feed_find(g->line, g->len, "$ "))) {
+		g->armed = 1;
+		g->stage = 3;
+		return;
+	}
+	if (uml_nt_feed_find_prompt(g->line, g->len, "login:")) {
+		g->armed = 1;
+		g->stage = 1;
+		return;
+	}
+}
+
+/* Append console output; a newline ends the line and starts a new one. */
 static inline void uml_nt_feed_gate_scan(struct uml_nt_feed_gate *g,
 					 const char *out, unsigned len)
 {
@@ -64,25 +117,26 @@ static inline void uml_nt_feed_gate_scan(struct uml_nt_feed_gate *g,
 	if (g == 0 || out == 0)
 		return;
 	for (i = 0; i < len; i++) {
-		if (uml_nt_feed_tok(out, len, i, "login:") &&
-		    (i == 0 || out[i - 1] == '\n' || out[i - 1] == '\r' ||
-		     out[i - 1] == ' ')) {
-			g->armed = 1;
-			g->stage = 1;
+		char ch = out[i];
+
+		/* interleaved kernel text can inject newlines; treat a run of
+		 * them as one boundary so a prompt still assembles */
+		if (ch == '\n' || ch == '\r') {
+			g->len = 0;
 			continue;
 		}
-		if (uml_nt_feed_tok(out, len, i, "Password:")) {
-			g->armed = 1;
-			g->stage = 2;
-			continue;
+		if (g->len + 1 < UML_NT_FEED_LINE_MAX)
+			g->line[g->len++] = ch;
+		else {
+			/* keep the tail: a prompt sits at the end of a line */
+			unsigned j;
+
+			for (j = 1; j < g->len; j++)
+				g->line[j - 1] = g->line[j];
+			g->line[g->len - 1] = ch;
 		}
-		/* a shell prompt after login — one more line may go */
-		if (g->stage >= 2 &&
-		    (uml_nt_feed_tok(out, len, i, "# ") ||
-		     uml_nt_feed_tok(out, len, i, "$ "))) {
-			g->armed = 1;
-			g->stage = 3;
-		}
+		g->line[g->len] = 0;
+		uml_nt_feed_gate_line(g);
 	}
 }
 

@@ -88,7 +88,24 @@ static ssize_t nt_con_tty_write(struct tty_struct *tty, const u8 *buf,
 {
 	/* S42: the prompts are what the feed waits for, so the output path is
 	 * where they are recognised. */
-	uml_nt_feed_gate_scan(&g_feed_gate, (const char *)buf, (unsigned)len);
+	{
+		int st0 = g_feed_gate.last_armed_stage;
+		static int gate_scan_budget = 8;
+
+		if (gate_scan_budget > 0 && len > 0) {
+			gate_scan_budget--;
+			os_info("[feedgate] scan len=%u head=\"%.32s\" "
+				"line=%u\n", (unsigned)len, (const char *)buf,
+				g_feed_gate.len);
+		}
+		uml_nt_feed_gate_scan(&g_feed_gate, (const char *)buf,
+				      (unsigned)len);
+		if (g_feed_gate.armed && g_feed_gate.stage != st0) {
+			g_feed_gate.last_armed_stage = g_feed_gate.stage;
+			os_info("[feedgate] arm stage=%d line=\"%.48s\"\n",
+				g_feed_gate.stage, g_feed_gate.line);
+		}
+	}
 	nt_console_write(buf, len);
 	return len;
 }
@@ -187,6 +204,9 @@ void uml_nt_console_flush(void)
 	 * when it is asked for. */
 	if (!uml_nt_feed_gate_take(&g_feed_gate))
 		return;
+	if ((g_feed_gate.lines & 3u) == 1u)
+		os_info("[feedgate] released line %d stage=%d\n",
+			g_feed_gate.lines, g_feed_gate.stage);
 	while (total < 256 &&
 	       uml_nt_con_ring_pop(&g_con_ring, &ch, 1) == 1) {
 		tty_insert_flip_string(&g_port[1], &ch, 1);
