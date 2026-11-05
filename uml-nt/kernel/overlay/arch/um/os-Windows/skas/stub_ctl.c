@@ -12715,8 +12715,17 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			if (o == c || o->thread == NULL || o->mm == NULL ||
 			    !uml_nt_conn_is_login(o))
 				continue;
-			if (o->last_ans_ns == 0 || o->spin_n >= 32)
+			if (o->spin_n >= 32)
 				continue;
+			/* S58: zero is not "never answered, skip me" — it is the
+			 * clock starting. Gating on it skipped exactly the conn
+			 * that had stopped answering, which is the one the sample
+			 * exists for (ledger #24: a measurement must not depend on
+			 * the event it measures). */
+			if (o->last_ans_ns == 0) {
+				o->last_ans_ns = os_nsecs();
+				continue;
+			}
 			if ((os_nsecs() - o->last_ans_ns) / 1000000ull < 1000)
 				continue;
 			{
@@ -12732,6 +12741,35 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 						(unsigned long)o->pid, o->spin_n,
 						rip, rsp, rbp,
 						uml_nt_sample_is_guest(o, rip));
+					/* the samples answer one question only when
+					 * they are counted: which rip comes back */
+					{
+						int hi, found = 0;
+
+						for (hi = 0; hi < o->spin_hn; hi++)
+							if (o->spin_hv[hi] == rip) {
+								o->spin_hc[hi]++;
+								found = 1;
+								break;
+							}
+						if (!found && o->spin_hn < 16) {
+							o->spin_hv[o->spin_hn] = rip;
+							o->spin_hc[o->spin_hn] = 1;
+							o->spin_hn++;
+						}
+					}
+					if (o->spin_n == 32) {
+						int hi;
+
+						os_info("[spin-sum] pid %lu distinct=%d\n",
+							(unsigned long)o->pid,
+							o->spin_hn);
+						for (hi = 0; hi < o->spin_hn; hi++)
+							os_info("[spin-sum]   rip=0x%llx "
+								"n=%u\n",
+								o->spin_hv[hi],
+								o->spin_hc[hi]);
+					}
 				}
 			}
 		}

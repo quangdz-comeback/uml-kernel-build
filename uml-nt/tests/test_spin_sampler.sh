@@ -31,7 +31,14 @@ int main(void)
 	CHECK(should_sample(1, t0, t0 + 5000ull * 1000000ull, 31) == 1); /* last slot */
 	CHECK(should_sample(1, t0, t0 + 5000ull * 1000000ull, 32) == 0); /* capped */
 	CHECK(should_sample(0, t0, t0 + 5000ull * 1000000ull, 0) == 0);  /* not login */
-	CHECK(should_sample(1, 0, t0, 0) == 0);                          /* never answered */
+	/* S58: a conn that never answered is not skipped — the clock starts */
+	{
+		unsigned long long clock = 0;
+
+		CHECK(should_sample(1, clock, t0, 0) == 0);   /* first sight */
+		clock = t0;                                   /* clock armed */
+		CHECK(should_sample(1, clock, t0 + 1500ull * 1000000ull, 0) == 1);
+	}
 
 	/* a spin shows up as a tiny set of distinct rips */
 	{
@@ -59,4 +66,6 @@ EOF
 "$TMP/t"
 S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c"
 grep -q "\[spin\]" "$S" || { echo "FAIL: no out-of-band sample record"; exit 1; }
+grep -q "\[spin-sum\]" "$S" || { echo "FAIL: no histogram"; exit 1; }
+grep -q "o->last_ans_ns = os_nsecs();" "$S" || { echo "FAIL: the clock is not armed"; exit 1; }
 echo "spin_sampler: the kernel emits it"
