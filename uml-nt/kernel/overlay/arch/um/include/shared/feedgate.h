@@ -24,6 +24,8 @@ struct uml_nt_feed_gate {
 	int stage;	/* 0 = before login, 1 = user, 2 = password, 3 = shell */
 	int lines;	/* lines released so far */
 	int last_armed_stage;	/* for the one-shot arm record */
+	int dbg_n;		/* records printed for this console (cap 8) */
+	int arm_n;		/* times this console armed a line */
 	unsigned len;		/* bytes of the line in progress */
 	char line[UML_NT_FEED_LINE_MAX];
 };
@@ -34,6 +36,8 @@ static inline void uml_nt_feed_gate_reset(struct uml_nt_feed_gate *g)
 	g->stage = 0;
 	g->lines = 0;
 	g->last_armed_stage = 0;
+	g->dbg_n = 0;
+	g->arm_n = 0;
 	g->len = 0;
 }
 
@@ -55,6 +59,38 @@ static inline int uml_nt_feed_find(const char *hay, unsigned len,
 			return 1;
 	}
 	return 0;
+}
+
+/*
+ * The console carries colour: systemd writes "\e[0;1;38;5;100m" before its
+ * text and the run showed such a sequence landing inside a line. Prompt matching
+ * therefore looks at the line with escape sequences removed — CSI sequences
+ * ("ESC [ ... final-byte") and the two-byte "ESC <char>" form.
+ */
+static inline unsigned uml_nt_feed_strip_esc(char *dst, unsigned dstmax,
+					     const char *src, unsigned len)
+{
+	unsigned i = 0, o = 0;
+
+	while (i < len && o + 1 < dstmax) {
+		if ((unsigned char)src[i] == 0x1b) {
+			if (i + 1 < len && src[i + 1] == '[') {
+				i += 2;
+				while (i < len &&
+				       !((src[i] >= 'A' && src[i] <= 'Z') ||
+					 (src[i] >= 'a' && src[i] <= 'z')))
+					i++;
+				if (i < len)
+					i++;	/* the final byte */
+				continue;
+			}
+			i += 2;			/* ESC + one char */
+			continue;
+		}
+		dst[o++] = src[i++];
+	}
+	dst[o] = 0;
+	return o;
 }
 
 /* A prompt token, but not a path that merely ends in it: "/bin/login:" is a
@@ -84,24 +120,28 @@ static inline int uml_nt_feed_find_prompt(const char *hay, unsigned len,
 /* Examine the accumulated line and arm what it asks for. */
 static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g)
 {
+	char clean[UML_NT_FEED_LINE_MAX];
+	unsigned clen;
+
 	if (g->len == 0)
 		return;
+	clen = uml_nt_feed_strip_esc(clean, sizeof(clean), g->line, g->len);
 	/* the MOST RECENT prompt wins: a line can still carry the login prompt
 	 * when the password prompt is printed after it (the console does not
 	 * always start a new line), so the later stage is checked first */
-	if (uml_nt_feed_find_prompt(g->line, g->len, "Password:")) {
+	if (uml_nt_feed_find_prompt(clean, clen, "Password:")) {
 		g->armed = 1;
 		g->stage = 2;
 		return;
 	}
 	if (g->stage >= 2 &&
-	    (uml_nt_feed_find(g->line, g->len, "# ") ||
-	     uml_nt_feed_find(g->line, g->len, "$ "))) {
+	    (uml_nt_feed_find(clean, clen, "# ") ||
+	     uml_nt_feed_find(clean, clen, "$ "))) {
 		g->armed = 1;
 		g->stage = 3;
 		return;
 	}
-	if (uml_nt_feed_find_prompt(g->line, g->len, "login:")) {
+	if (uml_nt_feed_find_prompt(clean, clen, "login:")) {
 		g->armed = 1;
 		g->stage = 1;
 		return;

@@ -30,6 +30,11 @@ int main(void)
 	scan(&g, "systemd boots\nReached target Multi-User\n");
 	CHECK(uml_nt_feed_gate_take(&g) == 0);
 
+	/* S44: colour codes land inside the line — the prompt is still a prompt */
+	scan(&g, "\033[0;1;38;5;100mlog\033[0min: ");
+	CHECK(uml_nt_feed_gate_take(&g) == 1);
+	scan(&g, "\n");
+
 	/* a log line that merely mentions the binary is not a prompt */
 	scan(&g, "/bin/login: /bin/login: no version information available\n");
 	CHECK(uml_nt_feed_gate_take(&g) == 0);
@@ -59,14 +64,27 @@ int main(void)
 	/* the shell: one command line */
 	scan(&g, "\r\n# ");
 	CHECK(uml_nt_feed_gate_take(&g) == 1);
-	CHECK(g.lines == 5);	/* 2 from the split cases above, then 3 prompts */
+	CHECK(g.lines == 6);	/* 3 from the split/colour cases, then 3 prompts */
 
 	/* a second login prompt re-arms, and order is preserved */
 	scan(&g, "\r\numl login: ");
 	CHECK(uml_nt_feed_gate_take(&g) == 1);
 	scan(&g, "Password: ");
 	CHECK(uml_nt_feed_gate_take(&g) == 1);
-	CHECK(g.lines == 7);
+	CHECK(g.lines == 8);
+
+	/* the ESC stripper on its own: CSI and two-byte forms */
+	{
+		char out[64];
+		unsigned n = uml_nt_feed_strip_esc(out, sizeof(out),
+						   "\033[1mab\033[0mcd",
+						   (unsigned)strlen("\033[1mab\033[0mcd"));
+
+		CHECK(n == 4);
+		CHECK(out[0] == 'a' && out[1] == 'b' && out[2] == 'c' && out[3] == 'd');
+		n = uml_nt_feed_strip_esc(out, sizeof(out), "x\033cy", 4);
+		CHECK(n == 2 && out[0] == 'x' && out[1] == 'y');
+	}
 
 	if (fails) { printf("feedgate: %d failure(s)\n", fails); return 1; }
 	printf("feedgate: one line per prompt, in order, never for a log line\n");

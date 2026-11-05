@@ -83,29 +83,36 @@ static void nt_con_tty_close(struct tty_struct *tty, struct file *filp)
 	tty_port_close(&g_port[idx], tty, filp);
 }
 
+/* S44: the gate speaks about itself. [feedgate] arm is never budgeted — a prompt
+ * that arms nothing is the fact we are looking for. The tail record is budgeted
+ * per CONSOLE (rule #23), not globally: the previous run's eight slots were eaten
+ * by systemd's own startup messages and the log said nothing about login. */
+static void uml_nt_feed_report(struct uml_nt_feed_gate *g)
+{
+	if (g->armed && g->stage != g->last_armed_stage) {
+		g->last_armed_stage = g->stage;
+		g->arm_n++;
+		os_info("[feedgate] arm stage=%d line=\"%.64s\"\n",
+			g->stage, g->line);
+	}
+	if (g->dbg_n < 8 &&
+	    (uml_nt_feed_find(g->line, g->len, "log") ||
+	     uml_nt_feed_find(g->line, g->len, "assword"))) {
+		unsigned l = g->len;
+		const char *tail = l > 32 ? g->line + l - 32 : g->line;
+
+		g->dbg_n++;
+		os_info("[feedgate] tail=%.32s (len=%u)\n", tail, l);
+	}
+}
+
 static ssize_t nt_con_tty_write(struct tty_struct *tty, const u8 *buf,
 				size_t len)
 {
 	/* S42: the prompts are what the feed waits for, so the output path is
 	 * where they are recognised. */
-	{
-		int st0 = g_feed_gate.last_armed_stage;
-		static int gate_scan_budget = 8;
-
-		if (gate_scan_budget > 0 && len > 0) {
-			gate_scan_budget--;
-			os_info("[feedgate] scan len=%u head=\"%.32s\" "
-				"line=%u\n", (unsigned)len, (const char *)buf,
-				g_feed_gate.len);
-		}
-		uml_nt_feed_gate_scan(&g_feed_gate, (const char *)buf,
-				      (unsigned)len);
-		if (g_feed_gate.armed && g_feed_gate.stage != st0) {
-			g_feed_gate.last_armed_stage = g_feed_gate.stage;
-			os_info("[feedgate] arm stage=%d line=\"%.48s\"\n",
-				g_feed_gate.stage, g_feed_gate.line);
-		}
-	}
+	uml_nt_feed_gate_scan(&g_feed_gate, (const char *)buf, (unsigned)len);
+	uml_nt_feed_report(&g_feed_gate);
 	nt_console_write(buf, len);
 	return len;
 }
@@ -125,6 +132,11 @@ static const struct tty_operations nt_con_ops = {
 /* ---- console (printk sink) --------------------------------------------- */
 static void nt_con_printk(struct console *co, const char *s, unsigned int n)
 {
+	/* S44: one gate, two doors. If login's prompt reaches the console through
+	 * the printk sink rather than the tty write, the first gate never saw it —
+	 * so both paths feed the same state machine. */
+	uml_nt_feed_gate_scan(&g_feed_gate, s, n);
+	uml_nt_feed_report(&g_feed_gate);
 	nt_console_write(s, n);
 }
 
