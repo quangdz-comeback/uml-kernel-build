@@ -12698,6 +12698,44 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	rc = serve_conn(c);
 	if (rc == 2)
 		return 2; /* exec: c/d are dead — no mb, no evt_out */
+	/* S57: an out-of-band sample. A conn that has stopped asking cannot be
+	 * sampled from inside a round — that was the silence measured at 359 —
+	 * so while THIS conn is being served, any login conn that has been quiet
+	 * is suspended, read and resumed from here. The cap keeps a spin from
+	 * turning into a flood. */
+	{
+		struct uml_nt_stub_conn *lc[2];
+		int li;
+
+		lc[0] = &conn_parent;
+		lc[1] = &conn_child;
+		for (li = 0; li < 2; li++) {
+			struct uml_nt_stub_conn *o = lc[li];
+
+			if (o == c || o->thread == NULL || o->mm == NULL ||
+			    !uml_nt_conn_is_login(o))
+				continue;
+			if (o->last_ans_ns == 0 || o->spin_n >= 32)
+				continue;
+			if ((os_nsecs() - o->last_ans_ns) / 1000000ull < 1000)
+				continue;
+			{
+				unsigned long long rip = 0, rsp = 0, rbp = 0;
+				unsigned long long rdi = 0, rsi = 0, rbx = 0;
+
+				if (uml_nt_sample_read(o, &rip, &rsp, &rbp,
+						       &rdi, &rsi, &rbx) == 0) {
+					o->spin_n++;
+					os_info("[spin] pid %lu n=%u rip=0x%llx "
+						"rsp=0x%llx rbp=0x%llx "
+						"guest=%d\n",
+						(unsigned long)o->pid, o->spin_n,
+						rip, rsp, rbp,
+						uml_nt_sample_is_guest(o, rip));
+				}
+			}
+		}
+	}
 	/* S52: a conn that stops asking is the fact we need when it neither
 	 * prints nor dies. One record per idle window, with the round it last
 	 * asked on and what that round was. */

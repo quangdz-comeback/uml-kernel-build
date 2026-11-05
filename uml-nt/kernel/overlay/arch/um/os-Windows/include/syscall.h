@@ -251,6 +251,7 @@ struct uml_nt_stub_conn {
 	/* S55: is the conn looping on faults, or simply not asking? */
 	unsigned sc_rounds_sys, sc_rounds_fault, sc_rounds_other;
 	unsigned sc_other_logged;
+	unsigned spin_n;	/* S57: out-of-band samples taken */
 	/* Shelley 170: the LAST rounds are the ones that matter — a grow
 	 * decision is only interesting at the round that died, and the
 	 * first two answers always look healthy. Ring, dumped at death. */
