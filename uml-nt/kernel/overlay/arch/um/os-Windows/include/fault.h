@@ -241,6 +241,10 @@ struct uml_nt_fault_plan {
  * unknown access class, write to read-only VMA, physmem exhausted —
  * every fail path loud). `addr` is the raw faulting VA.
  */
+int uml_nt_ca_margin_inside(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			    struct uml_nt_fault_plan *plan,
+			    unsigned long long top, unsigned long long limit,
+			    int runs);
 int uml_nt_stack_grow(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		      unsigned long long addr, unsigned long long rsp,
 		      struct uml_nt_fault_plan *plan);

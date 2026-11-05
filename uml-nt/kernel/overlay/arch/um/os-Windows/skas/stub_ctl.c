@@ -9995,7 +9995,8 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			else
 				os_info("[ca-margin-skip] pid %lu chain_login=%u "
 					"gexec=%d d_bottom=0x%llx d_top=0x%llx "
-					"lim=0x%llx top=0x%llx nvma=%d\n",
+					"lim=0x%llx top=0x%llx nvma=%d "
+					"inside_vma=[0x%llx,0x%llx) run_off=0x%llx\n",
 					(unsigned long)c->pid,
 					(unsigned)c->chain_login,
 					(int)g_exec_login,
@@ -10003,7 +10004,10 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					(unsigned long long)c->d->stack_top_hint,
 					(unsigned long long)c->mm->stack_limit,
 					(unsigned long long)c->mm->stack_top,
-					(int)c->mm->nvma);
+					(int)c->mm->nvma,
+					(unsigned long long)c->mm->ca_inside_va,
+					(unsigned long long)c->mm->ca_inside_end,
+					(unsigned long long)c->mm->ca_inside_off);
 		} else {
 			os_info("[ca-margin-skip] pid %lu reason=not-chain "
 				"chain_login=%u gexec=%d\n",
@@ -11729,6 +11733,8 @@ int uml_nt_conn_is_login(const struct uml_nt_stub_conn *c)
  * at INIT for a conn born by exec (S34), and at the FORK SEED for a chain child
  * (S35), because a fork child never has an INIT answer of its own and the conn
  * that dies at the PAM dip dies on its first syscall. */
+static unsigned int ca_margin_mode;	/* 1 = inside, 2 = add-only, 0 = none */
+
 static int uml_nt_ca_margin(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
 {
 	struct uml_nt_fault_plan *scratch;
@@ -11751,6 +11757,25 @@ static int uml_nt_ca_margin(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
 		added++;
 	}
 	kfree(scratch);
+	ca_margin_mode = added > 0 ? 2 : 0;
+	if (added > 0)
+		return added;
+
+	/* S36: the target sat inside a VMA the add-only path must not touch.
+	 * The second path has a narrower contract — same run_off, live refs, no
+	 * allocation, no table change — and exists only for this margin. */
+	scratch = kzalloc(sizeof(*scratch), GFP_KERNEL);
+	if (scratch == NULL)
+		return 0;
+	added = uml_nt_ca_margin_inside(mm, ph, scratch, mm->stack_top,
+					 mm->stack_limit,
+					 UML_NT_CA_MARGIN_RUNS);
+	kfree(scratch);
+	ca_margin_mode = added > 0 ? 1 : 0;
+	if (added > 0)
+		os_info("[ca-margin] inside-VMA mode: %d run(s) mapped in the "
+			"VMA that already covers them (nvma=%d unchanged)\n",
+			added, (int)mm->nvma);
 	return added;
 }
 

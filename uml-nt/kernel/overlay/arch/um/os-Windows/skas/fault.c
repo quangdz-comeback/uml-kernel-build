@@ -305,6 +305,12 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		if (start < mm->vma[i].end &&
 		    start + UML_NT_SG_RUN > mm->vma[i].start) {
 			mm->ca_inside = 1;
+			/* S36: name the VMA that refused, so "the reserve said
+			 * no" is never again an inference. */
+			mm->ca_inside_va = mm->vma[i].start;
+			mm->ca_inside_end = mm->vma[i].end;
+			mm->ca_inside_off = mm->vma[i].run_off +
+				(start - mm->vma[i].start);
 			return 0;
 		}
 	}
@@ -356,6 +362,53 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	}
 	mm->ca_plan = 1;
 	return 1;
+}
+
+/* S36: the margin INSIDE an existing VMA.
+ *
+ * A fork child inherits the stack VMA its parent had, and the reservation below
+ * it can be covered by that same VMA. The add-only reserve refuses to touch it —
+ * correctly, because the VMA may be shared, COW or span-backed — so the margin
+ * had no way in and the dip pages stayed free (referee 42055980664: mapped=0,
+ * alloc=0, committed=0 across the whole window).
+ *
+ * This is a SECOND path with a narrower contract, and it exists only for that
+ * margin: it never adds a VMA, never moves a bound, never allocates, and it
+ * refuses unless the range it would map is already owned by the VMA that covers
+ * it — same run_off, live refs. Then a MAP op is all the stub needs: the pages
+ * become committed without the table changing shape.
+ */
+int uml_nt_ca_margin_inside(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			    struct uml_nt_fault_plan *plan,
+			    unsigned long long top, unsigned long long limit,
+			    int runs)
+{
+	int r, added = 0;
+	unsigned long long bot = top - UML_NT_SG_RUN;
+
+	for (r = 0; r < runs; r++, bot -= UML_NT_SG_RUN) {
+		struct uml_nt_vma *v = 0;
+		unsigned long long off;
+		int i;
+
+		if (bot < limit)
+			break;
+		for (i = 0; i < mm->nvma; i++)
+			if (bot >= mm->vma[i].start && bot < mm->vma[i].end) {
+				v = &mm->vma[i];
+				break;
+			}
+		if (v == 0)
+			break;			/* outside every VMA: not ours */
+		off = v->run_off + (bot - v->start);
+		if (uml_nt_phys_refs(ph, (long long)off) == 0)
+			break;			/* the range is not owned */
+		if (plan_op(plan, UML_NT_FOP_MAP, 0x04u, bot,
+			    UML_NT_SG_RUN, off) < 0)
+			break;
+		added++;
+	}
+	return added;
 }
 
 int uml_nt_mm_fault(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
