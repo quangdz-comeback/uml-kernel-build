@@ -5001,7 +5001,11 @@ static void uml_nt_spin_scan(void)
 
 		if (o->thread == NULL && o->pid == 0)
 			continue;
-		if (!uml_nt_conn_is_login(o))
+		/* S60: the probe measured login_seen=0 with the thread running and
+		 * eight scans done — so the exec_path predicate never matched the
+		 * login conn. The chain latch is the fact the rest of the boot uses,
+		 * and it is set for the fork children too. */
+		if (!uml_nt_conn_is_login(o) && !o->chain_login)
 			continue;
 		spin_login_seen++;
 		if (o->spin_n >= 32)
