@@ -4532,12 +4532,26 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		 * 42069926848: ioctl(0x5401) -> -25) and /bin/login had nothing
 		 * to ask. Only fds 0/1/2 belong to the console; anything else
 		 * still goes to the real table. */
-		if (a[0] <= 2 && c->mm != 0) {
+		/* S41b: not only fds 0-2. A task-backed conn's stdin is a real
+		 * kernel file (that is what the VFS gives it), and the console
+		 * device behind it has no tty driver — so the ENOTTY came from
+		 * the kernel's own ioctl, on a descriptor number we do not own.
+		 * Every tty question this port can answer is answered here. */
+		if (c->mm != 0) {
 			unsigned char ttybuf[UML_NT_TERMIOS_SIZE];
 			int tn = uml_nt_tty_ioctl_fill((unsigned)a[1], ttybuf,
 						       (unsigned)sizeof(ttybuf));
 
 			if (tn >= 0) {
+				static int tty_once;
+
+				if (!tty_once) {
+					tty_once = 1;
+					os_info("[tty-ioctl] fd=%llu req=0x%llx "
+						"replied %d byte(s) from the "
+						"console model\n",
+						a[0], a[1], tn);
+				}
 				if (tn > 0) {
 					long long toff = uml_nt_vma_translate(
 						c->mm, a[2], (unsigned long long)tn);
