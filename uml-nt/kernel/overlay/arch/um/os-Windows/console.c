@@ -55,6 +55,9 @@
 #include "console_status.h"
 #include "con_ring.h"
 #include "internal.h"
+#include <feedgate.h>
+
+static struct uml_nt_feed_gate g_feed_gate;
 
 /* ---- tty driver -------------------------------------------------------- */
 static struct tty_driver *g_driver;
@@ -83,6 +86,9 @@ static void nt_con_tty_close(struct tty_struct *tty, struct file *filp)
 static ssize_t nt_con_tty_write(struct tty_struct *tty, const u8 *buf,
 				size_t len)
 {
+	/* S42: the prompts are what the feed waits for, so the output path is
+	 * where they are recognised. */
+	uml_nt_feed_gate_scan(&g_feed_gate, (const char *)buf, (unsigned)len);
 	nt_console_write(buf, len);
 	return len;
 }
@@ -173,6 +179,13 @@ void uml_nt_console_flush(void)
 	unsigned int total = 0;
 
 	if (!console_reader_waiting())
+		return;
+	/* S42: a line is released only when its prompt has been printed. The
+	 * feed used to run ahead of login and be discarded by login's own
+	 * TCSAFLUSH; waiting for the prompt keeps both behaviours: the flush
+	 * still drops what is pending (nothing is), and the username arrives
+	 * when it is asked for. */
+	if (!uml_nt_feed_gate_take(&g_feed_gate))
 		return;
 	while (total < 256 &&
 	       uml_nt_con_ring_pop(&g_con_ring, &ch, 1) == 1) {
