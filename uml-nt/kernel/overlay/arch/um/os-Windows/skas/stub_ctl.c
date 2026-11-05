@@ -12673,12 +12673,27 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 		return -1;
 	}
 	if (uml_nt_conn_is_login(c)) {
-		if (c->d->cmd == 1)
+		if (c->d->cmd == 1) {
 			c->sc_rounds_sys++;
-		else if (c->d->cmd == 3)
+		} else if (c->d->cmd == 3) {
 			c->sc_rounds_fault++;
-		else
+		} else {
 			c->sc_rounds_other++;
+			/* S56: the rounds that are neither a syscall nor a fault are
+			 * the ones nobody has looked at, and one of them may be the
+			 * round the port does not serve. Name each with its command,
+			 * rip and the value it published. */
+			if (c->sc_other_logged < 40) {
+				c->sc_other_logged++;
+				os_info("[other] pid %lu n=%u cmd=%u rip=0x%llx "
+					"retval=0x%llx action=%u err=%u\n",
+					(unsigned long)c->pid,
+					c->sc_rounds_other, (unsigned)c->d->cmd,
+					(unsigned long long)c->d->regs.rip,
+					(unsigned long long)c->d->retval,
+					(unsigned)c->d->action, (unsigned)c->d->err);
+			}
+		}
 	}
 	rc = serve_conn(c);
 	if (rc == 2)
