@@ -65,18 +65,33 @@ static void feed_gate_sink(const char *s, unsigned int n)
 	if (uml_nt_console_gate.armed &&
 	    uml_nt_console_gate.stage != uml_nt_console_gate.last_armed_stage) {
 		uml_nt_console_gate.last_armed_stage = uml_nt_console_gate.stage;
-		os_info("[feedgate] arm stage=%d line=\"%.64s\"\n",
+		os_info("[feedgate] arm stage=%d src=%s line=\"%.64s\"\n",
 			uml_nt_console_gate.stage,
-			uml_nt_console_gate.line[src]);
+			uml_nt_console_gate.match_src ? "kernel" : "console",
+			uml_nt_console_gate.line[uml_nt_console_gate.match_src]);
 	}
-	if (uml_nt_feed_find(uml_nt_console_gate.line[src],
-			     uml_nt_console_gate.len[src], "ogin") ||
-	    uml_nt_feed_find(uml_nt_console_gate.line[src],
-			     uml_nt_console_gate.len[src], "assword"))
-		os_info("[feedgate] line=%.64s src=%s len=%u\n",
-			uml_nt_console_gate.line[src],
-			src ? "kernel" : "console",
-			uml_nt_console_gate.len[src]);
+	/* S47 tail-colon: a guest write that ends in ':' or carries "logi" is
+	 * almost certainly a prompt fragment — print it, whatever the buffer
+	 * state says. */
+	if (src == 0 && n > 0 &&
+	    (s[n - 1] == ':' || uml_nt_feed_find(s, n, "logi")))
+		os_info("[feedgate] frag=\"%.32s\" len=%u\n", s, n);
+	{
+		int b;
+
+		for (b = 0; b < 2; b++) {
+			if (uml_nt_console_gate.truncated[b])
+				continue;
+			if (uml_nt_feed_find(uml_nt_console_gate.line[b],
+					     uml_nt_console_gate.len[b], "ogin") ||
+			    uml_nt_feed_find(uml_nt_console_gate.line[b],
+					     uml_nt_console_gate.len[b], "assword"))
+				os_info("[feedgate] line=%.64s src=%s len=%u\n",
+					uml_nt_console_gate.line[b],
+					b ? "kernel" : "console",
+					uml_nt_console_gate.len[b]);
+		}
+	}
 }
 
 void nt_console_write(const char *s, unsigned int n)

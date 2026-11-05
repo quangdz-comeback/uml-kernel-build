@@ -113,6 +113,20 @@ int main(void)
 		CHECK(uml_nt_feed_gate_take(&k) == 1);
 	}
 
+	/* S47: a line whose head was cut must never match. The kernel line that
+	 * armed the last run was "/bin/login: …" with its '/' truncated away. */
+	{
+		struct uml_nt_feed_gate q;
+		char big[UML_NT_FEED_LINE_MAX + 40];
+
+		uml_nt_feed_gate_reset(&q);
+		memset(big, 'x', sizeof(big) - 20);
+		big[sizeof(big) - 20] = 0;
+		strcat(big, "/bin/login: ");
+		uml_nt_feed_gate_scan(&q, big, (unsigned)strlen(big), 1);
+		CHECK(uml_nt_feed_gate_take(&q) == 0);	/* headless, no match */
+	}
+
 	if (fails) { printf("feedgate: %d failure(s)\n", fails); return 1; }
 	printf("feedgate: one line per prompt, in order, never for a log line\n");
 	return 0;

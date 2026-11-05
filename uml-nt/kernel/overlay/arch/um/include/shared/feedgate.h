@@ -33,6 +33,12 @@ struct uml_nt_feed_gate {
 	unsigned len[2];	/* 0 = tty write, 1 = printk */
 	char line[2][UML_NT_FEED_LINE_MAX];
 	char last_tail[40];	/* the previous tail record's text (dedupe) */
+	/* S47: a line that no longer starts where it began cannot be trusted for
+	 * matching — truncating the head of "[pivot-wslot] … /bin/login:" removed
+	 * the '/' that told the matcher it was a path, and the gate armed on a
+	 * kernel line. Overflow now DROPS the write and marks the line. */
+	int truncated[2];
+	int match_src;		/* which buffer produced the last arm */
 };
 
 static inline void uml_nt_feed_gate_reset(struct uml_nt_feed_gate *g)
@@ -45,6 +51,9 @@ static inline void uml_nt_feed_gate_reset(struct uml_nt_feed_gate *g)
 	g->len[0] = 0;
 	g->len[1] = 0;
 	g->last_tail[0] = 0;
+	g->truncated[0] = 0;
+	g->truncated[1] = 0;
+	g->match_src = 0;
 	g->arm_n = 0;
 	g->len[0] = 0;
 	g->len[1] = 0;
@@ -133,8 +142,8 @@ static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g,
 	char clean[UML_NT_FEED_LINE_MAX];
 	unsigned clen;
 
-	if (g->len[src] == 0)
-		return;
+	if (g->len[src] == 0 || g->truncated[src])
+		return;		/* a headless line may match anything: never use it */
 	clen = uml_nt_feed_strip_esc(clean, sizeof(clean), g->line[src],
 				      g->len[src]);
 	/* the MOST RECENT prompt wins: a line can still carry the login prompt
@@ -143,6 +152,7 @@ static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g,
 	if (uml_nt_feed_find_prompt(clean, clen, "Password:")) {
 		g->armed = 1;
 		g->stage = 2;
+		g->match_src = src;
 		return;
 	}
 	if (g->stage >= 2 &&
@@ -150,11 +160,13 @@ static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g,
 	     uml_nt_feed_find(clean, clen, "$ "))) {
 		g->armed = 1;
 		g->stage = 3;
+		g->match_src = src;
 		return;
 	}
 	if (uml_nt_feed_find_prompt(clean, clen, "login:")) {
 		g->armed = 1;
 		g->stage = 1;
+		g->match_src = src;
 	}
 }
 
@@ -172,16 +184,16 @@ static inline void uml_nt_feed_gate_scan(struct uml_nt_feed_gate *g,
 
 		if (ch == '\n' || ch == '\r') {
 			g->len[src] = 0;
+			g->truncated[src] = 0;
 			continue;
 		}
-		if (g->len[src] + 1 < UML_NT_FEED_LINE_MAX)
+		if (g->len[src] + 1 < UML_NT_FEED_LINE_MAX) {
 			g->line[src][g->len[src]++] = ch;
-		else {
-			unsigned j;
-
-			for (j = 1; j < g->len[src]; j++)
-				g->line[src][j - 1] = g->line[src][j];
-			g->line[src][g->len[src] - 1] = ch;
+		} else {
+			/* overflow: keep what we have, stop growing, and mark the
+			 * line as headless so nothing is matched against it */
+			g->truncated[src] = 1;
+			continue;
 		}
 		g->line[src][g->len[src]] = 0;
 		uml_nt_feed_gate_line(g, src);
