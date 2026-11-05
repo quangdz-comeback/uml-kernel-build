@@ -9963,6 +9963,49 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		return 0;
 	}
 	if (d->cmd == UML_STUB_CMD_INIT) {
+		/* S34: the margin is committed HERE — at the conn's birth, from the
+		 * VMA table alone, before the guest has run a single instruction.
+		 * Every answer-time reserve needs an answer that carries
+		 * registers, and the conn that dies at the PAM dip dies on its
+		 * FIRST syscall — referee 42047725849 showed exactly one INIT
+		 * answer and one PROT answer, no trap round at all. A VMA added
+		 * now is mapped by the INIT plan below, so the pages under the
+		 * stack are committed before the guest can dip into them.
+		 *
+		 * Scoped to the login chain by the same latch the rest of the
+		 * boot uses: the margin is a debt of the login path, and mem=120M
+		 * cannot afford it for every conn (census: free=7-8 MiB at
+		 * multi-user, nine conns live). */
+		if ((c->chain_login || g_exec_login) && c->mm != NULL &&
+		    c->mm->stack_top > c->mm->stack_limit) {
+			struct uml_nt_fault_plan scratch;
+			int r, added = 0;
+
+			unsigned long long bot = c->mm->stack_top -
+						 UML_NT_SG_RUN;
+
+			memset(&scratch, 0, sizeof(scratch));
+			for (r = 0; r < UML_NT_CA_MARGIN_RUNS; r++, bot -= UML_NT_SG_RUN) {
+				int one = uml_nt_stack_commit_ahead(
+					c->mm, c->ph, bot, bot,
+					c->mm->stack_top,
+					c->mm->stack_limit,
+					UML_NT_SG_RUN, &scratch);
+
+				if (one <= 0)
+					break;
+				added++;
+			}
+			c->mm->ca_margin_runs = (unsigned)added;
+			if (added > 0)
+				os_info("[ca-margin] pid %lu runs=%d bytes=0x%llx "
+					"under stack bottom 0x%llx (committed at "
+					"birth, before the first syscall)\n",
+					(unsigned long)c->pid, added,
+					(unsigned long long)added * UML_NT_SG_RUN,
+					(unsigned long long)c->mm->stack_top -
+					(unsigned long long)UML_NT_SG_RUN);
+		}
 		/* Stream the conn's initial per-VMA map plan; the probe
 		 * appends NOACCESS protects for the parent's guard
 		 * pages (the fault-probe seed). */

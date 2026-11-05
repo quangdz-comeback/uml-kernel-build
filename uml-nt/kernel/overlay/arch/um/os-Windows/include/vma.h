@@ -117,6 +117,7 @@ struct uml_nt_mm {
 	unsigned int ca_append;		/* S33: reserves queued into a drain */
 	unsigned int ca_mid_drain;	/* S33: this answer was mid-drain */
 	unsigned int ca_mid_drain_ops;	/* S33: ops the reserve added */
+	unsigned int ca_margin_runs;	/* S34: margin runs committed at birth */
 	unsigned ca_n;
 	int ca_alloc, ca_vma, ca_plan, ca_nvma, ca_free, ca_inside, ca_full;
 	struct uml_nt_vma vma[UML_NT_VMA_MAX];

@@ -20,6 +20,11 @@
 /* One answer commits at most this many runs (256 KiB) below the committed
  * bottom; anything deeper is the deliberate FULLCOMMIT experiment. */
 #define UML_NT_CA_DEFAULT_RUNS	4
+/* S34: the margin committed at conn birth. The PAM dip needs ~0x51000 (dip
+ * 0x41000 + wrapper ~0x10000); six runs = 384 KiB covers it with slack, and the
+ * budget at mem=120M (free 7-8 MiB, nine conns live, chain conns a handful)
+ * pays 384 KiB for the handful without touching the rest. */
+#define UML_NT_CA_MARGIN_RUNS	6
 #define UML_NT_RUN_BYTES	0x10000ull
 
 /*
