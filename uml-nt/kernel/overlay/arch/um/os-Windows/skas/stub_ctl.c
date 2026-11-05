@@ -12672,6 +12672,14 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			c->d->done_seq);
 		return -1;
 	}
+	if (uml_nt_conn_is_login(c)) {
+		if (c->d->cmd == 1)
+			c->sc_rounds_sys++;
+		else if (c->d->cmd == 3)
+			c->sc_rounds_fault++;
+		else
+			c->sc_rounds_other++;
+	}
 	rc = serve_conn(c);
 	if (rc == 2)
 		return 2; /* exec: c/d are dead — no mb, no evt_out */

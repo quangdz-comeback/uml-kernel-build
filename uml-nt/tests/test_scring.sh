@@ -55,4 +55,7 @@ S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/syscall.c"
 grep -q "\[scring\]" "$S" || { echo "FAIL: no scring dump"; exit 1; }
 grep -q "sc_total == 16" "$S" || { echo "FAIL: the small checkpoints are gone"; exit 1; }
 grep -q "\[sc-tail\]" "$S" || { echo "FAIL: no rolling tail"; exit 1; }
+grep -q "\[sc4\]" "$S" || { echo "FAIL: no four-line window after 32"; exit 1; }
+grep -q "\[sc-ev\]" "$S" || { echo "FAIL: thread events are not named"; exit 1; }
+grep -q "rounds sys=" "$S" || { echo "FAIL: no round census"; exit 1; }
 echo "scring: the kernel dumps it"

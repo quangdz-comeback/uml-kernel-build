@@ -5034,6 +5034,47 @@ out:
 		 * marks are small now, and past them a short tail is printed every
 		 * eighth call — a rolling "final dump" that always shows the most
 		 * recent activity, however the run ends. */
+		/* S55: after 32, four lines every two calls — the window that was
+		 * empty (33..63) is the one that matters. */
+		if (c->sc_total > 32 && c->sc_total <= 128 &&
+		    (c->sc_total & 1u) == 0) {
+			unsigned i, n = 4;
+			unsigned start = (c->sc_ri + 200 - n) % 200;
+
+			os_info("[sc4] total=%u last=%u\n", c->sc_total, n);
+			for (i = 0; i < n; i++) {
+				unsigned k = (start + i) % 200;
+
+				os_info("[sc2] nr=%llu a0=0x%llx a1=0x%llx "
+					"a2=0x%llx ret=%lld rip=0x%llx\n",
+					c->sc_ring[k].nr, c->sc_ring[k].a0,
+					c->sc_ring[k].a1, c->sc_ring[k].a2,
+					(long long)c->sc_ring[k].ret,
+					c->sc_ring[k].rip);
+			}
+			{
+				int vi, hit = 0;
+
+				for (vi = 0; vi < c->mm->nvma; vi++)
+					if (c->mm->vma[vi].start < 0x60900000ull &&
+					    c->mm->vma[vi].end > 0x60870000ull) {
+						hit = 1;
+						os_info("[sc4] vma[%d] "
+							"[0x%llx,0x%llx) prot=0x%x "
+							"meets the region above "
+							"stack_top\n", vi,
+							c->mm->vma[vi].start,
+							c->mm->vma[vi].end,
+							c->mm->vma[vi].prot);
+					}
+				if (!hit)
+					os_info("[sc4] no VMA meets "
+						"[0x60870000,0x60900000)\n");
+			}
+			os_info("[sc4] rounds sys=%u fault=%u other=%u total=%u\n",
+				c->sc_rounds_sys, c->sc_rounds_fault,
+				c->sc_rounds_other, c->sc_total);
+		}
 		if (c->sc_dumps < 8 &&
 		    (c->sc_total == 16 || c->sc_total == 32 ||
 		     c->sc_total == 64 || c->sc_total == 128)) {
@@ -5054,6 +5095,12 @@ out:
 					c->sc_ring[k].rip);
 			}
 		}
+		/* S55: a thread event is worth its own name — clone and futex are
+		 * how a conn stops being one thread. */
+		if (nr == 56 || nr == 202)
+			os_info("[sc-ev] pid %lu nr=%llu a0=0x%llx ret=%lld "
+				"total=%u\n", (unsigned long)c->pid, nr, a[0],
+				(long long)ret, c->sc_total);
 		/* the rolling tail: the last eight calls, every eighth call */
 		if (c->sc_total > 128 && (c->sc_total & 7u) == 0) {
 			unsigned i, n = c->sc_total < 8 ? c->sc_total : 8;
