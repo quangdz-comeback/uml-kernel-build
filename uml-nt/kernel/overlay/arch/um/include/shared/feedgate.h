@@ -21,13 +21,18 @@
 
 struct uml_nt_feed_gate {
 	int armed;	/* a prompt is waiting for one line */
+	int src;	/* which door produced the last bytes */
 	int stage;	/* 0 = before login, 1 = user, 2 = password, 3 = shell */
 	int lines;	/* lines released so far */
 	int last_armed_stage;	/* for the one-shot arm record */
 	int dbg_n;		/* records printed for this console (cap 8) */
 	int arm_n;		/* times this console armed a line */
-	unsigned len;		/* bytes of the line in progress */
-	char line[UML_NT_FEED_LINE_MAX];
+	/* S45: one line per SOURCE. A kernel log line arriving between two halves
+	 * of the guest's prompt must not reset the guest's line — the two doors
+	 * feed one state machine, but they must not share a buffer. */
+	unsigned len[2];	/* 0 = tty write, 1 = printk */
+	char line[2][UML_NT_FEED_LINE_MAX];
+	char last_tail[40];	/* the previous tail record's text (dedupe) */
 };
 
 static inline void uml_nt_feed_gate_reset(struct uml_nt_feed_gate *g)
@@ -37,8 +42,12 @@ static inline void uml_nt_feed_gate_reset(struct uml_nt_feed_gate *g)
 	g->lines = 0;
 	g->last_armed_stage = 0;
 	g->dbg_n = 0;
+	g->len[0] = 0;
+	g->len[1] = 0;
+	g->last_tail[0] = 0;
 	g->arm_n = 0;
-	g->len = 0;
+	g->len[0] = 0;
+	g->len[1] = 0;
 }
 
 static inline int uml_nt_feed_find(const char *hay, unsigned len,
@@ -118,17 +127,19 @@ static inline int uml_nt_feed_find_prompt(const char *hay, unsigned len,
 }
 
 /* Examine the accumulated line and arm what it asks for. */
-static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g)
+static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g,
+					 int src)
 {
 	char clean[UML_NT_FEED_LINE_MAX];
 	unsigned clen;
 
-	if (g->len == 0)
+	if (g->len[src] == 0)
 		return;
-	clen = uml_nt_feed_strip_esc(clean, sizeof(clean), g->line, g->len);
+	clen = uml_nt_feed_strip_esc(clean, sizeof(clean), g->line[src],
+				      g->len[src]);
 	/* the MOST RECENT prompt wins: a line can still carry the login prompt
-	 * when the password prompt is printed after it (the console does not
-	 * always start a new line), so the later stage is checked first */
+	 * when the password prompt is printed after it, so the later stage is
+	 * checked first */
 	if (uml_nt_feed_find_prompt(clean, clen, "Password:")) {
 		g->armed = 1;
 		g->stage = 2;
@@ -144,39 +155,36 @@ static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g)
 	if (uml_nt_feed_find_prompt(clean, clen, "login:")) {
 		g->armed = 1;
 		g->stage = 1;
-		return;
 	}
 }
 
-/* Append console output; a newline ends the line and starts a new one. */
+/* Append console output from one source; a newline ends THAT source's line. */
 static inline void uml_nt_feed_gate_scan(struct uml_nt_feed_gate *g,
-					 const char *out, unsigned len)
+					 const char *out, unsigned len, int src)
 {
 	unsigned i;
 
-	if (g == 0 || out == 0)
+	if (g == 0 || out == 0 || src < 0 || src > 1)
 		return;
+	g->src = src;
 	for (i = 0; i < len; i++) {
 		char ch = out[i];
 
-		/* interleaved kernel text can inject newlines; treat a run of
-		 * them as one boundary so a prompt still assembles */
 		if (ch == '\n' || ch == '\r') {
-			g->len = 0;
+			g->len[src] = 0;
 			continue;
 		}
-		if (g->len + 1 < UML_NT_FEED_LINE_MAX)
-			g->line[g->len++] = ch;
+		if (g->len[src] + 1 < UML_NT_FEED_LINE_MAX)
+			g->line[src][g->len[src]++] = ch;
 		else {
-			/* keep the tail: a prompt sits at the end of a line */
 			unsigned j;
 
-			for (j = 1; j < g->len; j++)
-				g->line[j - 1] = g->line[j];
-			g->line[g->len - 1] = ch;
+			for (j = 1; j < g->len[src]; j++)
+				g->line[src][j - 1] = g->line[src][j];
+			g->line[src][g->len[src] - 1] = ch;
 		}
-		g->line[g->len] = 0;
-		uml_nt_feed_gate_line(g);
+		g->line[src][g->len[src]] = 0;
+		uml_nt_feed_gate_line(g, src);
 	}
 }
 

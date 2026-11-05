@@ -19,7 +19,7 @@ static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; printf("FAIL %d: %s\n", __LINE__, #c); } } while (0)
 static void scan(struct uml_nt_feed_gate *g, const char *s)
 {
-	uml_nt_feed_gate_scan(g, s, (unsigned)strlen(s));
+	uml_nt_feed_gate_scan(g, s, (unsigned)strlen(s), 0);
 }
 int main(void)
 {
@@ -84,6 +84,19 @@ int main(void)
 		CHECK(out[0] == 'a' && out[1] == 'b' && out[2] == 'c' && out[3] == 'd');
 		n = uml_nt_feed_strip_esc(out, sizeof(out), "x\033cy", 4);
 		CHECK(n == 2 && out[0] == 'x' && out[1] == 'y');
+	}
+
+	/* S45: a kernel line between the halves of the guest prompt does not
+	 * reset the guest's own line */
+	{
+		struct uml_nt_feed_gate h;
+
+		uml_nt_feed_gate_reset(&h);
+		uml_nt_feed_gate_scan(&h, "\numl log", 8, 0);
+		uml_nt_feed_gate_scan(&h, "[commit-ahead] pid 1\n", 21, 1);
+		CHECK(uml_nt_feed_gate_take(&h) == 0);
+		uml_nt_feed_gate_scan(&h, "in: ", 4, 0);
+		CHECK(uml_nt_feed_gate_take(&h) == 1);
 	}
 
 	if (fails) { printf("feedgate: %d failure(s)\n", fails); return 1; }
