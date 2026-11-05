@@ -12701,26 +12701,19 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 					c->mm->ca_round_skip++;
 				want_runs = 0;
 			}
-			if (want_runs > 0 &&
-			    !uml_nt_ca_plan_ok(c->plan_left, c->plan_next)) {
-				/* S25: the plan is mid-drain; a fault would drop
-				 * the unissued tail and leave the reserve's VMA
-				 * without its MAP. Wait for a quiescent plan. */
-				c->mm->ca_plan_skip++;
-				if (c->mm->ca_skip_plan++ < 2)
-					os_info("[ca-skip] pid %lu reason=plan "
-						"left=%d next=%d ops=%d\n",
-						(unsigned long)c->pid,
-						c->plan_left, c->plan_next,
-						c->plan.n_ops);
-				if (c->mm->ca_plan_skip <= 4)
-					os_info("[ca-orphan] pid %lu skip "
-						"plan_left=%d plan_next=%d "
-						"ops=%d (reserve deferred)\n",
-						(unsigned long)c->pid,
-						c->plan_left, c->plan_next,
-						c->plan.n_ops);
-				want_runs = 0;
+			/* S33: the mid-drain deferral is retired. It existed because a
+			 * repair used to RESET the plan and drop the unissued tail
+			 * (S25), and that reset now appends instead (S27) — so a
+			 * reserve queued into a draining plan is carried to the stub
+			 * like any other op. The stream position is kept and the
+			 * remainder recounted below, after the ops have landed. */
+			{
+				int mid_drain = c->plan_left > 0 && c->plan_next > 0;
+
+				if (mid_drain && want_runs > 0)
+					c->mm->ca_append++;
+				c->mm->ca_mid_drain = mid_drain;
+				c->mm->ca_mid_drain_ops = 0;
 			}
 			{
 				char ca[UML_NT_DIAG_CAP];
@@ -12818,6 +12811,22 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			if (r <= 0)
 				break;
 			c->d->grow_mapped++;
+			if (c->mm->ca_mid_drain)
+				c->mm->ca_mid_drain_ops++;
+		}
+		if (c->mm->ca_mid_drain && c->mm->ca_mid_drain_ops != 0) {
+			/* S33: ops landed BEHIND the drain cursor — the remainder is
+			 * every unissued op, the new tail included, so the stub
+			 * receives the reserve's MAP instead of never hearing of
+			 * it. Position is untouched: nothing in flight. */
+			c->plan_left = uml_nt_fault_plan_left_at_trap(&c->plan,
+								      c->plan_next);
+			if (c->mm->ca_skip_plan++ < 4)
+				os_info("[ca-append] pid %lu mid-drain next=%d "
+					"left=%d ops=%d (reserve joins the "
+					"stream)\n",
+					(unsigned long)c->pid, c->plan_next,
+					c->plan_left, c->plan.n_ops);
 		}
 		if (c->mm->ca_n != 0 && (c->mm->ca_n <= 6 ||
 					 (c->mm->ca_n & 31u) == 0))

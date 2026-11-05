@@ -14,7 +14,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c"
 H="$HERE/../kernel/overlay/arch/um/os-Windows/include/vma.h"
 fail=0
-for r in reason=no-mm reason=round reason=plan; do
+for r in reason=no-mm reason=round; do
 	grep -q "$r" "$S" || { echo "FAIL: no [ca-skip] for $r"; fail=1; }
 done
 # the counters belong to the object under investigation, not the shared block
