@@ -31,11 +31,11 @@ static int fails;
 #define TOP 0x60870000ull
 #define BOT (TOP - RUN)
 #define RES_LO (TOP - 0x800000ull)
-static unsigned char taken[64];
+static unsigned char taken[512];
 long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 {
 	int i, j;
-	for (i = 0; i + nruns <= 64; i++) {
+	for (i = 0; i + nruns <= 512; i++) {
 		int ok = 1;
 		for (j = 0; j < nruns; j++) if (taken[i + j]) { ok = 0; break; }
 		if (!ok) continue;
@@ -48,7 +48,7 @@ long long uml_nt_phys_backend_alloc_span(void **page_out, int nruns)
 void uml_nt_phys_backend_free(void *page, int nruns)
 {
 	int i = (int)((char *)page - (char *)taken), j;
-	for (j = 0; j < nruns; j++) if (i + j >= 0 && i + j < 64) taken[i + j] = 0;
+	for (j = 0; j < nruns; j++) if (i + j >= 0 && i + j < 512) taken[i + j] = 0;
 }
 int main(void)
 {
@@ -87,6 +87,54 @@ int main(void)
 	CHECK(lo <= dip_lo);
 	CHECK(hi >= dip_hi);
 	CHECK(saw_target == 1);
+
+	/* (a2) the run range is the VMA's, so unclaimed pages are CLAIMED in
+	 * place: every margin run ends up owned, and the shape still holds */
+	{
+		struct uml_nt_mm m2;
+		struct uml_nt_phys p2;
+		struct uml_nt_fault_plan q;
+		int n, r, owned = 1;
+		unsigned long long bot;
+
+		if (uml_nt_phys_init(&p2, 256 * RUN) < 0) return 2;
+		uml_nt_mm_init(&m2);
+		m2.stack_top = TOP;
+		m2.stack_limit = RES_LO;
+		/* the reservation is the VMA's range; nothing below is claimed */
+		(void)uml_nt_vma_add(&m2, RES_LO, TOP,
+				     (unsigned long long)uml_nt_phys_alloc(&p2),
+				     UML_NT_PAGE_READWRITE, 0);
+		memset(&q, 0, sizeof(q));
+		n = uml_nt_ca_margin_inside(&m2, &p2, &q, TOP, RES_LO,
+					    UML_NT_CA_MARGIN_RUNS);
+		CHECK(n == UML_NT_CA_MARGIN_RUNS);
+		CHECK(m2.nvma == 1);
+		bot = TOP - RUN;
+		for (r = 0; r < n; r++, bot -= RUN) {
+			unsigned long long off = m2.vma[0].run_off +
+						 (bot - m2.vma[0].start);
+
+			if (uml_nt_phys_refs(&p2, (long long)off) < 1) {
+				printf("run %d off=0x%llx refs=%d\n", r,
+				       off, uml_nt_phys_refs(&p2, (long long)off));
+				owned = 0;
+			}
+		}
+		CHECK(owned == 1);
+
+		/* (d) twice is the same as once: nothing is claimed twice */
+		{
+			struct uml_nt_fault_plan q2;
+			int n2;
+
+			memset(&q2, 0, sizeof(q2));
+			n2 = uml_nt_ca_margin_inside(&m2, &p2, &q2, TOP, RES_LO,
+						     UML_NT_CA_MARGIN_RUNS);
+			CHECK(n2 == UML_NT_CA_MARGIN_RUNS);
+			CHECK(m2.nvma == 1);
+		}
+	}
 
 	/* a range the VMA does not own is refused, not mapped */
 	{

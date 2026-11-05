@@ -180,6 +180,47 @@ reject:
 	return -1;
 }
 
+/* S37: claim a run at a CHOSEN offset.
+ *
+ * A stack VMA owns a contiguous run range; a page inside it that was never
+ * committed has no run of its own. Committing it means handing that exact run
+ * to the VMA — allocating "somewhere" and pointing the VMA at it would move
+ * the mapping, and moving a stack's backing under a live guest is the class
+ * this hunt spent half its reports on. So the allocator gets a placement call:
+ * same bookkeeping as a normal handout (refs, span fields, gen epoch, the
+ * zero-page contract), with the index fixed by the caller.
+ */
+long long uml_nt_phys_alloc_at(struct uml_nt_phys *p, long long off, int nruns)
+{
+	void *pg = (void *)0;
+	long long i;
+	long long got;
+	int k;
+
+	if (nruns != 1)
+		return -1;
+	i = run_index(p, off);
+	if (i < 0 || i + nruns > RUNS(p))
+		return -1;
+	if (p->refs[i] != 0)
+		return -1;			/* already owned: nothing to claim */
+	got = uml_nt_phys_backend_alloc_span(&pg, nruns);
+	if (got < 0 || pg == (void *)0)
+		return -1;
+	p->refs[i] = 1;
+	p->pages[i] = pg;
+	p->span_len[i] = (unsigned short)nruns;
+	p->span_back[i] = 0;
+	p->epoch++;
+	for (k = 0; k < nruns; k++) {
+		p->gen[i + k] = p->epoch;
+		p->touch[i + k] = p->epoch;
+	}
+	if (uml_nt_phys_zero_hook != (uml_nt_phys_zero_fn)0)
+		uml_nt_phys_zero_hook(off, nruns);
+	return off;
+}
+
 long long uml_nt_phys_alloc(struct uml_nt_phys *p)
 {
 	return uml_nt_phys_alloc_span(p, 1);

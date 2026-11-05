@@ -118,6 +118,8 @@ void uml_nt_phys_backend_free(void *page, int nruns);
 /* Allocate one run: section offset in bytes, or -1 when the backend
  * is exhausted. The run enters with refcount 1. */
 long long uml_nt_phys_alloc(struct uml_nt_phys *p);
+/* S37: claim the run at a chosen offset (the stack VMA's own backing). */
+long long uml_nt_phys_alloc_at(struct uml_nt_phys *p, long long off, int nruns);
 
 /* Allocate a CONTIGUOUS span of nruns (>= 1): section offset of the
  * first run, or -1 when the backend is exhausted / hands garbage.

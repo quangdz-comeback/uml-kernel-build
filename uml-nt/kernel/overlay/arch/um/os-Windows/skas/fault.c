@@ -401,8 +401,13 @@ int uml_nt_ca_margin_inside(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		if (v == 0)
 			break;			/* outside every VMA: not ours */
 		off = v->run_off + (bot - v->start);
-		if (uml_nt_phys_refs(ph, (long long)off) == 0)
-			break;			/* the range is not owned */
+		/* The range belongs to this VMA by construction; a page that was
+		 * never committed simply has no run yet. Claim that exact run —
+		 * the placement call keeps the VMA's backing where it is, which
+		 * is what a fault-grow would do minus the shape change. */
+		if (uml_nt_phys_refs(ph, (long long)off) == 0 &&
+		    uml_nt_phys_alloc_at(ph, (long long)off, 1) < 0)
+			break;
 		if (plan_op(plan, UML_NT_FOP_MAP, 0x04u, bot,
 			    UML_NT_SG_RUN, off) < 0)
 			break;
