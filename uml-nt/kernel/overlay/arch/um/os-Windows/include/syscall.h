@@ -241,6 +241,13 @@ struct uml_nt_stub_conn {
 	long long last_sysnr;
 	unsigned long long last_rip;
 	unsigned idle_logged;
+	/* S53: the last 200 syscalls of a login conn, dumped in order. A ring,
+	 * because the interesting window is always the most recent one and the
+	 * log must not be flooded to find it. */
+	struct { unsigned long long nr, a0, a1, a2, ret, rip; } sc_ring[200];
+	unsigned sc_ri;		/* next slot */
+	unsigned sc_total;	/* syscalls seen */
+	unsigned sc_dumps;
 	/* Shelley 170: the LAST rounds are the ones that matter — a grow
 	 * decision is only interesting at the round that died, and the
 	 * first two answers always look healthy. Ring, dumped at death. */

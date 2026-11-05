@@ -5015,6 +5015,41 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			uml_nt_uacc_fixup_page);
 	}
 out:
+	/* S53: keep the last 200 syscalls of a login conn and print them in order
+	 * at a few checkpoints — the tail of the run is what says where login
+	 * stopped making progress. */
+	if (uml_nt_conn_is_login(c)) {
+		unsigned slot = c->sc_ri;
+
+		c->sc_ring[slot].nr = nr;
+		c->sc_ring[slot].a0 = a[0];
+		c->sc_ring[slot].a1 = a[1];
+		c->sc_ring[slot].a2 = a[2];
+		c->sc_ring[slot].ret = ret;
+		c->sc_ring[slot].rip = d->regs.rip;
+		c->sc_ri = (slot + 1) % 200;
+		c->sc_total++;
+		if (c->sc_dumps < 4 &&
+		    (c->sc_total == 200 || c->sc_total == 1200 ||
+		     c->sc_total == 3200 || c->sc_total == 7200)) {
+			unsigned i, n = c->sc_total < 200 ? c->sc_total : 200;
+			unsigned start = (c->sc_ri + 200 - n) % 200;
+
+			c->sc_dumps++;
+			os_info("[scring] pid %lu total=%u showing=%u (in order)\n",
+				(unsigned long)c->pid, c->sc_total, n);
+			for (i = 0; i < n; i++) {
+				unsigned k = (start + i) % 200;
+
+				os_info("[sc] %u nr=%llu a0=0x%llx a1=0x%llx "
+					"a2=0x%llx ret=%lld rip=0x%llx\n",
+					i, c->sc_ring[k].nr, c->sc_ring[k].a0,
+					c->sc_ring[k].a1, c->sc_ring[k].a2,
+					(long long)c->sc_ring[k].ret,
+					c->sc_ring[k].rip);
+			}
+		}
+	}
 	uml_nt_uacc_set_mm(uacc_prev_mm);
 	uml_nt_uacc_set_nr(uacc_prev_nr);
 	uml_nt_uacc_set_sink(&uacc_prev_sink);
