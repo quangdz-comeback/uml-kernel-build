@@ -247,6 +247,10 @@ struct uml_nt_fault_plan {
 #define UML_NT_CAM_NOVMA	2	/* no VMA of this conn covers bot */
 #define UML_NT_CAM_CLAIM	3	/* the run could not be claimed in place */
 #define UML_NT_CAM_PLAN		4	/* the plan refused the op */
+/* S39: fill only the gap the conn does not already cover. */
+int uml_nt_ca_margin_gap(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			 int runs, unsigned long long *gap_lo_out,
+			 unsigned long long *gap_hi_out);
 int uml_nt_ca_margin_inside(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			    struct uml_nt_fault_plan *plan,
 			    unsigned long long top, unsigned long long limit,

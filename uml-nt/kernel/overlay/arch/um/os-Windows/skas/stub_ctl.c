@@ -11761,6 +11761,23 @@ static int uml_nt_ca_margin(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
 	if (added > 0)
 		return added;
 
+	/* S39: what the conn does not already cover is filled by one VMA for the
+	 * gap alone — the pages under it are still free, and the INIT plan maps
+	 * them because the plan walks every VMA. */
+	{
+		unsigned long long glo = 0, ghi = 0;
+		int g = uml_nt_ca_margin_gap(mm, ph, UML_NT_CA_MARGIN_RUNS,
+					     &glo, &ghi);
+
+		if (g > 0) {
+			ca_margin_mode = 3;
+			os_info("[ca-margin] gap VMA [0x%llx,0x%llx) runs=%d "
+				"(only the uncovered part; nvma=%d)\n",
+				glo, ghi, g, (int)mm->nvma);
+			return g;
+		}
+	}
+
 	/* S36: the target sat inside a VMA the add-only path must not touch.
 	 * The second path has a narrower contract — same run_off, live refs, no
 	 * allocation, no table change — and exists only for this margin. */
@@ -11770,7 +11787,14 @@ static int uml_nt_ca_margin(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
 	{
 		int why = 0;
 
-		added = uml_nt_ca_margin_inside(mm, ph, scratch, mm->stack_top,
+		if (mm->ca_inside != 0) {
+		os_info("[ca-margin-stop] reason=add-only inside_vma=[0x%llx,0x%llx) "
+			"run_off=0x%llx top=0x%llx limit=0x%llx\n",
+			mm->ca_inside_va, mm->ca_inside_end, mm->ca_inside_off,
+			mm->stack_top, mm->stack_limit);
+		mm->ca_inside = 0;
+	}
+	added = uml_nt_ca_margin_inside(mm, ph, scratch, mm->stack_top,
 						 mm->stack_limit,
 						 UML_NT_CA_MARGIN_RUNS,
 						 &why);

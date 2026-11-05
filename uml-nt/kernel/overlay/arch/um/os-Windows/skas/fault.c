@@ -378,6 +378,69 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
  * it — same run_off, live refs. Then a MAP op is all the stub needs: the pages
  * become committed without the table changing shape.
  */
+/* S39: fill only the GAP between the margin floor and what the conn already
+ * covers.
+ *
+ * A fork child's coverage is the run it was born on — [0x60850000,0x60870000) in
+ * the referee — while the PAM dip reaches 0x6082d000. The margin therefore needs
+ * the part nobody covers, and only that part: the pages already mapped must not
+ * be re-mapped or re-claimed, and a VMA that overlaps an existing one is exactly
+ * what the add-only rule refuses (correctly — it may be shared or COW).
+ *
+ * Gap = [top - margin, lowest VMA start at or above that floor). If it is empty
+ * there is nothing to do. One span backs the whole gap, one VMA maps it, and the
+ * plan that brings the conn up carries its MAP — so the pages are there before
+ * the guest runs, at 3 runs per conn instead of the 8 MiB a full-reservation VMA
+ * would cost.
+ */
+int uml_nt_ca_margin_gap(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
+			 int runs, unsigned long long *gap_lo_out,
+			 unsigned long long *gap_hi_out)
+{
+	unsigned long long floor, low = 0, gap_lo, gap_hi, need;
+	long long off;
+	int i, n;
+
+	if (mm == 0 || ph == 0 || runs <= 0)
+		return 0;
+	if (mm->stack_top <= mm->stack_limit)
+		return 0;
+	floor = mm->stack_top - (unsigned long long)runs * UML_NT_SG_RUN;
+	if (floor < mm->stack_limit)
+		floor = mm->stack_limit;
+	/* the lowest coverage at or above the floor bounds the gap */
+	for (i = 0; i < mm->nvma; i++) {
+		if (mm->vma[i].end <= floor || mm->vma[i].start >= mm->stack_top)
+			continue;
+		if (low == 0 || mm->vma[i].start < low)
+			low = mm->vma[i].start;
+	}
+	gap_hi = low != 0 ? low : mm->stack_top;
+	gap_lo = floor;
+	if (gap_hi <= gap_lo)
+		return 0;			/* already covered */
+	need = gap_hi - gap_lo;
+	n = (int)(need / UML_NT_SG_RUN);
+	if (n <= 0 || (unsigned long long)n * UML_NT_SG_RUN != need)
+		return 0;			/* only whole runs */
+	if (mm->nvma >= UML_NT_VMA_MAX)
+		return 0;
+	off = uml_nt_phys_alloc_span(ph, n);
+	if (off < 0)
+		return 0;
+	if (uml_nt_vma_add_gen(mm, gap_lo, gap_hi, (unsigned long long)off,
+			       0x04u /* RW */, 0,
+			       (unsigned long long)uml_nt_phys_gen(ph, off)) < 0) {
+		uml_nt_phys_unref(ph, off);
+		return 0;
+	}
+	if (gap_lo_out != 0)
+		*gap_lo_out = gap_lo;
+	if (gap_hi_out != 0)
+		*gap_hi_out = gap_hi;
+	return n;
+}
+
 int uml_nt_ca_margin_inside(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			    struct uml_nt_fault_plan *plan,
 			    unsigned long long top, unsigned long long limit,
