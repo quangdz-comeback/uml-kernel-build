@@ -57,7 +57,7 @@
 #include "internal.h"
 #include <feedgate.h>
 
-static struct uml_nt_feed_gate g_feed_gate;
+struct uml_nt_feed_gate uml_nt_console_gate;
 
 /* ---- tty driver -------------------------------------------------------- */
 static struct tty_driver *g_driver;
@@ -87,47 +87,13 @@ static void nt_con_tty_close(struct tty_struct *tty, struct file *filp)
  * that arms nothing is the fact we are looking for. The tail record is budgeted
  * per CONSOLE (rule #23), not globally: the previous run's eight slots were eaten
  * by systemd's own startup messages and the log said nothing about login. */
-static void uml_nt_feed_report(struct uml_nt_feed_gate *g, int src)
-{
-	const char *line = g->line[src];
-	unsigned l = g->len[src];
-
-	if (g->armed && g->stage != g->last_armed_stage) {
-		g->last_armed_stage = g->stage;
-		g->arm_n++;
-		os_info("[feedgate] arm stage=%d src=%s line=\"%.64s\"\n",
-			g->stage, src ? "printk" : "tty", line);
-	}
-	/* S45: uncapped while a line still carries a prompt fragment — that is the
-	 * fact being looked for, and a cap hid it twice. */
-	if (uml_nt_feed_find(line, l, "ogin") ||
-	    uml_nt_feed_find(line, l, "assword"))
-		os_info("[feedgate] line=%.64s src=%s len=%u\n", line,
-			src ? "printk" : "tty", l);
-	/* the tail record is capped by CONTENT: a repeated line costs nothing */
-	if (g->dbg_n < 8 && l > 0 &&
-	    (uml_nt_feed_find(line, l, "log") ||
-	     uml_nt_feed_find(line, l, "assword"))) {
-		const char *tail = l > 32 ? line + l - 32 : line;
-		char cmp[40];
-
-		snprintf(cmp, sizeof(cmp), "%.32s", tail);
-		if (strcmp(cmp, g->last_tail) != 0) {
-			snprintf(g->last_tail, sizeof(g->last_tail), "%s", cmp);
-			g->dbg_n++;
-			os_info("[feedgate] tail=%.32s src=%s len=%u\n", tail,
-				src ? "printk" : "tty", l);
-		}
-	}
-}
-
 static ssize_t nt_con_tty_write(struct tty_struct *tty, const u8 *buf,
 				size_t len)
 {
 	/* S42: the prompts are what the feed waits for, so the output path is
 	 * where they are recognised. */
-	uml_nt_feed_gate_scan(&g_feed_gate, (const char *)buf, (unsigned)len, 0);
-	uml_nt_feed_report(&g_feed_gate, 0);
+	/* S46: the gate scans in nt_console_write — the one door every path goes
+	 * through. Scanning here as well would see each byte twice. */
 	nt_console_write(buf, len);
 	return len;
 }
@@ -150,8 +116,7 @@ static void nt_con_printk(struct console *co, const char *s, unsigned int n)
 	/* S44: one gate, two doors. If login's prompt reaches the console through
 	 * the printk sink rather than the tty write, the first gate never saw it —
 	 * so both paths feed the same state machine. */
-	uml_nt_feed_gate_scan(&g_feed_gate, s, n, 1);
-	uml_nt_feed_report(&g_feed_gate, 1);
+	/* S46: see nt_console_write — one scan, one door. */
 	nt_console_write(s, n);
 }
 
@@ -229,11 +194,11 @@ void uml_nt_console_flush(void)
 	 * TCSAFLUSH; waiting for the prompt keeps both behaviours: the flush
 	 * still drops what is pending (nothing is), and the username arrives
 	 * when it is asked for. */
-	if (!uml_nt_feed_gate_take(&g_feed_gate))
+	if (!uml_nt_feed_gate_take(&uml_nt_console_gate))
 		return;
-	if ((g_feed_gate.lines & 3u) == 1u)
+	if ((uml_nt_console_gate.lines & 3u) == 1u)
 		os_info("[feedgate] released line %d stage=%d\n",
-			g_feed_gate.lines, g_feed_gate.stage);
+			uml_nt_console_gate.lines, uml_nt_console_gate.stage);
 	while (total < 256 &&
 	       uml_nt_con_ring_pop(&g_con_ring, &ch, 1) == 1) {
 		tty_insert_flip_string(&g_port[1], &ch, 1);

@@ -99,6 +99,20 @@ int main(void)
 		CHECK(uml_nt_feed_gate_take(&h) == 1);
 	}
 
+	/* S46: three sources, one door. The gate is fed by nt_console_write, so
+	 * every writer — the tty driver, printk, the guest's write(2) — arrives
+	 * with src=0 and assembles the same line. */
+	{
+		struct uml_nt_feed_gate k;
+
+		uml_nt_feed_gate_reset(&k);
+		uml_nt_feed_gate_scan(&k, "\numl log", 8, 0);	/* write(2) */
+		uml_nt_feed_gate_scan(&k, "[commit-ahead] pid 1", 19, 1);
+		CHECK(uml_nt_feed_gate_take(&k) == 0);
+		uml_nt_feed_gate_scan(&k, "in: ", 4, 0);	/* the rest */
+		CHECK(uml_nt_feed_gate_take(&k) == 1);
+	}
+
 	if (fails) { printf("feedgate: %d failure(s)\n", fails); return 1; }
 	printf("feedgate: one line per prompt, in order, never for a log line\n");
 	return 0;
@@ -107,6 +121,6 @@ EOF
 "$CC" -O1 -Wall -Wextra -Werror -I"$INC" -o "$TMP/t" "$TMP/t.c"
 "$TMP/t"
 C="$HERE/../kernel/overlay/arch/um/os-Windows/console.c"
-grep -q "uml_nt_feed_gate_take(&g_feed_gate)" "$C" || {
+grep -q "uml_nt_feed_gate_take(&uml_nt_console_gate)" "$C" || {
 	echo "FAIL: the console flush does not wait for a prompt"; exit 1; }
 echo "feedgate: the console flush waits for it"

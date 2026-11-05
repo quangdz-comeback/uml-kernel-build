@@ -16,6 +16,7 @@
 #include <os.h>
 #include "internal.h"
 #include <diag_record.h>
+#include <feedgate.h>
 
 /* um_arch.c page-offset anchors (PAGE_OFFSET / RAM top) — the D19
  * canary in uml_nt_physmem_check below compares against them. */
@@ -46,6 +47,38 @@ static void con_unlock(void)
 	__sync_lock_release(&g_con_lock); /* store-release */
 }
 
+extern struct uml_nt_feed_gate uml_nt_console_gate;
+
+/* S46: the console's single choke point. Every path that prints — the tty
+ * driver, the printk sink, the guest's write(2), a stub panic — ends here, so
+ * the feed gate reads the console here and nowhere else. The struct is
+ * zero-initialised (file scope), so a call before the console is up is safe. */
+static void feed_gate_sink(const char *s, unsigned int n)
+{
+	/* Which door? A diagnostic record starts with '[' at the head of the
+	 * write — the port's own voice. Everything else is the guest's console,
+	 * whatever path carried it. Keeping the two apart is what lets a prompt
+	 * assemble while the kernel's lines interleave with it. */
+	int src = (n > 0 && s[0] == '[') ? 1 : 0;
+
+	uml_nt_feed_gate_scan(&uml_nt_console_gate, s, n, src);
+	if (uml_nt_console_gate.armed &&
+	    uml_nt_console_gate.stage != uml_nt_console_gate.last_armed_stage) {
+		uml_nt_console_gate.last_armed_stage = uml_nt_console_gate.stage;
+		os_info("[feedgate] arm stage=%d line=\"%.64s\"\n",
+			uml_nt_console_gate.stage,
+			uml_nt_console_gate.line[src]);
+	}
+	if (uml_nt_feed_find(uml_nt_console_gate.line[src],
+			     uml_nt_console_gate.len[src], "ogin") ||
+	    uml_nt_feed_find(uml_nt_console_gate.line[src],
+			     uml_nt_console_gate.len[src], "assword"))
+		os_info("[feedgate] line=%.64s src=%s len=%u\n",
+			uml_nt_console_gate.line[src],
+			src ? "kernel" : "console",
+			uml_nt_console_gate.len[src]);
+}
+
 void nt_console_write(const char *s, unsigned int n)
 {
 	IO_STATUS_BLOCK iosb;
@@ -53,6 +86,7 @@ void nt_console_write(const char *s, unsigned int n)
 
 	if (nt == NULL || uml_boot.stdio_out == NULL || n == 0)
 		return;
+	feed_gate_sink(s, n);
 	con_lock();
 	st = nt->NtWriteFile(uml_boot.stdio_out, NULL, NULL, NULL, &iosb,
 			     (void *)s, n, NULL, NULL);
