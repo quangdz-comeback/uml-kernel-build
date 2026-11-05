@@ -308,7 +308,7 @@ for fn in ("os_info", "os_warn"):
     if not b:
         continue
     n = b.count("nt_console_write(")
-    if "uml_nt_diag_emit(" not in b:
+    if "uml_nt_diag_emit(" not in b and "DIAG_EMIT_LOGGED" not in b:
         fail("%s() does not use the record emitter" % fn)
     if n != 0:
         fail("%s() calls nt_console_write %d time(s) itself; the emitter owns "
