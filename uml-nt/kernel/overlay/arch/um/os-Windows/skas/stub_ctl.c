@@ -63,6 +63,10 @@
 #include "internal.h"
 #include <stackreserve_model.h>
 
+/* S35: defined far below (it needs the mm helpers); declared here for the INIT
+ * branch, which comes first. */
+static int uml_nt_ca_margin(struct uml_nt_mm *mm, struct uml_nt_phys *ph);
+
 /* The kernel has no getenv; the boot command line is the environment this
  * port reads its levers from. */
 static const char *uml_nt_getenv(const char *name)
@@ -9976,34 +9980,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * boot uses: the margin is a debt of the login path, and mem=120M
 		 * cannot afford it for every conn (census: free=7-8 MiB at
 		 * multi-user, nine conns live). */
-		if ((c->chain_login || g_exec_login) && c->mm != NULL &&
-		    c->mm->stack_top > c->mm->stack_limit) {
-			/* The plan struct carries 768 ops — ~32 KiB. On the kernel
-			 * thread's 16 KiB stack that is an overflow, and the crash
-			 * it produced lived in the slab allocator, nowhere near this
-			 * code (referee 42050260666: KERNEL NATIVE FAULT in
-			 * kmem_cache_refill_sheaf). Heap it. */
-			struct uml_nt_fault_plan *scratch;
-			int r, added = 0;
-			unsigned long long bot = c->mm->stack_top -
-						 UML_NT_SG_RUN;
+		if (c->chain_login || g_exec_login) {
+			int added = uml_nt_ca_margin(c->mm, c->ph);
 
-			scratch = kzalloc(sizeof(*scratch), GFP_KERNEL);
-			if (scratch == NULL)
-				goto ca_margin_done;
-			for (r = 0; r < UML_NT_CA_MARGIN_RUNS; r++, bot -= UML_NT_SG_RUN) {
-				int one = uml_nt_stack_commit_ahead(
-					c->mm, c->ph, bot, bot,
-					c->mm->stack_top,
-					c->mm->stack_limit,
-					UML_NT_SG_RUN, scratch);
-
-				if (one <= 0)
-					break;
-				added++;
-			}
-			kfree(scratch);
-ca_margin_done:
 			c->mm->ca_margin_runs = (unsigned)added;
 			if (added > 0)
 				os_info("[ca-margin] pid %lu runs=%d bytes=0x%llx "
@@ -10013,6 +9992,23 @@ ca_margin_done:
 					(unsigned long long)added * UML_NT_SG_RUN,
 					(unsigned long long)c->mm->stack_top -
 					(unsigned long long)UML_NT_SG_RUN);
+			else
+				os_info("[ca-margin-skip] pid %lu chain_login=%u "
+					"gexec=%d d_bottom=0x%llx d_top=0x%llx "
+					"lim=0x%llx top=0x%llx nvma=%d\n",
+					(unsigned long)c->pid,
+					(unsigned)c->chain_login,
+					(int)g_exec_login,
+					(unsigned long long)c->d->stack_bottom,
+					(unsigned long long)c->d->stack_top_hint,
+					(unsigned long long)c->mm->stack_limit,
+					(unsigned long long)c->mm->stack_top,
+					(int)c->mm->nvma);
+		} else {
+			os_info("[ca-margin-skip] pid %lu reason=not-chain "
+				"chain_login=%u gexec=%d\n",
+				(unsigned long)c->pid,
+				(unsigned)c->chain_login, (int)g_exec_login);
 		}
 		/* Stream the conn's initial per-VMA map plan; the probe
 		 * appends NOACCESS protects for the parent's guard
@@ -11728,6 +11724,36 @@ int uml_nt_conn_is_login(const struct uml_nt_stub_conn *c)
 	return i == 0 || c->exec_path[i - 1] == '/';
 }
 
+/* S35: the margin a conn must already own before it can run — committed runs
+ * under its stack bottom, mapped by the plan that brings it up. Needed twice:
+ * at INIT for a conn born by exec (S34), and at the FORK SEED for a chain child
+ * (S35), because a fork child never has an INIT answer of its own and the conn
+ * that dies at the PAM dip dies on its first syscall. */
+static int uml_nt_ca_margin(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
+{
+	struct uml_nt_fault_plan *scratch;
+	unsigned long long bot;
+	int r, added = 0;
+
+	if (mm == 0 || mm->stack_top <= mm->stack_limit || mm->nvma == 0)
+		return 0;
+	scratch = kzalloc(sizeof(*scratch), GFP_KERNEL);
+	if (scratch == NULL)
+		return 0;
+	bot = mm->stack_top - UML_NT_SG_RUN;
+	for (r = 0; r < UML_NT_CA_MARGIN_RUNS; r++, bot -= UML_NT_SG_RUN) {
+		int one = uml_nt_stack_commit_ahead(mm, ph, bot, bot,
+						    mm->stack_top, mm->stack_limit,
+						    UML_NT_SG_RUN, scratch);
+
+		if (one <= 0)
+			break;
+		added++;
+	}
+	kfree(scratch);
+	return added;
+}
+
 int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 {
 	unsigned long long seed_rsp;
@@ -11786,6 +11812,22 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	child->ph = parent->ph;
 	child->ph_shared = 1;
 
+	/* S35: a chain child is born running — it never has an INIT answer of
+	 * its own, and the conn that dies at the PAM dip dies on its first
+	 * syscall, so the margin has to be in the mm the clone copies. The
+	 * parent's own mm is the source of that clone; adding the runs there is
+	 * what the parent would have committed anyway at its next answer. */
+	if (child->chain_login || g_exec_login) {
+		int marg = uml_nt_ca_margin(parent->mm, child->ph);
+
+		if (marg > 0) {
+			child->mm->ca_margin_runs = (unsigned)marg;
+			os_info("[ca-margin] pid %lu runs=%d bytes=0x%llx in the "
+				"fork seed (chain child, before the clone)\n",
+				(unsigned long)child->pid, marg,
+				(unsigned long long)marg * UML_NT_SG_RUN);
+		}
+	}
 	rc_clone = uml_nt_mm_clone(child->mm, parent->mm, child->ph,
 			    seed_rsp);
 	if (rc_clone != 0) {
