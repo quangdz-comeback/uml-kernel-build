@@ -381,36 +381,64 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 int uml_nt_ca_margin_inside(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			    struct uml_nt_fault_plan *plan,
 			    unsigned long long top, unsigned long long limit,
-			    int runs)
+			    int runs, int *why)
 {
 	int r, added = 0;
 	unsigned long long bot = top - UML_NT_SG_RUN;
 
+	if (why != 0)
+		*why = 0;
 	for (r = 0; r < runs; r++, bot -= UML_NT_SG_RUN) {
 		struct uml_nt_vma *v = 0;
 		unsigned long long off;
 		int i;
 
-		if (bot < limit)
+		if (bot < limit) {
+			if (why != 0)
+				*why = UML_NT_CAM_LIMIT;
 			break;
+		}
 		for (i = 0; i < mm->nvma; i++)
 			if (bot >= mm->vma[i].start && bot < mm->vma[i].end) {
 				v = &mm->vma[i];
 				break;
 			}
-		if (v == 0)
+		if (v == 0) {
+			if (why != 0) {
+				*why = UML_NT_CAM_NOVMA;
+				mm->ca_stop_bot = bot;
+			}
 			break;			/* outside every VMA: not ours */
+		}
 		off = v->run_off + (bot - v->start);
+		if (why != 0) {
+			mm->ca_stop_bot = bot;
+			mm->ca_stop_v_lo = v->start;
+			mm->ca_stop_v_hi = v->end;
+			mm->ca_stop_off = off;
+			mm->ca_stop_refs = (unsigned)uml_nt_phys_refs(ph,
+							      (long long)off);
+			mm->ca_stop_runs = (unsigned)(ph->size >>
+						      UML_NT_PHYS_RUN_SHIFT);
+		}
 		/* The range belongs to this VMA by construction; a page that was
 		 * never committed simply has no run yet. Claim that exact run —
 		 * the placement call keeps the VMA's backing where it is, which
 		 * is what a fault-grow would do minus the shape change. */
-		if (uml_nt_phys_refs(ph, (long long)off) == 0 &&
-		    uml_nt_phys_alloc_at(ph, (long long)off, 1) < 0)
+		/* refs < 1 covers both "free" (0) and "not in the table" (-1): a
+		 * range the table does not know is not a range we may map. */
+		if (uml_nt_phys_refs(ph, (long long)off) < 1 &&
+		    uml_nt_phys_alloc_at(ph, (long long)off, 1) < 0) {
+			if (why != 0)
+				*why = UML_NT_CAM_CLAIM;
 			break;
+		}
 		if (plan_op(plan, UML_NT_FOP_MAP, 0x04u, bot,
-			    UML_NT_SG_RUN, off) < 0)
+			    UML_NT_SG_RUN, off) < 0) {
+			if (why != 0)
+				*why = UML_NT_CAM_PLAN;
 			break;
+		}
 		added++;
 	}
 	return added;

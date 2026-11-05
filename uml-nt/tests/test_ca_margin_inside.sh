@@ -71,7 +71,7 @@ int main(void)
 	memset(&plan, 0, sizeof(plan));
 
 	added = uml_nt_ca_margin_inside(&mm, &ph, &plan, TOP, RES_LO,
-					UML_NT_CA_MARGIN_RUNS);
+					UML_NT_CA_MARGIN_RUNS, 0);
 	CHECK(added > 0);
 	/* (a) the table does not change shape */
 	CHECK(mm.nvma == nv0);
@@ -107,7 +107,7 @@ int main(void)
 				     UML_NT_PAGE_READWRITE, 0);
 		memset(&q, 0, sizeof(q));
 		n = uml_nt_ca_margin_inside(&m2, &p2, &q, TOP, RES_LO,
-					    UML_NT_CA_MARGIN_RUNS);
+					    UML_NT_CA_MARGIN_RUNS, 0);
 		CHECK(n == UML_NT_CA_MARGIN_RUNS);
 		CHECK(m2.nvma == 1);
 		bot = TOP - RUN;
@@ -130,7 +130,7 @@ int main(void)
 
 			memset(&q2, 0, sizeof(q2));
 			n2 = uml_nt_ca_margin_inside(&m2, &p2, &q2, TOP, RES_LO,
-						     UML_NT_CA_MARGIN_RUNS);
+						     UML_NT_CA_MARGIN_RUNS, 0);
 			CHECK(n2 == UML_NT_CA_MARGIN_RUNS);
 			CHECK(m2.nvma == 1);
 		}
@@ -147,7 +147,7 @@ int main(void)
 		lone.stack_limit = RES_LO;
 		memset(&p2, 0, sizeof(p2));
 		n = uml_nt_ca_margin_inside(&lone, &ph, &p2, TOP, RES_LO,
-					    UML_NT_CA_MARGIN_RUNS);
+					    UML_NT_CA_MARGIN_RUNS, 0);
 		CHECK(n == 0);		/* no VMA covers it: nothing to map */
 		CHECK(p2.n_ops == 0);
 	}

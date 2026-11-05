@@ -11767,9 +11767,27 @@ static int uml_nt_ca_margin(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
 	scratch = kzalloc(sizeof(*scratch), GFP_KERNEL);
 	if (scratch == NULL)
 		return 0;
-	added = uml_nt_ca_margin_inside(mm, ph, scratch, mm->stack_top,
-					 mm->stack_limit,
-					 UML_NT_CA_MARGIN_RUNS);
+	{
+		int why = 0;
+
+		added = uml_nt_ca_margin_inside(mm, ph, scratch, mm->stack_top,
+						 mm->stack_limit,
+						 UML_NT_CA_MARGIN_RUNS,
+						 &why);
+		if (why != 0) {
+			static const char *nm[] = { "-", "limit", "no-vma",
+						    "claim", "plan" };
+
+			os_info("[ca-margin-stop] reason=%s added=%d bot=0x%llx "
+				"v=[0x%llx,0x%llx) off=0x%llx refs=%u "
+				"runs=%u top=0x%llx limit=0x%llx\n",
+				nm[why > 0 && why <= 4 ? why : 0], added,
+				mm->ca_stop_bot, mm->ca_stop_v_lo,
+				mm->ca_stop_v_hi, mm->ca_stop_off,
+				mm->ca_stop_refs, mm->ca_stop_runs,
+				mm->stack_top, mm->stack_limit);
+		}
+	}
 	kfree(scratch);
 	ca_margin_mode = added > 0 ? 1 : 0;
 	if (added > 0)

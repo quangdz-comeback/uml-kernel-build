@@ -241,10 +241,16 @@ struct uml_nt_fault_plan {
  * unknown access class, write to read-only VMA, physmem exhausted —
  * every fail path loud). `addr` is the raw faulting VA.
  */
+/* S38: why a margin claim stopped — the four exits were silent, and "2 runs"
+ * was then a matter of opinion. */
+#define UML_NT_CAM_LIMIT	1	/* bot fell below the stack limit */
+#define UML_NT_CAM_NOVMA	2	/* no VMA of this conn covers bot */
+#define UML_NT_CAM_CLAIM	3	/* the run could not be claimed in place */
+#define UML_NT_CAM_PLAN		4	/* the plan refused the op */
 int uml_nt_ca_margin_inside(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			    struct uml_nt_fault_plan *plan,
 			    unsigned long long top, unsigned long long limit,
-			    int runs);
+			    int runs, int *why);
 int uml_nt_stack_grow(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 		      unsigned long long addr, unsigned long long rsp,
 		      struct uml_nt_fault_plan *plan);
