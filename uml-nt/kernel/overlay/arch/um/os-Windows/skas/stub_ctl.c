@@ -9978,24 +9978,32 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * multi-user, nine conns live). */
 		if ((c->chain_login || g_exec_login) && c->mm != NULL &&
 		    c->mm->stack_top > c->mm->stack_limit) {
-			struct uml_nt_fault_plan scratch;
+			/* The plan struct carries 768 ops — ~32 KiB. On the kernel
+			 * thread's 16 KiB stack that is an overflow, and the crash
+			 * it produced lived in the slab allocator, nowhere near this
+			 * code (referee 42050260666: KERNEL NATIVE FAULT in
+			 * kmem_cache_refill_sheaf). Heap it. */
+			struct uml_nt_fault_plan *scratch;
 			int r, added = 0;
-
 			unsigned long long bot = c->mm->stack_top -
 						 UML_NT_SG_RUN;
 
-			memset(&scratch, 0, sizeof(scratch));
+			scratch = kzalloc(sizeof(*scratch), GFP_KERNEL);
+			if (scratch == NULL)
+				goto ca_margin_done;
 			for (r = 0; r < UML_NT_CA_MARGIN_RUNS; r++, bot -= UML_NT_SG_RUN) {
 				int one = uml_nt_stack_commit_ahead(
 					c->mm, c->ph, bot, bot,
 					c->mm->stack_top,
 					c->mm->stack_limit,
-					UML_NT_SG_RUN, &scratch);
+					UML_NT_SG_RUN, scratch);
 
 				if (one <= 0)
 					break;
 				added++;
 			}
+			kfree(scratch);
+ca_margin_done:
 			c->mm->ca_margin_runs = (unsigned)added;
 			if (added > 0)
 				os_info("[ca-margin] pid %lu runs=%d bytes=0x%llx "
