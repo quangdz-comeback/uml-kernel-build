@@ -5029,9 +5029,14 @@ out:
 		c->sc_ring[slot].rip = d->regs.rip;
 		c->sc_ri = (slot + 1) % 200;
 		c->sc_total++;
-		if (c->sc_dumps < 4 &&
-		    (c->sc_total == 200 || c->sc_total == 1200 ||
-		     c->sc_total == 3200 || c->sc_total == 7200)) {
+		/* S54: a login that makes fewer than two hundred calls never
+		 * reached the old checkpoints, so nothing was ever printed. The
+		 * marks are small now, and past them a short tail is printed every
+		 * eighth call — a rolling "final dump" that always shows the most
+		 * recent activity, however the run ends. */
+		if (c->sc_dumps < 8 &&
+		    (c->sc_total == 16 || c->sc_total == 32 ||
+		     c->sc_total == 64 || c->sc_total == 128)) {
 			unsigned i, n = c->sc_total < 200 ? c->sc_total : 200;
 			unsigned start = (c->sc_ri + 200 - n) % 200;
 
@@ -5044,6 +5049,24 @@ out:
 				os_info("[sc] %u nr=%llu a0=0x%llx a1=0x%llx "
 					"a2=0x%llx ret=%lld rip=0x%llx\n",
 					i, c->sc_ring[k].nr, c->sc_ring[k].a0,
+					c->sc_ring[k].a1, c->sc_ring[k].a2,
+					(long long)c->sc_ring[k].ret,
+					c->sc_ring[k].rip);
+			}
+		}
+		/* the rolling tail: the last eight calls, every eighth call */
+		if (c->sc_total > 128 && (c->sc_total & 7u) == 0) {
+			unsigned i, n = c->sc_total < 8 ? c->sc_total : 8;
+			unsigned start = (c->sc_ri + 200 - n) % 200;
+
+			os_info("[sc-tail] pid %lu total=%u\n",
+				(unsigned long)c->pid, c->sc_total);
+			for (i = 0; i < n; i++) {
+				unsigned k = (start + i) % 200;
+
+				os_info("[sct] nr=%llu a0=0x%llx a1=0x%llx "
+					"a2=0x%llx ret=%lld rip=0x%llx\n",
+					c->sc_ring[k].nr, c->sc_ring[k].a0,
 					c->sc_ring[k].a1, c->sc_ring[k].a2,
 					(long long)c->sc_ring[k].ret,
 					c->sc_ring[k].rip);

@@ -53,4 +53,6 @@ EOF
 "$TMP/t"
 S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/syscall.c"
 grep -q "\[scring\]" "$S" || { echo "FAIL: no scring dump"; exit 1; }
+grep -q "sc_total == 16" "$S" || { echo "FAIL: the small checkpoints are gone"; exit 1; }
+grep -q "\[sc-tail\]" "$S" || { echo "FAIL: no rolling tail"; exit 1; }
 echo "scring: the kernel dumps it"
