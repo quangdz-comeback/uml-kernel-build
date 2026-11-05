@@ -12675,6 +12675,26 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 	rc = serve_conn(c);
 	if (rc == 2)
 		return 2; /* exec: c/d are dead — no mb, no evt_out */
+	/* S52: a conn that stops asking is the fact we need when it neither
+	 * prints nor dies. One record per idle window, with the round it last
+	 * asked on and what that round was. */
+	{
+		unsigned long long now = os_nsecs();
+		unsigned long long gap_ms = c->last_ans_ns != 0 ?
+			(now - c->last_ans_ns) / 1000000ull : 0;
+
+		if (uml_nt_conn_is_login(c) && c->last_ans_ns != 0 &&
+		    gap_ms >= 3000 && c->idle_logged < 4) {
+			c->idle_logged++;
+			os_info("[idle] pid %lu gap_ms=%llu last_cmd=%u "
+				"last_nr=%lld last_rip=0x%llx\n",
+				(unsigned long)c->pid, gap_ms,
+				(unsigned)c->d->cmd,
+				(long long)c->last_sysnr,
+				(unsigned long long)c->last_rip);
+		}
+		c->last_ans_ns = now;
+	}
 	/* S4d (task-backed conns): the signal delivery point between
 	 * "trap served" and "stub resumed" — the upstream interrupt_
 	 * end() position. Ops in flight: the answer is an op, not a

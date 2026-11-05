@@ -4252,6 +4252,28 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		  * __abort_msg and aborts — signature-gated, silent
 		  * for every normal console writev. */
 		ret = sys_vfs(nr, a);
+		/* S52: the close records were read as a damaged fd table; the loop
+		 * could equally be open→read→close. Both halves are named now, with
+		 * the path for the open, so the pair is visible. */
+		if (nr == 257 && uml_nt_conn_is_login(c) && c->open_logged < 12) {
+			char pbuf[64];
+			long long poff = uml_nt_vma_translate(c->mm, a[1],
+							     sizeof(pbuf) - 1);
+			int pi;
+
+			pbuf[0] = 0;
+			if (poff >= 0) {
+				const char *pp = (const char *)uml_boot.physmem_base + poff;
+
+				for (pi = 0; pi < 63 && pp[pi] != 0; pi++)
+					pbuf[pi] = pp[pi];
+				pbuf[pi] = 0;
+			}
+			c->open_logged++;
+			os_info("[open] pid %d dirfd=%lld path=\"%.48s\" fd=%lld "
+				"rip=0x%llx\n", c->pid, (long long)a[0], pbuf,
+				(long long)ret, (unsigned long long)d->regs.rip);
+		}
 		if (nr == 3 && uml_nt_conn_is_login(c) && c->close_logged < 12) {
 			c->close_logged++;
 			os_info("[close] pid %d fd=%llu ret=%lld rip=0x%llx\n",
