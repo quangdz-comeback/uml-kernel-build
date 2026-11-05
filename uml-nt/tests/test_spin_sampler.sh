@@ -20,7 +20,7 @@ static int should_sample(int is_login, unsigned long long last_ns,
 {
 	if (!is_login || last_ns == 0 || spin_n >= 32)
 		return 0;
-	return (now_ns - last_ns) / 1000000ull >= 1000;
+	return (now_ns - last_ns) / 1000000ull >= 700;
 }
 int main(void)
 {
@@ -57,6 +57,14 @@ int main(void)
 		}
 		CHECK(distinct == 2);	/* the loop body, not a wander */
 	}
+		/* S59: the thread samples on its own clock — no other conn needs to be
+	 * served, which was the dependency that kept it silent. */
+	{
+		unsigned long long clock = t0;
+
+		CHECK(should_sample(1, clock, t0 + 700ull * 1000000ull, 0) == 1);
+		CHECK(should_sample(1, clock, t0 + 699ull * 1000000ull, 0) == 0);
+	}
 	if (fails) { printf("spin_sampler: %d failure(s)\n", fails); return 1; }
 	printf("spin_sampler: sampled outside the round, capped, and a spin is a few rips\n");
 	return 0;
@@ -68,4 +76,6 @@ S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c"
 grep -q "\[spin\]" "$S" || { echo "FAIL: no out-of-band sample record"; exit 1; }
 grep -q "\[spin-sum\]" "$S" || { echo "FAIL: no histogram"; exit 1; }
 grep -q "o->last_ans_ns = os_nsecs();" "$S" || { echo "FAIL: the clock is not armed"; exit 1; }
+grep -q "\[spin-probe\]" "$S" || { echo "FAIL: no probe record"; exit 1; }
+grep -q "nt_spin_thread" "$S" || { echo "FAIL: the sampler has no clock of its own"; exit 1; }
 echo "spin_sampler: the kernel emits it"

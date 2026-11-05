@@ -62,6 +62,7 @@
 #include <physalloc.h>
 #include "internal.h"
 #include <stackreserve_model.h>
+void uml_nt_spin_start(void);
 
 /* S35: defined far below (it needs the mm helpers); declared here for the INIT
  * branch, which comes first. */
@@ -4975,6 +4976,109 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
 			(unsigned long)c->pid, c->exec_path,
 			c->dr_exec_va, rdi, ret, d->regs.rbp, d->regs.rbx);
 	}
+}
+
+/* S59: the sampler thread.
+ *
+ * Borrowing another conn's service round made the sample depend on somebody else
+ * being served, and at the end of a boot the only conn left is the silent one
+ * (reports 361/362: [spin] stayed empty through two fixes). The probe below names
+ * which condition fails; the thread removes the dependency outright — a hundred
+ * milliseconds of its own, whatever the rest of the machine is doing.
+ */
+static unsigned spin_scans, spin_login_seen, spin_other_served;
+static unsigned spin_thread_state;	/* 0 = not started, 1 = running */
+
+static void uml_nt_spin_scan(void)
+{
+	struct uml_nt_stub_conn *lc[2];
+	int li;
+
+	lc[0] = &conn_parent;
+	lc[1] = &conn_child;
+	for (li = 0; li < 2; li++) {
+		struct uml_nt_stub_conn *o = lc[li];
+
+		if (o->thread == NULL && o->pid == 0)
+			continue;
+		if (!uml_nt_conn_is_login(o))
+			continue;
+		spin_login_seen++;
+		if (o->spin_n >= 32)
+			continue;
+		if (o->last_ans_ns == 0) {
+			o->last_ans_ns = os_nsecs();
+			continue;
+		}
+		if ((os_nsecs() - o->last_ans_ns) / 1000000ull < 700)
+			continue;
+		{
+			unsigned long long rip = 0, rsp = 0, rbp = 0;
+			unsigned long long rdi = 0, rsi = 0, rbx = 0;
+
+			if (uml_nt_sample_read(o, &rip, &rsp, &rbp, &rdi, &rsi,
+					       &rbx) == 0) {
+				int hi, found = 0;
+
+				o->spin_n++;
+				os_info("[spin] pid %lu n=%u rip=0x%llx rsp=0x%llx "
+					"rbp=0x%llx guest=%d\n",
+					(unsigned long)o->pid, o->spin_n, rip, rsp,
+					rbp, uml_nt_sample_is_guest(o, rip));
+				for (hi = 0; hi < o->spin_hn; hi++)
+					if (o->spin_hv[hi] == rip) {
+						o->spin_hc[hi]++;
+						found = 1;
+						break;
+					}
+				if (!found && o->spin_hn < 16) {
+					o->spin_hv[o->spin_hn] = rip;
+					o->spin_hc[o->spin_hn] = 1;
+					o->spin_hn++;
+				}
+				if (o->spin_n == 32) {
+					for (hi = 0; hi < o->spin_hn; hi++)
+						os_info("[spin-sum] pid %lu rip=0x%llx n=%u\n",
+							(unsigned long)o->pid,
+							o->spin_hv[hi],
+							o->spin_hc[hi]);
+				}
+			}
+		}
+	}
+	spin_scans++;
+	/* the probe: one line once eight scans have learned nothing */
+	if (spin_scans == 8 && spin_scans == spin_scans)
+		os_info("[spin-probe] scans=%u login_seen=%u other_served=%u "
+			"thread_state=%u\n", spin_scans, spin_login_seen,
+			spin_other_served, spin_thread_state);
+}
+
+static unsigned long __attribute__((ms_abi)) nt_spin_thread(void *arg)
+{
+	LARGE_INTEGER due;
+
+	(void)arg;
+	spin_thread_state = 1;
+	for (;;) {
+		due.QuadPart = -1000000LL;	/* 100 ms, relative */
+		nt->NtDelayExecution(0, &due);
+		uml_nt_spin_scan();
+	}
+	return 0;
+}
+
+void uml_nt_spin_start(void)
+{
+	ULONG tid = 0;
+	void *th;
+
+	if (spin_thread_state != 0)
+		return;
+	th = nt->CreateThread(NULL, 0, nt_spin_thread, NULL, 0, &tid);
+	if (th != NULL)
+		os_info("[spin-thread] tid=%lu every 100 ms\n",
+			(unsigned long)tid);
 }
 
 unsigned int uml_nt_sample_burst(struct uml_nt_stub_conn *c)
@@ -11941,6 +12045,8 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 	 * that range faulted on a page that was already committed (referee
 	 * 42067320083: committed=8/8, prot=2, then a write fault). Private runs
 	 * keep the protection writable, which is what a stack needs. */
+	/* S59: the sampler has its own clock from the moment a login conn exists. */
+	uml_nt_spin_start();
 	if (child->chain_login || g_exec_login) {
 		int marg = uml_nt_ca_margin(child->mm, child->ph);
 
