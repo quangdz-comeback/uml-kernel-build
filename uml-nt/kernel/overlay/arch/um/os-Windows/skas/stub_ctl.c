@@ -11126,22 +11126,15 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			d->args[0], d->args[2]);
 	}
 	/* S87 (steer 386 (2)): the READ side, witnessed independently of the
-	 * delivery path. [read-fd] only ever spoke at rax==0 (a read that
-	 * returned nothing), so "0 occurrences" said nothing about whether the
-	 * guest consumed the line. This says: a read on fd 0 returned bytes, and
-	 * here is the first one. */
-	if ((d->regs.rax == 0 || d->regs.rax > 0) && c->read_ok_n < 8) {
-		unsigned long long rfd = d->args[0];
-
-		if ((rfd == 0 || rfd == 1 || rfd == 2) && d->regs.rax > 0) {
-			unsigned char first = 0;
-
-			c->read_ok_n++;
-			(void)uml_nt_uacc_walk(c->mm, (char *)&first, d->args[1],
-					       1, (char *)&first, 0);
-			os_info("[con-read] port=%llu len=%llu first=%02x\n",
-				rfd, d->regs.rax, (unsigned)first);
-		}
+	 * delivery path. [read-fd] only ever spoke at rax==0, so its absence said
+	 * nothing about consumption; this says "a read on fd 0-2 returned bytes".
+	 * No guest read here: the walker drives the uaccess sink and cannot be
+	 * called from the answer path without clobbering the plan in flight. */
+	if (c->read_ok_n < 8 && d->regs.rax > 0 &&
+	    (d->args[0] == 0 || d->args[0] == 1 || d->args[0] == 2)) {
+		c->read_ok_n++;
+		os_info("[con-read] port=%llu len=%llu\n", d->args[0],
+			d->regs.rax);
 	}
 	/* S73: a login conn parking in a wait-for-input syscall is the prompt.
 	 * Arm one line — stage machine decides which — and say so. */
