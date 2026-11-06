@@ -4987,6 +4987,7 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
  * milliseconds of its own, whatever the rest of the machine is doing.
  */
 static unsigned spin_scans, spin_login_seen, spin_other_served, spin_scanned;
+static unsigned spin_not_login;
 static unsigned spin_thread_state;	/* 0 = not started, 1 = running */
 
 static void uml_nt_spin_scan(void)
@@ -5009,10 +5010,14 @@ static void uml_nt_spin_scan(void)
 		if (o == NULL)
 			continue;
 		spin_scanned++;
-		if (o->pid == 0)
+		/* S62: `pid == 0` is not "no conn" — a task-backed conn may leave the
+		 * stub pid unset. What matters is that it has a thread to suspend. */
+		if (o->thread == NULL)
 			continue;
-		if (!uml_nt_conn_is_login(o) && !o->chain_login)
+		if (!uml_nt_conn_is_login(o) && !o->chain_login) {
+			spin_not_login++;
 			continue;
+		}
 		spin_login_seen++;
 		if (o->spin_n >= 32)
 			continue;
@@ -5060,9 +5065,9 @@ static void uml_nt_spin_scan(void)
 	/* the probe: one line once eight scans have learned nothing */
 	if (spin_scans == 8 && spin_scans == spin_scans)
 		os_info("[spin-probe] scans=%u login_seen=%u other_served=%u "
-			"thread_state=%u scanned=%u\n", spin_scans,
+			"thread_state=%u scanned=%u not_login=%u\n", spin_scans,
 			spin_login_seen, spin_other_served, spin_thread_state,
-			spin_scanned);
+			spin_scanned, spin_not_login);
 }
 
 static unsigned long __attribute__((ms_abi)) nt_spin_thread(void *arg)
