@@ -11119,6 +11119,21 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	c->plan_has_retval = 0;
 	c->serve_site = UML_NT_SERVE_SYSCALL;
 	c->serve_nr = d->regs.rax;
+	/* S73: a login conn parking in a wait-for-input syscall is the prompt.
+	 * Arm one line — stage machine decides which — and say so. */
+	if (uml_nt_conn_is_login(c) || c->chain_login) {
+		unsigned long long nr = d->regs.rax;
+
+		if (nr == 7 || nr == 23 || nr == 270 || nr == 271) {
+			int st = uml_nt_console_arm_feed();
+
+			if (c->feed_arm_n < 8) {
+				c->feed_arm_n++;
+				os_info("[feed-arm] pid %d nr=%llu stage=%d line=%u\n",
+					(int)c->pid, nr, st, c->feed_arm_n);
+			}
+		}
+	}
 	uml_nt_syscall_handle(c, d);
 	if (uml_nt_syscall_consume_exec()) {
 		/* execve succeeded INSIDE the handler: exec_mmap

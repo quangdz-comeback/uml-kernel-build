@@ -233,6 +233,21 @@ void uml_nt_console_flush(void)
  * land on the NEXT prompt as a misaligned username/password/command
  * sequence (the referees' "uml login: echo LOGIN-OK"). Drop the
  * un-fed bytes at the same boundary so the feed restarts aligned. */
+/* S73: the guest asking for input IS the prompt. login writes its prompt to a
+ * path this gate does not read (report 375: no write in the syscall table, yet the
+ * conn parks in ppoll), so arming on the text never fired. Arming on the wait
+ * does: when a login conn parks in poll/ppoll/select/pselect6 it is asking for a
+ * line, and the stage machine decides which line. */
+int uml_nt_console_arm_feed(void)
+{
+	if (!g_con_live)
+		return 0;
+	if (uml_nt_console_gate.stage == 0)
+		uml_nt_console_gate.stage = 1;
+	uml_nt_console_gate.armed = 1;
+	return (int)uml_nt_console_gate.stage;
+}
+
 void uml_nt_console_drop_input(void)
 {
 	static int feed_drop_budget = 16;
