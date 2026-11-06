@@ -5069,15 +5069,17 @@ static void uml_nt_spin_scan(void)
 						int ki;
 
 						/* the saved frame lives at the top of the
-						 * kernel stack; scan down for code addresses */
+						 * kernel stack: print EVERY code address in
+						 * the top sixty-four words, in stack order,
+						 * so the caller chain reads straight down. */
 						for (ki = 0; ki < 64; ki++) {
 							unsigned long v = ks[
 								(THREAD_SIZE / sizeof(unsigned long)) - 1 - ki];
 
 							if (v >= 0x60000000ull &&
 							    v < 0x61000000ull)
-								os_info("[taskstate]   ret[%d]=0x%lx\n",
-									ki, v);
+								os_info("[tstack] pid %d k=%d 0x%lx\n",
+									t->pid, ki, v);
 						}
 					}
 					break;
