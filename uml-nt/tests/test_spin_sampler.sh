@@ -57,7 +57,16 @@ int main(void)
 		}
 		CHECK(distinct == 2);	/* the loop body, not a wander */
 	}
-		/* S61: a scan sees a conn that hangs off a task's mm — the table the
+		/* S64: the two wait states are told apart by the sequence numbers */
+	{
+		unsigned long long req = 7, done = 6;
+
+		CHECK((req > done) == 1);	/* needs-kernel-answer */
+		done = 7;
+		CHECK((req > done) == 0);	/* stub-idle-kernel-silent */
+	}
+
+	/* S61: a scan sees a conn that hangs off a task's mm — the table the
 	 * kernel actually uses — and not the two static probe conns. */
 	{
 		int scanned = 0, login_seen = 0;
@@ -100,4 +109,6 @@ grep -q "nt_spin_thread" "$S" || { echo "FAIL: the sampler has no clock of its o
 grep -q "for_each_process(p)" "$S" || { echo "FAIL: the scan does not walk tasks"; exit 1; }
 grep -q "context.id)->nt_conn" "$S" || { echo "FAIL: the scan does not read nt_conn"; exit 1; }
 grep -q "scanned=%u" "$S" || { echo "FAIL: the probe does not report how many it scanned"; exit 1; }
+grep -q "needs-kernel-answer" "$S" || { echo "FAIL: no wait verdict (a)"; exit 1; }
+grep -q "stub-idle-kernel-silent" "$S" || { echo "FAIL: no wait verdict (b)"; exit 1; }
 echo "spin_sampler: the kernel emits it"

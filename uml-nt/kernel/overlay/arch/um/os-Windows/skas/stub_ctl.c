@@ -5046,6 +5046,22 @@ static void uml_nt_spin_scan(void)
 					(unsigned long)o->pid, o->spin_n, rip, rsp,
 					rbp, uml_nt_sample_is_guest(o, rip),
 					o->exec_path);
+				/* S64: a sample outside the guest says the conn is
+				 * waiting; the sequence numbers say ON WHAT. A request
+				 * published and not answered is a kernel-side
+				 * obligation; equal numbers mean the stub is idle and
+				 * the kernel has nothing to send it. */
+				if (!uml_nt_sample_is_guest(o, rip)) {
+					os_info("[wait] pid %lu evt=%d last_cmd=%u "
+						"req=%llu done=%llu %s\n",
+						(unsigned long)o->pid,
+						o->evt_in != NULL, (unsigned)o->d->cmd,
+						(unsigned long long)o->d->req_seq,
+						(unsigned long long)o->d->done_seq,
+						o->d->req_seq > o->d->done_seq ?
+						"needs-kernel-answer" :
+						"stub-idle-kernel-silent");
+				}
 				for (hi = 0; hi < o->spin_hn; hi++)
 					if (o->spin_hv[hi] == rip) {
 						o->spin_hc[hi]++;
