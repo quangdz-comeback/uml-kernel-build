@@ -155,6 +155,7 @@ static struct console nt_cons = {
  * landing before late_initcall completes must not touch an uninit
  * port). */
 static struct uml_nt_con_ring g_con_ring;
+static int g_feed_deliver_n;	/* S76: [feed-drain] records */
 static HANDLE g_con_wake;
 static int g_con_live;
 static int g_con_armed = 1;
@@ -173,6 +174,8 @@ static int console_reader_waiting(void)
 	if (work_pending(&g_port[1].buf.work))
 		return 0;
 	tty = READ_ONCE(g_port[1].itty);
+	if (tty == NULL || !waitqueue_active(&tty->read_wait))
+		tty = READ_ONCE(g_port[0].itty);
 	if (tty == NULL || test_bit(TTY_HUPPED, &tty->flags) ||
 	    test_bit(TTY_HUPPING, &tty->flags)) {
 		g_con_armed = 1;
@@ -213,16 +216,39 @@ void uml_nt_console_flush(void)
 	if ((uml_nt_console_gate.lines & 3u) == 1u)
 		os_info("[feedgate] released line %d stage=%d\n",
 			uml_nt_console_gate.lines, uml_nt_console_gate.stage);
-	while (total < 256 &&
-	       uml_nt_con_ring_pop(&g_con_ring, &ch, 1) == 1) {
-		tty_insert_flip_string(&g_port[1], &ch, 1);
-		total++;
-		if (ch == '\n' || ch == '\r')
-			break;
-	}
-	if (total != 0) {
-		g_con_armed = 0;
-		tty_flip_buffer_push(&g_port[1]);
+	/* S76: which port? login opens /dev/tty itself (report 378: `[tty-ioctl]
+	 * fd=4`), and its reader waits on that tty's read_wait — the feed used to
+	 * go to port 1 unconditionally, so the bytes landed in a queue nobody was
+	 * reading. Deliver to the port that has a reader waiting; port 1 stays the
+	 * default when both or neither do. */
+	{
+		int dport = 1, i;
+
+		for (i = 0; i < 2; i++) {
+			struct tty_struct *t = READ_ONCE(g_port[i].itty);
+
+			if (t != NULL && waitqueue_active(&t->read_wait) &&
+			    !work_pending(&g_port[i].buf.work)) {
+				dport = i;
+				break;
+			}
+		}
+		while (total < 256 &&
+		       uml_nt_con_ring_pop(&g_con_ring, &ch, 1) == 1) {
+			tty_insert_flip_string(&g_port[dport], &ch, 1);
+			total++;
+			if (ch == '\n' || ch == '\r')
+				break;
+		}
+		if (total != 0) {
+			g_con_armed = 0;
+			tty_flip_buffer_push(&g_port[dport]);
+			if (g_feed_deliver_n < 8) {
+				g_feed_deliver_n++;
+				os_info("[feed-drain] port=%d bytes=%u\n",
+					dport, total);
+			}
+		}
 	}
 }
 

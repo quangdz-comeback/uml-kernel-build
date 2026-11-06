@@ -72,10 +72,14 @@ EOF
 "$CC" -O1 -Wall -Wextra -Werror -I"$INC" -o "$TMP/t" "$TMP/t.c"
 "$TMP/t"
 S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c"
+
 C="$HERE/../kernel/overlay/arch/um/os-Windows/console.c"
 grep -q "uml_nt_console_arm_feed" "$S" || { echo "FAIL: the syscall path does not arm"; exit 1; }
 grep -q "uml_nt_console_arm_feed" "$C" || { echo "FAIL: the gate has no arm entry"; exit 1; }
 grep -q "\\[feed-arm\\]" "$S" || { echo "FAIL: no [feed-arm] record"; exit 1; }
 grep -q "uml_nt_console_chain_alive" "$C" || { echo "FAIL: the drop does not ask about the chain"; exit 1; }
+grep -q "\[feed-drain\]" "$C" || { echo "FAIL: the drain does not say which port"; exit 1; }
+grep -q "waitqueue_active(&t->read_wait)" "$C" || { echo "FAIL: the drain does not look for a waiting reader"; exit 1; }
+echo "feed_arm: the drain delivers to the port with a reader"
 echo "feed_arm: the drop asks the chain first"
 echo "feed_arm: the wait arms it"
