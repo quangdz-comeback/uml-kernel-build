@@ -193,16 +193,82 @@ static int console_reader_waiting(void)
 
 int uml_nt_console_pending(void)
 {
-	/* S79: the stage sentence does NOT live in the ring (69cbaed moved the
-	 * released line into a table indexed by stage), so "the ring is dry"
-	 * stopped meaning "there is nothing to deliver". It said exactly that
-	 * here, and this is the only call site signal.c uses to decide whether
-	 * to run the flush: an armed gate with an empty ring would wait for a
-	 * delivery that no door opens. The ring is one source, the armed gate is
-	 * the other; pending asks about both. */
+	/* S84 (report 383 §5): back to the ring — and only the ring.
+	 *
+	 * S79 widened this to "ring OR gate armed" so a staged line would not be
+	 * hidden by a dry ring, and that opened a window with no name: the flush
+	 * runs kernel tty code from unblock_signals, which fires ANYWHERE on a
+	 * conn thread — including inside the window where that very conn is
+	 * committing an exec and its old mm is already gone. The referee showed
+	 * the window live ([flush-ctx] door=0 gate=1 ring=0) and the kernel
+	 * faulting into an unmapped guest page right after exec committed.
+	 *
+	 * The staged line no longer needs this door: the ARM point delivers it
+	 * (uml_nt_console_arm_feed, inside the syscall handler, a known-safe
+	 * point). So pending() asks the ring again — the one source whose
+	 * producer is the reader thread and whose delivery point is the pump.
+	 */
 	return console_reader_waiting() &&
-	       (uml_nt_con_ring_pending(&g_con_ring) ||
-		uml_nt_console_gate.armed);
+	       uml_nt_con_ring_pending(&g_con_ring);
+}
+
+/* S84: the port the console is being read on — the one with a parked reader,
+ * else the one the last delivery used. Shared by the flush and the arm point so
+ * both land on the same tty. */
+static int nt_con_pick_port(void)
+{
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		struct tty_struct *t = READ_ONCE(g_port[i].itty);
+
+		if (t != NULL && waitqueue_active(&t->read_wait) &&
+		    !work_pending(&g_port[i].buf.work)) {
+			g_feed_dport = i;
+			return i;
+		}
+	}
+	return g_feed_dport;
+}
+
+/* S84: release the line this stage asks for, on the port that reads. Returns 1
+ * when bytes went out. Called from the ARM point (a conn's syscall handler,
+ * before the guest parks) and, unchanged, from the flush for a text-armed stage
+ * (the prompt matcher arms stage 2/3 without going through the syscall door). */
+static int nt_con_deliver_stage(int dport)
+{
+	static const char *const sfe[] = {
+		"", "root\n", "root\n", "echo LOGIN-OK\n"
+	};
+	unsigned si = (unsigned)uml_nt_console_gate.stage;
+	const char *sl = (si < 4) ? sfe[si] : "";
+	unsigned sll = 0;
+	unsigned k;
+
+	while (sl[sll] != 0)
+		sll++;
+	if (sll == 0)
+		return 0;
+	for (k = 0; k < sll; k++)
+		tty_insert_flip_string(&g_port[dport], &sl[k], 1);
+	tty_flip_buffer_push(&g_port[dport]);
+	{
+		struct tty_struct *wt = READ_ONCE(g_port[dport].itty);
+
+		if (wt != NULL)
+			wake_up_interruptible(&wt->read_wait);
+	}
+	if (g_feed_deliver_n < 8) {
+		g_feed_deliver_n++;
+		os_info("[feed-drain] port=%d bytes=%u src=stage\n", dport, sll);
+	}
+	if (g_feed_line_n < 8) {
+		g_feed_line_n++;
+		os_info("[feed-line] port=%d stage=%u bytes=%u data=\"%.8s\"\n",
+			dport, si, sll, sl);
+	}
+	g_con_armed = 0;
+	return 1;
 }
 
 /* vCPU-side drain (D19): move at most one line from the ring into
@@ -269,48 +335,11 @@ void uml_nt_console_flush(int door)
 	 * the ring happens to hold. */
 	if (!uml_nt_feed_gate_take(&uml_nt_console_gate))
 		return;
-	{
-		static const char *const sfe[] = {
-			"", "root\n", "root\n", "echo LOGIN-OK\n"
-		};
-		int dport = g_feed_dport;
-		unsigned si = (unsigned)uml_nt_console_gate.stage;
-		const char *sl = (si < 4) ? sfe[si] : "";
-		unsigned sll = 0;
-
-		while (sl[sll] != 0)
-			sll++;
-		if (sll != 0) {
-			unsigned k;
-
-			for (k = 0; k < sll; k++)
-				tty_insert_flip_string(&g_port[dport], &sl[k], 1);
-			tty_flip_buffer_push(&g_port[dport]);
-			{
-				struct tty_struct *wt =
-					READ_ONCE(g_port[g_feed_dport].itty);
-
-				if (wt != NULL)
-					wake_up_interruptible(&wt->read_wait);
-			}
-			if (g_feed_deliver_n < 8) {
-				g_feed_deliver_n++;
-				/* S79: the checklist counts bytes DELIVERED, and it reads one
-				 * marker. 69cbaed delivered five bytes here and printed only
-				 * [feed-line], so the referee's "[feed-drain] = 0" was a rename,
-				 * not a broken drain (report 380). Both sources print this. */
-				os_info("[feed-drain] port=%d bytes=%u src=stage\n",
-					dport, sll);
-			}
-			if (g_feed_line_n < 8) {
-				g_feed_line_n++;
-				os_info("[feed-line] port=%d stage=%u bytes=%u data=\"%.8s\"\n",
-					dport, si, sll, sl);
-			}
-			g_con_armed = 0;
-			return;
-		}
-	}
+	/* S84: a TEXT-armed stage (the prompt matcher sets stage 2/3 without
+	 * the syscall door) still lands here; a syscall arm was already delivered
+	 * and consumed at the arm point, so this cannot double-release. */
+	if (nt_con_deliver_stage(nt_con_pick_port()))
+		return;
 	if ((uml_nt_console_gate.lines & 3u) == 1u)
 		os_info("[feedgate] released line %d stage=%d\n",
 			uml_nt_console_gate.lines, uml_nt_console_gate.stage);
@@ -368,6 +397,14 @@ int uml_nt_console_arm_feed(void)
 	if (uml_nt_console_gate.stage == 0)
 		uml_nt_console_gate.stage = 1;
 	uml_nt_console_gate.armed = 1;
+	/* S84: DELIVER HERE. This is the arm point — the conn's own syscall
+	 * handler, before the guest parks in ppoll — so the line's delivery runs
+	 * in a known-safe window instead of inside whatever kernel code
+	 * unblock_signals happened to be called from. And CONSUME ONCE: the take
+	 * clears the arm, so a later flush can never hand out the same stage
+	 * twice. */
+	if (nt_con_deliver_stage(nt_con_pick_port()))
+		(void)uml_nt_feed_gate_take(&uml_nt_console_gate);
 	return (int)uml_nt_console_gate.stage;
 }
 

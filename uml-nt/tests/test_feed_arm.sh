@@ -89,19 +89,48 @@ int main(void)
 		CHECK(parked == 0);
 	}
 
-	/* S79: the stage line does not live in the ring, so "the ring is
-	 * empty" must not mean "nothing to deliver". A reader is waiting and
-	 * the gate is armed: the flush has to run even with a dry ring. */
+	/* S84 (report 383 §5): pending() is the RING again — and only the ring.
+	 * S79's "ring OR gate armed" is what opened the async door that ran the
+	 * tty code inside the exec window; the staged line is delivered at the
+	 * ARM point now, so the armed gate must NOT wake the unblock_signals
+	 * door. The case that was green under S79 is deliberately red here:
+	 * reader waiting + dry ring + armed gate ⇒ nothing for that door. */
 	{
-		/* reader_waiting && (ring_pending || gate_armed), exactly as
-		 * uml_nt_console_pending() must decide it */
-#define PENDING(rw, rp, ga) ((rw) && ((rp) || (ga)))
-		CHECK(PENDING(1, 0, 1) == 1);	/* armed, ring dry: deliver */
-		CHECK(PENDING(1, 1, 0) == 1);	/* ring line: deliver */
-		CHECK(PENDING(1, 1, 1) == 1);
-		CHECK(PENDING(1, 0, 0) == 0);	/* nothing armed, nothing queued */
-		CHECK(PENDING(0, 1, 1) == 0);	/* no reader: nothing to do */
+		/* reader_waiting && ring_pending, exactly as pending() decides it */
+#define PENDING(rw, rp) ((rw) && (rp))
+		CHECK(PENDING(1, 0) == 0);	/* armed is NOT a reason */
+		CHECK(PENDING(1, 1) == 1);	/* ring line: deliver */
+		CHECK(PENDING(0, 1) == 0);	/* no reader: nothing to do */
 #undef PENDING
+	}
+
+	/* S84: CONSUME ONCE at the arm point — an arm releases exactly the line
+	 * its stage asks for and consumes the arm, so a later flush cannot hand
+	 * the same stage out twice; the next ask releases the next line. */
+	{
+		struct uml_nt_feed_gate a;
+		int delivered = 0;
+
+		uml_nt_feed_gate_reset(&a);
+		/* arm stage 1 → deliver → consume */
+		if (a.stage == 0)
+			a.stage = 1;
+		a.armed = 1;
+		if (uml_nt_feed_gate_take(&a))
+			delivered++;
+		CHECK(delivered == 1);
+		CHECK(a.armed == 0);
+		/* a second door (the flush) finds nothing armed */
+		CHECK(uml_nt_feed_gate_take(&a) == 0);
+		/* the guest asks again at the same stage: exactly one more line */
+		a.stage = 1;
+		a.armed = 1;
+		if (uml_nt_feed_gate_take(&a))
+			delivered++;
+		CHECK(delivered == 2);
+		CHECK(uml_nt_feed_gate_take(&a) == 0);
+		/* and the stage table decides WHAT each stage releases */
+		CHECK(a.lines == 2);
 	}
 
 	if (fails) { printf("feed_arm: %d failure(s)\n", fails); return 1; }
@@ -133,8 +162,15 @@ grep -q "waitqueue_active(&t->read_wait)" "$C" || { echo "FAIL: the drain does n
 # (c) the syscall ring that names a conn's last calls was gated on the LOGIN
 #     binary, so the conn that actually received the feed (agetty, a CHAIN conn)
 #     went dark right after its fifth read.
-awk '/^int uml_nt_console_pending/,/^}/' "$C" | grep -q 'uml_nt_console_gate.armed' \
-	|| { echo "FAIL: pending() does not ask the gate (a dry ring hides a staged line)"; exit 1; }
+if awk '/^int uml_nt_console_pending/,/^}/' "$C" | grep -q 'uml_nt_console_gate.armed'; then
+	echo "FAIL: pending() still wakes the async door for a staged line"; exit 1
+fi
+awk '/^int uml_nt_console_pending/,/^}/' "$C" | grep -q 'uml_nt_con_ring_pending' \
+	|| { echo "FAIL: pending() no longer asks the ring"; exit 1; }
+grep -q 'nt_con_deliver_stage(nt_con_pick_port())' "$C" \
+	|| { echo "FAIL: the arm point does not deliver the staged line"; exit 1; }
+awk '/^int uml_nt_console_arm_feed/,/^}/' "$C" | grep -q 'uml_nt_feed_gate_take' \
+	|| { echo "FAIL: the arm point does not consume the arm (double release possible)"; exit 1; }
 grep -q '\[feed-drain\] port=%d bytes=%u src=stage' "$C" \
 	|| { echo "FAIL: the stage path delivers without a [feed-drain] record"; exit 1; }
 grep -q '\[feed-drain\] port=%d bytes=%u src=ring' "$C" \
@@ -144,6 +180,7 @@ grep -q 'uml_nt_conn_is_login(c) || c->chain_login' "$SYS" \
 echo "feed_arm: the drain delivers to the port with a reader"
 echo "feed_arm: the drop asks the chain first"
 echo "feed_arm: the wait arms it"
-echo "feed_arm: a staged line is pending with a dry ring"
+echo "feed_arm: pending() is the ring again, not the armed gate"
 echo "feed_arm: one [feed-drain] number for both sources"
 echo "feed_arm: the ring follows the chain, not only the login binary"
+echo "feed_arm: the arm point delivers once and consumes"
