@@ -262,6 +262,7 @@ struct uml_nt_stub_conn {
 	unsigned sc_total;	/* syscalls seen */
 	unsigned sc_dumps;
 	unsigned sc_tail_dumps;	/* S79: rolling-tail records (chain budget) */
+	unsigned syslog_n;	/* S80: [syslog] payload peeks */
 	/* S55: is the conn looping on faults, or simply not asking? */
 	unsigned sc_rounds_sys, sc_rounds_fault, sc_rounds_other;
 	unsigned sc_other_logged;
@@ -891,7 +892,7 @@ void uml_nt_exec_path_set(const char *path);
 /* 1 when the conn's binary is the login class (basename "login"). */
 int uml_nt_conn_is_login(const struct uml_nt_stub_conn *c);
 
-/* S79: the last eight syscalls of a chain/login conn, printed when the
+/* S79: the last sixteen syscalls of a chain/login conn, printed when the
  * conn dies. The rolling [sc-tail] fires every eighth call, so the call
  * that ends the conn — the one that says why it ended — can fall between
  * two dumps; death is the one moment the ring must always speak. */

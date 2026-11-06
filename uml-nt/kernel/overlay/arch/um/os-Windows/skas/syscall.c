@@ -45,6 +45,7 @@
 #include <fillrehome_model.h>
 #include <ttymodel.h>
 #include <feedgate.h>
+#include <diag_str.h>
 
 #define UML_NT_SYSCALLS_BASE UML_STUB_RAM_BASE
 
@@ -5026,6 +5027,31 @@ out:
 	 * now follows the chain; the early checkpoints below stay login-only, and
 	 * a chain conn's rolling tail is budgeted (rule #23) so a shell cannot
 	 * flood the log. */
+	/* S80: the console chain reports through /dev/log, not through the
+	 * console. On 42274124035 the reader's last syscalls were
+	 * socket/connect/sendto/close/clock_nanosleep — agetty's log_err()
+	 * feeding syslog and then exit_slowly(sleep 10, exit) — and the text of
+	 * that message went to journald, where a referee never sees it. Peek the
+	 * payload out of guest memory (printable only, clamped) so the next run
+	 * says WHAT the guest complained about instead of that it complained.
+	 * Budgeted per conn (rule #23): a diagnostic, not a tap. */
+	if (nr == 44 /* sendto */ && ret > 0 &&
+	    (uml_nt_conn_is_login(c) || c->chain_login) && c->syslog_n < 4) {
+		char msg[161];
+		unsigned long long want = (unsigned long long)ret;
+
+		if (want > 160)
+			want = 160;
+		if (uml_nt_uacc_walk(c->mm, uml_boot.physmem_base, a[1],
+				     want, msg, UML_NT_UACC_FROM_GUEST) >= 0) {
+			unsigned n = uml_nt_diag_sanitize(msg, sizeof(msg), msg,
+							  (unsigned)want);
+
+			c->syslog_n++;
+			os_info("[syslog] pid %lu len=%u msg=\"%s\"\n",
+				(unsigned long)c->pid, n, msg);
+		}
+	}
 	if (uml_nt_conn_is_login(c) || c->chain_login) {
 		unsigned slot = c->sc_ri;
 
@@ -5145,7 +5171,10 @@ out:
  * the conn did next — the rolling [sc-tail] only speaks every eighth call, and
  * the calls that follow the last dump are exactly the ones that matter. This
  * is called from the mmctx teardown, so every chain/login conn's ring is
- * printed once, in order, with the return value the kernel gave it. */
+ * printed once, in order, with the return value the kernel gave it. S80
+ * widened the window from eight to sixteen: on 42274124035 the reader's death
+ * sequence (syslog socket dance + sleep) filled all eight and still hid what
+ * came before it. */
 void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
 {
 	unsigned i, n, start;
@@ -5154,7 +5183,7 @@ void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
 		return;
 	if (!uml_nt_conn_is_login(c) && !c->chain_login)
 		return;
-	n = c->sc_total < 8 ? c->sc_total : 8;
+	n = c->sc_total < 16 ? c->sc_total : 16;
 	start = (c->sc_ri + 200 - n) % 200;
 	os_info("[sc-final] pid %lu total=%u last=%u (in order, at death)\n",
 		(unsigned long)c->pid, c->sc_total, n);
