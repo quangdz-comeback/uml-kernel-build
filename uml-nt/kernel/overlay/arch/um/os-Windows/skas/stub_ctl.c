@@ -5040,6 +5040,41 @@ static void uml_nt_spin_scan(void)
 			 * and where its kernel stack points. A conn with a pending
 			 * request that nobody answers is holding a task that is not
 			 * running; the stack says what it is blocked on. */
+			/* S68: an active experiment. Five samples frozen at the
+			 * same request is half a second of a task that should be
+			 * runnable and is not; if a wake makes the request get
+			 * answered, the class is a lost wakeup and the fix is the
+			 * condition order around sleep. If it changes nothing, the
+			 * task is not wakeable at all and the look moves to its
+			 * exit state. */
+			if (o->d != NULL) {
+				int frozen = 0;
+
+				if (o->req_frozen_req == o->d->req_seq &&
+				    o->d->req_seq > o->d->done_seq)
+					frozen = 1;
+				o->req_frozen_req = o->d->req_seq;
+				o->req_frozen_n = frozen ? o->req_frozen_n + 1 : 0;
+			}
+			if (o->d != NULL && o->d->req_seq > o->d->done_seq &&
+			    o->req_frozen_n >= 5 && o->poke_done == 0) {
+				struct task_struct *pt;
+
+				for_each_process(pt) {
+					if (pt->mm == NULL)
+						continue;
+					if (((struct mm_id *)&pt->mm->context.id)
+					    ->nt_conn != o)
+						continue;
+					o->poke_done = 1;
+					os_info("[poke] pid %d conn %lu req=%llu done=%llu woke=%d\n",
+						pt->pid, (unsigned long)o->pid,
+						(unsigned long long)o->d->req_seq,
+						(unsigned long long)o->d->done_seq,
+						(int)wake_up_process(pt));
+					break;
+				}
+			}
 			if (o->d != NULL && o->d->req_seq > o->d->done_seq &&
 			    o->taskstate_n < 8) {
 				struct task_struct *t;
@@ -5063,27 +5098,10 @@ static void uml_nt_spin_scan(void)
 						(unsigned)t->flags,
 						(int)(t->in_iowait), t->mm != NULL,
 						0ULL);
-					/* S67: the kernel's own unwinder, not a
-					 * hand-scan of the stack top. A task parked in
-					 * schedule() with on_cpu=0 can be walked safely;
-					 * an empty trace is a datum too. */
-					{
-						struct stack_trace tr;
-						unsigned long ents[16];
-						unsigned int ni;
-
-						tr.nr_entries = 0;
-						tr.max_entries = 16;
-						tr.entries = ents;
-						tr.skip = 0;
-						save_stack_trace_tsk(t, &tr);
-						os_info("[kstack] pid %d state=%u entries=%u\n",
-							t->pid, (unsigned)t->__state,
-							tr.nr_entries);
-						for (ni = 0; ni < tr.nr_entries; ni++)
-							os_info("[kstack]   #%u 0x%lx\n",
-								ni, tr.entries[ni]);
-					}
+					/* S68: the unwinder called from another thread does
+					 * not return in this port (report 370: the sampler went
+					 * silent at that call), so the stack is dumped from the
+					 * owning task instead — see [reqstuck] in process.c. */
 					break;
 				}
 			}

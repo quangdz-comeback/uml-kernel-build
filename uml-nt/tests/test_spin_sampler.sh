@@ -57,7 +57,30 @@ int main(void)
 		}
 		CHECK(distinct == 2);	/* the loop body, not a wander */
 	}
-		/* S65: the three states the record distinguishes are three different
+		/* S68: a frozen request for five samples is what triggers the poke, and
+	 * the counter must reset the moment the answer arrives. */
+	{
+		unsigned long long req = 9, done = 8, frozen_req = 0;
+		unsigned n = 0;
+		int i;
+
+		for (i = 0; i < 6; i++) {
+			int frozen = (frozen_req == req && req > done);
+
+			frozen_req = req;
+			n = frozen ? n + 1 : 0;
+		}
+		CHECK(n == 5);		/* five consecutive samples, not six */
+		done = 9;		/* answered */
+		{
+			int frozen = (frozen_req == req && req > done);
+
+			n = frozen ? n + 1 : 0;
+		}
+		CHECK(n == 0);		/* the counter resets on the answer */
+	}
+
+	/* S65: the three states the record distinguishes are three different
 	 * numbers, so a reader can tell a parked task from a queued one. */
 	CHECK(0u != 1u);		/* RUNNING vs INTERRUPTIBLE */
 	CHECK(1u != 0x401u);		/* INTERRUPTIBLE vs UNINTERRUPTIBLE */
@@ -118,7 +141,11 @@ grep -q "scanned=%u" "$S" || { echo "FAIL: the probe does not report how many it
 grep -q "needs-kernel-answer" "$S" || { echo "FAIL: no wait verdict (a)"; exit 1; }
 grep -q "stub-idle-kernel-silent" "$S" || { echo "FAIL: no wait verdict (b)"; exit 1; }
 grep -q "\[taskstate\]" "$S" || { echo "FAIL: no task state record"; exit 1; }
-grep -q "\[kstack\]" "$S" || { echo "FAIL: no unwinder record"; exit 1; }
-grep -q "save_stack_trace_tsk" "$S" || { echo "FAIL: the unwinder is not the kernel's"; exit 1; }
-grep -q "\[tstack\]" "$S" && { echo "FAIL: the hand-scan is still there"; exit 1; }
+grep -q "\[poke\]" "$S" || { echo "FAIL: no active poke"; exit 1; }
+grep -q "wake_up_process" "$S" || { echo "FAIL: the poke does not wake"; exit 1; }
+P="$HERE/../kernel/overlay/arch/um/os-Windows/skas/process.c"
+grep -q "\[reqstuck\]" "$P" || { echo "FAIL: no stuck-request dump in the serve loop"; exit 1; }
+grep -q "dump_stack()" "$P" || { echo "FAIL: the loop does not dump its own stack"; exit 1; }
+grep -q "\[kstack\]" "$S" && { echo "FAIL: the thread-side unwinder is still there"; exit 1; }
+grep -q "save_stack_trace_tsk" "$S" && { echo "FAIL: the unsafe unwinder is still there"; exit 1; }
 echo "spin_sampler: the kernel emits it"

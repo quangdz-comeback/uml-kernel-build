@@ -253,6 +253,9 @@ struct uml_nt_stub_conn {
 	unsigned sc_other_logged;
 	unsigned spin_n;	/* S57: out-of-band samples taken */
 	unsigned taskstate_n;	/* S65: task-state records for this conn */
+	unsigned req_stuck_rounds, req_dump_done;	/* S68: stuck request */
+	unsigned long long req_frozen_req;
+	unsigned req_frozen_n, poke_done;	/* S68: active poke */
 	unsigned spin_hn, spin_hv[16], spin_hc[16];	/* S58: rip histogram */
 	/* Shelley 170: the LAST rounds are the ones that matter — a grow
 	 * decision is only interesting at the round that died, and the

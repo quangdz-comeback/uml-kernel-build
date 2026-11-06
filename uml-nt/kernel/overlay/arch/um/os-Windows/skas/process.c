@@ -1252,6 +1252,27 @@ void userspace(struct uml_pt_regs *regs)
 				 * once the death was already found (calls=0).
 				 * The tick line is the positive counter that
 				 * proves this clock runs at all. */
+				/* S68: a request published and not answered, seen
+				 * from inside the very task that owes it. If this
+				 * never prints for a conn, the task is not in this
+				 * loop at all — and that absence is the finding.
+				 * dump_stack() uses current, so it needs no stack
+				 * walk of a foreign task (the one that failed). */
+				if (c->d->req_seq > c->d->done_seq) {
+					c->req_stuck_rounds++;
+					if (c->req_stuck_rounds >= 5 &&
+					    c->req_dump_done == 0) {
+						c->req_dump_done = 1;
+						os_info("[reqstuck] pid %d rounds=%u req=%llu done=%llu — dumping this task's stack\n",
+							(int)c->pid,
+							c->req_stuck_rounds,
+							c->d->req_seq,
+							c->d->done_seq);
+						dump_stack();
+					}
+				} else {
+					c->req_stuck_rounds = 0;
+				}
 				if (login_conn(c)) {
 					uml_nt_sample_push(c);
 					if ((c->d->smp_calls % 200u) == 0)
