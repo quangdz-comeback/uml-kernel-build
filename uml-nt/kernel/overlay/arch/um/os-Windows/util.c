@@ -95,7 +95,10 @@ void uml_nt_console_note_chain_alive(int on)
 
 int uml_nt_console_chain_alive(void)
 {
-	return g_con_chain_alive;
+	/* S75: once a login chain has run, the feed is kept — the drop fired during
+	 * termios setup, before the conn ever entered a wait, so "alive right now"
+	 * was measured too late (report 377: dropped=2 with both arms firing). */
+	return g_con_chain_alive || g_con_login_seen;
 }
 
 
