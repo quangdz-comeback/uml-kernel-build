@@ -256,7 +256,14 @@ jobs:
           New-ItemProperty -Path $k -Name DumpCount -Value 4 -PropertyType DWord -Force | Out-Null
           Write-Host "LocalDumps -> $dir (Type=2 full)"
 
+      # S85: the GitHub backstop. timeout(1) cannot kill the native launcher
+      # (referee 42294016398: 56+ minutes in this step, the 900s bound never
+      # firing), and a wedged step costs the whole run's evidence. 25 minutes is
+      # past the launcher's own 900s/1800s bound and the ETW watcher's, so a
+      # cancel here means something below is stuck — and every later step is
+      # if: always, so systemd.log still comes back.
       - name: NATIVE systemd boot (M5.5a + M5.5b-1 login feed)
+        timeout-minutes: 25
         shell: msys2 {0}
         env:
           # Shelley 219: a dump after the death never returns, so the stub
@@ -348,7 +355,7 @@ jobs:
           # -k 30: if the launcher ignores TERM we still get the log back —
           # an instrument that can hang forever costs the whole run's
           # evidence (referee 40794805029 lost everything at 1h01m).
-          } | timeout -k 30 ${{ inputs.debugger && '1800' || '900' }} ./launcher.exe ../../build/vmlinux \
+          } | bash bounded-run.sh ${{ inputs.debugger && '1800' || '900' }} ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
             "mem=120M" \
