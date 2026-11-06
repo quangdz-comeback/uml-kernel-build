@@ -279,6 +279,13 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	mm->ca_limit = limit;
 	mm->ca_want = want;
 	mm->ca_n++;
+	/* S88: the memo is keyed on (rsp, plan_n_ops), and only a plan with NO
+	 * op still queued may answer "already covered": a VMA in the table does
+	 * not prove the stub applied the MAP behind it, so mid-drain the answer
+	 * stays 0 (report 387 §1 — the shortcut alone cost an acceptance test). */
+	if (mm->ca_stop_rsp == rsp &&
+	    mm->ca_stop_ops == (unsigned int)plan->n_ops && plan->n_ops == 0)
+		return 2;
 	if (rsp == 0 || committed == 0 || top == 0 || limit == 0)
 		return 0;
 	d = uml_nt_sg_commit_ahead(top, limit, rsp, committed,

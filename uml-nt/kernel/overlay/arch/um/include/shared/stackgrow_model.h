@@ -86,4 +86,13 @@ static inline int uml_nt_sg_commit_ahead(unsigned long long top,
 	return 1;
 }
 
+/* S88: a covering VMA is an answer ONLY when no plan op is still in flight. */
+static inline int uml_nt_sg_covers(unsigned long long vstart,
+				   unsigned long long vend,
+				   unsigned long long start,
+				   unsigned long long run)
+{
+	return vstart <= start && vend >= start + run;
+}
+
 #endif
