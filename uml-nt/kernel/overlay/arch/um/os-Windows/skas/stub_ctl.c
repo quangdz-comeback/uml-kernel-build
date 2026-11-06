@@ -4986,25 +4986,31 @@ static void uml_nt_dr_exec_round(struct uml_nt_stub_conn *c)
  * which condition fails; the thread removes the dependency outright — a hundred
  * milliseconds of its own, whatever the rest of the machine is doing.
  */
-static unsigned spin_scans, spin_login_seen, spin_other_served;
+static unsigned spin_scans, spin_login_seen, spin_other_served, spin_scanned;
 static unsigned spin_thread_state;	/* 0 = not started, 1 = running */
 
 static void uml_nt_spin_scan(void)
 {
-	struct uml_nt_stub_conn *lc[2];
-	int li;
+	struct task_struct *p;
 
-	lc[0] = &conn_parent;
-	lc[1] = &conn_child;
-	for (li = 0; li < 2; li++) {
-		struct uml_nt_stub_conn *o = lc[li];
+	spin_scanned = 0;
+	/* S61: the conn the sample is for is not one of the two static probe
+	 * conns — those belong to the fork/probe tests. A task-backed conn hangs
+	 * off its mm, exactly where the fork seed's anti-stale guard reads it, so
+	 * that is the table to walk (probe 42135241335: login_seen=0 with the
+	 * thread running and eight scans done). */
+	for_each_process(p) {
+		struct uml_nt_stub_conn *o;
 
-		if (o->thread == NULL && o->pid == 0)
+		if (p->mm == NULL)
 			continue;
-		/* S60: the probe measured login_seen=0 with the thread running and
-		 * eight scans done — so the exec_path predicate never matched the
-		 * login conn. The chain latch is the fact the rest of the boot uses,
-		 * and it is set for the fork children too. */
+		o = (struct uml_nt_stub_conn *)
+			((struct mm_id *)&p->mm->context.id)->nt_conn;
+		if (o == NULL)
+			continue;
+		spin_scanned++;
+		if (o->pid == 0)
+			continue;
 		if (!uml_nt_conn_is_login(o) && !o->chain_login)
 			continue;
 		spin_login_seen++;
@@ -5054,8 +5060,9 @@ static void uml_nt_spin_scan(void)
 	/* the probe: one line once eight scans have learned nothing */
 	if (spin_scans == 8 && spin_scans == spin_scans)
 		os_info("[spin-probe] scans=%u login_seen=%u other_served=%u "
-			"thread_state=%u\n", spin_scans, spin_login_seen,
-			spin_other_served, spin_thread_state);
+			"thread_state=%u scanned=%u\n", spin_scans,
+			spin_login_seen, spin_other_served, spin_thread_state,
+			spin_scanned);
 }
 
 static unsigned long __attribute__((ms_abi)) nt_spin_thread(void *arg)

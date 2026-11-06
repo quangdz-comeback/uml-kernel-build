@@ -57,7 +57,25 @@ int main(void)
 		}
 		CHECK(distinct == 2);	/* the loop body, not a wander */
 	}
-		/* S59: the thread samples on its own clock — no other conn needs to be
+		/* S61: a scan sees a conn that hangs off a task's mm — the table the
+	 * kernel actually uses — and not the two static probe conns. */
+	{
+		int scanned = 0, login_seen = 0;
+		struct { void *nt_conn; int chain; } tasks[3] = {
+			{ 0, 0 }, { (void *)1, 1 }, { (void *)1, 0 }
+		};
+		int i;
+
+		for (i = 0; i < 3; i++) {
+			if (tasks[i].nt_conn == 0) continue;
+			scanned++;
+			if (tasks[i].chain) login_seen++;
+		}
+		CHECK(scanned == 2);
+		CHECK(login_seen == 1);
+	}
+
+	/* S59: the thread samples on its own clock — no other conn needs to be
 	 * served, which was the dependency that kept it silent. */
 	{
 		unsigned long long clock = t0;
@@ -78,4 +96,8 @@ grep -q "\[spin-sum\]" "$S" || { echo "FAIL: no histogram"; exit 1; }
 grep -q "o->last_ans_ns = os_nsecs();" "$S" || { echo "FAIL: the clock is not armed"; exit 1; }
 grep -q "\[spin-probe\]" "$S" || { echo "FAIL: no probe record"; exit 1; }
 grep -q "nt_spin_thread" "$S" || { echo "FAIL: the sampler has no clock of its own"; exit 1; }
+# S61: the scan must walk the tasks' mm conns, not the two static probe conns
+grep -q "for_each_process(p)" "$S" || { echo "FAIL: the scan does not walk tasks"; exit 1; }
+grep -q "context.id)->nt_conn" "$S" || { echo "FAIL: the scan does not read nt_conn"; exit 1; }
+grep -q "scanned=%u" "$S" || { echo "FAIL: the probe does not report how many it scanned"; exit 1; }
 echo "spin_sampler: the kernel emits it"
