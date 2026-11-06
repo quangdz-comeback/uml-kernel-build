@@ -5030,7 +5030,12 @@ static void uml_nt_spin_scan(void)
 			o->last_ans_ns = os_nsecs();
 			continue;
 		}
-		if ((os_nsecs() - o->last_ans_ns) / 1000000ull < 700)
+		/* S72: the login conn is the one under investigation, so it is
+		 * sampled even when it is merely idle (req == done) — "quiet" is
+		 * the state to read, and the syscall number says where it is
+		 * quiet. Everything else keeps the 700 ms gate. */
+		if (!o->chain_login && !uml_nt_conn_is_login(o) &&
+		    (os_nsecs() - o->last_ans_ns) / 1000000ull < 700)
 			continue;
 		{
 			unsigned long long rip = 0, rsp = 0, rbp = 0;
