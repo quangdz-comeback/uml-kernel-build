@@ -1227,10 +1227,30 @@ void userspace(struct uml_pt_regs *regs)
 			 * samples inside the window the death comes out of, and
 			 * it sharpens the detection from one second to fifty
 			 * milliseconds as a bonus. */
+			/* S69: where the task's own port-side position is. If a
+			 * request is published while this says WAIT, the task is
+			 * parked in the turnstile; if it says anything else, the
+			 * task is not in the loop at all and the sampler will say
+			 * which site it last reached. */
+			c->site = UML_NT_SITE_WAIT;
 			w = nt->WaitForMultipleObjects(nwait, waits, 0,
 						       login_conn(c) ? 50 : 1000);
-			if (w == 0)
+			c->site = UML_NT_SITE_AFTER_WAIT;
+			if (w == 0) {
+				/* S69: the loop's own census. A conn that publishes
+				 * a request and then never comes back here is named by
+				 * an exit without a matching enter. */
+				c->site = UML_NT_SITE_TRAP;
+				if (login_conn(c)) {
+					c->loop_trap_n++;
+					if (c->loop_trap_n <= 4 ||
+					    (c->loop_trap_n & 255u) == 0)
+						os_info("[loop] pid %d trap n=%u req=%llu done=%llu\n",
+							(int)c->pid, c->loop_trap_n,
+							c->d->req_seq, c->d->done_seq);
+				}
 				break; /* stub trap ready */
+			}
 			if (idx_net >= 0 && w == (ULONG)idx_net) {
 				/* A frame was staged: run the SIGIO
 				 * machinery (registry flush → the net

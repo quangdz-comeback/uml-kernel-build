@@ -57,7 +57,19 @@ int main(void)
 		}
 		CHECK(distinct == 2);	/* the loop body, not a wander */
 	}
-		/* S68: a frozen request for five samples is what triggers the poke, and
+		/* S69: the four sites are distinct numbers, and a task that never
+	 * returns to the loop shows a trap count that stops advancing. */
+	{
+		unsigned long long sites[4] = { 0, 1, 2, 3 };
+		int i, j, dup = 0;
+
+		for (i = 0; i < 4; i++)
+			for (j = i + 1; j < 4; j++)
+				if (sites[i] == sites[j]) dup = 1;
+		CHECK(dup == 0);
+	}
+
+	/* S68: a frozen request for five samples is what triggers the poke, and
 	 * the counter must reset the moment the answer arrives. */
 	{
 		unsigned long long req = 9, done = 8, frozen_req = 0;
@@ -144,6 +156,9 @@ grep -q "\[taskstate\]" "$S" || { echo "FAIL: no task state record"; exit 1; }
 grep -q "\[poke\]" "$S" || { echo "FAIL: no active poke"; exit 1; }
 grep -q "wake_up_process" "$S" || { echo "FAIL: the poke does not wake"; exit 1; }
 P="$HERE/../kernel/overlay/arch/um/os-Windows/skas/process.c"
+grep -q "\[loop\]" "$P" || { echo "FAIL: the serve loop has no census"; exit 1; }
+grep -q "SITE_WAIT" "$P" || { echo "FAIL: the port site is not recorded"; exit 1; }
+grep -q "\[site\]" "$S" || { echo "FAIL: the sampler does not report the site"; exit 1; }
 grep -q "\[reqstuck\]" "$P" || { echo "FAIL: no stuck-request dump in the serve loop"; exit 1; }
 grep -q "dump_stack()" "$P" || { echo "FAIL: the loop does not dump its own stack"; exit 1; }
 grep -q "\[kstack\]" "$S" && { echo "FAIL: the thread-side unwinder is still there"; exit 1; }

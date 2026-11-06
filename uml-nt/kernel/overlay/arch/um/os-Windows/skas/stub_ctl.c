@@ -5121,7 +5121,13 @@ static void uml_nt_spin_scan(void)
 				 * obligation; equal numbers mean the stub is idle and
 				 * the kernel has nothing to send it. */
 				if (!uml_nt_sample_is_guest(o, rip)) {
-					os_info("[wait] pid %lu evt=%d last_cmd=%u "
+					os_info("[site] pid %lu conn %lu site=%llu req=%llu done=%llu trap_n=%u\n",
+					(unsigned long)o->pid,
+					(unsigned long)o->pid, o->site,
+					(unsigned long long)o->d->req_seq,
+					(unsigned long long)o->d->done_seq,
+					o->loop_trap_n);
+				os_info("[wait] pid %lu evt=%d last_cmd=%u "
 						"req=%llu done=%llu %s\n",
 						(unsigned long)o->pid,
 						o->evt_in != NULL, (unsigned)o->d->cmd,

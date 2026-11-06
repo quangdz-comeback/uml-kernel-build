@@ -124,6 +124,12 @@ void uml_nt_conn_unregister(struct uml_nt_stub_conn *c);
 int uml_nt_conn_reg_count(void);
 struct uml_nt_stub_conn *uml_nt_conn_reg_at(int i);
 
+/* S69: the port-side position of a task, set where the code actually is. */
+#define UML_NT_SITE_NONE	0
+#define UML_NT_SITE_WAIT	1	/* parked in the turnstile */
+#define UML_NT_SITE_AFTER_WAIT	2	/* just woke from it */
+#define UML_NT_SITE_TRAP	3	/* about to serve a trap */
+
 struct uml_nt_stub_conn {
 	struct uml_nt_stub_data *d;
 	HANDLE evt_in, evt_out;
@@ -255,6 +261,8 @@ struct uml_nt_stub_conn {
 	unsigned taskstate_n;	/* S65: task-state records for this conn */
 	unsigned req_stuck_rounds, req_dump_done;	/* S68: stuck request */
 	unsigned long long req_frozen_req;
+	unsigned long long site;	/* S69 */
+	unsigned loop_trap_n;		/* S69 */
 	unsigned req_frozen_n, poke_done;	/* S68: active poke */
 	unsigned spin_hn, spin_hv[16], spin_hc[16];	/* S58: rip histogram */
 	/* Shelley 170: the LAST rounds are the ones that matter — a grow
