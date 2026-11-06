@@ -39,6 +39,7 @@ static LARGE_INTEGER qpc_to_li(long long nsecs)
 static unsigned long __attribute__((ms_abi)) nt_timer_thread(void *arg)
 {
 	uml_nt_thread_role = "timer";
+	uml_nt_thread_role_claim("timer");
 	for (;;) {
 		nt->NtWaitForSingleObject(g_timer, 0, NULL);
 		deliver_alarm();

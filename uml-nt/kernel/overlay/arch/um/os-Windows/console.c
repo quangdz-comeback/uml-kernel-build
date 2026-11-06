@@ -56,6 +56,7 @@
 #include "con_ring.h"
 #include "internal.h"
 #include <feedgate.h>
+#include <threadrole.h>
 
 struct uml_nt_feed_gate uml_nt_console_gate;
 
@@ -209,13 +210,38 @@ int uml_nt_console_pending(void)
  * reader is actively sleeping on tty->read_wait, then push. Pacing
  * one line per read_wait sleep prevents early boot opens/closes and
  * login/bash tcsetattr(TCSAFLUSH) from wiping queued command lines. */
-void uml_nt_console_flush(void)
+void uml_nt_console_flush(int door)
 {
 	unsigned char ch;
 	unsigned int total = 0;
+	static int flush_ctx_n;
 
+	/* S82 (D19): the flush runs KERNEL tty code — flip buffers, the line
+	 * discipline, wake-ups — so it may only run on a conn/vCPU thread.
+	 * Deliver the door and the thread's own identity so the next referee
+	 * can see WHERE a flush came from instead of inferring it: report 381
+	 * §3 left the crash's "thread=timer" unreadable because the role was a
+	 * global. Refused, not silently skipped: a flush from the wrong thread
+	 * is a port bug, not a race to be papered over. */
+	if (!uml_nt_flush_door_ok(uml_nt_thread_role_current())) {
+		if (flush_ctx_n < 8) {
+			flush_ctx_n++;
+			os_info("[flush-ctx] door=%d who=%s tid=%lu REFUSED "
+				"(not a conn thread)\n", door,
+				uml_nt_thread_role_current(),
+				uml_nt_current_tid());
+		}
+		return;
+	}
 	if (!console_reader_waiting())
 		return;
+	if (flush_ctx_n < 8) {
+		flush_ctx_n++;
+		os_info("[flush-ctx] door=%d who=%s tid=%lu gate=%d ring=%d "
+			"port=%d\n", door, uml_nt_thread_role_current(),
+			uml_nt_current_tid(), uml_nt_console_gate.armed,
+			uml_nt_con_ring_pending(&g_con_ring), g_feed_dport);
+	}
 	{
 		int i;
 		int chosen = 1;

@@ -1262,7 +1262,7 @@ void userspace(struct uml_pt_regs *regs)
 				/* Console input staged: drain the
 				 * edge-capture ring into the tty core
 				 * on THIS thread, then re-wait. */
-				uml_nt_console_flush();
+				uml_nt_console_flush(1 /* pump wake door */);
 				continue;
 			}
 			if (w == 258u /*WAIT_TIMEOUT*/) {

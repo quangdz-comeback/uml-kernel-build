@@ -63,6 +63,9 @@ jobs:
           # S80 (report 380): the console chain reports through /dev/log, so
           # the harness that proves the peek is printable-and-clamped runs here.
           bash uml-nt/tests/test_syslog_peek.sh
+          # S82 (D19, report 381): only a conn/vCPU thread may run the console
+          # flush, and every flush names its door and its host thread.
+          bash uml-nt/tests/test_flush_ctx.sh
           # M3.7 uaccess walker (D15) over the vma tree
           bash uml-nt/tests/test_uaccess.sh
           # M4.1 bench stats — the pure math the freestanding kernel
@@ -111,4 +114,4 @@ jobs:
             uml-nt/tests/test_resume.sh uml-nt/tests/test_guard.sh \
             uml-nt/tests/test_feedgate.sh uml-nt/tests/test_feed_arm.sh \
             uml-nt/tests/test_tty_ioctl.sh uml-nt/tests/test_scring.sh \
-            uml-nt/tests/test_syslog_peek.sh
+            uml-nt/tests/test_syslog_peek.sh uml-nt/tests/test_flush_ctx.sh

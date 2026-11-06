@@ -321,6 +321,7 @@ static unsigned long __attribute__((ms_abi)) net_reader_thread(void *arg)
 	int n;
 
 	uml_nt_thread_role = "net-reader";
+	uml_nt_thread_role_claim("net-reader");
 
 	for (;;) {
 		if (recv_exact(dev->s, head, 2) < 0)
@@ -374,6 +375,7 @@ static unsigned long __attribute__((ms_abi)) uml_nt_open_thread(void *arg)
 	int attempt;
 
 	uml_nt_thread_role = "net-open";
+	uml_nt_thread_role_claim("net-open");
 
 	if (uml_nt_ws_init() == 0) {
 		if (have_netstack) {

@@ -17,6 +17,7 @@
 #include <stub-panic.h>
 
 #include <os.h>
+#include <threadrole.h>
 #include "internal.h"
 
 void os_early_checks(void)
@@ -601,12 +602,42 @@ const char *uml_nt_thread_role = "boot/vcpu";
  * only ever re-bases FS (arch_prctl SET_FS is the recorded syscall);
  * GS stays the host's, so this reads the true Windows tid even from
  * a vCPU mid-syscall. */
-static unsigned long long uml_nt_current_tid(void)
+unsigned long long uml_nt_current_tid(void)
 {
 	unsigned long long teb;
 
 	__asm__ volatile("mov %%gs:0x30, %0" : "=r"(teb));
 	return *(unsigned long long *)(teb + 0x40 + 8);
+}
+
+/* S82 (D19): WHICH THREAD is running, answered per thread instead of by a
+ * global the last writer owned.
+ *
+ * uml_nt_thread_role above is one string for the whole process: the timer thread
+ * sets it to "timer" at startup and the crash report then prints "thread=timer"
+ * for whatever thread actually faulted (report 381 §3 — the field was a red
+ * herring). The console flush must only ever run on a conn/vCPU thread, so the
+ * question "am I one?" needs an answer keyed by the running thread, not by
+ * whoever wrote last. Claims are explicit (each aux thread claims its role at
+ * entry); anything unclaimed is a conn thread, which is the default the port's
+ * own history assumes. */
+static struct uml_nt_thread_slot g_thread_slots[UML_NT_THREAD_SLOTS];
+
+const char *uml_nt_thread_role_claim(const char *role)
+{
+	return uml_nt_thread_claim(g_thread_slots, UML_NT_THREAD_SLOTS,
+				   uml_nt_current_tid(), role);
+}
+
+const char *uml_nt_thread_role_current(void)
+{
+	return uml_nt_thread_role_at(g_thread_slots, UML_NT_THREAD_SLOTS,
+				     uml_nt_current_tid());
+}
+
+int uml_nt_thread_is_conn(void)
+{
+	return uml_nt_thread_is_conn_role(uml_nt_thread_role_current());
 }
 
 static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)

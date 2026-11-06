@@ -131,7 +131,7 @@ void unblock_signals(void)
 	 * alarm — before the no-signals early-out so input never
 	 * waits on an unrelated signal. */
 	if (uml_nt_console_pending())
-		uml_nt_console_flush();
+		uml_nt_console_flush(0 /* unblock_signals door */);
 
 	if (save_pending == 0)
 		goto out;
