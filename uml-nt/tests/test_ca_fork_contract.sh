@@ -67,8 +67,10 @@ int main(void)
 
 	/* the same call is idempotent: nothing more */
 	nv0 = mm.nvma; no0 = plan.n_ops;
+	/* S87: same guarantee (nothing more happens), stated as the precise
+	 * answer: the target is already covered by the VMA just added. */
 	CHECK(uml_nt_stack_commit_ahead(&mm, &ph, BOT + 0x10, BOT, TOP,
-					TOP - 0x800000ull, 0x40000, &plan) == 0);
+					TOP - 0x800000ull, 0x40000, &plan) == 2);
 	CHECK(mm.nvma == nv0);
 	CHECK(plan.n_ops == no0);
 	/* S25: the orphan hazard, demonstrated. A reserve queued into a plan
