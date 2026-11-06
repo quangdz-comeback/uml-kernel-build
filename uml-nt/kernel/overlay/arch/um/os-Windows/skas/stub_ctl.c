@@ -5014,10 +5014,15 @@ static void uml_nt_spin_scan(void)
 		 * stub pid unset. What matters is that it has a thread to suspend. */
 		if (o->thread == NULL)
 			continue;
-		if (!uml_nt_conn_is_login(o) && !o->chain_login) {
+		/* S63: neither the path nor the chain latch matched any of the conns
+		 * hanging off the tasks (probe: scanned=12 not_login=61). The sample
+		 * is cheap and the conn is named in the record, so the predicate goes
+		 * away: any quiet task-backed conn is sampled, and "did a login conn
+		 * appear" is answered by what those lines say. */
+		if (uml_nt_conn_is_login(o) || o->chain_login)
+			spin_login_seen++;
+		else
 			spin_not_login++;
-			continue;
-		}
 		spin_login_seen++;
 		if (o->spin_n >= 32)
 			continue;
@@ -5037,9 +5042,10 @@ static void uml_nt_spin_scan(void)
 
 				o->spin_n++;
 				os_info("[spin] pid %lu n=%u rip=0x%llx rsp=0x%llx "
-					"rbp=0x%llx guest=%d\n",
+					"rbp=0x%llx guest=%d exec=%.24s\n",
 					(unsigned long)o->pid, o->spin_n, rip, rsp,
-					rbp, uml_nt_sample_is_guest(o, rip));
+					rbp, uml_nt_sample_is_guest(o, rip),
+					o->exec_path);
 				for (hi = 0; hi < o->spin_hn; hi++)
 					if (o->spin_hv[hi] == rip) {
 						o->spin_hc[hi]++;
