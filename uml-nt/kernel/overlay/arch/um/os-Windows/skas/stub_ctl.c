@@ -11125,6 +11125,24 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		os_info("[read-fd] pid %d fd=%llu len=%llu\n", (int)c->pid,
 			d->args[0], d->args[2]);
 	}
+	/* S87 (steer 386 (2)): the READ side, witnessed independently of the
+	 * delivery path. [read-fd] only ever spoke at rax==0 (a read that
+	 * returned nothing), so "0 occurrences" said nothing about whether the
+	 * guest consumed the line. This says: a read on fd 0 returned bytes, and
+	 * here is the first one. */
+	if ((d->regs.rax == 0 || d->regs.rax > 0) && c->read_ok_n < 8) {
+		unsigned long long rfd = d->args[0];
+
+		if ((rfd == 0 || rfd == 1 || rfd == 2) && d->regs.rax > 0) {
+			unsigned char first = 0;
+
+			c->read_ok_n++;
+			(void)uml_nt_uacc_walk(c->mm, (char *)&first, d->args[1],
+					       1, (char *)&first, 0);
+			os_info("[con-read] port=%llu len=%llu first=%02x\n",
+				rfd, d->regs.rax, (unsigned)first);
+		}
+	}
 	/* S73: a login conn parking in a wait-for-input syscall is the prompt.
 	 * Arm one line — stage machine decides which — and say so. */
 	if (uml_nt_conn_is_login(c) || c->chain_login) {
@@ -13364,6 +13382,9 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 						0x40000ull, &c->plan);
 
 			sg = r;
+			if (r == 2)
+				break;	/* S87: already covered — the reserve is
+					 * there; asking again cannot change it. */
 			if (r <= 0)
 				break;
 			c->d->grow_mapped++;

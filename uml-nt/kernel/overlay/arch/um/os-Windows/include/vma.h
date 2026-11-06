@@ -119,6 +119,8 @@ struct uml_nt_mm {
 	unsigned int ca_mid_drain_ops;	/* S33: ops the reserve added */
 	unsigned int ca_margin_runs;	/* S34: margin runs committed at birth */
 	unsigned long long ca_inside_va, ca_inside_end, ca_inside_off;
+	unsigned long long ca_stop_rsp;	/* S87: rsp answered "already covered" */
+	unsigned int ca_covered;	/* S87: the reserve target was already mapped */
 	unsigned long long ca_stop_bot, ca_stop_v_lo, ca_stop_v_hi, ca_stop_off;
 	unsigned int ca_stop_refs, ca_stop_runs;
 	unsigned ca_n;

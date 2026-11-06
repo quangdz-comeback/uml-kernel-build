@@ -4307,6 +4307,54 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 7: /* poll — udhcpc waits the lease window in poll() */
 	case 23: /* select */
 	case 270: /* pselect6 */
+		/* fallthrough */
+	case 271: /* ppoll */ {
+		/* S87 (steer 386 (1)): the decisive question behind login's exit 0
+		 * is WHAT it is parked on. For ppoll the fd/event pairs live in
+		 * guest memory — read them out (same walker as the [syslog] peek)
+		 * and say them. fd 0 is the console; anything else is a socket,
+		 * and then the feed could never have reached it. pselect6's sets
+		 * are bitmasks, not pollfds, so it reports its nfds and the first
+		 * mask word instead of pretending to be the same shape. */
+		static unsigned armfds_n;
+
+		if (armfds_n < 6) {
+			armfds_n++;
+			if (nr == 271) {
+				struct { int fd; short events, revents; } pf[4];
+				long long nfd = (long long)a[1];
+
+				if (nfd > 0 && nfd <= 4 && a[0] != 0 &&
+				    uml_nt_uacc_walk(uml_nt_syscall_mm(),
+						     (char *)pf, a[0],
+						     sizeof(pf[0]) * (unsigned long long)nfd,
+						     (char *)pf, 0) >= 0) {
+					char fb[160];
+					int o = 0, i;
+
+					for (i = 0; i < (int)nfd && o < 132; i++)
+						o += snprintf(fb + o,
+							      sizeof(fb) - (size_t)o,
+							      " fd%d=%d ev%d=%#x",
+							      i, pf[i].fd, i,
+							      (unsigned)pf[i].events);
+					os_info("[arm-fds] nr=271 n=%d%s\n",
+						(int)nfd, fb);
+				}
+			} else {
+				unsigned long long mask = 0;
+
+				(void)uml_nt_uacc_walk(uml_nt_syscall_mm(),
+						       (char *)&mask, a[1],
+						       sizeof(mask),
+						       (char *)&mask, 0);
+				os_info("[arm-fds] nr=270 nfds=%llu rmask=%#llx\n",
+					a[0], mask);
+			}
+		}
+	}
+		/* fall through */
+
 	case 271: /* ppoll — systemd's netlink wait ("Failed to wait
 		   * for netlink event, ignoring") */
 	case 35: /* nanosleep — ping interval, retry loops (hrtimer

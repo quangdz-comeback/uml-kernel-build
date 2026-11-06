@@ -86,4 +86,26 @@ static inline int uml_nt_sg_commit_ahead(unsigned long long top,
 	return 1;
 }
 
+/* S87 (report 386 §3): "the reserve target is already mapped" is an ANSWER,
+ * not a refusal. The guest's rsp sat exactly on the committed boundary
+ * (rsp == committed), so the model asked for one more run below it, and the
+ * kernel refused because that run fell inside an existing VMA — over and over:
+ * the same question, 12.7k times, nothing learned. Two pure pieces let the
+ * kernel say what it means and then stop asking. */
+static inline int uml_nt_sg_covers(unsigned long long vstart,
+				   unsigned long long vend,
+				   unsigned long long start,
+				   unsigned long long run)
+{
+	return vstart <= start && vend >= start + run;
+}
+
+/* Sticky memo keyed on rsp: the ask only changes when the stack pointer does,
+ * so the same rsp must never be asked twice. */
+static inline int uml_nt_sg_ask_again(unsigned long long memo_rsp,
+				      unsigned long long rsp)
+{
+	return memo_rsp == 0 || memo_rsp != rsp;
+}
+
 #endif

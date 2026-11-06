@@ -70,6 +70,7 @@ jobs:
           # evidence — the boot step now runs the launcher under a hard-killing
           # bound of our own, not timeout(1).
           bash uml-nt/tests/test_bounded_run.sh
+          bash uml-nt/tests/test_sg_covers.sh
           # M3.7 uaccess walker (D15) over the vma tree
           bash uml-nt/tests/test_uaccess.sh
           # M4.1 bench stats — the pure math the freestanding kernel
@@ -119,4 +120,5 @@ jobs:
             uml-nt/tests/test_feedgate.sh uml-nt/tests/test_feed_arm.sh \
             uml-nt/tests/test_tty_ioctl.sh uml-nt/tests/test_scring.sh \
             uml-nt/tests/test_syslog_peek.sh uml-nt/tests/test_flush_ctx.sh \
-            uml-nt/launcher/bounded-run.sh uml-nt/tests/test_bounded_run.sh
+            uml-nt/launcher/bounded-run.sh uml-nt/tests/test_bounded_run.sh \
+            uml-nt/tests/test_sg_covers.sh
