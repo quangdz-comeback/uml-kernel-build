@@ -11124,6 +11124,8 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	if (uml_nt_conn_is_login(c) || c->chain_login) {
 		unsigned long long nr = d->regs.rax;
 
+		uml_nt_console_note_chain_alive(1);
+
 		if (nr == 7 || nr == 23 || nr == 270 || nr == 271) {
 			int st = uml_nt_console_arm_feed();
 

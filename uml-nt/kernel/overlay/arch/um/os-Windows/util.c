@@ -84,6 +84,21 @@ int uml_nt_console_login_seen(void)
 	return g_con_login_seen;
 }
 
+/* S74: the console cannot walk tasks from here, so the chain's liveness is
+ * published by whoever knows it (stub_ctl sets it when a chain conn runs). */
+static int g_con_chain_alive;
+
+void uml_nt_console_note_chain_alive(int on)
+{
+	g_con_chain_alive = on ? 1 : 0;
+}
+
+int uml_nt_console_chain_alive(void)
+{
+	return g_con_chain_alive;
+}
+
+
 /* S46: the console's single choke point. Every path that prints — the tty
  * driver, the printk sink, the guest's write(2), a stub panic — ends here, so
  * the feed gate reads the console here and nowhere else. The struct is

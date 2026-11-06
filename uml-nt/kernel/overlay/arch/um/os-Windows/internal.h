@@ -29,6 +29,9 @@ int uml_nt_console_login_seen(void);
 void uml_nt_console_note_login(void);
 /* S73: arm one feed line because the guest is waiting for input. */
 int uml_nt_console_arm_feed(void);
+/* S74: is a login chain conn alive (the feed must survive its TCSAFLUSH)? */
+int uml_nt_console_chain_alive(void);
+void uml_nt_console_note_chain_alive(int on);
 
 /* M3.8: last-chance VEH — any native exception in the kernel process
  * prints rip/fault-address (direct NtWriteFile, no console lock —

@@ -255,6 +255,13 @@ void uml_nt_console_drop_input(void)
 
 	if (!g_con_live)
 		return;
+	/* S74: the feed is now released by the guest ASKING (report 375/376: the
+	 * arm fires at ppoll, but the bytes were dropped at tcsetattr a moment
+	 * earlier). While a login chain conn is alive, keeping the bytes is the
+	 * point of the whole mechanism — the drop's alignment job is done by the
+	 * syscall-driven arm instead. Everything else keeps the old behaviour. */
+	if (uml_nt_console_chain_alive())
+		return;
 	n = uml_nt_con_ring_drop(&g_con_ring);
 	if (n != 0 && feed_drop_budget > 0) {
 		feed_drop_budget--;

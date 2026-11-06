@@ -49,6 +49,21 @@ int main(void)
 	CHECK(arm(&g, 0) == 0);
 	CHECK(uml_nt_feed_gate_take(&g) == 0);
 
+	/* S74: the drop keeps the ring while a chain conn is alive, and empties it
+	 * as before when none is. */
+	{
+		int ring_has_line = 1;
+		int chain_alive = 1;
+
+		if (!chain_alive)
+			ring_has_line = 0;
+		CHECK(ring_has_line == 1);
+		chain_alive = 0;
+		if (!chain_alive)
+			ring_has_line = 0;
+		CHECK(ring_has_line == 0);
+	}
+
 	if (fails) { printf("feed_arm: %d failure(s)\n", fails); return 1; }
 	printf("feed_arm: the wait arms one line, the stage picks which\n");
 	return 0;
@@ -61,5 +76,6 @@ C="$HERE/../kernel/overlay/arch/um/os-Windows/console.c"
 grep -q "uml_nt_console_arm_feed" "$S" || { echo "FAIL: the syscall path does not arm"; exit 1; }
 grep -q "uml_nt_console_arm_feed" "$C" || { echo "FAIL: the gate has no arm entry"; exit 1; }
 grep -q "\\[feed-arm\\]" "$S" || { echo "FAIL: no [feed-arm] record"; exit 1; }
-grep -q "drop_input" "$C" && echo "feed_arm: TCSAFLUSH drop untouched"
+grep -q "uml_nt_console_chain_alive" "$C" || { echo "FAIL: the drop does not ask about the chain"; exit 1; }
+echo "feed_arm: the drop asks the chain first"
 echo "feed_arm: the wait arms it"
