@@ -5036,6 +5036,53 @@ static void uml_nt_spin_scan(void)
 			unsigned long long rip = 0, rsp = 0, rbp = 0;
 			unsigned long long rdi = 0, rsi = 0, rbx = 0;
 
+			/* S65: who owes the answer is a task, so name its state
+			 * and where its kernel stack points. A conn with a pending
+			 * request that nobody answers is holding a task that is not
+			 * running; the stack says what it is blocked on. */
+			if (o->d != NULL && o->d->req_seq > o->d->done_seq &&
+			    o->taskstate_n < 8) {
+				struct task_struct *t;
+
+				for_each_process(t) {
+					if (t->mm == NULL)
+						continue;
+					if (((struct mm_id *)&t->mm->context.id)
+					    ->nt_conn != o)
+						continue;
+					o->taskstate_n++;
+					os_info("[taskstate] pid %d conn_pid %lu "
+						"state=%u on_cpu=%d on_rq=%d "
+						"exec_start=%llu flags=0x%x "
+						"iowait=%d mm=%d sp=0x%llx\n",
+						t->pid, (unsigned long)o->pid,
+						(unsigned)t->__state,
+						(int)(t->on_cpu),
+						(int)(t->on_rq),
+						(unsigned long long)t->se.exec_start,
+						(unsigned)t->flags,
+						(int)(t->in_iowait), t->mm != NULL,
+						0ULL);
+					if (task_stack_page(t) != NULL) {
+						unsigned long *ks = (unsigned long *)
+							task_stack_page(t);
+						int ki;
+
+						/* the saved frame lives at the top of the
+						 * kernel stack; scan down for code addresses */
+						for (ki = 0; ki < 64; ki++) {
+							unsigned long v = ks[
+								(THREAD_SIZE / sizeof(unsigned long)) - 1 - ki];
+
+							if (v >= 0x60000000ull &&
+							    v < 0x61000000ull)
+								os_info("[taskstate]   ret[%d]=0x%lx\n",
+									ki, v);
+						}
+					}
+					break;
+				}
+			}
 			if (uml_nt_sample_read(o, &rip, &rsp, &rbp, &rdi, &rsi,
 					       &rbx) == 0) {
 				int hi, found = 0;

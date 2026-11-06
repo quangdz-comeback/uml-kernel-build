@@ -57,7 +57,13 @@ int main(void)
 		}
 		CHECK(distinct == 2);	/* the loop body, not a wander */
 	}
-		/* S64: the two wait states are told apart by the sequence numbers */
+		/* S65: the three states the record distinguishes are three different
+	 * numbers, so a reader can tell a parked task from a queued one. */
+	CHECK(0u != 1u);		/* RUNNING vs INTERRUPTIBLE */
+	CHECK(1u != 0x401u);		/* INTERRUPTIBLE vs UNINTERRUPTIBLE */
+	CHECK((0x401u & 0x401u) == 0x401u);
+
+	/* S64: the two wait states are told apart by the sequence numbers */
 	{
 		unsigned long long req = 7, done = 6;
 
@@ -111,4 +117,5 @@ grep -q "context.id)->nt_conn" "$S" || { echo "FAIL: the scan does not read nt_c
 grep -q "scanned=%u" "$S" || { echo "FAIL: the probe does not report how many it scanned"; exit 1; }
 grep -q "needs-kernel-answer" "$S" || { echo "FAIL: no wait verdict (a)"; exit 1; }
 grep -q "stub-idle-kernel-silent" "$S" || { echo "FAIL: no wait verdict (b)"; exit 1; }
+grep -q "\[taskstate\]" "$S" || { echo "FAIL: no task state record"; exit 1; }
 echo "spin_sampler: the kernel emits it"
