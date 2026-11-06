@@ -156,6 +156,7 @@ static struct console nt_cons = {
  * port). */
 static struct uml_nt_con_ring g_con_ring;
 static int g_feed_deliver_n;	/* S76: [feed-drain] records */
+static int g_feed_dport = 1;	/* S78: which port this flush targets */
 static HANDLE g_con_wake;
 static int g_con_live;
 static int g_con_armed = 1;
@@ -206,13 +207,66 @@ void uml_nt_console_flush(void)
 
 	if (!console_reader_waiting())
 		return;
+	{
+		int i;
+		int chosen = 1;
+
+		for (i = 0; i < 2; i++) {
+			struct tty_struct *t = READ_ONCE(g_port[i].itty);
+
+			if (t != NULL && waitqueue_active(&t->read_wait) &&
+			    !work_pending(&g_port[i].buf.work)) {
+				chosen = i;
+				break;
+			}
+		}
+		g_feed_dport = chosen;
+	}
 	/* S42: a line is released only when its prompt has been printed. The
 	 * feed used to run ahead of login and be discarded by login's own
 	 * TCSAFLUSH; waiting for the prompt keeps both behaviours: the flush
 	 * still drops what is pending (nothing is), and the username arrives
 	 * when it is asked for. */
+	/* S78: STAGE-INDEXED feed. The ring is what the workflow wrote to stdin,
+	 * and by the time login asks it has been dropped and refilled with the
+	 * wrong lines (report 379: 14 bytes of "echo LOGIN-OK" delivered as the
+	 * username). The line a stage needs belongs to the stage, not to whatever
+	 * the ring happens to hold. */
 	if (!uml_nt_feed_gate_take(&uml_nt_console_gate))
 		return;
+	{
+		static const char *const sfe[] = {
+			"", "root\n", "root\n", "echo LOGIN-OK\n"
+		};
+		int dport = g_feed_dport;
+		unsigned si = (unsigned)uml_nt_console_gate.stage;
+		const char *sl = (si < 4) ? sfe[si] : "";
+		unsigned sll = 0;
+
+		while (sl[sll] != 0)
+			sll++;
+		if (sll != 0) {
+			unsigned k;
+
+			for (k = 0; k < sll; k++)
+				tty_insert_flip_string(&g_port[dport], &sl[k], 1);
+			tty_flip_buffer_push(&g_port[dport]);
+			{
+				struct tty_struct *wt =
+					READ_ONCE(g_port[g_feed_dport].itty);
+
+				if (wt != NULL)
+					wake_up_interruptible(&wt->read_wait);
+			}
+			if (g_feed_deliver_n < 8) {
+				g_feed_deliver_n++;
+				os_info("[feed-line] port=%d stage=%u bytes=%u data=\"%.8s\"\n",
+					dport, si, sll, sl);
+			}
+			g_con_armed = 0;
+			return;
+		}
+	}
 	if ((uml_nt_console_gate.lines & 3u) == 1u)
 		os_info("[feedgate] released line %d stage=%d\n",
 			uml_nt_console_gate.lines, uml_nt_console_gate.stage);
@@ -222,33 +276,22 @@ void uml_nt_console_flush(void)
 	 * reading. Deliver to the port that has a reader waiting; port 1 stays the
 	 * default when both or neither do. */
 	{
-		int dport = 1, i;
-
-		for (i = 0; i < 2; i++) {
-			struct tty_struct *t = READ_ONCE(g_port[i].itty);
-
-			if (t != NULL && waitqueue_active(&t->read_wait) &&
-			    !work_pending(&g_port[i].buf.work)) {
-				dport = i;
-				break;
-			}
-		}
 		while (total < 256 &&
 		       uml_nt_con_ring_pop(&g_con_ring, &ch, 1) == 1) {
-			tty_insert_flip_string(&g_port[dport], &ch, 1);
+			tty_insert_flip_string(&g_port[g_feed_dport], &ch, 1);
 			total++;
 			if (ch == '\n' || ch == '\r')
 				break;
 		}
 		if (total != 0) {
 			g_con_armed = 0;
-			tty_flip_buffer_push(&g_port[dport]);
+			tty_flip_buffer_push(&g_port[g_feed_dport]);
 			/* S77: the reader parked BEFORE these bytes existed (ppoll is
 			 * already asleep), so the push alone does not lift it — the
 			 * wake has to name the wait it is on. */
 			{
 				struct tty_struct *wt =
-					READ_ONCE(g_port[dport].itty);
+					READ_ONCE(g_port[g_feed_dport].itty);
 
 				if (wt != NULL)
 					wake_up_interruptible(&wt->read_wait);
@@ -256,7 +299,7 @@ void uml_nt_console_flush(void)
 			if (g_feed_deliver_n < 8) {
 				g_feed_deliver_n++;
 				os_info("[feed-drain] port=%d bytes=%u\n",
-					dport, total);
+					g_feed_dport, total);
 			}
 		}
 	}

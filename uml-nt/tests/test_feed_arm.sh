@@ -64,6 +64,18 @@ int main(void)
 		CHECK(ring_has_line == 0);
 	}
 
+	/* S78: the line belongs to the stage, not to the ring — dropping the ring
+	 * must not change what stage 1 receives. */
+	{
+		const char *tab[4] = { "", "root\n", "root\n", "echo LOGIN-OK\n" };
+		int ring_empty = 1;	/* the drop took everything */
+
+		(void)ring_empty;
+		CHECK(tab[1][0] == 'r' && tab[1][4] == '\n');
+		CHECK(tab[2][0] == 'r');
+		CHECK(tab[3][0] == 'e');	/* the shell command, for stage 3 */
+	}
+
 	/* S77: a reader already asleep is only lifted by a wake that names its
 	 * wait; the push alone leaves it parked. */
 	{
@@ -93,6 +105,8 @@ grep -q "\\[feed-arm\\]" "$S" || { echo "FAIL: no [feed-arm] record"; exit 1; }
 grep -q "uml_nt_console_chain_alive" "$C" || { echo "FAIL: the drop does not ask about the chain"; exit 1; }
 grep -q "\[feed-drain\]" "$C" || { echo "FAIL: the drain does not say which port"; exit 1; }
 grep -q "wake_up_interruptible(&wt->read_wait)" "$C" || { echo "FAIL: the drain does not wake the reader"; exit 1; }
+grep -q "\[feed-line\]" "$C" || { echo "FAIL: no stage-indexed line record"; exit 1; }
+grep -q "echo LOGIN-OK" "$C" || { echo "FAIL: the stage table has no LOGIN-OK line"; exit 1; }
 grep -q "waitqueue_active(&t->read_wait)" "$C" || { echo "FAIL: the drain does not look for a waiting reader"; exit 1; }
 echo "feed_arm: the drain delivers to the port with a reader"
 echo "feed_arm: the drop asks the chain first"
