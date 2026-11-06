@@ -270,6 +270,7 @@ struct uml_nt_stub_conn {
 	unsigned long long req_frozen_req;
 	unsigned long long site;	/* S69 */
 	unsigned long long serve_site;	/* S70 */
+	unsigned long long serve_nr;	/* S71: the syscall being served */
 	unsigned loop_trap_n;		/* S69 */
 	unsigned req_frozen_n, poke_done;	/* S68: active poke */
 	unsigned spin_hn, spin_hv[16], spin_hc[16];	/* S58: rip histogram */

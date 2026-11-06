@@ -171,6 +171,8 @@ P="$HERE/../kernel/overlay/arch/um/os-Windows/skas/process.c"
 grep -q "\[loop\]" "$P" || { echo "FAIL: the serve loop has no census"; exit 1; }
 grep -q "SITE_WAIT" "$P" || { echo "FAIL: the port site is not recorded"; exit 1; }
 grep -q "\[site\]" "$S" || { echo "FAIL: the sampler does not report the site"; exit 1; }
+grep -q "serve_nr" "$S" || { echo "FAIL: the sampled syscall number is not recorded"; exit 1; }
+grep -q "nr=%llu" "$S" || { echo "FAIL: the site record does not carry nr"; exit 1; }
 for v in SERVE_ENTER SERVE_SYSCALL SERVE_FAULT SERVE_INITPROT SERVE_PLANDRAIN SERVE_DONE; do
 	grep -q "UML_NT_$v" "$S" || { echo "FAIL: serve site $v is never set"; exit 1; }
 done

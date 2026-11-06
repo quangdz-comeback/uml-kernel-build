@@ -5121,9 +5121,10 @@ static void uml_nt_spin_scan(void)
 				 * obligation; equal numbers mean the stub is idle and
 				 * the kernel has nothing to send it. */
 				if (!uml_nt_sample_is_guest(o, rip)) {
-					os_info("[site] pid %lu conn %lu site=%llu serve=%llu req=%llu done=%llu trap_n=%u\n",
+					os_info("[site] pid %lu conn %lu site=%llu serve=%llu nr=%llu req=%llu done=%llu trap_n=%u\n",
 					(unsigned long)o->pid,
 					(unsigned long)o->pid, o->site, o->serve_site,
+					o->serve_nr,
 					(unsigned long long)o->d->req_seq,
 					(unsigned long long)o->d->done_seq,
 					o->loop_trap_n);
@@ -11112,6 +11113,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	}
 	c->plan_has_retval = 0;
 	c->serve_site = UML_NT_SERVE_SYSCALL;
+	c->serve_nr = d->regs.rax;
 	uml_nt_syscall_handle(c, d);
 	if (uml_nt_syscall_consume_exec()) {
 		/* execve succeeded INSIDE the handler: exec_mmap
