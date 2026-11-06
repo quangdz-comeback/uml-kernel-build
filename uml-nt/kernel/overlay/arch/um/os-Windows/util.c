@@ -114,6 +114,16 @@ static void feed_gate_sink(const char *s, unsigned int n)
 	 * assemble while the kernel's lines interleave with it. */
 	int src = g_con_src;
 
+	/* S81: the port's own voice is not the guest's console. A whole record
+	 * whose write begins with '[' and ends with the record's newline is this
+	 * port printing — and on 42279051954 one of those records armed the gate:
+	 * the [syslog] echo of a PAM line carried "pam_unix(login:account)", the
+	 * matcher saw "login:" inside it, and stage 1 armed on the instrument's
+	 * own text (report 380, rule #24 — the measurement fed the mechanism).
+	 * A guest fragment is not a framed record: it does not both start with
+	 * '[' and end with the newline, so prompts still reach the matcher. */
+	if (uml_nt_feed_port_voice(s, n))
+		return;
 	uml_nt_feed_gate_scan(&uml_nt_console_gate, s, n, src);
 	if (uml_nt_console_gate.armed &&
 	    uml_nt_console_gate.stage != uml_nt_console_gate.last_armed_stage) {

@@ -170,6 +170,34 @@ static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g,
 	}
 }
 
+/*
+ * S81: is this write the PORT's own voice rather than the guest's console?
+ *
+ * Every path that prints ends in one choke point (nt_console_write), so the gate
+ * reads the kernel's diagnostic records as well as the guest's output. That was
+ * harmless while the records were ours alone — until an instrument echoed guest
+ * bytes back: on run 42279051954 a [syslog] record carrying
+ * "pam_unix(login:account)" armed the feed on the "login:" inside it (report
+ * 380, rule #24: the measurement fed the mechanism it measures).
+ *
+ * A record is framed: one write that begins with '[' , closes its tag within the
+ * first few bytes, and ends with the record's newline. A guest prompt fragment
+ * is not framed like that (it neither starts with '[' nor ends with a newline),
+ * so prompts still reach the matcher — which is why the check is this and not
+ * "anything starting with a bracket".
+ */
+static inline int uml_nt_feed_port_voice(const char *s, unsigned n)
+{
+	int k;
+
+	if (s == 0 || n < 3 || s[0] != '[' || s[n - 1] != '\n')
+		return 0;
+	for (k = 1; k < (int)n && k < 24; k++)
+		if (s[k] == ']')
+			return 1;
+	return 0;
+}
+
 /* Append console output from one source; a newline ends THAT source's line. */
 static inline void uml_nt_feed_gate_scan(struct uml_nt_feed_gate *g,
 					 const char *out, unsigned len, int src)

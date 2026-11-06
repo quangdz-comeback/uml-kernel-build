@@ -23,6 +23,7 @@
 
 #include <ntabi.h>
 #include "drslot_model.h"
+#include <ttymodel.h>
 #include <vma.h>
 #include <fault.h>
 #include <uaccess_walk.h>
@@ -273,6 +274,7 @@ struct uml_nt_stub_conn {
 	unsigned long long site;	/* S69 */
 	unsigned long long serve_site;	/* S70 */
 	unsigned long long serve_nr;	/* S71: the syscall being served */
+	struct uml_nt_tty_model tty_model;	/* S81: the termios this fd was told */
 	unsigned feed_arm_n;		/* S73: [feed-arm] records */
 	unsigned read_fd_n;		/* S77: [read-fd] records */
 	unsigned loop_trap_n;		/* S69 */

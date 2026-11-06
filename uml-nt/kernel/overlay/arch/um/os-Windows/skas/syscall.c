@@ -4598,10 +4598,26 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		 * device behind it has no tty driver — so the ENOTTY came from
 		 * the kernel's own ioctl, on a descriptor number we do not own.
 		 * Every tty question this port can answer is answered here. */
+		/* S81: TCSETS carries a termios in. Read it through the D15
+		 * walker so the model can REMEMBER it — Debian's glibc tcsetattr
+		 * reads the state back and calls a set that did not stick an
+		 * EINVAL (report 380: agetty died in termio_final for exactly
+		 * that, eleven seconds after it had read the fed username). */
 		if (c->mm != 0) {
 			unsigned char ttybuf[UML_NT_TERMIOS_SIZE];
-			int tn = uml_nt_tty_ioctl_fill((unsigned)a[1], ttybuf,
-						       (unsigned)sizeof(ttybuf));
+			unsigned char ttyin[UML_NT_TERMIOS_SIZE];
+			const unsigned char *tin = NULL;
+			int tn;
+
+			if ((a[1] == UML_NT_TCSETS || a[1] == UML_NT_TCSETSW ||
+			     a[1] == UML_NT_TCSETSF) &&
+			    uml_nt_uacc_walk(c->mm, uml_boot.physmem_base, a[2],
+					     UML_NT_TERMIOS_SIZE, (char *)ttyin,
+					     UML_NT_UACC_FROM_GUEST) >= 0)
+				tin = ttyin;
+			tn = uml_nt_tty_ioctl_fill(&c->tty_model, (unsigned)a[1],
+						   tin, ttybuf,
+						   (unsigned)sizeof(ttybuf));
 
 			if (tn >= 0) {
 				static int tty_once;

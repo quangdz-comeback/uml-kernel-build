@@ -141,6 +141,36 @@ int main(void)
 		CHECK(uml_nt_feed_gate_take(&m) == 1);
 	}
 
+	/* S81 (report 380): the port's own records are not the guest's console.
+	 * On 42279051954 the [syslog] echo of a PAM line armed stage 1 because the
+	 * text contained "pam_unix(login:account)" — the instrument fed the
+	 * mechanism it measures. The sink now asks the framer first. */
+	{
+		struct uml_nt_feed_gate p;
+		const char *rec =
+			"[syslog] pid 7676 len=99 msg=\"<87>Jan 15 16:42:16 "
+			"login[93]: pam_unix(login:account): account root\"\n";
+
+		CHECK(uml_nt_feed_port_voice(rec, (unsigned)strlen(rec)) == 1);
+		uml_nt_feed_gate_reset(&p);
+		if (!uml_nt_feed_port_voice(rec, (unsigned)strlen(rec)))
+			uml_nt_feed_gate_scan(&p, rec, (unsigned)strlen(rec), 1);
+		CHECK(uml_nt_feed_gate_take(&p) == 0);	/* no arm from a record */
+
+		/* …and the same text without the framing is a prompt again */
+		CHECK(uml_nt_feed_port_voice("login: ", 7) == 0);
+		uml_nt_feed_gate_reset(&p);
+		uml_nt_feed_gate_scan(&p, "login: ", 7, 1);
+		CHECK(uml_nt_feed_gate_take(&p) == 1);
+
+		/* a fragment that merely starts with a bracket is not a record
+		 * (no newline, no closed tag): the shell prompt must still arm */
+		CHECK(uml_nt_feed_port_voice("[root@box ~]# ", 14) == 0);
+		CHECK(uml_nt_feed_port_voice("[partial", 8) == 0);
+		/* nor is a bare bracketed word with no record body */
+		CHECK(uml_nt_feed_port_voice("[ok]\n", 5) == 1);
+	}
+
 	if (fails) { printf("feedgate: %d failure(s)\n", fails); return 1; }
 	printf("feedgate: one line per prompt, in order, never for a log line\n");
 	return 0;
@@ -156,3 +186,7 @@ echo "s49: both the guest write and the tty door are named"
 grep -q "uml_nt_feed_gate_take(&uml_nt_console_gate)" "$C" || {
 	echo "FAIL: the console flush does not wait for a prompt"; exit 1; }
 echo "feedgate: the console flush waits for it"
+U="$HERE/../kernel/overlay/arch/um/os-Windows/util.c"
+grep -q "uml_nt_feed_port_voice(s, n)" "$U" || {
+	echo "FAIL: the console sink still scans the port's own records"; exit 1; }
+echo "feedgate: the port's own records never arm the feed"
