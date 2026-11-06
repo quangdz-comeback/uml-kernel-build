@@ -5121,9 +5121,9 @@ static void uml_nt_spin_scan(void)
 				 * obligation; equal numbers mean the stub is idle and
 				 * the kernel has nothing to send it. */
 				if (!uml_nt_sample_is_guest(o, rip)) {
-					os_info("[site] pid %lu conn %lu site=%llu req=%llu done=%llu trap_n=%u\n",
+					os_info("[site] pid %lu conn %lu site=%llu serve=%llu req=%llu done=%llu trap_n=%u\n",
 					(unsigned long)o->pid,
-					(unsigned long)o->pid, o->site,
+					(unsigned long)o->pid, o->site, o->serve_site,
 					(unsigned long long)o->d->req_seq,
 					(unsigned long long)o->d->done_seq,
 					o->loop_trap_n);
@@ -9559,6 +9559,12 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 {
 	struct uml_nt_stub_data *d = c->d;
 
+	/* S70: which branch of the serve is holding the task. Set at entry and
+	 * at each branch head; DONE at the exits — a task sampled in ENTER has
+	 * not reached a branch at all, one sampled in SYSCALL is in the syscall
+	 * path, and one in DONE is on the return path. */
+	c->serve_site = UML_NT_SERVE_ENTER;
+
 	/* M5.6a login-depth follow-up (Shelley 149 [resume-regs]): the
 	 * round's trap capture is the reference the answer's resume rsp
 	 * is judged against. Op rounds (PROT_DONE) publish a result
@@ -10071,6 +10077,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					   &c->plan.ops[c->plan_next]) < 0)
 				return -1;
 			c->plan_left--;
+			c->serve_site = UML_NT_SERVE_PLANDRAIN;
 			issue_plan_op(c, &c->plan.ops[c->plan_next]);
 			return 0;
 		}
@@ -10234,6 +10241,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		/* Stream the conn's initial per-VMA map plan; the probe
 		 * appends NOACCESS protects for the parent's guard
 		 * pages (the fault-probe seed). */
+		c->serve_site = UML_NT_SERVE_INITPROT;
 		if (uml_nt_mm_init_plan(c->mm, c->ph, &c->plan) < 0) {
 			os_info("[stubtest] INIT plan refused (pid %lu, "
 				"why=%c — 'z' = a VMA's run shows 0 refs: "
@@ -10456,6 +10464,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			else if (lz < 0)
 				rc = -1;
 			else
+				c->serve_site = UML_NT_SERVE_FAULT;
 				sg = uml_nt_stack_grow(c->mm, c->ph,
 						       d->fault_addr,
 						       d->regs.rsp, &c->plan);
@@ -10494,6 +10503,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				/* S27: ops queued but not yet sent are part of
 				 * the stream — the repair appends, never resets. */
 				c->plan.keep_tail = c->plan_left > 0;
+				c->serve_site = UML_NT_SERVE_FAULT;
 				rc = uml_nt_mm_fault(c->mm, c->ph,
 						     d->fault_addr,
 						     d->fault_type,
@@ -11101,6 +11111,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		c->plan_left = 0;
 	}
 	c->plan_has_retval = 0;
+	c->serve_site = UML_NT_SERVE_SYSCALL;
 	uml_nt_syscall_handle(c, d);
 	if (uml_nt_syscall_consume_exec()) {
 		/* execve succeeded INSIDE the handler: exec_mmap
@@ -12914,7 +12925,9 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 			}
 		}
 	}
+	c->serve_site = UML_NT_SERVE_ENTER;
 	rc = serve_conn(c);
+	c->serve_site = UML_NT_SERVE_DONE;
 	if (rc == 2)
 		return 2; /* exec: c/d are dead — no mb, no evt_out */
 	/* S57: an out-of-band sample. A conn that has stopped asking cannot be

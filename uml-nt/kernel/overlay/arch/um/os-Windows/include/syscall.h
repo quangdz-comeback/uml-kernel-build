@@ -129,6 +129,13 @@ struct uml_nt_stub_conn *uml_nt_conn_reg_at(int i);
 #define UML_NT_SITE_WAIT	1	/* parked in the turnstile */
 #define UML_NT_SITE_AFTER_WAIT	2	/* just woke from it */
 #define UML_NT_SITE_TRAP	3	/* about to serve a trap */
+/* S70: inside serve_conn — which branch holds the task. */
+#define UML_NT_SERVE_ENTER	1
+#define UML_NT_SERVE_SYSCALL	2
+#define UML_NT_SERVE_FAULT	3
+#define UML_NT_SERVE_INITPROT	4
+#define UML_NT_SERVE_PLANDRAIN	5
+#define UML_NT_SERVE_DONE	6
 
 struct uml_nt_stub_conn {
 	struct uml_nt_stub_data *d;
@@ -262,6 +269,7 @@ struct uml_nt_stub_conn {
 	unsigned req_stuck_rounds, req_dump_done;	/* S68: stuck request */
 	unsigned long long req_frozen_req;
 	unsigned long long site;	/* S69 */
+	unsigned long long serve_site;	/* S70 */
 	unsigned loop_trap_n;		/* S69 */
 	unsigned req_frozen_n, poke_done;	/* S68: active poke */
 	unsigned spin_hn, spin_hv[16], spin_hc[16];	/* S58: rip histogram */
