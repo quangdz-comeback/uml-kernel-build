@@ -11119,6 +11119,12 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	c->plan_has_retval = 0;
 	c->serve_site = UML_NT_SERVE_SYSCALL;
 	c->serve_nr = d->regs.rax;
+	/* S77: did the login conn actually read the line we delivered? */
+	if (d->regs.rax == 0 && c->feed_arm_n > 0 && c->read_fd_n < 8) {
+		c->read_fd_n++;
+		os_info("[read-fd] pid %d fd=%llu len=%llu\n", (int)c->pid,
+			d->args[0], d->args[2]);
+	}
 	/* S73: a login conn parking in a wait-for-input syscall is the prompt.
 	 * Arm one line — stage machine decides which — and say so. */
 	if (uml_nt_conn_is_login(c) || c->chain_login) {

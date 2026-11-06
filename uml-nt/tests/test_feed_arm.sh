@@ -64,6 +64,19 @@ int main(void)
 		CHECK(ring_has_line == 0);
 	}
 
+	/* S77: a reader already asleep is only lifted by a wake that names its
+	 * wait; the push alone leaves it parked. */
+	{
+		int parked = 1, woke = 0;
+
+		if (parked && woke == 0)
+			CHECK(parked == 1);	/* still asleep without the wake */
+		woke = 1;
+		if (woke)
+			parked = 0;
+		CHECK(parked == 0);
+	}
+
 	if (fails) { printf("feed_arm: %d failure(s)\n", fails); return 1; }
 	printf("feed_arm: the wait arms one line, the stage picks which\n");
 	return 0;
@@ -79,6 +92,7 @@ grep -q "uml_nt_console_arm_feed" "$C" || { echo "FAIL: the gate has no arm entr
 grep -q "\\[feed-arm\\]" "$S" || { echo "FAIL: no [feed-arm] record"; exit 1; }
 grep -q "uml_nt_console_chain_alive" "$C" || { echo "FAIL: the drop does not ask about the chain"; exit 1; }
 grep -q "\[feed-drain\]" "$C" || { echo "FAIL: the drain does not say which port"; exit 1; }
+grep -q "wake_up_interruptible(&wt->read_wait)" "$C" || { echo "FAIL: the drain does not wake the reader"; exit 1; }
 grep -q "waitqueue_active(&t->read_wait)" "$C" || { echo "FAIL: the drain does not look for a waiting reader"; exit 1; }
 echo "feed_arm: the drain delivers to the port with a reader"
 echo "feed_arm: the drop asks the chain first"

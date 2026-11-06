@@ -243,6 +243,16 @@ void uml_nt_console_flush(void)
 		if (total != 0) {
 			g_con_armed = 0;
 			tty_flip_buffer_push(&g_port[dport]);
+			/* S77: the reader parked BEFORE these bytes existed (ppoll is
+			 * already asleep), so the push alone does not lift it — the
+			 * wake has to name the wait it is on. */
+			{
+				struct tty_struct *wt =
+					READ_ONCE(g_port[dport].itty);
+
+				if (wt != NULL)
+					wake_up_interruptible(&wt->read_wait);
+			}
 			if (g_feed_deliver_n < 8) {
 				g_feed_deliver_n++;
 				os_info("[feed-drain] port=%d bytes=%u\n",
