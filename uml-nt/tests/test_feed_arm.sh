@@ -89,6 +89,21 @@ int main(void)
 		CHECK(parked == 0);
 	}
 
+	/* S79: the stage line does not live in the ring, so "the ring is
+	 * empty" must not mean "nothing to deliver". A reader is waiting and
+	 * the gate is armed: the flush has to run even with a dry ring. */
+	{
+		/* reader_waiting && (ring_pending || gate_armed), exactly as
+		 * uml_nt_console_pending() must decide it */
+#define PENDING(rw, rp, ga) ((rw) && ((rp) || (ga)))
+		CHECK(PENDING(1, 0, 1) == 1);	/* armed, ring dry: deliver */
+		CHECK(PENDING(1, 1, 0) == 1);	/* ring line: deliver */
+		CHECK(PENDING(1, 1, 1) == 1);
+		CHECK(PENDING(1, 0, 0) == 0);	/* nothing armed, nothing queued */
+		CHECK(PENDING(0, 1, 1) == 0);	/* no reader: nothing to do */
+#undef PENDING
+	}
+
 	if (fails) { printf("feed_arm: %d failure(s)\n", fails); return 1; }
 	printf("feed_arm: the wait arms one line, the stage picks which\n");
 	return 0;
@@ -97,6 +112,7 @@ EOF
 "$CC" -O1 -Wall -Wextra -Werror -I"$INC" -o "$TMP/t" "$TMP/t.c"
 "$TMP/t"
 S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c"
+SYS="$HERE/../kernel/overlay/arch/um/os-Windows/skas/syscall.c"
 
 C="$HERE/../kernel/overlay/arch/um/os-Windows/console.c"
 grep -q "uml_nt_console_arm_feed" "$S" || { echo "FAIL: the syscall path does not arm"; exit 1; }
@@ -108,6 +124,26 @@ grep -q "wake_up_interruptible(&wt->read_wait)" "$C" || { echo "FAIL: the drain 
 grep -q "\[feed-line\]" "$C" || { echo "FAIL: no stage-indexed line record"; exit 1; }
 grep -q "echo LOGIN-OK" "$C" || { echo "FAIL: the stage table has no LOGIN-OK line"; exit 1; }
 grep -q "waitqueue_active(&t->read_wait)" "$C" || { echo "FAIL: the drain does not look for a waiting reader"; exit 1; }
+
+# S79: three checks that were RED on 69cbaed — the run 42265037880 showed why.
+# (a) the stage line never enters the ring, so the pending predicate must ask the
+#     gate as well; (b) a delivery must be one [feed-drain] number whether the
+#     bytes came from the table or the ring (report 380: the refactor renamed the
+#     marker, and the checklist read "drain = 0" while five bytes were delivered);
+# (c) the syscall ring that names a conn's last calls was gated on the LOGIN
+#     binary, so the conn that actually received the feed (agetty, a CHAIN conn)
+#     went dark right after its fifth read.
+awk '/^int uml_nt_console_pending/,/^}/' "$C" | grep -q 'uml_nt_console_gate.armed' \
+	|| { echo "FAIL: pending() does not ask the gate (a dry ring hides a staged line)"; exit 1; }
+grep -q '\[feed-drain\] port=%d bytes=%u src=stage' "$C" \
+	|| { echo "FAIL: the stage path delivers without a [feed-drain] record"; exit 1; }
+grep -q '\[feed-drain\] port=%d bytes=%u src=ring' "$C" \
+	|| { echo "FAIL: the ring path delivers without a [feed-drain] record"; exit 1; }
+grep -q 'uml_nt_conn_is_login(c) || c->chain_login' "$SYS" \
+	|| { echo "FAIL: the syscall ring skips the chain conn that read the feed"; exit 1; }
 echo "feed_arm: the drain delivers to the port with a reader"
 echo "feed_arm: the drop asks the chain first"
 echo "feed_arm: the wait arms it"
+echo "feed_arm: a staged line is pending with a dry ring"
+echo "feed_arm: one [feed-drain] number for both sources"
+echo "feed_arm: the ring follows the chain, not only the login binary"

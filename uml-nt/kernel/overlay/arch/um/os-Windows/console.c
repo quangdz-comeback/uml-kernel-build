@@ -155,7 +155,8 @@ static struct console nt_cons = {
  * landing before late_initcall completes must not touch an uninit
  * port). */
 static struct uml_nt_con_ring g_con_ring;
-static int g_feed_deliver_n;	/* S76: [feed-drain] records */
+static int g_feed_deliver_n;	/* S76: [feed-drain] records (both sources) */
+static int g_feed_line_n;	/* S79: [feed-line] stage detail records */
 static int g_feed_dport = 1;	/* S78: which port this flush targets */
 static HANDLE g_con_wake;
 static int g_con_live;
@@ -191,8 +192,16 @@ static int console_reader_waiting(void)
 
 int uml_nt_console_pending(void)
 {
+	/* S79: the stage sentence does NOT live in the ring (69cbaed moved the
+	 * released line into a table indexed by stage), so "the ring is dry"
+	 * stopped meaning "there is nothing to deliver". It said exactly that
+	 * here, and this is the only call site signal.c uses to decide whether
+	 * to run the flush: an armed gate with an empty ring would wait for a
+	 * delivery that no door opens. The ring is one source, the armed gate is
+	 * the other; pending asks about both. */
 	return console_reader_waiting() &&
-	       uml_nt_con_ring_pending(&g_con_ring);
+	       (uml_nt_con_ring_pending(&g_con_ring) ||
+		uml_nt_console_gate.armed);
 }
 
 /* vCPU-side drain (D19): move at most one line from the ring into
@@ -260,6 +269,15 @@ void uml_nt_console_flush(void)
 			}
 			if (g_feed_deliver_n < 8) {
 				g_feed_deliver_n++;
+				/* S79: the checklist counts bytes DELIVERED, and it reads one
+				 * marker. 69cbaed delivered five bytes here and printed only
+				 * [feed-line], so the referee's "[feed-drain] = 0" was a rename,
+				 * not a broken drain (report 380). Both sources print this. */
+				os_info("[feed-drain] port=%d bytes=%u src=stage\n",
+					dport, sll);
+			}
+			if (g_feed_line_n < 8) {
+				g_feed_line_n++;
 				os_info("[feed-line] port=%d stage=%u bytes=%u data=\"%.8s\"\n",
 					dport, si, sll, sl);
 			}
@@ -298,7 +316,7 @@ void uml_nt_console_flush(void)
 			}
 			if (g_feed_deliver_n < 8) {
 				g_feed_deliver_n++;
-				os_info("[feed-drain] port=%d bytes=%u\n",
+				os_info("[feed-drain] port=%d bytes=%u src=ring\n",
 					g_feed_dport, total);
 			}
 		}

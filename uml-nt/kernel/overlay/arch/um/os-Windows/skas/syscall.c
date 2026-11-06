@@ -5018,7 +5018,15 @@ out:
 	/* S53: keep the last 200 syscalls of a login conn and print them in order
 	 * at a few checkpoints — the tail of the run is what says where login
 	 * stopped making progress. */
-	if (uml_nt_conn_is_login(c)) {
+	/* S79: and of the CHAIN conn that asks the console for input. The feed is
+	 * consumed by whoever is reading the tty, and on 69cbaed that reader was
+	 * agetty — a chain conn, not the login binary — so the ring the hunt
+	 * relies on was empty at exactly the moment that mattered: five reads,
+	 * then the conn died with no further record (run 42265037880). The ring
+	 * now follows the chain; the early checkpoints below stay login-only, and
+	 * a chain conn's rolling tail is budgeted (rule #23) so a shell cannot
+	 * flood the log. */
+	if (uml_nt_conn_is_login(c) || c->chain_login) {
 		unsigned slot = c->sc_ri;
 
 		c->sc_ring[slot].nr = nr;
@@ -5037,7 +5045,7 @@ out:
 		/* S55: after 32, four lines every two calls — the window that was
 		 * empty (33..63) is the one that matters. */
 		if (c->sc_total > 32 && c->sc_total <= 128 &&
-		    (c->sc_total & 1u) == 0) {
+		    (c->sc_total & 1u) == 0 && uml_nt_conn_is_login(c)) {
 			unsigned i, n = 4;
 			unsigned start = (c->sc_ri + 200 - n) % 200;
 
@@ -5075,7 +5083,10 @@ out:
 				c->sc_rounds_sys, c->sc_rounds_fault,
 				c->sc_rounds_other, c->sc_total);
 		}
-		if (c->sc_dumps < 8 &&
+		/* the whole-ring dumps stay login-only (a chain conn's 16/32/64/128
+		 * marks would print 240 lines for an agetty that is only walking
+		 * to its first prompt) */
+		if (c->sc_dumps < 8 && uml_nt_conn_is_login(c) &&
 		    (c->sc_total == 16 || c->sc_total == 32 ||
 		     c->sc_total == 64 || c->sc_total == 128)) {
 			unsigned i, n = c->sc_total < 200 ? c->sc_total : 200;
@@ -5102,9 +5113,13 @@ out:
 				"total=%u\n", (unsigned long)c->pid, nr, a[0],
 				(long long)ret, c->sc_total);
 		/* the rolling tail: the last eight calls, every eighth call */
-		if (c->sc_total > 128 && (c->sc_total & 7u) == 0) {
+		if (c->sc_total > 128 && (c->sc_total & 7u) == 0 &&
+		    (uml_nt_conn_is_login(c) || c->sc_tail_dumps < 32)) {
 			unsigned i, n = c->sc_total < 8 ? c->sc_total : 8;
 			unsigned start = (c->sc_ri + 200 - n) % 200;
+
+			if (!uml_nt_conn_is_login(c))
+				c->sc_tail_dumps++;
 
 			os_info("[sc-tail] pid %lu total=%u\n",
 				(unsigned long)c->pid, c->sc_total);

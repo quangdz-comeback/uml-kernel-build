@@ -261,6 +261,7 @@ struct uml_nt_stub_conn {
 	unsigned sc_ri;		/* next slot */
 	unsigned sc_total;	/* syscalls seen */
 	unsigned sc_dumps;
+	unsigned sc_tail_dumps;	/* S79: rolling-tail records (chain budget) */
 	/* S55: is the conn looping on faults, or simply not asking? */
 	unsigned sc_rounds_sys, sc_rounds_fault, sc_rounds_other;
 	unsigned sc_other_logged;
