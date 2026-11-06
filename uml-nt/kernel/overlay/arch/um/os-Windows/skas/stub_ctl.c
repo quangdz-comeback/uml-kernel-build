@@ -13382,9 +13382,6 @@ int uml_nt_pump_conn(struct uml_nt_stub_conn *c)
 						0x40000ull, &c->plan);
 
 			sg = r;
-			if (r == 2)
-				break;	/* S87: already covered — the reserve is
-					 * there; asking again cannot change it. */
 			if (r <= 0)
 				break;
 			c->d->grow_mapped++;

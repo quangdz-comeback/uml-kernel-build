@@ -2785,7 +2785,7 @@ static void test_commit_ahead_ownership(void)
 		unsigned long long run0 = mm.vma[0].run_off;
 
 		/* (a) the plan still holds the MAP this helper queued */
-		CHECK(ca_call(&mm, &ph, &plan) == 2 /* S87: already covered */);
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
 		CHECK(mock_alloc_calls == 1 && mock_free_calls == 0);
 		ca_plan_unchanged(&p1, &plan);
 		CHECK(mm.nvma == 1);
@@ -2794,7 +2794,7 @@ static void test_commit_ahead_ownership(void)
 
 		/* (b) the next answer: a drained plan */
 		memset(&plan, 0, sizeof(plan));
-		CHECK(ca_call(&mm, &ph, &plan) == 2 /* S87: already covered */);
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
 		CHECK(mock_alloc_calls == 1 && mock_free_calls == 0);
 		CHECK(plan.n_ops == 0);
 		CHECK(mm.nvma == 1);
@@ -2817,7 +2817,7 @@ static void test_commit_ahead_ownership(void)
 		p0 = plan;
 		v0 = mm.vma[0];
 		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
-		CHECK(ca_call(&mm, &ph, &plan) == 2 /* S87: already covered */);
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
 		CHECK(mock_alloc_calls == 0 && mock_free_calls == 0);
 		ca_plan_unchanged(&p0, &plan);
 		CHECK(mm.nvma == 1);
@@ -2860,7 +2860,7 @@ static void test_commit_ahead_ownership(void)
 		g0 = mm.guard[0];
 		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
 
-		CHECK(ca_call(&mm, &ph, &plan) == 2 /* S87: already covered */);
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
 		CHECK(mock_alloc_calls == 0 && mock_free_calls == 0);
 		ca_plan_unchanged(&p0, &plan);
 		CHECK(mm.nvma == 1);
@@ -2927,7 +2927,7 @@ static void test_commit_ahead_ownership(void)
 		p0 = plan;
 		v0 = mm.vma[0];
 		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
-		CHECK(ca_call(&mm, &ph, &plan) == 2 /* S87: already covered */);
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
 		CHECK(mock_alloc_calls == 0 && mock_free_calls == 0);
 		ca_plan_unchanged(&p0, &plan);
 		CHECK(mm.nvma == 1 && mm.vma[0].run_off == r);
@@ -2972,7 +2972,7 @@ static void test_commit_ahead_ownership(void)
 		p0 = plan;
 		mock_alloc_calls = mock_alloc_ok = mock_free_calls = 0;
 
-		CHECK(ca_call(&mm, &ph, &plan) == 2 /* S87: already covered */);
+		CHECK(ca_call(&mm, &ph, &plan) == 0);
 		CHECK(mock_alloc_calls == 0 && mock_free_calls == 0);
 		ca_plan_unchanged(&p0, &plan);
 		CHECK(mm.nvma == 1);

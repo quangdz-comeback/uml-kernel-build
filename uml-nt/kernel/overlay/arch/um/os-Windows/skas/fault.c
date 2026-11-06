@@ -279,10 +279,6 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 	mm->ca_limit = limit;
 	mm->ca_want = want;
 	mm->ca_n++;
-	/* S87: this rsp was already answered "already covered" — do not walk the
-	 * VMA table again, and do not let the round re-ask a settled question. */
-	if (!uml_nt_sg_ask_again(mm->ca_stop_rsp, rsp))
-		return 2;
 	if (rsp == 0 || committed == 0 || top == 0 || limit == 0)
 		return 0;
 	d = uml_nt_sg_commit_ahead(top, limit, rsp, committed,
@@ -315,16 +311,6 @@ int uml_nt_stack_commit_ahead(struct uml_nt_mm *mm, struct uml_nt_phys *ph,
 			mm->ca_inside_end = mm->vma[i].end;
 			mm->ca_inside_off = mm->vma[i].run_off +
 				(start - mm->vma[i].start);
-			/* S87: a VMA covering the WHOLE target means the reserve
-			 * is already there — answer it, remember the rsp, and
-			 * let the caller stop instead of spinning (report 386:
-			 * rsp == committed == 0x60800000, mapped=0, 12.7k times). */
-			if (uml_nt_sg_covers(mm->vma[i].start, mm->vma[i].end,
-					     start, UML_NT_SG_RUN)) {
-				mm->ca_covered = 1;
-				mm->ca_stop_rsp = rsp;
-				return 2;
-			}
 			return 0;
 		}
 	}
