@@ -5139,3 +5139,32 @@ out:
 	uml_nt_uacc_set_nr(uacc_prev_nr);
 	uml_nt_uacc_set_sink(&uacc_prev_sink);
 }
+
+/* S79: death dumps the tail. Run 42265037880 ended a console reader (pid 628,
+ * /sbin/agetty) five reads into the feed and the log said nothing about what
+ * the conn did next — the rolling [sc-tail] only speaks every eighth call, and
+ * the calls that follow the last dump are exactly the ones that matter. This
+ * is called from the mmctx teardown, so every chain/login conn's ring is
+ * printed once, in order, with the return value the kernel gave it. */
+void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
+{
+	unsigned i, n, start;
+
+	if (c == NULL || c->sc_total == 0)
+		return;
+	if (!uml_nt_conn_is_login(c) && !c->chain_login)
+		return;
+	n = c->sc_total < 8 ? c->sc_total : 8;
+	start = (c->sc_ri + 200 - n) % 200;
+	os_info("[sc-final] pid %lu total=%u last=%u (in order, at death)\n",
+		(unsigned long)c->pid, c->sc_total, n);
+	for (i = 0; i < n; i++) {
+		unsigned k = (start + i) % 200;
+
+		os_info("[sct] nr=%llu a0=0x%llx a1=0x%llx a2=0x%llx ret=%lld "
+			"rip=0x%llx\n",
+			c->sc_ring[k].nr, c->sc_ring[k].a0,
+			c->sc_ring[k].a1, c->sc_ring[k].a2,
+			(long long)c->sc_ring[k].ret, c->sc_ring[k].rip);
+	}
+}

@@ -891,6 +891,12 @@ void uml_nt_exec_path_set(const char *path);
 /* 1 when the conn's binary is the login class (basename "login"). */
 int uml_nt_conn_is_login(const struct uml_nt_stub_conn *c);
 
+/* S79: the last eight syscalls of a chain/login conn, printed when the
+ * conn dies. The rolling [sc-tail] fires every eighth call, so the call
+ * that ends the conn — the one that says why it ended — can fall between
+ * two dumps; death is the one moment the ring must always speak. */
+void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c);
+
 /* M5.6a [pivot-sample]: one sampling burst of the conn's RUNNING
  * stub thread - called by the pump right after the answer release.
  * Returns the number of samples taken. */

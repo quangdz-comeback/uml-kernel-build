@@ -187,6 +187,11 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * exit line is the churn curve's down-tick (and the imgwatch
 	 * verify still sees this conn's image intact). */
 	uml_nt_census("exit", (long long)id->pid);
+	/* S79: a chain/login conn's last eight syscalls, printed HERE — the
+	 * ring's rolling dump misses the calls that end the conn, and on
+	 * 42265037880 the console reader died five reads into the feed with
+	 * no record of what it did next. */
+	uml_nt_sc_dump_final(c);
 	/* D27: drop the deferred file regions' file references (the
 	 * touched-vs-file-run [lazyfile] line rides this path). */
 	uml_nt_lazy_drop(c);

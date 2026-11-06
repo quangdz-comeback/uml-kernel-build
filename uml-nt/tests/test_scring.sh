@@ -44,6 +44,18 @@ int main(void)
 	CHECK(seen[199] == 1000 + 449);
 	for (i = 1; i < n; i++)
 		CHECK(seen[i] == seen[i - 1] + 1);
+
+	/* S79: death speaks. The rolling tail fires every eighth call, so the
+	 * calls that END a conn can sit between two dumps — the final dump takes
+	 * the last eight whatever the total is, newest last. */
+	{
+		unsigned fn = total < 8 ? total : 8;
+		unsigned fstart = (ri + 200 - fn) % 200;
+
+		CHECK(fn == 8);
+		CHECK(ring[(fstart + fn - 1) % 200].nr == 1000 + 449);
+		CHECK(ring[fstart].nr == 1000 + 442);
+	}
 	if (fails) { printf("scring: %d failure(s)\n", fails); return 1; }
 	printf("scring: 200 slots, oldest first, the newest last\n");
 	return 0;
@@ -58,4 +70,13 @@ grep -q "\[sc-tail\]" "$S" || { echo "FAIL: no rolling tail"; exit 1; }
 grep -q "\[sc4\]" "$S" || { echo "FAIL: no four-line window after 32"; exit 1; }
 grep -q "\[sc-ev\]" "$S" || { echo "FAIL: thread events are not named"; exit 1; }
 grep -q "rounds sys=" "$S" || { echo "FAIL: no round census"; exit 1; }
+# S79: the ring follows the CHAIN (the conn that reads the console is agetty,
+# not the login binary) and it speaks at death, not only every eighth call.
+grep -q "uml_nt_conn_is_login(c) || c->chain_login" "$S" \
+	|| { echo "FAIL: the ring still stops at the login binary"; exit 1; }
+grep -q "void uml_nt_sc_dump_final" "$S" \
+	|| { echo "FAIL: no death dump for the tail"; exit 1; }
+M="$HERE/../kernel/overlay/arch/um/os-Windows/skas/mmctx.c"
+grep -q "uml_nt_sc_dump_final(c)" "$M" \
+	|| { echo "FAIL: the teardown does not dump the tail"; exit 1; }
 echo "scring: the kernel dumps it"
