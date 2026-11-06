@@ -118,5 +118,7 @@ grep -q "scanned=%u" "$S" || { echo "FAIL: the probe does not report how many it
 grep -q "needs-kernel-answer" "$S" || { echo "FAIL: no wait verdict (a)"; exit 1; }
 grep -q "stub-idle-kernel-silent" "$S" || { echo "FAIL: no wait verdict (b)"; exit 1; }
 grep -q "\[taskstate\]" "$S" || { echo "FAIL: no task state record"; exit 1; }
-grep -q "\[tstack\]" "$S" || { echo "FAIL: no full stack dump"; exit 1; }
+grep -q "\[kstack\]" "$S" || { echo "FAIL: no unwinder record"; exit 1; }
+grep -q "save_stack_trace_tsk" "$S" || { echo "FAIL: the unwinder is not the kernel's"; exit 1; }
+grep -q "\[tstack\]" "$S" && { echo "FAIL: the hand-scan is still there"; exit 1; }
 echo "spin_sampler: the kernel emits it"
