@@ -75,7 +75,7 @@ grep -q '\[syslog\] pid' "$S" \
 	|| { echo "FAIL: no [syslog] record — the payload still goes only to journald"; exit 1; }
 grep -q 'nr == 44 /\* sendto \*/' "$S" \
 	|| { echo "FAIL: the peek is not attached to sendto"; exit 1; }
-grep -q 'c->syslog_n < 4' "$S" \
+grep -q 'c->syslog_n < 32' "$S" \
 	|| { echo "FAIL: the peek is not budgeted per conn"; exit 1; }
 grep -q 'uml_nt_uacc_walk(c->mm, uml_boot.physmem_base, a\[1\]' "$S" \
 	|| { echo "FAIL: the payload is not read back through the D15 walker"; exit 1; }

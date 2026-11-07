@@ -4,7 +4,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K="$HERE/../kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c"
 grep -q '\[spin-grp\]' "$K" || { echo "FAIL: spins are not grouped"; exit 1; }
-grep -q 'samples=%lu (same site)' "$K" || { echo "FAIL: no sample count per site"; exit 1; }
+grep -q 'samples=%lu tid=%llu (same site)' "$K" || { echo "FAIL: no sample count per site"; exit 1; }
 grep -q '\[spin-stuck\]' "$K" || { echo "FAIL: no stuck classification"; exit 1; }
 # one line per site per window, not per sample
 n=$(grep -n '\[spin\] pid' "$K" | head -1 | cut -d: -f1)
