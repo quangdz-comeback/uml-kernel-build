@@ -3384,7 +3384,7 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 				is_sys_div_n++;
 				if (is_sys_div_budget > 0) {
 					is_sys_div_budget--;
-					os_info("[is-sys-div] rip=0x%llx "
+					fprintf(stderr, "[is-sys-div] rip=0x%llx "
 						"first=%02x%02x second=%02x%02x "
 						"(total %llu) — fault flow, "
 						"no fold\n",
