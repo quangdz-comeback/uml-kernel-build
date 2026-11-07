@@ -34,4 +34,17 @@ case "$(awk '/int uml_nt_fork_seed\(/{f=1} f{print} f&&/^}/{exit}' "$S")" in
 *"uml_nt_seed_group_check(parent, child, pv, cv, 1)"*) ;;
 *) echo "FAIL: fork_seed still does a whole-range check"; exit 1;; esac
 
-echo "seed_groups: eager seed checks and copies per contiguous run group"
+# S99: an unmaterialized SOURCE group is a hole, not corruption — it is skipped
+# (the child faults in zero, which is anonymous semantics), and only other whys
+# refuse. A 1.6 MB VMA with one 64 KiB hole must not cost a fork.
+case "$body" in
+*'first-run-unmaterialized'*) ;;
+*) echo "FAIL: holes are not distinguished from corruption"; exit 1;; esac
+case "$body" in
+*'skipped-unmaterialized'*) ;;
+*) echo "FAIL: skipped groups are not counted"; exit 1;; esac
+case "$body" in
+*'done += gl;'*'continue;'*) ;;
+*) echo "FAIL: a skipped group does not advance the walk"; exit 1;; esac
+
+echo "seed_groups: eager seed copies per group, skips unmaterialized holes"

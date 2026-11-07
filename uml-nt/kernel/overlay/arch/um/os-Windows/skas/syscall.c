@@ -5133,7 +5133,11 @@ out:
 		 * Only a failed open is an "open-miss". */
 		if (nr == 1 && a[0] == 2)
 			uml_nt_note_text(c, "[err-write]", a[1], a[2]);
-		else if (nr == 257 && (long long)d->regs.rax <= 0)
+		/* S99: the return value is `ret`, not d->regs.rax — rax still
+		 * holds the SYSCALL NUMBER at this point, so testing it kept the
+		 * six ENOENT openats of login 6336 silent while [err-write]
+		 * (which had no return test at all) spoke. */
+		else if (nr == 257 && (long long)ret < 0)
 			uml_nt_note_text(c, "[open-miss]", a[1], 64);
 	}
 	/* S53: keep the last 200 syscalls of a login conn and print them in order

@@ -12119,6 +12119,7 @@ static int uml_nt_seed_group_check(struct uml_nt_stub_conn *parent,
 	unsigned long long len = cv->end - cv->start;
 	unsigned long long done = 0;
 	unsigned long long run = UML_NT_PHYS_RUN_SIZE;
+	int seed_skipped = 0;
 
 	while (done < len) {
 		unsigned long long gl, so = pv->run_off + done,
@@ -12150,14 +12151,38 @@ static int uml_nt_seed_group_check(struct uml_nt_stub_conn *parent,
 		if (gl > len - done)
 			gl = len - done;
 		own_d = (int)(d_o >> UML_NT_PHYS_RUN_SHIFT);
-		if (uml_nt_phys_block_check(child->ph, (long long)d_o, gl) < 0 ||
-		    uml_nt_phys_block_check(parent->ph, (long long)so, gl) < 0) {
+		/* S99: a source group the parent NEVER materialized is not a
+		 * corruption — it is a page the parent never wrote. For a private
+		 * anonymous VMA the correct fork semantics is to leave it
+		 * unmaterialized: the child faults in a zero page when it touches
+		 * it, exactly as anonymous memory works. Refusing the whole 1.6 MB
+		 * VMA (referee e737ec6: vma 7, one 64 KiB hole at 0x13e0000) cost
+		 * a fork per refusal. File-backed VMAs never reach here — D28 lazy
+		 * clone owns them. A group broken for any OTHER reason still
+		 * refuses, with its own why. */
+		if (uml_nt_phys_block_check(parent->ph, (long long)so, gl) < 0) {
+			const char *why = uml_nt_phys_block_why(parent->ph,
+							(long long)so, gl);
+
+			if (!strcmp(why, "first-run-unmaterialized")) {
+				seed_skipped++;
+				done += gl;
+				continue;
+			}
 			if (log)
 				os_info("[fillguard] seed group @0x%llx len=%llu "
 					"refused (src:%s dst:%s)\n",
-					so, gl,
-					uml_nt_phys_block_why(parent->ph,
-							(long long)so, gl),
+					so, gl, why,
+					uml_nt_phys_block_why(child->ph,
+							(long long)d_o, gl));
+			(void)own_d;
+			return -ENOMEM;
+		}
+		if (uml_nt_phys_block_check(child->ph, (long long)d_o, gl) < 0) {
+			if (log)
+				os_info("[fillguard] seed group @0x%llx len=%llu "
+					"refused (src:%s dst:%s)\n",
+					so, gl, "ok",
 					uml_nt_phys_block_why(child->ph,
 							(long long)d_o, gl));
 			(void)own_d;
@@ -12168,6 +12193,9 @@ static int uml_nt_seed_group_check(struct uml_nt_stub_conn *parent,
 				   "seed-group");
 		done += gl;
 	}
+	if (seed_skipped && log)
+		os_info("[seed] skipped-unmaterialized n=%d (private-anon holes "
+			"fault in zero in the child)\n", seed_skipped);
 	return 0;
 }
 
