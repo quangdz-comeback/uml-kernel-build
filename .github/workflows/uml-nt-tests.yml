@@ -123,4 +123,4 @@ jobs:
             uml-nt/tests/test_syslog_peek.sh uml-nt/tests/test_flush_ctx.sh \
             uml-nt/launcher/bounded-run.sh uml-nt/tests/test_bounded_run.sh \
             uml-nt/tests/test_guestread.sh uml-nt/tests/test_exit_why.sh \
-            uml-nt/tests/symbolize_faults.sh \
+            uml-nt/tests/symbolize_faults.sh uml-nt/tests/log_shape.sh \

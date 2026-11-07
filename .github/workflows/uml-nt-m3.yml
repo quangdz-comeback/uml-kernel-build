@@ -8,9 +8,15 @@ name: uml-nt M3 kernel build (D5a cross)
 # round-trip (see the greps in the last job).
 
 on:
+  workflow_call:
   push:
     branches: ["uml-nt/**"]
   workflow_dispatch:
+    inputs:
+      debug_info:
+        description: "Build with DWARF (fault rips get file:line)"
+        type: string
+        default: "true"
 
 jobs:
   kernel:
@@ -56,6 +62,19 @@ jobs:
         run: |
           make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC="ccache clang" \
             LD=ld.lld uml_nt_defconfig
+          # S93: the referee's fault rips resolved to a function but "??:0" —
+          # no DWARF, so the field at +0xea78 cannot be named and the 383
+          # mistake (a rip read as "outside every image") was possible at all.
+          # Debug info costs build size, not boot behaviour; if it ever breaks a
+          # gate the input debug_info=false turns it back off, and the reason
+          # will be in the log rather than in a habit.
+          DEBUGINFO="${{ inputs.debug_info || 'true' }}"
+          if [ "$DEBUGINFO" != "false" ]; then
+            scripts/config --file build/.config -e DEBUG_INFO -e DEBUG_INFO_DWARF5
+            make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC="ccache clang" \
+              LD=ld.lld olddefconfig >/dev/null
+          fi
+          grep -q '^CONFIG_DEBUG_INFO=y' build/.config && echo "DWARF: on" || echo "DWARF: off"
 
       - name: Build vmlinux (clang+lld, ccache)
         run: |

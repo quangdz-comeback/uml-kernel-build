@@ -432,6 +432,12 @@ jobs:
       # against /bin/login and ld.so, never the kernel image at 0x60000000.
       # This step makes that mistake impossible: any "KERNEL NATIVE FAULT rip=X"
       # in systemd.log is resolved against the vmlinux this run just built.
+      - name: Shape of this run (one line, comparable across referees)
+        if: always()
+        shell: msys2 {0}
+        run: |
+          VMLINUX=build/vmlinux bash uml-nt/tests/log_shape.sh systemd.log | tee -a systemd.log
+
       - name: Symbolize fault rips against this run's vmlinux
         if: always()
         shell: msys2 {0}

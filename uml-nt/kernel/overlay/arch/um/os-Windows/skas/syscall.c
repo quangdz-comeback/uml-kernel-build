@@ -4107,6 +4107,21 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	struct uml_nt_mm *uacc_prev_mm;
 	struct uml_nt_uacc_sink uacc_prev_sink;
 	unsigned long long uacc_prev_nr;
+	/* S93: the handler is where all three faulting rips live, so its own
+	 * entry/exit must be visible. A stall that prints "in" and no "out" is a
+	 * handler that never returned — the 272-line shape (kernel silent after
+	 * tty0-enable, the "kernel owes an answer" question of 373) — and a
+	 * fault between the two says which syscall carried the bad index. */
+	static unsigned hdl_n;
+	int hdl_trace = 0;
+	unsigned hdl_tid = (unsigned)c->pid;
+
+	if (hdl_n < 8) {
+		hdl_trace = 1;
+		hdl_n++;
+		os_info("[hdl] in tid=%u pid=%d nr=%llu a0=0x%llx a1=0x%llx\n",
+			hdl_tid, (int)c->pid, nr, a[0], a[1]);
+	}
 
 	/* [deadwrite] leak guard (lead 115): the exit route arms the
 	 * destroy-path witness and do_exit never returns, so a fresh
@@ -5046,6 +5061,9 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			uml_nt_uacc_fixup_page);
 	}
 out:
+	if (hdl_trace)
+		os_info("[hdl] out tid=%u pid=%d nr=%llu ret=%lld\n",
+			hdl_tid, (int)c->pid, nr, (long long)d->regs.rax);
 	/* S53: keep the last 200 syscalls of a login conn and print them in order
 	 * at a few checkpoints — the tail of the run is what says where login
 	 * stopped making progress. */
