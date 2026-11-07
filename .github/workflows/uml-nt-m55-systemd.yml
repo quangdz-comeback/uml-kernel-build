@@ -145,6 +145,28 @@ jobs:
               echo "not present, skipped: $unit"
             fi
           done
+          # S426 minimal profile: keep systemd PID 1 and the console chain the
+          # gate measures (getty@tty0 -> agetty -> /bin/login). Mask the rest:
+          # 15-21 victims and the stall came from services, not from the engine.
+          MIN_MASK="systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service systemd-resolved.service systemd-timesyncd.service ssh.service ssh.socket sshd.service cron.service atd.service systemd-userdbd.service systemd-userdbd.socket systemd-homed.service systemd-machined.service ModemManager.service packagekit.service unattended-upgrades.service apt-daily.service apt-daily-upgrade.service man-db.service e2scrub_all.service"
+          MIN_N=0
+          for unit in $MIN_MASK; do
+            if [ -e "/mnt/m55a-rootfs/usr/lib/systemd/system/$unit" ] || [ -e "/mnt/m55a-rootfs/lib/systemd/system/$unit" ]; then
+              sudo ln -sf /dev/null "/mnt/m55a-rootfs/etc/systemd/system/$unit"
+              MIN_N=$((MIN_N + 1))
+            fi
+          done
+          sudo mkdir -p /mnt/m55a-rootfs/etc/systemd/journald.conf.d
+          printf "[Journal]\nForwardToConsole=yes\nTTYPath=/dev/console\nMaxLevelConsole=info\n" | sudo tee /mnt/m55a-rootfs/etc/systemd/journald.conf.d/uml-nt-console.conf >/dev/null
+          PROFILE_SHA=$(printf %s "$MIN_MASK" | sha256sum | cut -c1-12)
+          MISSED=""
+          for unit in $MIN_MASK; do
+            if [ -e "/mnt/m55a-rootfs/usr/lib/systemd/system/$unit" ] || [ -e "/mnt/m55a-rootfs/lib/systemd/system/$unit" ]; then
+              if [ "$(readlink -f "/mnt/m55a-rootfs/etc/systemd/system/$unit" 2>/dev/null)" != "/dev/null" ]; then MISSED="$MISSED $unit"; fi
+            fi
+          done
+          if [ -n "$MISSED" ]; then echo "[prep] profile=minimal unmasked:$MISSED" >&2; exit 1; fi
+          echo "[prep] profile=minimal units_masked=$MIN_N sha=$PROFILE_SHA"
           # M5.5b-1 (S423): pam_systemd is loaded through
           # @include common-session, and it asks io.systemd.UserDatabase for
           # the session record. This test image carries NO systemd-userdbd unit
