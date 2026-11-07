@@ -12264,9 +12264,16 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 				cv->end - cv->start) < 0) {
 			os_info("[fillguard] fork seed eager copy vma "
 				"%d: src=0x%llx dst=0x%llx len=%llu "
-				"leaves the block — seed refused\n",
+				"leaves the block — seed refused "
+				"(src:%s dst:%s)\n",
 				vi, pv->run_off, cv->run_off,
-				cv->end - cv->start);
+				cv->end - cv->start,
+				uml_nt_phys_block_why(parent->ph,
+					(long long)pv->run_off,
+					cv->end - cv->start),
+				uml_nt_phys_block_why(child->ph,
+					(long long)cv->run_off,
+					cv->end - cv->start));
 			uml_nt_fork_disarm();
 			return -ENOMEM;
 		}

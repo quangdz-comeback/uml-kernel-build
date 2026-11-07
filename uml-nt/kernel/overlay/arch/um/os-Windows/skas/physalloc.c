@@ -452,6 +452,41 @@ int uml_nt_phys_block_check(const struct uml_nt_phys *p, long long off,
 	return 0;
 }
 
+/* S97: WHY the block check failed. "leaves the block" has been printed 25
+ * times per run without saying whether the destination was outside the table,
+ * unmaterialized (refs==0), discontinuous, or past its span's length — and the
+ * three imply completely different fixes. */
+const char *uml_nt_phys_block_why(const struct uml_nt_phys *p, long long off,
+				  unsigned long long len)
+{
+	int first, last, own, k;
+
+	if (len == 0)
+		return "empty";
+	if (off < 0)
+		return "off-negative";
+	if ((unsigned long long)off > p->size)
+		return "beyond-table";
+	if (len > p->size - (unsigned long long)off)
+		return "past-table-end";
+	first = (int)(off >> UML_NT_PHYS_RUN_SHIFT);
+	last = (int)((off + len - 1) >> UML_NT_PHYS_RUN_SHIFT);
+	if (p->refs[first] == 0)
+		return "first-run-unmaterialized";
+	own = first - (int)p->span_back[first];
+	if (own < 0)
+		return "span-back-negative";
+	for (k = first; k <= last; k++) {
+		if (p->refs[k] == 0)
+			return "gap-run-unmaterialized";
+		if (p->span_back[k] != k - own)
+			return "span-discontinuous";
+	}
+	if (last - own >= (int)p->span_len[own])
+		return "past-span-length";
+	return "ok";
+}
+
 void uml_nt_phys_set_drop_owner(struct uml_nt_phys *p, const void *owner)
 {
 	p->drop_owner = owner;
