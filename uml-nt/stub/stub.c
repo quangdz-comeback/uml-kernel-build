@@ -114,6 +114,7 @@ static DWORD WINAPI exit_thread(LPVOID arg)
  * helper thread is still touching state produces an exception no handler can
  * see — the exit code becomes the exception code, which is exactly what the
  * harness reads. */
+static unsigned long long unowned_seq;
 static volatile LONG alive_watchdog, alive_census, alive_jobw, alive_vehwin;
 static unsigned long g_main_tid;
 
@@ -2191,13 +2192,33 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 		memcpy(&slot, (const void *)sva, 8);
 		memcpy(&above, (const void *)(sva + 8), 8);
 	}
-	n = snprintf(line, sizeof(line),
-		     "stub: UNOWNED exception %08lx rip=%llx rsp=%llx "
+	/* S114: how close the stub thread is to its own guard page, in bytes.
+	 * c00000fd is STACK_OVERFLOW; if slack is near zero the overflow is
+	 * the root and every garbage callee-saved register (r15=1 included)
+	 * is a symptom of it, not a separate corruption. */
+	{
+		MEMORY_BASIC_INFORMATION smb;
+		long long slack = -1;
+		unsigned long long sbase = 0, ssize = 0;
+
+		memset(&smb, 0, sizeof(smb));
+		if (VirtualQuery((void *)(uintptr_t)c->Rsp, &smb, sizeof(smb)) ==
+		    sizeof(smb)) {
+			sbase = (unsigned long long)(uintptr_t)smb.BaseAddress;
+			ssize = (unsigned long long)smb.RegionSize;
+			slack = (long long)((unsigned long long)c->Rsp - sbase);
+		}
+		n = snprintf(line, sizeof(line),
+		     "stub: UNOWNED exception %08lx seq=%llu tick=%llu "
+		     "rip=%llx rsp=%llx slack=%lld stackbase=%llx stacksize=%llx "
 		     "op=%llu addr=%llx fs_base=%llx last_cmd=%u — "
 		     "process dies; view [rsp-8]=%llx [rsp]=%llx "
 		     "region base=%p alloc=%p size=%llx prot=%lx type=%lx\n",
 		     (unsigned long)er->ExceptionCode,
+		     (unsigned long long)++unowned_seq,
+		     (unsigned long long)GetTickCount64(),
 		     (unsigned long long)c->Rip, (unsigned long long)c->Rsp,
+		     slack, sbase, ssize,
 		     er->NumberParameters > 0 ?
 			     (unsigned long long)er->ExceptionInformation[0] : 0,
 		     er->NumberParameters > 1 ?
@@ -2206,6 +2227,7 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 		     slot, above, mbi.BaseAddress, mbi.AllocationBase,
 		     (unsigned long long)mbi.RegionSize,
 		     (unsigned long)mbi.Protect, (unsigned long)mbi.Type);
+	}
 	n = snprintf(line + (n > 0 ? n : 0),
 		     sizeof(line) - (n > 0 ? n : 0),
 		     " guest_read_site=%ld", (long)guest_read_site);

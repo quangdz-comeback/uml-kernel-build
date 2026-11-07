@@ -3795,10 +3795,12 @@ static void uml_nt_resume_regs_record(struct uml_nt_stub_conn *c,
 		static unsigned long long last_pid;
 		static int r15_watch_budget = 64;
 		static unsigned long long r15_trans_n;
+		static unsigned long long r15_seq;
 		unsigned long long now15 = d->regs.r15;
 
 		if (last_pid != c->pid || last_r15 != now15) {
 			r15_trans_n++;
+			r15_seq++;
 			/* S113: 64 loud lines were spent on healthy transitions
 			 * (0x1000 -> 0x61080000 -> …) before the fatal one could
 			 * happen, so the cap never saw the event it was armed for.
@@ -3809,7 +3811,7 @@ static void uml_nt_resume_regs_record(struct uml_nt_stub_conn *c,
 				r15_watch_budget--;
 				os_info("[r15-watch] pid %lu old=0x%llx new=0x%llx "
 					"cmd=%d verbatim=%u pushed=%u nr=%llu "
-					"rip=0x%llx total=%llu\n",
+					"rip=0x%llx total=%llu seq=%llu\n",
 					(unsigned long)c->pid, last_r15, now15,
 					(int)c->plan.kill_why,
 					(unsigned)((d->xstate_flags &
@@ -3818,7 +3820,7 @@ static void uml_nt_resume_regs_record(struct uml_nt_stub_conn *c,
 					(unsigned long long)c->sc_ring[
 						(c->sc_ri + 199) % 200].nr,
 					(unsigned long long)d->regs.rip,
-					r15_trans_n);
+					r15_trans_n, r15_seq);
 			}
 			last_pid = c->pid;
 			last_r15 = now15;
@@ -5159,6 +5161,19 @@ static void uml_nt_spin_scan(void)
 					(unsigned long)o->pid, o->spin_n, rip, rsp,
 					rbp, uml_nt_sample_is_guest(o, rip),
 					o->exec_path);
+				/* S114: name the range. A host rip in the 0x7ff…
+				 * band is Windows' own modules (ntdll/kernel32 or
+				 * the stub's image); a guest rip is inside the
+				 * mapped image. Naming the exact module needs the
+				 * stub to publish its module bases — until then
+				 * say which side of the fence the sample is on. */
+				os_info("[spin-mod] pid %lu rip=0x%llx range=%s "
+					"guest=%d\n",
+					(unsigned long)o->pid, rip,
+					(rip >> 40) == 0x7ff ? "host-0x7ff" :
+					(uml_nt_sample_is_guest(o, rip) ?
+					 "guest-image" : "host-other"),
+					uml_nt_sample_is_guest(o, rip));
 				/* S64: a sample outside the guest says the conn is
 				 * waiting; the sequence numbers say ON WHAT. A request
 				 * published and not answered is a kernel-side
