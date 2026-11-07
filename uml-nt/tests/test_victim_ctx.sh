@@ -14,12 +14,14 @@ ln_vic=$(grep -n 'SIGSEGV victim' "$S" | head -1 | cut -d: -f1)
 [ "$ln_ctx" -lt "$ln_vic" ] || { echo "FAIL: context is not at the victim"; exit 1; }
 [ $((ln_vic - ln_ctx)) -lt 80 ] || { echo "FAIL: context drifted away from the victim"; exit 1; }
 
-blk=$(sed -n "$((ln_ctx - 70)),$((ln_vic + 30))p" "$S")
+blk=$(sed -n "$((ln_ctx - 90)),$((ln_vic + 30))p" "$S")
 case "$blk" in *'bytes@rip-8=%s'*) ;; *) echo "FAIL: rip bytes not shown"; exit 1;; esac
 case "$blk" in *'uml_nt_vma_find(c->mm'*) ;; *) echo "FAIL: rip VMA not resolved"; exit 1;; esac
 case "$blk" in *UML_NT_VMA_FILE*) ;; *) echo "FAIL: file flag not reported"; exit 1;; esac
 case "$blk" in *rsp+%d=0x%llx*) ;; *) echo "FAIL: stack qwords not printed"; exit 1;; esac
 case "$blk" in *'[rela-ctx]'*) ;; *) echo "FAIL: the RELA entry is not recorded"; exit 1;; esac
+case "$blk" in *'[reg-dump2]'*) ;; *) echo "FAIL: callee-saved regs are not dumped"; exit 1;; esac
+case "$blk" in *'r15=0x%llx'*) ;; *) echo "FAIL: r15 not printed"; exit 1;; esac
 case "$blk" in *'r_offset=0x%llx'*) ;; *) echo "FAIL: r_offset not printed"; exit 1;; esac
 case "$blk" in *uml_nt_uacc_walk*) echo "FAIL: drives the uaccess sink"; exit 1;; esac
 echo "victim_ctx: rip region, file flag, bytes, stack returns, RELA entry"

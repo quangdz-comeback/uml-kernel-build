@@ -10617,6 +10617,28 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								 "%02x ", pb[pi]);
 					} else
 						snprintf(ph, sizeof(ph), "(no map)");
+				/* S106: the whole register file at the victim. A
+				 * callee-saved register that reads 1 (r15=1 seen on
+				 * the dead victim, with a valid rcx=base+r_offset
+				 * on the three survivors) is the signature of a
+				 * round-trip clobber, and partial dumps cannot tell
+				 * a clobbered pair from a legitimately small value. */
+				os_info("[reg-dump] pid %lu "
+					"rax=0x%llx rbx=0x%llx rcx=0x%llx "
+					"rdx=0x%llx rsi=0x%llx rdi=0x%llx "
+					"rbp=0x%llx rsp=0x%llx\n",
+					(unsigned long)c->pid, d->regs.rax,
+					d->regs.rbx, d->regs.rcx, d->regs.rdx,
+					d->regs.rsi, d->regs.rdi, d->regs.rbp,
+					d->regs.rsp);
+				os_info("[reg-dump2] pid %lu "
+					"r8=0x%llx r9=0x%llx r10=0x%llx "
+					"r11=0x%llx r12=0x%llx r13=0x%llx "
+					"r14=0x%llx r15=0x%llx\n",
+					(unsigned long)c->pid, d->regs.r8,
+					d->regs.r9, d->regs.r10, d->regs.r11,
+					d->regs.r12, d->regs.r13,
+					d->regs.r14, d->regs.r15);
 				/* S105: the relocation loop of ld.so faulted on a
 				 * store to load_base + r_offset — so print the
 				 * entry it was processing. If r_offset here is
