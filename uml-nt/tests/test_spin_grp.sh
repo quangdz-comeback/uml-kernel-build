@@ -10,5 +10,5 @@ grep -q '\[spin-stuck\]' "$K" || { echo "FAIL: no stuck classification"; exit 1;
 n=$(grep -n '\[spin\] pid' "$K" | head -1 | cut -d: -f1)
 blk=$(sed -n "$((n - 25)),$((n + 5))p" "$K")
 case "$blk" in *'grp_rip != rip'*) ;; *) echo "FAIL: no collapse on (pid, rip)"; exit 1;; esac
-case "$blk" in *else*) ;; *) echo "FAIL: no suppression path"; exit 1;; esac
+case "$blk" in *'grp_n++'*) ;; *) echo "FAIL: no suppression path"; exit 1;; esac
 echo "spin_grp: samples collapse per (pid,rip) window, stuck sites flagged"
