@@ -23,6 +23,16 @@
  */
 #include <linux/kernel.h>
 #include <diag_record.h>
+
+/* S94: the heavy diagnostic blocks are fault sites, not mechanisms — the
+ * heapwalk fragscan, the capget witness and the abort capture each carve a
+ * huge frame out of the switch stack. One switch, OFF by default. */
+int uml_nt_heavy;		/* 0 by default; referee sets it if needed */
+
+static inline int uml_nt_heavy_on(void)
+{
+	return uml_nt_heavy != 0;
+}
 #include <linux/binfmts.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -2513,14 +2523,18 @@ static unsigned long long sys_clock_gettime(struct uml_nt_stub_conn *c,
 	long long nsecs;
 	unsigned long long buf[2];
 
-	if (a[0] != 0 /* CLOCK_REALTIME */ &&
-	    a[0] != 1 /* CLOCK_MONOTONIC */ &&
-	    a[0] != 7 /* CLOCK_BOOTTIME — == monotonic here: this guest
-		       * never suspends. systemd's now() asserts
-		       * clock_gettime == 0 (src/basic/time-util.c:54);
-		       * the EINVAL aborted PID 1 into the coredump-fork
-		       * spiral (run 36782313512). */)
+	/* S95: clockid 5 (CLOCK_MONOTONIC_RAW) returned -EINVAL and that is a
+	 * bug, not a policy: no clock in the Linux ABI may be unanswerable to a
+	 * guest that is only asking what time it is. Referee 42341779431 showed
+	 * login ask for it after the syslog sendto — one more thing that would
+	 * have made it give up. Answer every standard clockid; only the ones the
+	 * ABI does not define (>= 12) keep EINVAL. Realtime vs monotonic differ
+	 * only in what zero means, and this guest boots once and never suspends,
+	 * so one boot-clock serves them all — but it says which one it saw. */
+	if (a[0] >= 12)
 		return SC_RET(SC_EINVAL);
+	if (a[0] != 0 && a[0] != 1 && a[0] != 7 && !c->clock_odd_n)
+		c->clock_odd_n++;
 	if (a[1] == 0)
 		return SC_RET(SC_EFAULT);
 	nsecs = os_nsecs();
@@ -4104,11 +4118,31 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
  * the crash lands. They are hunt leftovers, not mechanisms: default OFF, one
  * switch, and the cheap witnesses ([hdl], [shape], [gwrite], [con-read],
  * [feed-*]) stay on because they have never faulted. */
-int uml_nt_heavy;		/* 0 by default; referee sets it if needed */
 
-static inline int uml_nt_heavy_on(void)
+/* S95: what a chain conn was actually trying to say. The 64-line ring showed
+ * login writing 34 bytes to fd 2 and then six ENOENT openats with the path
+ * living on the heap — the ring names the numbers, never the strings. Read them
+ * the safe way (VMA translate + physmem copy, the [abrt] block's pattern), not
+ * through the uaccess sink. */
+static void uml_nt_note_text(struct uml_nt_stub_conn *c, const char *tag,
+			     unsigned long long va, unsigned long len)
 {
-	return uml_nt_heavy != 0;
+	char buf[80];
+	long off;
+	unsigned long i, n;
+
+	if (c->mm == NULL || va == 0 || len == 0)
+		return;
+	n = len > sizeof(buf) - 1 ? sizeof(buf) - 1 : len;
+	off = uml_nt_vma_translate(c->mm, va, n);
+	if (off < 0)
+		return;
+	memcpy(buf, (char *)uml_boot.physmem_base + off, n);
+	for (i = 0; i < n; i++)
+		if (buf[i] < 0x20 || buf[i] > 0x7e)
+			buf[i] = '.';
+	buf[n] = 0;
+	os_info("%s len=%lu text=\"%s\"\n", tag, len, buf);
 }
 
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
@@ -5083,6 +5117,16 @@ out:
 	if (hdl_trace)
 		os_info("[hdl] out tid=%u pid=%d nr=%llu ret=%lld\n",
 			hdl_tid, (int)c->pid, nr, (long long)d->regs.rax);
+	/* S95: the strings behind the numbers, for a login/chain conn only.
+	 * login 6336 wrote 34 bytes to stderr and hit six ENOENT openats whose
+	 * paths sat on the heap — the ring showed the calls, not the reason. */
+	if ((c->chain_login || uml_nt_conn_is_login(c)) &&
+	    (long long)d->regs.rax <= 0) {
+		if (nr == 1 && a[0] == 2)
+			uml_nt_note_text(c, "[err-write]", a[1], a[2]);
+		else if (nr == 257)
+			uml_nt_note_text(c, "[open-miss]", a[1], 64);
+	}
 	/* S53: keep the last 200 syscalls of a login conn and print them in order
 	 * at a few checkpoints — the tail of the run is what says where login
 	 * stopped making progress. */
