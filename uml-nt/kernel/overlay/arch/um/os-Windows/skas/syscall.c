@@ -4235,35 +4235,32 @@ static void uml_nt_pam_mod_note(struct uml_nt_stub_conn *c,
 }
 
 
-/* S429: read guest-physical bytes only if the host page is really there.
- * A successful uml_nt_vma_translate() says the VMA covers the address; it says
- * nothing about whether the backing run was materialized. Reading
- * physmem_base + off regardless faulted at 0x10220020 (guest phys 0x220020) and
- * was misread as a raw guest dereference for a whole round. Returns 0 on a
- * complete read, -1 (nothing copied) otherwise. */
+/* S429/S431: read guest-physical bytes only if the ENGINE's own bookkeeping
+ * says the run is materialized.
+ *
+ * The first version asked the host API and broke the link:
+ * syscall.c is kernel side and this tree reaches NT only through the resolved
+ * ntabi table, never by direct import. That accident pointed at the better
+ * answer anyway: the phys table IS the source of truth. A run with refs>0 and
+ * a continuous span is committed by definition; anything else is a hole, and a
+ * hole is exactly what 0x10220020 was. No host call, no import, and faster.
+ *
+ * Returns 0 on a complete read, -1 (nothing copied) otherwise. */
 int uml_nt_phys_read_checked(struct uml_nt_stub_conn *c,
 			     unsigned long long off, void *dst,
 			     unsigned long long n)
 {
-	char *src;
-	MEMORY_BASIC_INFORMATION mbi;
-
-	(void)c;
-	if (uml_boot.physmem_base == NULL || n == 0)
+	if (c == NULL || c->ph == NULL || n == 0)
 		return -1;
-	if (off + n > uml_boot.physmem_size)
+	if (off + n > (unsigned long long)UML_NT_PHYS_MAX_RUNS *
+		      UML_NT_PHYS_RUN_SIZE)
 		return -1;
-	src = (char *)uml_boot.physmem_base + off;
-	if (VirtualQuery(src, &mbi, sizeof(mbi)) != sizeof(mbi) ||
-	    mbi.State != MEM_COMMIT ||
-	    (mbi.Protect & (PAGE_NOACCESS | 0x100)) ||
-	    (unsigned long long)(uintptr_t)src + n >
-		    (unsigned long long)(uintptr_t)mbi.BaseAddress +
-			    mbi.RegionSize)
+	if (uml_nt_phys_block_check(c->ph, (long long)off, n) < 0)
 		return -1;
-	memcpy(dst, src, n);
+	memcpy(dst, (char *)uml_boot.physmem_base + off, n);
 	return 0;
 }
+
 static void uml_nt_note_text(struct uml_nt_stub_conn *c, const char *tag,
 			     unsigned long long va, unsigned long len)
 {
