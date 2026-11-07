@@ -3785,6 +3785,36 @@ static void uml_nt_resume_regs_record(struct uml_nt_stub_conn *c,
 {
 	struct uml_nt_stub_data *d = c->d;
 	struct uml_nt_rres_rec *r;
+	/* S112: r15 canary. Every static road has been audited and cleared, so the
+	 * writer has to be caught in the act: sample the published cell at each
+	 * resume boundary and shout the moment it changes — with the transition,
+	 * the command that produced the answer, and the verbatim/pushed flags,
+	 * which is exactly the split the ranking asks for first. */
+	{
+		static unsigned long long last_r15;
+		static unsigned long long last_pid;
+		static int r15_watch_budget = 64;
+		unsigned long long now15 = d->regs.r15;
+
+		if (last_pid != c->pid || last_r15 != now15) {
+			if (r15_watch_budget > 0) {
+				r15_watch_budget--;
+				os_info("[r15-watch] pid %lu old=0x%llx new=0x%llx "
+					"cmd=%d verbatim=%u pushed=%u nr=%llu "
+					"rip=0x%llx\n",
+					(unsigned long)c->pid, last_r15, now15,
+					(int)c->plan.kill_why,
+					(unsigned)((d->xstate_flags &
+						   UML_STUB_XS_VERBATIM) != 0),
+					(unsigned)pushed,
+					(unsigned long long)c->sc_ring[
+						(c->sc_ri + 199) % 200].nr,
+					(unsigned long long)d->regs.rip);
+			}
+			last_pid = c->pid;
+			last_r15 = now15;
+		}
+	}
 	unsigned int verbatim =
 		(d->xstate_flags & UML_STUB_XS_VERBATIM) ? 1u : 0u;
 	int cls = UML_NT_RRES_UNCHANGED;
