@@ -81,7 +81,9 @@ grep -q 'uml_nt_uacc_walk(c->mm, uml_boot.physmem_base, a\[1\]' "$S" \
 	|| { echo "FAIL: the payload is not read back through the D15 walker"; exit 1; }
 grep -q 'unsigned syslog_n;' "$H" \
 	|| { echo "FAIL: no per-conn budget field"; exit 1; }
-grep -q 'sc_total < 16' "$S" \
-	|| { echo "FAIL: the death dump is still eight calls wide"; exit 1; }
+# S91: the window widened from 16 to 64 — sixteen filled up on the reader's
+# syslog dance and again on login's GetUserRecord → munmap teardown.
+grep -q 'sc_total < 64' "$S" \
+	|| { echo "FAIL: the death dump did not widen to 64 calls"; exit 1; }
 echo "syslog_peek: the chain's /dev/log message reaches the referee's log"
-echo "syslog_peek: the death dump is sixteen calls wide"
+echo "syslog_peek: the death dump is sixty-four calls wide"
