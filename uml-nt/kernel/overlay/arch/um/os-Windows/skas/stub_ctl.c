@@ -10617,6 +10617,33 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 								 "%02x ", pb[pi]);
 					} else
 						snprintf(ph, sizeof(ph), "(no map)");
+				/* S105: the relocation loop of ld.so faulted on a
+				 * store to load_base + r_offset — so print the
+				 * entry it was processing. If r_offset here is
+				 * garbage or zero, the RELA page was delivered
+				 * unread (the pre-register path, which lazy_run
+				 * never sees). */
+				{
+					unsigned long long rq[2] = {0, 0};
+					long ro = -1;
+
+					if (d->regs.rax != 0)
+						ro = uml_nt_vma_translate(c->mm,
+								d->regs.rax,
+								sizeof(rq));
+					if (ro >= 0)
+						memcpy(rq, (char *)uml_boot.
+						       physmem_base + ro,
+						       sizeof(rq));
+					os_info("[rela-ctx] pid %lu base=0x%llx "
+						"rax=0x%llx mapped=%d "
+						"r_offset=0x%llx r_info=0x%llx "
+						"rcx=0x%llx\n",
+						(unsigned long)c->pid,
+						d->regs.r15, d->regs.rax,
+						ro >= 0, rq[0], rq[1],
+						d->regs.rcx);
+				}
 					os_info("[victim-ctx] pid %lu rip=0x%llx "
 						"in_vma=%d file=%d prot=0x%x "
 						"va0=0x%llx off=0x%llx "
