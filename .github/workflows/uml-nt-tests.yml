@@ -72,9 +72,10 @@ jobs:
           bash uml-nt/tests/test_bounded_run.sh
           bash uml-nt/tests/test_guestread.sh
           bash uml-nt/tests/test_exit_why.sh
-          bash uml-nt/tests/test_heavy_off.sh uml-nt/tests/test_clock_ids.sh uml-nt/tests/test_heavy_noop.sh
-          bash uml-nt/tests/test_clock_ids.sh uml-nt/tests/test_heavy_noop.sh
-          bash uml-nt/tests/test_heavy_noop.sh
+          bash uml-nt/tests/test_heavy_off.sh uml-nt/tests/test_clock_ids.sh uml-nt/tests/test_heavy_noop.sh uml-nt/tests/test_seed_groups.sh
+          bash uml-nt/tests/test_clock_ids.sh uml-nt/tests/test_heavy_noop.sh uml-nt/tests/test_seed_groups.sh
+          bash uml-nt/tests/test_heavy_noop.sh uml-nt/tests/test_seed_groups.sh
+          bash uml-nt/tests/test_seed_groups.sh
           # M3.7 uaccess walker (D15) over the vma tree
           bash uml-nt/tests/test_uaccess.sh
           # M4.1 bench stats — the pure math the freestanding kernel
@@ -127,4 +128,4 @@ jobs:
             uml-nt/launcher/bounded-run.sh uml-nt/tests/test_bounded_run.sh \
             uml-nt/tests/test_guestread.sh uml-nt/tests/test_exit_why.sh \
             uml-nt/tests/symbolize_faults.sh uml-nt/tests/log_shape.sh \
-            uml-nt/tests/test_heavy_off.sh uml-nt/tests/test_clock_ids.sh uml-nt/tests/test_heavy_noop.sh \
+            uml-nt/tests/test_heavy_off.sh uml-nt/tests/test_clock_ids.sh uml-nt/tests/test_heavy_noop.sh uml-nt/tests/test_seed_groups.sh \

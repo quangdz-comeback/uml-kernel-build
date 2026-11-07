@@ -12101,6 +12101,76 @@ static int uml_nt_ca_margin(struct uml_nt_mm *mm, struct uml_nt_phys *ph)
 	return added;
 }
 
+
+/* S98: copy an eager fork-seed range in CONTIGUOUS RUN GROUPS.
+ *
+ * The parent's phys table is a patchwork: its runs were materialized by scattered
+ * 64 KiB COW copies, so a range contiguous in the VMA is discontinuous in the
+ * table (referee 42348970558: 14 of 14 refusals were "src:span-discontinuous
+ * dst:ok"). Checking the whole range as one block was the bug; the guard itself
+ * was right. Each group is checked with the same block_check, so a group that is
+ * genuinely broken still refuses — with the group's own size and offsets.
+ */
+static int uml_nt_seed_group_check(struct uml_nt_stub_conn *parent,
+				   struct uml_nt_stub_conn *child,
+				   const struct uml_nt_vma *pv,
+				   const struct uml_nt_vma *cv, int log)
+{
+	unsigned long long len = cv->end - cv->start;
+	unsigned long long done = 0;
+	unsigned long long run = UML_NT_PHYS_RUN_SIZE;
+
+	while (done < len) {
+		unsigned long long gl, so = pv->run_off + done,
+				   d_o = cv->run_off + done;
+		unsigned long long off_in = so & (run - 1);
+		int first = (int)(so >> UML_NT_PHYS_RUN_SHIFT);
+		int own_s = first - (int)parent->ph->span_back[first];
+		int own_d, k, n;
+
+		gl = run - off_in;
+		if (gl > len - done)
+			gl = len - done;
+		/* extend while BOTH ends stay in the same span, run by run */
+		n = 1;
+		while (done + (unsigned long long)n * run - off_in < len) {
+			k = first + n;
+			if (k >= (int)UML_NT_PHYS_MAX_RUNS)
+				break;
+			if (parent->ph->refs[k] == 0 ||
+			    parent->ph->span_back[k] !=
+			    (unsigned short)(k - own_s))
+				break;
+			if ((d_o + (unsigned long long)n * run) >=
+			    UML_NT_PHYS_RUN_SIZE * UML_NT_PHYS_MAX_RUNS)
+				break;
+			n++;
+		}
+		gl = (unsigned long long)n * run - off_in;
+		if (gl > len - done)
+			gl = len - done;
+		own_d = (int)(d_o >> UML_NT_PHYS_RUN_SHIFT);
+		if (uml_nt_phys_block_check(child->ph, (long long)d_o, gl) < 0 ||
+		    uml_nt_phys_block_check(parent->ph, (long long)so, gl) < 0) {
+			if (log)
+				os_info("[fillguard] seed group @0x%llx len=%llu "
+					"refused (src:%s dst:%s)\n",
+					so, gl,
+					uml_nt_phys_block_why(parent->ph,
+							(long long)so, gl),
+					uml_nt_phys_block_why(child->ph,
+							(long long)d_o, gl));
+			(void)own_d;
+			return -ENOMEM;
+		}
+		uml_nt_copy_verify(uml_boot.physmem_base + d_o,
+				   uml_boot.physmem_base + so, gl,
+				   "seed-group");
+		done += gl;
+	}
+	return 0;
+}
+
 int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 {
 	unsigned long long seed_rsp;
@@ -12256,24 +12326,26 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		/* WRITER-HUNT (M5.6a): same direct-write tripwire as
 		 * the POC fork hook — either end leaving its block
 		 * fails the seed loud, no write. */
-		if (uml_nt_phys_block_check(child->ph,
-				(long long)cv->run_off,
-				cv->end - cv->start) < 0 ||
-		    uml_nt_phys_block_check(parent->ph,
-				(long long)pv->run_off,
-				cv->end - cv->start) < 0) {
-			os_info("[fillguard] fork seed eager copy vma "
-				"%d: src=0x%llx dst=0x%llx len=%llu "
-				"leaves the block — seed refused "
-				"(src:%s dst:%s)\n",
+		/* S98: the parent's span is a PATCHWORK by construction — its
+		 * runs were materialized one 64 KiB COW copy at a time
+		 * ("arm cowcopy src=… dst=0x4ab0000", "dst=0x4510000", …), so a
+		 * four-run range is contiguous in the VMA and discontinuous in
+		 * the table. Checking the whole range as one block therefore
+		 * refused 14 of 14 seeds on referee 42348970558 — with
+		 * "src:span-discontinuous dst:ok" every single time — and every
+		 * refusal was a fork systemd never got.
+		 *
+		 * The guard is not what was wrong; the granularity was. Check
+		 * and copy per CONTIGUOUS RUN GROUP: each group is checked with
+		 * the same block_check, so a group that is itself broken still
+		 * refuses, and only a group boundary ends the copy. */
+		if (uml_nt_seed_group_check(parent, child, pv, cv, 1) < 0) {
+			/* the failing group printed its own offsets and why */
+			os_info("[fillguard] fork seed eager copy vma %d: "
+				"src=0x%llx dst=0x%llx len=%llu — seed "
+				"refused (group refused above)\n",
 				vi, pv->run_off, cv->run_off,
-				cv->end - cv->start,
-				uml_nt_phys_block_why(parent->ph,
-					(long long)pv->run_off,
-					cv->end - cv->start),
-				uml_nt_phys_block_why(child->ph,
-					(long long)cv->run_off,
-					cv->end - cv->start));
+				cv->end - cv->start);
 			uml_nt_fork_disarm();
 			return -ENOMEM;
 		}
@@ -12281,7 +12353,7 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 		 * guest content — capture both ends' gens at the
 		 * translate, gen-only compare at the write (the child
 		 * table was cloned this round; the dst run is born
-		 * here). */
+		 * here). The bytes were copied by the group loop. */
 		{
 			unsigned long long egs = (unsigned long long)
 				uml_nt_phys_gen(parent->ph,
@@ -12290,10 +12362,6 @@ int uml_nt_fork_seed(struct uml_nt_stub_conn *child)
 				uml_nt_phys_gen(parent->ph,
 						(long long)cv->run_off);
 
-			uml_nt_copy_verify(uml_boot.physmem_base +
-					   cv->run_off,
-				   uml_boot.physmem_base + pv->run_off,
-				   cv->end - cv->start, "seed-eager");
 			uml_nt_flatwr_check(parent,
 				UML_NT_FLATWR_SITE_FORK_EAGER, 0,
 				cv->end - cv->start, pv->run_off, egs,
