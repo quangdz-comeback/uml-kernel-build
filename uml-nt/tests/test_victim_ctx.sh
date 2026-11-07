@@ -10,9 +10,11 @@ ln_ret=$(grep -n '\[wild-ret\]' "$S" | head -1 | cut -d: -f1)
 ln_vic=$(grep -n 'SIGSEGV victim' "$S" | head -1 | cut -d: -f1)
 [ -n "$ln_ctx" ] || { echo "FAIL: no victim context"; exit 1; }
 [ -n "$ln_ret" ] || { echo "FAIL: no return-address witness"; exit 1; }
-[ "$ln_ctx" -gt "$ln_vic" ] || { echo "FAIL: context is not at the victim"; exit 1; }
+# the context sits immediately before the victim line it explains
+[ "$ln_ctx" -lt "$ln_vic" ] || { echo "FAIL: context is not at the victim"; exit 1; }
+[ $((ln_vic - ln_ctx)) -lt 80 ] || { echo "FAIL: context drifted away from the victim"; exit 1; }
 
-blk=$(sed -n "${ln_vic},$((ln_ret + 20))p" "$S")
+blk=$(sed -n "$((ln_ctx - 5)),$((ln_vic + 30))p" "$S")
 case "$blk" in *'bytes@rip-8=%s'*) ;; *) echo "FAIL: rip bytes not shown"; exit 1;; esac
 case "$blk" in *'uml_nt_vma_find(c->mm'*) ;; *) echo "FAIL: rip VMA not resolved"; exit 1;; esac
 case "$blk" in *UML_NT_VMA_FILE*) ;; *) echo "FAIL: file flag not reported"; exit 1;; esac
