@@ -10587,6 +10587,71 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				 * callee-saved + last-syscall below
 				 * (each line < 255). */
 				sigsegv_victims++;
+				/* S103: WHERE the rip landed. insn=zeros does not
+				 * mean the text page is zero — it means the rip
+				 * fell into a region that holds zeros (padding,
+				 * .bss). Distinguish: bytes of the real .text at
+				 * rip-8, the VMA that owns the rip, and whether
+				 * that VMA is file-backed. */
+				{
+					struct uml_nt_vma *vv =
+						uml_nt_vma_find(c->mm,
+								d->regs.rip);
+					unsigned char pb[17];
+					char ph[52];
+					long po = -1;
+					int pi;
+
+					memset(pb, 0, sizeof(pb));
+					if (vv != NULL && d->regs.rip >= 8)
+						po = uml_nt_vma_translate(c->mm,
+								d->regs.rip - 8,
+								sizeof(pb) - 1);
+					if (po >= 0) {
+						memcpy(pb, (char *)uml_boot.
+						       physmem_base + po,
+						       sizeof(pb) - 1);
+						for (pi = 0; pi < 16; pi++)
+							snprintf(ph + pi * 3,
+								 sizeof(ph) - pi * 3,
+								 "%02x ", pb[pi]);
+					} else
+						snprintf(ph, sizeof(ph), "(no map)");
+					os_info("[victim-ctx] pid %lu rip=0x%llx "
+						"in_vma=%d file=%d prot=0x%x "
+						"va0=0x%llx off=0x%llx "
+						"bytes@rip-8=%s\n",
+						(unsigned long)c->pid,
+						d->regs.rip, vv != NULL,
+						vv ? (int)((vv->flags &
+							UML_NT_VMA_FILE) != 0) : -1,
+						vv ? (unsigned)vv->prot : 0u,
+						vv ? vv->start : 0ull,
+						vv ? (unsigned long long)
+						     vv->run_off : 0ull, ph);
+					/* S103: the way home — the return
+					 * addresses sitting on this stack, so a
+					 * wild jump names its caller. */
+					{
+						unsigned long long sq[4];
+						long so = uml_nt_vma_translate(
+							c->mm, d->regs.rsp,
+							sizeof(sq));
+						int si;
+
+						if (so >= 0) {
+							memcpy(sq, (char *)
+							       uml_boot.
+							       physmem_base + so,
+							       sizeof(sq));
+							for (si = 0; si < 4; si++)
+								os_info("[wild-ret] pid %lu rsp+%d=0x%llx\n",
+									(unsigned long)c->pid,
+									si * 8, sq[si]);
+						}
+					}
+				}
+				sigsegv_victims++;
 				os_info("[stubtest] SIGSEGV victim #%d "
 					"pid %lu addr=0x%llx type=%u "
 					"rip=0x%llx why=%c fs=0x%llx "
