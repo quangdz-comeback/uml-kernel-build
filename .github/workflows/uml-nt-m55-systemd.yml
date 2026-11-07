@@ -167,6 +167,32 @@ jobs:
           done
           if [ -n "$MISSED" ]; then echo "[prep] profile=minimal unmasked:$MISSED" >&2; exit 1; fi
           echo "[prep] profile=minimal units_masked=$MIN_N sha=$PROFILE_SHA"
+          # S430: removing pam_systemd was not enough. /etc/nsswitch.conf in
+          # this image says "passwd: files systemd", so login's getpwnam("root")
+          # goes through libnss_systemd -> userdb -> no daemon -> retry, and
+          # agetty respawns it 26 times. Referees 42390998226 measured exactly
+          # that: GetUserRecord=1 with pam_systemd already commented out.
+          # Strip the systemd source from the account databases in the TEST image
+          # (files stays; this is a local-account test image), declare it, and
+          # fail if it survives.
+          NSS_F=/mnt/m55a-rootfs/etc/nsswitch.conf
+          if [ -f "$NSS_F" ]; then
+            sudo sed -i -e 's/^\(passwd:[[:space:]]*files\)[[:space:]].*systemd.*/\1 # [uml-nt test image] userdb has no daemon here/' \
+                          -e 's/^\(group:[[:space:]]*files\)[[:space:]].*systemd.*/\1 # [uml-nt test image] userdb has no daemon here/' \
+                          -e 's/^\(shadow:[[:space:]]*files\)[[:space:]].*systemd.*/\1 # [uml-nt test image] userdb has no daemon here/' \
+                          -e 's/^\(gshadow:[[:space:]]*files\)[[:space:]].*systemd.*/\1 # [uml-nt test image] userdb has no daemon here/' \
+                          "$NSS_F"
+            NSS_SHA=$(grep -E '^(passwd|group|shadow|gshadow):' "$NSS_F" | sha256sum | cut -c1-12)
+            if grep -qE '^(passwd|group|shadow|gshadow):.*systemd' "$NSS_F"; then
+              echo "[prep] nss_systemd=present sha=$NSS_SHA" >&2
+              echo "nsswitch still routes accounts through userdb — refusing to publish" >&2
+              exit 1
+            fi
+            echo "[prep] nss_systemd=removed sha=$NSS_SHA"
+            grep -E '^(passwd|group|shadow|gshadow):' "$NSS_F" || true
+          else
+            echo "[prep] nss_systemd=no-nsswitch"
+          fi
           # M5.5b-1 (S423): pam_systemd is loaded through
           # @include common-session, and it asks io.systemd.UserDatabase for
           # the session record. This test image carries NO systemd-userdbd unit
