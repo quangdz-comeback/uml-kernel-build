@@ -425,6 +425,29 @@ jobs:
           # must pass in TWO CONSECUTIVE runs before the milestone
           # closes — re-dispatch and confirm, tracked in STATUS.
 
+      # S92 (report 392): every future fault names its own function. Three
+      # referees faulted at rips that all live inside uml_nt_syscall_handle, and
+      # nobody could see that until a human symbolized them by hand against the
+      # CI vmlinux — 383 read "outside every image" because it only compared
+      # against /bin/login and ld.so, never the kernel image at 0x60000000.
+      # This step makes that mistake impossible: any "KERNEL NATIVE FAULT rip=X"
+      # in systemd.log is resolved against the vmlinux this run just built.
+      - name: Symbolize fault rips against this run's vmlinux
+        if: always()
+        shell: msys2 {0}
+        run: |
+          set +e
+          VL=build/vmlinux
+          [ -f "$VL" ] || { echo "FAULT-SYM: no vmlinux to symbolize with"; exit 0; }
+          rips=$(grep -oE 'KERNEL NATIVE FAULT[^\n]*rip=[0-9a-fA-F]+' systemd.log 2>/dev/null |
+                 grep -oE 'rip=[0-9a-fA-F]+' | cut -d= -f2 | sort -u)
+          if [ -z "$rips" ]; then echo "FAULT-SYM: no native fault in this run"; exit 0; fi
+          for r in $rips; do
+            v="0x$r"
+            line=$(llvm-addr2line -f -e "$VL" "$v" 2>/dev/null | tr '\n' ' ')
+            echo "FAULT-SYM rip=$v $line"
+          done
+
       - name: Windows error events (faulting module + offset)
         if: always()
         shell: powershell
