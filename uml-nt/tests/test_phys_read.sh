@@ -15,8 +15,9 @@ case "$blk" in *uml_nt_phys_block_check*) ;; *) echo "FAIL: no engine-side commi
 case "$blk" in *memcpy\(dst*) ;; *) echo "FAIL: no copy path"; exit 1;; esac
 chk=$(printf '%s\n' "$blk" | grep -n 'uml_nt_phys_block_check' | head -1 | cut -d: -f1)
 cpy=$(printf '%s\n' "$blk" | grep -n 'memcpy(dst' | head -1 | cut -d: -f1)
-[ -n "$chk" ] && [ -n "$cpy" ] && [ "$chk" -lt "$cpy" ] \
-	|| { echo "FAIL: copies before validating"; exit 1; }
+if [ -z "$chk" ] || [ -z "$cpy" ] || [ "$chk" -ge "$cpy" ]; then
+	echo "FAIL: copies before validating"; exit 1
+fi
 grep -q 'UNAVAILABLE(reason=phys-unmapped)' "$S" \
 	|| { echo "FAIL: no provenance on an unmapped run"; exit 1; }
 echo "phys_read: engine bookkeeping gates the read, no host API"
