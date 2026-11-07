@@ -5167,13 +5167,37 @@ static void uml_nt_spin_scan(void)
 				 * mapped image. Naming the exact module needs the
 				 * stub to publish its module bases — until then
 				 * say which side of the fence the sample is on. */
-				os_info("[spin-mod] pid %lu rip=0x%llx range=%s "
-					"guest=%d\n",
-					(unsigned long)o->pid, rip,
-					(rip >> 40) == 0x7ff ? "host-0x7ff" :
-					(uml_nt_sample_is_guest(o, rip) ?
-					 "guest-image" : "host-other"),
-					uml_nt_sample_is_guest(o, rip));
+				{
+					/* S115: name the module from the stub's own
+					 * published map; fall back to the band. */
+					const char *nm = NULL;
+					unsigned long long off = 0;
+					int mi;
+
+					for (mi = 0; mi < 2; mi++) {
+						unsigned long long b =
+							o->d != NULL ?
+							o->d->mod_base[mi] : 0;
+						unsigned long long sz =
+							o->d != NULL ?
+							o->d->mod_size[mi] : 0;
+
+						if (b && rip >= b && rip < b + sz) {
+							nm = mi == 0 ? "stub.exe" :
+								"ntdll.dll";
+							off = rip - b;
+							break;
+						}
+					}
+					os_info("[spin-mod] pid %lu rip=0x%llx "
+						"mod=%s +0x%llx range=%s guest=%d\n",
+						(unsigned long)o->pid, rip,
+						nm ? nm : "unknown", off,
+						(rip >> 40) == 0x7ff ? "host-0x7ff" :
+						(uml_nt_sample_is_guest(o, rip) ?
+						 "guest-image" : "host-other"),
+						uml_nt_sample_is_guest(o, rip));
+				}
 				/* S64: a sample outside the guest says the conn is
 				 * waiting; the sequence numbers say ON WHAT. A request
 				 * published and not answered is a kernel-side

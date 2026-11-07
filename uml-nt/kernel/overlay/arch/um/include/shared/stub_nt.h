@@ -821,6 +821,13 @@ struct uml_nt_stub_data {
 	unsigned int exc_prot[UML_NT_EXC_PAGES];
 	unsigned int exc_committed;
 	unsigned int exc_sampled;
+	/* S115: the stub's own module map, published once at init so the kernel
+	 * can NAME a host rip instead of guessing its band. Windows module bases
+	 * are ASLR-chosen per process, so only the stub can report them; the
+	 * kernel only reads. */
+	unsigned long long mod_base[2];	/* 0 = stub.exe, 1 = ntdll.dll */
+	unsigned long long mod_size[2];
+	unsigned long long mod_seq;
 };
 
 /*

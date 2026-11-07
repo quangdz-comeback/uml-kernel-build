@@ -48,6 +48,7 @@
  * only the kernel ELF free of that).
  */
 #include <windows.h>
+#include <psapi.h>
 #include <tlhelp32.h>
 
 /* Shelley 282: the thread-lifecycle prints are off; the call sites stay. */
@@ -115,6 +116,37 @@ static DWORD WINAPI exit_thread(LPVOID arg)
  * see — the exit code becomes the exception code, which is exactly what the
  * harness reads. */
 static unsigned long long unowned_seq;
+
+/* S115: publish this process's module map once. Windows picks module bases per
+ * process, so a host rip can only be named from inside the stub. Called from the
+ * init path, never from the hot dispatch loop. */
+static void publish_module_map(struct uml_nt_stub_data *d)
+{
+	HMODULE h;
+	MODULEINFO mi;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		memset(&mi, 0, sizeof(mi));
+		h = NULL;
+		if (i == 0) {
+			if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+						GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+						(LPCSTR)(uintptr_t)&publish_module_map, &h))
+				h = NULL;
+		} else {
+			h = GetModuleHandleA("ntdll.dll");
+		}
+		if (h != NULL &&
+		    GetModuleInformation(GetCurrentProcess(), h, &mi, sizeof(mi))) {
+			d->mod_base[i] = (unsigned long long)(uintptr_t)mi.lpBaseOfDll;
+			d->mod_size[i] = (unsigned long long)mi.SizeOfImage;
+		}
+	}
+	MemoryBarrier();
+	d->mod_seq++;
+}
+
 static volatile LONG alive_watchdog, alive_census, alive_jobw, alive_vehwin;
 static unsigned long g_main_tid;
 
@@ -3957,6 +3989,10 @@ int main(int argc, char **argv)
 		exit_begin("bad-handshake", 111);
 		ExitProcess(111);
 	}
+
+	/* S115: publish the module map once, here, so the kernel can NAME a host
+	 * rip instead of guessing its band. Not in the dispatch loop. */
+	publish_module_map(d);
 
 	SetUnhandledExceptionFilter(unhandled_filter);
 	/* Shelley 211: the CRT can leave this world without an exception the

@@ -15,7 +15,7 @@ stub.exe: stub.c $(KERNELDIR)/include/shared/stub_nt.h \
 	   $(KERNELDIR)/include/shared/diag_record.h \
 	   $(KERNELDIR)/include/shared/hop_live.h \
 	   $(KERNELDIR)/include/shared/hop_live_asm.h
-	$(MINGW_CC) $(CFLAGS) -o $@ stub.c -lntdll
+	$(MINGW_CC) $(CFLAGS) -o $@ stub.c -lntdll -lpsapi
 
 clean:
 	rm -f stub.exe
