@@ -12902,6 +12902,8 @@ static int dbg_want(const struct uml_nt_stub_conn *c)
 	return want;
 }
 
+static int init_r15_budget = 32;
+
 int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 		      unsigned long long stack_va,
 		      const struct uml_nt_gp_regs *init)
@@ -12957,6 +12959,22 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	d->entry_va = entry_va;
 	d->stack_va = stack_va;
 	d->init_regs = *init;
+	/* S110: what the guest is actually born with. The trampoline loads
+	 * r15 from init_regs (stub.c: movq 120(%rcx), %r15), and a fork child
+	 * inherits *g wholesale — so an r15 of 1 seeded here reaches the
+	 * guest's first instruction, and ld.so's relocation loop (where r15
+	 * is the load base) then computes base + r_offset with base = 1. The
+	 * dead victims read exactly that. Print the seed once per spawn,
+	 * before the thread is resumed. */
+	if (init_r15_budget > 0) {
+		init_r15_budget--;
+		os_info("[init-r15] pid %lu kind=%s r15=0x%llx r14=0x%llx "
+			"r10=0x%llx rbx=0x%llx r12=0x%llx r13=0x%llx\n",
+			(unsigned long)c->pid,
+			c->task_backed ? "fork" : "exec",
+			init->r15, init->r14, init->r10, init->rbx,
+			init->r12, init->r13);
+	}
 	d->halt = 0;
 	/* A/B (Shelley 161 item 4): MEASURED, and the answer is that the
 	 * hop is load-bearing — with it disabled the guest got FURTHER
