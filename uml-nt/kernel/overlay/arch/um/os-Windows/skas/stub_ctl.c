@@ -3791,40 +3791,46 @@ static void uml_nt_resume_regs_record(struct uml_nt_stub_conn *c,
 	 * the command that produced the answer, and the verbatim/pushed flags,
 	 * which is exactly the split the ranking asks for first. */
 	{
-		static unsigned long long last_r15;
+		/* S116: two measurement bugs fixed here.
+		 * (1) "old" was the value seen at the PREVIOUS resume, which is not
+		 * what the stub was handed when it parked — so the canary could not
+		 * tell "the kernel rewrote r15" from "the guest simply ran on".
+		 * The value the answer carried (d->regs.r15 at release) is what must
+		 * be compared against the next park's report.
+		 * (2) 64 lines were spent on a single pid (2032) whose guest uses
+		 * r15=1 as an ordinary counter, so the budget never saw another
+		 * conn. One line per pid now, capped at 64 pids. */
+		static unsigned long long last_sent_r15;
 		static unsigned long long last_pid;
+		static unsigned long long seen_pid[64];
+		static int seen_n;
 		static int r15_watch_budget = 64;
-		static unsigned long long r15_trans_n;
-		static unsigned long long r15_seq;
 		unsigned long long now15 = d->regs.r15;
+		int i, dup = 0;
 
-		if (last_pid != c->pid || last_r15 != now15) {
-			r15_trans_n++;
-			r15_seq++;
-			/* S113: 64 loud lines were spent on healthy transitions
-			 * (0x1000 -> 0x61080000 -> …) before the fatal one could
-			 * happen, so the cap never saw the event it was armed for.
-			 * Only a 1 on either side is interesting; everything else
-			 * is counted and stays quiet. */
-			if ((now15 == 1 || last_r15 == 1) &&
-			    r15_watch_budget > 0) {
-				r15_watch_budget--;
-				os_info("[r15-watch] pid %lu old=0x%llx new=0x%llx "
-					"cmd=%d verbatim=%u pushed=%u nr=%llu "
-					"rip=0x%llx total=%llu seq=%llu\n",
-					(unsigned long)c->pid, last_r15, now15,
-					(int)c->plan.kill_why,
-					(unsigned)((d->xstate_flags &
-						   UML_STUB_XS_VERBATIM) != 0),
-					(unsigned)pushed,
-					(unsigned long long)c->sc_ring[
-						(c->sc_ri + 199) % 200].nr,
-					(unsigned long long)d->regs.rip,
-					r15_trans_n, r15_seq);
-			}
-			last_pid = c->pid;
-			last_r15 = now15;
+		for (i = 0; i < seen_n; i++)
+			if (seen_pid[i] == c->pid)
+				dup = 1;
+		if (!dup && seen_n < 64)
+			seen_pid[seen_n++] = c->pid;
+		if (!dup && last_pid != c->pid && last_sent_r15 != 0 &&
+		    r15_watch_budget > 0) {
+			r15_watch_budget--;
+			os_info("[r15-watch] pid %lu sent=0x%llx now=0x%llx "
+				"cmd=%d verbatim=%u pushed=%u nr=%llu rip=0x%llx "
+				"total=%llu\n",
+				(unsigned long)c->pid, last_sent_r15, now15,
+				(int)c->plan.kill_why,
+				(unsigned)((d->xstate_flags &
+					   UML_STUB_XS_VERBATIM) != 0),
+				(unsigned)pushed,
+				(unsigned long long)c->sc_ring[
+					(c->sc_ri + 199) % 200].nr,
+				(unsigned long long)d->regs.rip,
+				(unsigned long long)seen_n);
 		}
+		last_pid = c->pid;
+		last_sent_r15 = now15;
 	}
 	unsigned int verbatim =
 		(d->xstate_flags & UML_STUB_XS_VERBATIM) ? 1u : 0u;
@@ -5193,7 +5199,7 @@ static void uml_nt_spin_scan(void)
 						"mod=%s +0x%llx range=%s guest=%d\n",
 						(unsigned long)o->pid, rip,
 						nm ? nm : "unknown", off,
-						(rip >> 40) == 0x7ff ? "host-0x7ff" :
+						((rip >> 40) >= 0x7ff8) ? "host-module" :
 						(uml_nt_sample_is_guest(o, rip) ?
 						 "guest-image" : "host-other"),
 						uml_nt_sample_is_guest(o, rip));

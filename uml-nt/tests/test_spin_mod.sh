@@ -7,7 +7,8 @@ S="$HERE/../stub/stub.c"
 
 grep -q '\[spin-mod\]' "$K" || { echo "FAIL: spin range unnamed"; exit 1; }
 grep -q 'range=%s' "$K" || { echo "FAIL: no range field"; exit 1; }
-grep -q 'host-0x7ff' "$K" || { echo "FAIL: host band not distinguished"; exit 1; }
+grep -q 'host-module' "$K" || { echo "FAIL: host module band not distinguished"; exit 1; }
+grep -q '0x7ff8' "$K" || { echo "FAIL: band is still a single prefix, not the 0x7ff8-0x7fff range"; exit 1; }
 
 # unowned: stack slack + a comparable sequence number
 grep -q 'slack=%lld' "$S" || { echo "FAIL: no stack slack at UNOWNED"; exit 1; }
