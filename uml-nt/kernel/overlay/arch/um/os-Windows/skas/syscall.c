@@ -57,6 +57,11 @@ static inline int uml_nt_heavy_on(void)
 #include <feedgate.h>
 #include <diag_str.h>
 
+/* S429: forward declaration (definition sits with the text helpers). */
+int uml_nt_phys_read_checked(struct uml_nt_stub_conn *c,
+			     unsigned long long off, void *dst,
+			     unsigned long long n);
+
 #define UML_NT_SYSCALLS_BASE UML_STUB_RAM_BASE
 
 /* The real x86-64 UML table (arch/x86/um/sys_call_table_64.c). */
@@ -3751,12 +3756,26 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 						row, foff);
 					continue;
 				}
+				/* S429: translate() returning >= 0 does NOT mean the
+				 * physical page is committed — a VMA can be registered
+				 * before its run is materialized (the hole class of 399,
+				 * met here on a different road). Dereferencing
+				 * physmem_base + foff then faults at 0x10220020, which
+				 * looks like a guest-physical address and cost a round.
+				 * Every such read goes through the checked helper. */
 				{
-					const unsigned long long *q =
-						(const void *)((
-						char *)uml_boot.physmem_base +
-						foff);
+					unsigned long long q[8];
 
+					if (uml_nt_phys_read_checked(
+						    c, (unsigned long long)foff, q,
+						    sizeof(q)) < 0) {
+						os_info("[abrt]   +0x%03x: "
+							"%016llx %016llx %016llx %016llx "
+							"UNAVAILABLE(reason=phys-unmapped) "
+							"bytes_valid=0\n",
+							row * 64, q[0], q[1], q[2], q[3]);
+						continue;
+					}
 					os_info("[abrt]   +0x%03x: "
 						"%016llx %016llx "
 						"%016llx %016llx\n",
@@ -4215,6 +4234,36 @@ static void uml_nt_pam_mod_note(struct uml_nt_stub_conn *c,
 	os_info("[pam-mod] pid %d path=\"%s\"\n", (int)c->pid, buf);
 }
 
+
+/* S429: read guest-physical bytes only if the host page is really there.
+ * A successful uml_nt_vma_translate() says the VMA covers the address; it says
+ * nothing about whether the backing run was materialized. Reading
+ * physmem_base + off regardless faulted at 0x10220020 (guest phys 0x220020) and
+ * was misread as a raw guest dereference for a whole round. Returns 0 on a
+ * complete read, -1 (nothing copied) otherwise. */
+int uml_nt_phys_read_checked(struct uml_nt_stub_conn *c,
+			     unsigned long long off, void *dst,
+			     unsigned long long n)
+{
+	char *src;
+	MEMORY_BASIC_INFORMATION mbi;
+
+	(void)c;
+	if (uml_boot.physmem_base == NULL || n == 0)
+		return -1;
+	if (off + n > uml_boot.physmem_size)
+		return -1;
+	src = (char *)uml_boot.physmem_base + off;
+	if (VirtualQuery(src, &mbi, sizeof(mbi)) != sizeof(mbi) ||
+	    mbi.State != MEM_COMMIT ||
+	    (mbi.Protect & (PAGE_NOACCESS | 0x100)) ||
+	    (unsigned long long)(uintptr_t)src + n >
+		    (unsigned long long)(uintptr_t)mbi.BaseAddress +
+			    mbi.RegionSize)
+		return -1;
+	memcpy(dst, src, n);
+	return 0;
+}
 static void uml_nt_note_text(struct uml_nt_stub_conn *c, const char *tag,
 			     unsigned long long va, unsigned long len)
 {
