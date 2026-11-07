@@ -832,6 +832,12 @@ struct uml_nt_stub_data {
 	 * record is written, so the kernel can compare "the thread that died" with
 	 * "the threads still spinning" — the numeric form of the deadlock proof. */
 	unsigned long long tid;
+	/* S119: the UNOWNED measurements live here instead of only on the stub's
+	 * torn stderr copy. The kernel's own [stubtest] record is one write and
+	 * reads them intact — no launcher surgery, no logging refactor. */
+	unsigned long long unowned_slack;
+	unsigned long long unowned_stackbase;
+	unsigned long long unowned_stacksize;
 };
 
 /*

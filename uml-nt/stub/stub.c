@@ -2241,6 +2241,11 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 			ssize = (unsigned long long)smb.RegionSize;
 			slack = (long long)((unsigned long long)c->Rsp - sbase);
 		}
+		d->unowned_slack = (unsigned long long)slack;
+		d->unowned_stackbase = sbase;
+		d->unowned_stacksize = ssize;
+		d->tid = (unsigned long long)GetCurrentThreadId();
+		MemoryBarrier();
 		n = snprintf(line, sizeof(line),
 		     "stub: UNOWNED exception %08lx seq=%llu tick=%llu tid=%llu "
 		     "rip=%llx rsp=%llx slack=%lld stackbase=%llx stacksize=%llx "
