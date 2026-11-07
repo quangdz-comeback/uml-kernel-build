@@ -18,7 +18,8 @@ case "$blk" in *'readable=1 bytes_valid=1'*) ;; *) echo "FAIL: a good read is no
 # the failure must return before any bytes are rendered
 fail=$(printf '%s\n' "$blk" | grep -n 'UNAVAILABLE' | head -1 | cut -d: -f1)
 copy=$(printf '%s\n' "$blk" | grep -n 'memcpy(buf' | head -1 | cut -d: -f1)
-[ -n "$fail" ] && [ -n "$copy" ] && [ "$fail" -lt "$copy" ] \
-	|| { echo "FAIL: bytes are copied before the readability gate"; exit 1; }
+if [ -z "$fail" ] || [ -z "$copy" ] || [ "$fail" -ge "$copy" ]; then
+	echo "FAIL: bytes are copied before the readability gate"; exit 1
+fi
 case "$blk" in *'return;'*) ;; *) echo "FAIL: no early return on failure"; exit 1;; esac
 echo "provenance: failed reads print UNAVAILABLE, good reads say bytes_valid=1"

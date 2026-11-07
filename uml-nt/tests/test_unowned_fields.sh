@@ -21,6 +21,7 @@ grep -q 'dead_holder=%s' "$K" || { echo "FAIL: no holder verdict"; exit 1; }
 # published before the line is built, so the two copies agree
 pub=$(grep -n 'd->unowned_slack =' "$S" | head -1 | cut -d: -f1)
 line=$(grep -n 'stub: UNOWNED exception' "$S" | head -1 | cut -d: -f1)
-[ -n "$pub" ] && [ -n "$line" ] && [ "$pub" -lt "$line" ] \
-	|| { echo "FAIL: fields published after the record"; exit 1; }
+if [ -z "$pub" ] || [ -z "$line" ] || [ "$pub" -ge "$line" ]; then
+	echo "FAIL: fields published after the record"; exit 1
+fi
 echo "unowned_fields: slack/stackbase/stacksize/tid published and printed intact"
