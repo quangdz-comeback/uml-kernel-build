@@ -4130,6 +4130,31 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
  * living on the heap — the ring names the numbers, never the strings. Read them
  * the safe way (VMA translate + physmem copy, the [abrt] block's pattern), not
  * through the uaccess sink. */
+/* S100: which PAM module was being loaded when the stack went down. musl's
+ * dlopen IS a chain of openats, so this needs no new mechanism — it is a filter
+ * over the same safe read. Cheap: only a login/chain conn, only on success. */
+static void uml_nt_pam_mod_note(struct uml_nt_stub_conn *c,
+				unsigned long long va)
+{
+	char buf[80];
+	long off;
+	unsigned long i, n = 79;
+
+	if (c->mm == NULL || va == 0)
+		return;
+	off = uml_nt_vma_translate(c->mm, va, n);
+	if (off < 0)
+		return;
+	memcpy(buf, (char *)uml_boot.physmem_base + off, n);
+	buf[n] = 0;
+	for (i = 0; i < n && buf[i]; i++)
+		if (buf[i] < 0x20 || buf[i] > 0x7e)
+			buf[i] = '.';
+	if (!strstr(buf, "pam_") && !strstr(buf, "/lib/security/"))
+		return;
+	os_info("[pam-mod] pid %d path=\"%s\"\n", (int)c->pid, buf);
+}
+
 static void uml_nt_note_text(struct uml_nt_stub_conn *c, const char *tag,
 			     unsigned long long va, unsigned long len)
 {
@@ -5139,6 +5164,8 @@ out:
 		 * (which had no return test at all) spoke. */
 		else if (nr == 257 && (long long)ret < 0)
 			uml_nt_note_text(c, "[open-miss]", a[1], 64);
+		else if (nr == 257 && (long long)ret >= 0)
+			uml_nt_pam_mod_note(c, a[1]);
 	}
 	/* S53: keep the last 200 syscalls of a login conn and print them in order
 	 * at a few checkpoints — the tail of the run is what says where login
@@ -5158,9 +5185,14 @@ out:
 	 * that message went to journald, where a referee never sees it. Peek the
 	 * payload out of guest memory (printable only, clamped) so the next run
 	 * says WHAT the guest complained about instead of that it complained.
-	 * Budgeted per conn (rule #23): a diagnostic, not a tap. */
+	 * Budgeted per conn (rule #23): a diagnostic, not a tap.
+	 *
+	 * S100: 4 -> 32 for the login chain. The cap cut exactly between
+	 * pam_systemd's GetUserRecord and the abort, so every pam_syslog
+	 * LOG_CRIT naming the module and the value it returned sat in record
+	 * 5 and beyond — the log hid the answer by being thrifty. */
 	if (nr == 44 /* sendto */ && ret > 0 &&
-	    (uml_nt_conn_is_login(c) || c->chain_login) && c->syslog_n < 4) {
+	    (uml_nt_conn_is_login(c) || c->chain_login) && c->syslog_n < 32) {
 		char msg[161];
 		unsigned long long want = (unsigned long long)ret;
 
