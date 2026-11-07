@@ -13,4 +13,7 @@ case "$blk" in *'d->regs.r15'*) ;; *) echo "FAIL: not sampling the published cel
 # it must fire on transition, not every resume, and be budgeted
 case "$blk" in *'last_r15 != now15'*) ;; *) echo "FAIL: does not detect a change"; exit 1;; esac
 case "$blk" in *'r15_watch_budget'*) ;; *) echo "FAIL: unbudgeted"; exit 1;; esac
+# S113: the cap must only be spent on a 1, never on healthy churn
+case "$blk" in *'now15 == 1 || last_r15 == 1'*) ;; *) echo "FAIL: cap spends on healthy transitions"; exit 1;; esac
+case "$blk" in *'total=%llu'*) ;; *) echo "FAIL: no transition density"; exit 1;; esac
 echo "r15_watch: transitions recorded with cmd/verbatim/pushed"
