@@ -828,6 +828,10 @@ struct uml_nt_stub_data {
 	unsigned long long mod_base[2];	/* 0 = stub.exe, 1 = ntdll.dll */
 	unsigned long long mod_size[2];
 	unsigned long long mod_seq;
+	/* S118: the stub threads's own id, published at init and refreshed when a
+	 * record is written, so the kernel can compare "the thread that died" with
+	 * "the threads still spinning" — the numeric form of the deadlock proof. */
+	unsigned long long tid;
 };
 
 /*

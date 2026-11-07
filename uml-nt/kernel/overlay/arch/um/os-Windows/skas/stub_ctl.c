@@ -62,6 +62,11 @@
 #include <physalloc.h>
 #include "internal.h"
 #include <stackreserve_model.h>
+
+/* S118: the thread id of the last dead stub thread, so a spinning site can say
+ * whether it is waiting on the very thread that died — the numeric deadlock
+ * proof. */
+static unsigned long long dead_tid;
 void uml_nt_spin_start(void);
 
 /* S35: defined far below (it needs the mm helpers); declared here for the INIT
@@ -5175,8 +5180,9 @@ static void uml_nt_spin_scan(void)
 					    (o->spin_n / 8)) {
 						if (grp_n > 1)
 							os_info("[spin-grp] pid %lu rip=0x%llx "
-								"samples=%lu (same site)\n",
-								grp_pid, grp_rip, grp_n);
+								"samples=%lu tid=%llu (same site)\n",
+								grp_pid, grp_rip, grp_n,
+								o->d ? o->d->tid : 0ull);
 						grp_rip = rip;
 						grp_pid = o->pid;
 						grp_sec = (unsigned long long)
@@ -5192,8 +5198,12 @@ static void uml_nt_spin_scan(void)
 						grp_n++;
 					if (grp_n >= 40 && (grp_n % 40) == 0)
 						os_info("[spin-stuck] pid %lu rip=0x%llx "
-							"samples=%lu held_by=unknown\n",
-							grp_pid, grp_rip, grp_n);
+							"samples=%lu tid=%llu dead_holder=%s\n",
+							grp_pid, grp_rip, grp_n,
+							o->d ? o->d->tid : 0ull,
+							(dead_tid && o->d &&
+							 o->d->tid == dead_tid) ? "yes" :
+							"no");
 				}
 				/* S114: name the range. A host rip in the 0x7ff…
 				 * band is Windows' own modules (ntdll/kernel32 or
@@ -10699,6 +10709,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				 * callee-saved + last-syscall below
 				 * (each line < 255). */
 				sigsegv_victims++;
+				dead_tid = c->d ? c->d->tid : 0;
 				/* S103: WHERE the rip landed. insn=zeros does not
 				 * mean the text page is zero — it means the rip
 				 * fell into a region that holds zeros (padding,

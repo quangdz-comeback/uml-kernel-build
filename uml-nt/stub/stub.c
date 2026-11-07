@@ -143,6 +143,7 @@ static void publish_module_map(struct uml_nt_stub_data *d)
 			d->mod_size[i] = (unsigned long long)mi.SizeOfImage;
 		}
 	}
+	d->tid = (unsigned long long)GetCurrentThreadId();
 	MemoryBarrier();
 	d->mod_seq++;
 }
@@ -2241,7 +2242,7 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 			slack = (long long)((unsigned long long)c->Rsp - sbase);
 		}
 		n = snprintf(line, sizeof(line),
-		     "stub: UNOWNED exception %08lx seq=%llu tick=%llu "
+		     "stub: UNOWNED exception %08lx seq=%llu tick=%llu tid=%llu "
 		     "rip=%llx rsp=%llx slack=%lld stackbase=%llx stacksize=%llx "
 		     "op=%llu addr=%llx fs_base=%llx last_cmd=%u — "
 		     "process dies; view [rsp-8]=%llx [rsp]=%llx "
@@ -2249,6 +2250,7 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
 		     (unsigned long)er->ExceptionCode,
 		     (unsigned long long)++unowned_seq,
 		     (unsigned long long)GetTickCount64(),
+		     (unsigned long long)GetCurrentThreadId(),
 		     (unsigned long long)c->Rip, (unsigned long long)c->Rsp,
 		     slack, sbase, ssize,
 		     er->NumberParameters > 0 ?
