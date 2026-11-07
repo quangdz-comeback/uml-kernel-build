@@ -4226,14 +4226,21 @@ static void uml_nt_note_text(struct uml_nt_stub_conn *c, const char *tag,
 		return;
 	n = len > sizeof(buf) - 1 ? sizeof(buf) - 1 : len;
 	off = uml_nt_vma_translate(c->mm, va, n);
-	if (off < 0)
+	if (off < 0) {
+		/* S424: no successful read means no byte observation. Printing a
+		 * zeroed buffer as a path is how "userdb…" garbage got into the
+		 * record and sent the hunt after a string that never existed. */
+		os_info("%s len=%lu readable=0 bytes_valid=0 text=UNAVAILABLE(reason=translate)\n",
+			tag, len);
 		return;
+	}
 	memcpy(buf, (char *)uml_boot.physmem_base + off, n);
 	for (i = 0; i < n; i++)
 		if (buf[i] < 0x20 || buf[i] > 0x7e)
 			buf[i] = '.';
 	buf[n] = 0;
-	os_info("%s len=%lu text=\"%s\"\n", tag, len, buf);
+	os_info("%s len=%lu readable=1 bytes_valid=1 text=\"%s\"\n",
+		tag, len, buf);
 }
 
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
