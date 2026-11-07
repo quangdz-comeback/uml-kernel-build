@@ -68,19 +68,25 @@ jobs:
           # Debug info costs build size, not boot behaviour; if it ever breaks a
           # gate the input debug_info=false turns it back off, and the reason
           # will be in the log rather than in a habit.
+          # S94: CONFIG_DEBUG_INFO is a `choice` whose selected member is set by
+          # the defconfig; `scripts/config -e DEBUG_INFO` is then silently eaten
+          # by olddefconfig. Passing -gdwarf-5 in KCFLAGS reaches the compiler
+          # regardless of the choice — that is what produced a 73.6 MB vmlinux
+          # with .debug_info and file:line for all three faulting rips.
           DEBUGINFO="${{ inputs.debug_info || 'true' }}"
           if [ "$DEBUGINFO" != "false" ]; then
-            scripts/config --file build/.config -e DEBUG_INFO -e DEBUG_INFO_DWARF5
-            make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC="ccache clang" \
-              LD=ld.lld olddefconfig >/dev/null
+            echo "KCFLAGS_DEBUGINFO=-gdwarf-5" >> "$GITHUB_ENV"
+            echo "DWARF: on (KCFLAGS=-gdwarf-5)"
+          else
+            echo "DWARF: off (input debug_info=false)"
           fi
-          grep -q '^CONFIG_DEBUG_INFO=y' build/.config && echo "DWARF: on" || echo "DWARF: off"
 
       - name: Build vmlinux (clang+lld, ccache)
         run: |
           ccache -z
           make -C "$TREE" O="$(pwd)/build" ARCH=um LLVM=1 CC="ccache clang" \
-            LD=ld.lld KBUILD_BUILD_TIMESTAMP="uml-nt" -j"$(nproc)"
+            LD=ld.lld KCFLAGS="${KCFLAGS_DEBUGINFO:-}" \
+            KBUILD_BUILD_TIMESTAMP="uml-nt" -j"$(nproc)"
           ccache -s
 
       - name: Freestanding gates (D1/D2)

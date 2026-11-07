@@ -2940,6 +2940,9 @@ static void abrt_msg_capture(struct uml_nt_stub_conn *c,
 {
 	static int ncaptured, nmiss;
 	char s[448];
+
+	if (!uml_nt_heavy_on())
+		return;
 	int k;
 
 	if (ncaptured >= 3)
@@ -3780,7 +3783,8 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 	{
 		static int heapwalk_done;
 
-		if (!heapwalk_done && c->mm->heap_start != 0 &&
+		if (uml_nt_heavy_on() && !heapwalk_done &&
+		    c->mm->heap_start != 0 &&
 		    c->mm->heap_end > c->mm->heap_start) {
 			unsigned long long va, prev_va = 0, prev_cs = 0;
 			unsigned long long g1_va = 0, g1_cs = 0;
@@ -4091,6 +4095,20 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 			}
 		}
 	}
+}
+
+/* S94: the heavy diagnostic blocks are the fault sites. Report 394 symbolized
+ * all three rips into THIS file's instrument code — the heapwalk fragscan
+ * (3972), the capget witness (4909) and the abort capture's 36-qword dump plus
+ * physmem memcpy (4958) — and their frames plus register pressure live where
+ * the crash lands. They are hunt leftovers, not mechanisms: default OFF, one
+ * switch, and the cheap witnesses ([hdl], [shape], [gwrite], [con-read],
+ * [feed-*]) stay on because they have never faulted. */
+int uml_nt_heavy;		/* 0 by default; referee sets it if needed */
+
+static inline int uml_nt_heavy_on(void)
+{
+	return uml_nt_heavy != 0;
 }
 
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
@@ -4906,7 +4924,8 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	/* Shelley 301: after the handler has answered, before anything else
 	 * touches the round. The witness is read-only and never gated on the
 	 * debugger/veh_window levers. */
-	uml_nt_capget_witness(c, nr, a, ret);
+	if (uml_nt_heavy_on())
+		uml_nt_capget_witness(c, nr, a, ret);
 	d->err = ((long long)ret < 0 && (long long)ret > -512) ? 1 : 0;
 	/* M5.4 c3 diag: feed the SIGSEGV print (stub_ctl.c) — see the
 	 * conn field comment. */
