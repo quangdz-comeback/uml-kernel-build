@@ -5213,8 +5213,33 @@ void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
 		return;
 	if (!uml_nt_conn_is_login(c) && !c->chain_login)
 		return;
-	n = c->sc_total < 16 ? c->sc_total : 16;
+	/* S91: sixteen filled up on 42274124035 and again here — login's whole
+	 * teardown (dbus userdb read/wait, setgroups, setuid, the munmap burst)
+	 * fits in 64 and nothing before it needs to be guessed. */
+	n = c->sc_total < 64 ? c->sc_total : 64;
 	start = (c->sc_ri + 200 - n) % 200;
+	/* S91: the real door. [exit-why] was placed on the nr==231 case, but no
+	 * 231 ever reached it — login's ring ends in the munmap burst, so the
+	 * exit arrives through task teardown, not through a syscall the stub
+	 * answers. Say so here, with the ring's own last entry as evidence. */
+	{
+		unsigned last = (c->sc_ri + 200 - 1) % 200;
+		const char *how = "teardown";
+
+		if (c->sc_ring[last].nr == 231 || c->sc_ring[last].nr == 60)
+			how = "exit_syscall";
+		else if (c->sc_ring[last].nr == 11)
+			how = "munmap_burst";
+		else if (c->sc_ring[last].nr == 0)
+			how = "read_eof";
+		os_info("[exit-why] pid %lu how=%s last_nr=%llu last_ret=%lld "
+			"total=%u login=%u chain=%u nvma=%d\n",
+			(unsigned long)c->pid, how, c->sc_ring[last].nr,
+			(long long)c->sc_ring[last].ret, c->sc_total,
+			(unsigned)uml_nt_conn_is_login(c),
+			(unsigned)c->chain_login,
+			c->mm != NULL ? (int)c->mm->nvma : -1);
+	}
 	os_info("[sc-final] pid %lu total=%u last=%u (in order, at death)\n",
 		(unsigned long)c->pid, c->sc_total, n);
 	for (i = 0; i < n; i++) {
