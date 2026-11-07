@@ -5162,11 +5162,39 @@ static void uml_nt_spin_scan(void)
 				int hi, found = 0;
 
 				o->spin_n++;
-				os_info("[spin] pid %lu n=%u rip=0x%llx rsp=0x%llx "
-					"rbp=0x%llx guest=%d exec=%.24s\n",
-					(unsigned long)o->pid, o->spin_n, rip, rsp,
-					rbp, uml_nt_sample_is_guest(o, rip),
-					o->exec_path);
+				/* S117: group, do not drip. 1449 single lines at
+				 * one rip is a deadlock asking to be recognised as
+				 * one fact, not 1449. Same (pid, rip) inside a second
+				 * collapses to one [spin-grp]. */
+				{
+					static unsigned long long grp_rip, grp_sec;
+					static unsigned long grp_pid, grp_n;
+
+					if (grp_rip != rip || grp_pid != o->pid ||
+					    grp_sec != (unsigned long long)
+					    (o->spin_n / 8)) {
+						if (grp_n > 1)
+							os_info("[spin-grp] pid %lu rip=0x%llx "
+								"samples=%lu (same site)\n",
+								grp_pid, grp_rip, grp_n);
+						grp_rip = rip;
+						grp_pid = o->pid;
+						grp_sec = (unsigned long long)
+							  (o->spin_n / 8);
+						grp_n = 1;
+						os_info("[spin] pid %lu n=%u rip=0x%llx rsp=0x%llx "
+							"rbp=0x%llx guest=%d exec=%.24s\n",
+							(unsigned long)o->pid, o->spin_n, rip,
+							rsp, rbp,
+							uml_nt_sample_is_guest(o, rip),
+							o->exec_path);
+					} else
+						grp_n++;
+					if (grp_n >= 40 && (grp_n % 40) == 0)
+						os_info("[spin-stuck] pid %lu rip=0x%llx "
+							"samples=%lu held_by=unknown\n",
+							grp_pid, grp_rip, grp_n);
+				}
 				/* S114: name the range. A host rip in the 0x7ff…
 				 * band is Windows' own modules (ntdll/kernel32 or
 				 * the stub's image); a guest rip is inside the
