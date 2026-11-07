@@ -10824,6 +10824,19 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 					}
 				}
 				sigsegv_victims++;
+				/* S119: the UNOWNED measurements, read from the
+				 * shared block — one write, intact, unlike the
+				 * stub's stderr copy which tears under load. */
+				os_info("[unowned] pid %lu tid=%llu slack=%llu "
+					"stackbase=0x%llx stacksize=0x%llx "
+					"dead_holder=%s\n",
+					(unsigned long)c->pid,
+					c->d ? c->d->tid : 0ull,
+					c->d ? c->d->unowned_slack : 0ull,
+					c->d ? c->d->unowned_stackbase : 0ull,
+					c->d ? c->d->unowned_stacksize : 0ull,
+					(dead_tid && c->d &&
+					 c->d->tid == dead_tid) ? "yes" : "no");
 				os_info("[stubtest] SIGSEGV victim #%d "
 					"pid %lu addr=0x%llx type=%u "
 					"rip=0x%llx why=%c fs=0x%llx "
