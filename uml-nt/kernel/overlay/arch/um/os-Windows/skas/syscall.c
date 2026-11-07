@@ -4130,6 +4130,35 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
  * living on the heap — the ring names the numbers, never the strings. Read them
  * the safe way (VMA translate + physmem copy, the [abrt] block's pattern), not
  * through the uaccess sink. */
+
+/* S101: WHERE pam_systemd is connecting, and what it got. The whole chain is
+ * down to one door — pam_dispatch returns PAM_ABORT only when a module hands it
+ * a value outside the PAM range, and pam_systemd's GetUserRecord is a varlink
+ * call to /run/systemd/userdb/… . A raw -errno escaping as the module result
+ * produces exactly the "Critical error - immediate abort." we keep reading. */
+static void uml_nt_con_path_note(struct uml_nt_stub_conn *c,
+				 unsigned long long sa, long long ret)
+{
+	char buf[112];
+	struct { unsigned short fam; char path[110]; } __attribute__((packed)) s;
+	long off;
+	unsigned long i;
+
+	if (c->mm == NULL || sa == 0)
+		return;
+	off = uml_nt_vma_translate(c->mm, sa, sizeof(s));
+	if (off < 0)
+		return;
+	memcpy(&s, (char *)uml_boot.physmem_base + off, sizeof(s));
+	memcpy(buf, s.path, sizeof(buf) - 1);
+	buf[sizeof(buf) - 1] = 0;
+	for (i = 0; i < sizeof(buf) - 1 && buf[i]; i++)
+		if (buf[i] < 0x20 || buf[i] > 0x7e)
+			buf[i] = '.';
+	os_info("[con-path] pid %d fam=%u ret=%lld path=\"%s\"\n",
+		(int)c->pid, (unsigned)s.fam, ret, buf);
+}
+
 /* S100: which PAM module was being loaded when the stack went down. musl's
  * dlopen IS a chain of openats, so this needs no new mechanism — it is a filter
  * over the same safe read. Cheap: only a login/chain conn, only on success. */
@@ -5166,6 +5195,8 @@ out:
 			uml_nt_note_text(c, "[open-miss]", a[1], 64);
 		else if (nr == 257 && (long long)ret >= 0)
 			uml_nt_pam_mod_note(c, a[1]);
+		else if (nr == 42)
+			uml_nt_con_path_note(c, a[1], (long long)ret);
 	}
 	/* S53: keep the last 200 syscalls of a login conn and print them in order
 	 * at a few checkpoints — the tail of the run is what says where login
