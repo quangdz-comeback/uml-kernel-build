@@ -1499,6 +1499,10 @@ static long long uml_nt_mmap_sweep(struct uml_nt_stub_conn *c,
  * quantifies the win. */
 static unsigned long long lazy_demand_runs, lazy_eager_runs;
 static unsigned long long lazy_unswept_syscalls, lazy_filled_runs;
+/* S102: how often a file-backed run was skipped because a VMA already covered
+ * it — the door that can hand a process a zero page instead of file bytes. */
+static unsigned long long lazy_skip_runs;
+static int lazy_skip_budget = 24;
 static int lazy_unswept_budget = 12;
 static int lazy_reg_budget = 16, lazy_drop_budget = 24;
 static int lazy_demand_budget = 32;
@@ -1611,8 +1615,35 @@ static int lazy_run(struct uml_nt_stub_conn *c, struct uml_nt_lazy_region *r,
 	unsigned long long n, sp;
 	loff_t pos;
 
-	if (uml_nt_vma_find(c->mm, run_va) != NULL)
-		return 0;
+	/* S102: THE MATERIALIZE-WITHOUT-READ DOOR. "A VMA already covers this
+	 * run" was taken to mean "the page is there", but a VMA in the table is
+	 * not a page in the file: fork seeding, clones and the exec pre-register
+	 * path all install VMAs before any bytes are read. Returning 0 here
+	 * leaves the run ZERO — and a process then executes 0x00 bytes inside
+	 * /sbin/init and systemd-shared, which is exactly the signature of
+	 * referee 42366157638: "[stubtest] SIGSEGV victim … insn=ALL ZEROS,
+	 * rip=0x60e94353/0x60e3e4e0" with addr=0x0/0x63.
+	 *
+	 * The count decides the fix, so the door says how often it is used and
+	 * what was standing there. */
+	{
+		struct uml_nt_vma *ex = uml_nt_vma_find(c->mm, run_va);
+
+		if (ex != NULL) {
+			lazy_skip_runs++;
+			if (lazy_skip_budget > 0) {
+				lazy_skip_budget--;
+				os_info("[lazy-skip] pid %lu va=0x%llx run=0x%llx "
+					"file=%d prot=0x%x: VMA exists, NO READ "
+					"ISSUED (total %llu)\n",
+					(unsigned long)c->pid, run_va,
+					(unsigned long long)ex->run_off,
+					(int)(ex->flags & UML_NT_VMA_FILE) != 0,
+					(unsigned)ex->prot, lazy_skip_runs);
+			}
+			return 0;
+		}
+	}
 	sp = (unsigned long long)uml_nt_phys_alloc(c->ph);
 	if ((long long)sp < 0)
 		return -1;
