@@ -145,6 +145,25 @@ jobs:
               echo "not present, skipped: $unit"
             fi
           done
+          # M5.5b-1 (S423): pam_systemd is loaded through
+          # @include common-session, and it asks io.systemd.UserDatabase for
+          # the session record. This test image carries NO systemd-userdbd unit
+          # (measured: find over the whole rootfs finds only pam_userdb, a
+          # different module), so nothing answers, connect returns -ENOENT, and
+          # login retries the userdb path forever instead of reaching a shell —
+          # it never execs bash at all. LOGIN-OK must answer "does the engine
+          # reach a shell", not "did we enable another daemon", so the
+          # auxiliary module is commented out of the TEST image here, in the
+          # prep script, never by hand: a rebuilt image keeps this.
+          if [ -f /mnt/m55a-rootfs/etc/pam.d/common-session ]; then
+            sudo sed -i \
+              -e 's|^session[[:space:]]*optional[[:space:]]*pam_systemd\.so.*|# [uml-nt test image] pam_systemd needs systemd-userdbd, which this image does not carry; login must reach a shell without it\n&|' \
+              /mnt/m55a-rootfs/etc/pam.d/common-session
+            echo "--- pam_systemd in common-session ---"
+            grep -n pam_systemd /mnt/m55a-rootfs/etc/pam.d/common-session || true
+          else
+            echo "common-session missing — pam_systemd cannot be neutralised"
+          fi
           echo "--- masked units in /etc/systemd/system ---"
           ls -l /mnt/m55a-rootfs/etc/systemd/system/ | grep -i cloud || true
           # M5.5b-1 (gate 1/3 of the M5.5b milestone, test-image rule):
