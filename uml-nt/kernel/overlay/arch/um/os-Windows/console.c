@@ -158,7 +158,8 @@ static struct console nt_cons = {
 static struct uml_nt_con_ring g_con_ring;
 static int g_feed_deliver_n;	/* S76: [feed-drain] records (both sources) */
 static int g_feed_line_n;	/* S79: [feed-line] stage detail records */
-static int g_feed_dport = 1;	/* S78: which port this flush targets */
+static int g_feed_dport = 1;
+static int g_feed_owner = -1;	/* S90: conn pid that armed */
 static HANDLE g_con_wake;
 static int g_con_live;
 static int g_con_armed = 1;
@@ -260,7 +261,8 @@ static int nt_con_deliver_stage(int dport)
 	}
 	if (g_feed_deliver_n < 8) {
 		g_feed_deliver_n++;
-		os_info("[feed-drain] port=%d bytes=%u src=stage\n", dport, sll);
+		os_info("[feed-drain] port=%d bytes=%u src=stage owner=%d\n",
+			dport, sll, g_feed_owner);
 	}
 	if (g_feed_line_n < 8) {
 		g_feed_line_n++;
@@ -390,6 +392,16 @@ void uml_nt_console_flush(int door)
  * conn parks in ppoll), so arming on the text never fired. Arming on the wait
  * does: when a login conn parks in poll/ppoll/select/pselect6 it is asking for a
  * line, and the stage machine decides which line. */
+void uml_nt_console_set_owner(int pid)
+{
+	g_feed_owner = pid;
+}
+
+int uml_nt_console_feed_port(void)
+{
+	return g_feed_dport;
+}
+
 int uml_nt_console_arm_feed(void)
 {
 	if (!g_con_live)

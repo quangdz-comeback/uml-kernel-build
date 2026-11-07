@@ -11133,8 +11133,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	if (c->read_ok_n < 8 && d->regs.rax > 0 &&
 	    (d->args[0] == 0 || d->args[0] == 1 || d->args[0] == 2)) {
 		c->read_ok_n++;
-		os_info("[con-read] port=%llu len=%llu\n", d->args[0],
-			d->regs.rax);
+		os_info("[con-read] pid=%d fd=%llu len=%llu gdport=%d\n",
+			(int)c->pid, d->args[0], d->regs.rax,
+			uml_nt_console_feed_port());
 	}
 	/* S73: a login conn parking in a wait-for-input syscall is the prompt.
 	 * Arm one line — stage machine decides which — and say so. */
@@ -11144,7 +11145,10 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		uml_nt_console_note_chain_alive(1);
 
 		if (nr == 7 || nr == 23 || nr == 270 || nr == 271) {
-			int st = uml_nt_console_arm_feed();
+			int st;
+
+			uml_nt_console_set_owner((int)c->pid);
+			st = uml_nt_console_arm_feed();
 
 			if (c->feed_arm_n < 8) {
 				c->feed_arm_n++;
@@ -14234,6 +14238,7 @@ static int va_in(unsigned long long va, unsigned long long lo,
 void uml_nt_ans_free_live(unsigned long long lo, unsigned long long hi,
 			  const char *why)
 {
+	static unsigned ctx_n;
 	int i;
 
 	if (hi <= lo)
@@ -14243,6 +14248,31 @@ void uml_nt_ans_free_live(unsigned long long lo, unsigned long long hi,
 
 		if (c == NULL || c->d == NULL || !c->alive)
 			continue;
+		/* S90: 203 of these is a violated invariant, not noise, so the
+		 * record must say WHICH answer it was: the request still in the
+		 * ring, the dispatch command, whether the conn is in a login
+		 * chain, and whether an mm-drop is in flight right now. Eight of
+		 * them, then the counters speak. */
+		if (ctx_n < 8) {
+			unsigned slot = (unsigned)(c->sc_ri % 200u);
+			char rb[220];
+
+			ctx_n++;
+			snprintf(rb, sizeof(rb),
+				 "sc nr=%llu a0=0x%llx ret=%lld cmd=%u "
+				 "login=%u mmdrop=%u nvma=%d",
+				 c->sc_ring[slot].nr,
+				 c->sc_ring[slot].a0,
+				 (long long)c->sc_ring[slot].ret,
+				 (unsigned)c->d->cmd,
+				 (unsigned)(c->chain_login ||
+					    uml_nt_conn_is_login(c)),
+				 (unsigned)(c->mm != NULL &&
+					    c->mm->ca_mid_drain),
+				 c->mm != NULL ? (int)c->mm->nvma : -1);
+			os_info("[ans-free-live-ctx] pid %lu %s\n",
+				(unsigned long)c->pid, rb);
+		}
 		if (va_in(c->d->regs.rip, lo, hi))
 			os_info("[ans-free-live] conn pid %lu which=rip "
 				"va=0x%llx range=[0x%llx,0x%llx) why=%s\n",

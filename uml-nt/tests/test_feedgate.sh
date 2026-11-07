@@ -35,6 +35,17 @@ int main(void)
 	CHECK(uml_nt_feed_gate_take(&g) == 1);
 	scan(&g, "\n");
 
+	/* S90: systemd's own message about the login unit must not arm it */
+	{
+		struct uml_nt_feed_gate b;
+
+		uml_nt_feed_gate_reset(&b);
+		scan(&b, "systemd[1]: login.service: Control process exited, code=exited, status=6/ABRT\n");
+		CHECK(uml_nt_feed_gate_take(&b) == 0);
+		scan(&b, "login: ");
+		CHECK(uml_nt_feed_gate_take(&b) == 1);
+	}
+
 	/* a log line that merely mentions the binary is not a prompt */
 	scan(&g, "/bin/login: /bin/login: no version information available\n");
 	CHECK(uml_nt_feed_gate_take(&g) == 0);

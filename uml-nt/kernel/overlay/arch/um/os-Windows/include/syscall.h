@@ -277,7 +277,8 @@ struct uml_nt_stub_conn {
 	struct uml_nt_tty_model tty_model;	/* S81: the termios this fd was told */
 	unsigned feed_arm_n;		/* S73: [feed-arm] records */
 	unsigned read_fd_n;		/* S77: [read-fd] records */
-	unsigned read_ok_n;	/* S87: reads on fd 0-2 that returned bytes */
+	unsigned read_ok_n;
+	unsigned exit_why_n;	/* S90: [exit-why] records */	/* S87: reads on fd 0-2 that returned bytes */
 	unsigned loop_trap_n;		/* S69 */
 	unsigned req_frozen_n, poke_done;	/* S68: active poke */
 	unsigned spin_hn, spin_hv[16], spin_hc[16];	/* S58: rip histogram */

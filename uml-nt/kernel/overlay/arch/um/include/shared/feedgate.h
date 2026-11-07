@@ -146,6 +146,16 @@ static inline void uml_nt_feed_gate_line(struct uml_nt_feed_gate *g,
 		return;		/* a headless line may match anything: never use it */
 	clen = uml_nt_feed_strip_esc(clean, sizeof(clean), g->line[src],
 				      g->len[src]);
+	/* S90: systemd's own complaints about the login unit are not prompts.
+	 * "login.service: Control process exited, code=exited, status=6/ABRT"
+	 * armed the feed on the "login:" inside it (referee 42312661055) — the
+	 * third time an instrument ate its own log. An explicit blacklist, not a
+	 * position rule: a real prompt may carry a hostname ("uml login: ") and
+	 * S45 splits one across a kernel line, but no prompt is a status line. */
+	if (uml_nt_feed_find(clean, clen, "systemd[") ||
+	    uml_nt_feed_find(clean, clen, "status=") ||
+	    uml_nt_feed_find(clean, clen, "code=exited"))
+		return;
 	/* the MOST RECENT prompt wins: a line can still carry the login prompt
 	 * when the password prompt is printed after it, so the later stage is
 	 * checked first */
