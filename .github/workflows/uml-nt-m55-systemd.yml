@@ -161,6 +161,21 @@ jobs:
               /mnt/m55a-rootfs/etc/pam.d/common-session
             echo "--- pam_systemd in common-session ---"
             grep -n pam_systemd /mnt/m55a-rootfs/etc/pam.d/common-session || true
+            # S425: two referees on one SHA behaved differently because one of
+            # them booted an image this step never touched. The prep must be
+            # self-declaring and self-enforcing: the job FAILS if the comment is
+            # not in the image, and the boot log carries the verdict plus a hash
+            # of the rule that produced it, so no comparison is ever made
+            # between two different images again.
+            PREP_SHA=$(printf '%s' "${PREP_RULE:-pam_systemd}" | sha256sum | cut -c1-12)
+            if grep -q '\[uml-nt test image\] pam_systemd' \
+                 /mnt/m55a-rootfs/etc/pam.d/common-session; then
+              echo "[prep] pam_systemd=commented sha=$PREP_SHA"
+            else
+              echo "[prep] pam_systemd=present sha=$PREP_SHA" >&2
+              echo "prep did not apply to the image — refusing to publish it" >&2
+              exit 1
+            fi
           else
             echo "common-session missing — pam_systemd cannot be neutralised"
           fi
