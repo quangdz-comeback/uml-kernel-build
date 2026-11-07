@@ -3575,6 +3575,12 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 	char s[448];
 	int n, i;
 
+	/* S96: the gate is the FIRST thing this function does. It used to sit
+	 * after a uml_nt_uacc_walk — a guest-memory walk that drives the uaccess
+	 * sink — so a heavy=off build still entered a capture path, and the
+	 * 16k-line referee run faulted here (syscall.c:3958). */
+	if (!uml_nt_heavy_on())
+		return;
 	if (!c->task_backed || a[0] != 2 || ncaptured >= 3)
 		return;
 	if (cnt < 1 || cnt > 8)
@@ -5120,11 +5126,14 @@ out:
 	/* S95: the strings behind the numbers, for a login/chain conn only.
 	 * login 6336 wrote 34 bytes to stderr and hit six ENOENT openats whose
 	 * paths sat on the heap — the ring showed the calls, not the reason. */
-	if ((c->chain_login || uml_nt_conn_is_login(c)) &&
-	    (long long)d->regs.rax <= 0) {
+	if (c->chain_login || uml_nt_conn_is_login(c)) {
+		/* S96: a SUCCESSFUL write to stderr is still the message. The
+		 * first cut gated both tags on ret <= 0 and threw away the one
+		 * line the round was written for (login writes 34 bytes, ret=34).
+		 * Only a failed open is an "open-miss". */
 		if (nr == 1 && a[0] == 2)
 			uml_nt_note_text(c, "[err-write]", a[1], a[2]);
-		else if (nr == 257)
+		else if (nr == 257 && (long long)d->regs.rax <= 0)
 			uml_nt_note_text(c, "[open-miss]", a[1], 64);
 	}
 	/* S53: keep the last 200 syscalls of a login conn and print them in order

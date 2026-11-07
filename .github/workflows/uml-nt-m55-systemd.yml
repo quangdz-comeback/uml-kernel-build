@@ -436,7 +436,14 @@ jobs:
         if: always()
         shell: msys2 {0}
         run: |
-          VMLINUX=build/vmlinux bash uml-nt/tests/log_shape.sh systemd.log | tee -a systemd.log
+          # S96: the boot step and this one do not share a cwd, so
+          # "tee -a systemd.log" could write a different file from the one
+          # uploaded. Find the log the artifact actually carries, and also
+          # print the line to the job log so it survives either way.
+          F=$(find . -name systemd.log -type f -printf '%p %s\n' 2>/dev/null | sort -k2 -n | tail -1 | cut -d' ' -f1)
+          [ -n "$F" ] || F=systemd.log
+          echo "shape target: $F"
+          VMLINUX=build/vmlinux bash uml-nt/tests/log_shape.sh "$F" | tee -a "$F"
 
       - name: Symbolize fault rips against this run's vmlinux
         if: always()
