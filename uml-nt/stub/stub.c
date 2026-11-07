@@ -2221,6 +2221,9 @@ static void report_unowned(const EXCEPTION_RECORD *er, const CONTEXT *c)
  * the process dies 0xC0000005 (referee 37205147552: a leaked viewprobe
  * address read through a NOACCESS page). Every guest read the handler
  * performs on its own behalf goes through this first. */
+static unsigned long long is_sys_div_n;
+static int is_sys_div_budget = 16;
+
 static int veh_readable_n(unsigned long long va, unsigned long long len)
 {
 	MEMORY_BASIC_INFORMATION mb;
@@ -3360,7 +3363,37 @@ static LONG CALLBACK veh_handler_body(EXCEPTION_POINTERS *ep)
 			guest_read_site = 0;
 		}
 		if (uml_nt_resume_illegal_is_syscall(1, readable, ib)) {
-			is_syscall = 1;
+			/* S108: the sentinel was read through one view. Confirm it
+			 * before folding retval and resuming at rip+2 — a page that
+			 * is mid-materialization can hand this handler 0f 0b while
+			 * the guest's own next fetch sees something else, and the
+			 * fold then writes rax=1 (a PROT_DONE retval) and resumes
+			 * into the middle of an instruction. That is the shape of
+			 * the dead victims: base/r15 = 1 with a valid rcx on every
+			 * survivor. Diverge => treat as a plain FAULT: no retval
+			 * fold, no rip+2. */
+			unsigned char ib2[2] = { 0, 0 };
+
+			_ReadWriteBarrier();
+			if (veh_readable_n(rip, 2))
+				memcpy(ib2, (const void *)(uintptr_t)rip, 2);
+			if (ib2[0] == UML_NT_RESUME_UD2_0 &&
+			    ib2[1] == UML_NT_RESUME_UD2_1) {
+				is_syscall = 1;
+			} else {
+				is_sys_div_n++;
+				if (is_sys_div_budget > 0) {
+					is_sys_div_budget--;
+					os_info("[is-sys-div] rip=0x%llx "
+						"first=%02x%02x second=%02x%02x "
+						"(total %llu) — fault flow, "
+						"no fold\n",
+						rip, ib[0], ib[1], ib2[0], ib2[1],
+						is_sys_div_n);
+				}
+				is_syscall = 0;
+				is_fault = 1;
+			}
 		} else {
 			report_syscall_misclass(er, c, ib);
 			report_unowned(er, c);
