@@ -11,8 +11,8 @@ S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/syscall.c"
 M="$HERE/../kernel/overlay/arch/um/os-Windows/skas/mmctx.c"
 
 # 1. the dump is 64 for a chain/login conn, not 16
-awk '/^void uml_nt_sc_dump_final/,/^}/' "$S" | grep -q 'sc_total < 64' \
-	|| { echo "FAIL: the death dump is still capped at 16"; exit 1; }
+awk '/^void uml_nt_sc_dump_final/,/^}/' "$S" | grep -q 'sc_total < 200' \
+	|| { echo "FAIL: the death dump is not 200 wide"; exit 1; }
 
 # 2. [exit-why] is emitted where the conn actually dies (the dump's own door),
 #    and it names how from the ring instead of assuming a syscall
