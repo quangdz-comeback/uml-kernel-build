@@ -4410,6 +4410,8 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 5: /* fstat — musl stdio sizing/ash script fd */
 	case 262: /* newfstatat — glibc's fstat/stat shape (AT_EMPTY_PATH) */
 	case 332: /* statx — glibc stat variants */
+	case 137: /* statfs — systemd probes mount-point fs types */
+	case 138: /* fstatfs */
 	case 140: /* setpriority — pam_limits calls setpriority(PRIO_PROCESS,0,nice)
 		    * in pam_sm_open_session; without it the call returned
 		    * -ENOSYS, pam_limits logged 'cannot initialize' and returned
@@ -4438,8 +4440,6 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		else
 			ret = (unsigned long long)(long long)c->nice;
 		break;
-	case 137: /* statfs — systemd probes mount-point fs types */
-	case 138: /* fstatfs */
 	case 318: /* getrandom — systemd + libcrypto key material */
 	case 319: /* memfd_create — the executor's anonymous files */
 	case 321: /* bpf — systemd probes; the honest kernel answer
