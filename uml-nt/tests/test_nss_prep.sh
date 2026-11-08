@@ -56,4 +56,12 @@ if grep -qF 'for f in "$PAMD/login"' "$W"; then
 	echo "FAIL: hardcoded file list is back"; exit 1
 fi
 }
+grep -qF '[prep] session_minimal=1 sessions=1 (pam_unix only)' "$W" \
+	|| { echo "FAIL: session reduction is not declared"; exit 1; }
+grep -qF '[prep] session_minimal=FAILED' "$W" \
+	|| { echo "FAIL: session reduction cannot fail the job"; exit 1; }
+grep -qF '[prep] pam_debug=session-lines' "$W" \
+	|| { echo "FAIL: no pam debug declaration"; exit 1; }
+# D26: every tier-B concession is declared and enforced
+grep -qF 'refusing to publish' "$W" || { echo "FAIL: no enforcement"; exit 1; }
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"

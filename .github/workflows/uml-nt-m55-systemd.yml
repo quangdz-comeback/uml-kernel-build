@@ -191,6 +191,39 @@ jobs:
             exit 1
           fi
           echo "[prep] pam_loginuid=commented active=0"
+          # S449 branch A (D26 tier B): the session stack of /etc/pam.d/login is
+          # replaced by the minimum that still measures the engine — pam_unix
+          # only. Every other session module is a hardening layer whose failure
+          # has cost four rounds without evidence of an engine fault. If login
+          # reaches a shell with this, the engine chain is proven and only the
+          # Debian stack remains to be explained.
+          LOGIN_PAM=/mnt/m55a-rootfs/etc/pam.d/login
+          if [ -f "$LOGIN_PAM" ]; then
+            sudo cp "$LOGIN_PAM" "$LOGIN_PAM.orig"
+            # keep auth/account/password untouched; rewrite session lines only
+            sudo awk '
+              /^[[:space:]]*session[[:space:]]/ { if (!done) {
+                  print "# [uml-nt test image] session stack replaced (S449 A): engine measurement";
+                  print "session    required     pam_unix.so";
+                  done=1 }
+                next }
+              { print }' "$LOGIN_PAM.orig" | sudo tee "$LOGIN_PAM" >/dev/null
+            SESS=$(grep -cE '^[[:space:]]*session[[:space:]]' "$LOGIN_PAM" || true)
+            if [ "${SESS:-0}" -ne 1 ] || ! grep -qE '^session[[:space:]]+required[[:space:]]+pam_unix\.so' "$LOGIN_PAM"; then
+              echo "[prep] session_minimal=FAILED sessions=$SESS" >&2
+              echo "the session stack was not reduced — refusing to publish" >&2
+              exit 1
+            fi
+            echo "[prep] session_minimal=1 sessions=1 (pam_unix only)"
+          fi
+          # S449 branch B: ask libpam to trace every session module it runs. The
+          # last module logged before 'res=failed' is the culprit, named in the
+          # guest's own syslog.
+          for f in /mnt/m55a-rootfs/etc/pam.d/login /mnt/m55a-rootfs/etc/pam.d/common-session; do
+            [ -f "$f" ] || continue
+            sudo sed -i -E '/^[[:space:]]*session[[:space:]]/ { /[[:space:]]debug([[:space:]]|$)/! s/$/ debug/ }' "$f"
+          done
+          echo "[prep] pam_debug=session-lines (login, common-session)"
           # S446: /etc/securetty is absent in this base image, and pam_securetty
           # denies root on a terminal it cannot find in that file. This is a
           # console test image, so declare the terminals it actually uses.
