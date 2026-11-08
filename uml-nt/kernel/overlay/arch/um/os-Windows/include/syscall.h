@@ -280,7 +280,8 @@ struct uml_nt_stub_conn {
 	unsigned read_ok_n;
 	unsigned exit_why_n;	/* S90: [exit-why] records */
 	unsigned life_dump;
-	unsigned getpid_n;	/* S440: first five getpid answers, logged */	/* S435: this conn was a login/chain conn while it ran */
+	unsigned getpid_n;	/* S440: first five getpid answers, logged */
+	int nice;		/* S443: pam_limits' setpriority/getpriority */	/* S435: this conn was a login/chain conn while it ran */
 	/* S439: the three return addresses above rsp for the last few syscalls —
 	 * the ledger's rip is always inside the libc syscall stub, so the only
 	 * thing that names the caller in login.c is the guest stack. */

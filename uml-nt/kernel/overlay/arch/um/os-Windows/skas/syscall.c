@@ -4410,6 +4410,34 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	case 5: /* fstat — musl stdio sizing/ash script fd */
 	case 262: /* newfstatat — glibc's fstat/stat shape (AT_EMPTY_PATH) */
 	case 332: /* statx — glibc stat variants */
+	case 140: /* setpriority — pam_limits calls setpriority(PRIO_PROCESS,0,nice)
+		    * in pam_sm_open_session; without it the call returned
+		    * -ENOSYS, pam_limits logged 'cannot initialize' and returned
+		    * PAM_ABORT, and login bailed for forty rounds.
+		    * Stock semantics: only an invalid `which` is EINVAL; a nice
+		    * value outside [-20,19] is CLAMPED, never refused. The guest
+		    * here passes garbage in a2 (0x67c6f2e2), so clamping is also
+		    * the only sane answer. */
+		if ((long long)a[0] < 0 || (long long)a[0] > 2)
+			ret = SC_RET(SC_EINVAL);
+		else {
+			long long nice = (long long)a[2];
+
+			if (nice < -20)
+				nice = -20;
+			if (nice > 19)
+				nice = 19;
+			c->nice = (int)nice;
+			ret = 0;
+		}
+		break;
+	case 141: /* getpriority — the other half of pam_limits' check (it
+		    * compares the return against -1 and inspects errno) */
+		if ((long long)a[0] < 0 || (long long)a[0] > 2)
+			ret = SC_RET(SC_EINVAL);
+		else
+			ret = (unsigned long long)(long long)c->nice;
+		break;
 	case 137: /* statfs — systemd probes mount-point fs types */
 	case 138: /* fstatfs */
 	case 318: /* getrandom — systemd + libcrypto key material */
