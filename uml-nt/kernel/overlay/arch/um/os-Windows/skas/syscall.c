@@ -5364,6 +5364,25 @@ out:
 		c->sc_ring[slot].a0 = a[0];
 		c->sc_ring[slot].a1 = a[1];
 		c->sc_ring[slot].a2 = a[2];
+		/* S439: capture the return addresses BEFORE the value is lost —
+		 * the guest stack at rsp holds the chain back into login.c. */
+		{
+			unsigned long long st[3] = { 0, 0, 0 };
+			long so = uml_nt_vma_translate(c->mm, d->regs.rsp,
+						       sizeof(st));
+
+			if (so >= 0 &&
+			    uml_nt_phys_read_checked(c, (unsigned long long)so,
+						     st, sizeof(st)) == 0) {
+				unsigned k = c->ra_ri % 8;
+
+				c->ra_ring[k].nr = (unsigned)nr;
+				c->ra_ring[k].ra[0] = st[0];
+				c->ra_ring[k].ra[1] = st[1];
+				c->ra_ring[k].ra[2] = st[2];
+				c->ra_ri = k + 1;
+			}
+		}
 		c->sc_ring[slot].ret = ret;
 		c->sc_ring[slot].rip = d->regs.rip;
 		c->sc_ri = (slot + 1) % 200;
@@ -5517,6 +5536,16 @@ void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
 			(unsigned)uml_nt_conn_is_login(c),
 			(unsigned)c->chain_login,
 			c->mm != NULL ? (int)c->mm->nvma : -1);
+	}
+	/* S439: the caller chain, most recent first-class. */
+	for (i = 0; i < 8 && i < c->ra_ri; i++) {
+		unsigned k = (c->ra_ri + 8 - 1 - i) % 8;
+
+		os_info("[sct-caller] pid %lu nr=%u ra1=0x%llx ra2=0x%llx "
+			"ra3=0x%llx\n",
+			(unsigned long)c->pid, c->ra_ring[k].nr,
+			c->ra_ring[k].ra[0], c->ra_ring[k].ra[1],
+			c->ra_ring[k].ra[2]);
 	}
 	os_info("[sc-final] pid %lu total=%u last=%u (in order, at death)\n",
 		(unsigned long)c->pid, c->sc_total, n);
