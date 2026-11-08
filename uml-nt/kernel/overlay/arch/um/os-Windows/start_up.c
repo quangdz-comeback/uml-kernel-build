@@ -798,6 +798,26 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 			(void)i;
 	}
 
+	/* S455: the last 32 exceptions in first-chance order. The terminating
+	 * record's rip has been mid-instruction three times running, so the tail
+	 * is the evidence about (rip, op, addr). */
+	{
+		unsigned int i, cnt = av_ring_n < 32 ? av_ring_n : 32;
+
+		for (i = 0; i < cnt; i++) {
+			unsigned int k = (av_ring_n + 32 - cnt + i) % 32;
+
+			n = snprintf(buf, sizeof(buf),
+				     "  [av] tid=%llu code=%08x rip=%llx op=%d "
+				     "addr=%llx\n", av_ring[k].tid,
+				     (unsigned int)av_ring[k].code,
+				     av_ring[k].rip, av_ring[k].op,
+				     av_ring[k].addr);
+			if (n > 0)
+				uml_nt_crash_write(buf, (unsigned int)n);
+		}
+	}
+
 	/* Page-offset anchors: uml_physmem IS page_offset/PAGE_OFFSET —
 	 * if it got trashed, every virt_to_page/kmem_cache_free faults
 	 * far from the write that trashed it. Print them so a
