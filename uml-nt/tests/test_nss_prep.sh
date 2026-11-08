@@ -73,4 +73,12 @@ grep -q 'id: msys1' "$W" || { echo "FAIL: no first msys attempt id"; exit 1; }
 grep -q 'id: msys3' "$W" || { echo "FAIL: no third attempt"; exit 1; }
 grep -qF '[infra] msys2-setup-failed-after-3-attempts' "$W" 	|| { echo "FAIL: no infrastructure verdict"; exit 1; }
 grep -qF '[infra] msys=ok' "$W" || { echo "FAIL: the log does not declare the attempt"; exit 1; }
+# S456: the symbolizer must read the log the artifact carries, not ./systemd.log
+grep -qF "find . -name systemd.log" "$W" || { echo "FAIL: symbolizer cannot find the log"; exit 1; }
+grep -qF '[infra] sym=skipped(no-fault)' "$W" \
+	|| { echo "FAIL: no-fault is not distinguished from no-file"; exit 1; }
+grep -qF "grep -oE '\\[av\\]" "$W" || grep -qF '[av]' "$W" \
+	|| { echo "FAIL: first-chance rips are not symbolized"; exit 1; }
+grep -qF "stack\\[[0-9.]+\\]" "$W" \
+	|| { echo "FAIL: stack return addresses are not symbolized"; exit 1; }
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"

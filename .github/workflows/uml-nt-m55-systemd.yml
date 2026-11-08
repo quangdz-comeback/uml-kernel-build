@@ -688,17 +688,42 @@ jobs:
         if: always()
         shell: msys2 {0}
         run: |
+          # S456: this step ran in its own cwd and read ./systemd.log, while the
+          # boot step wrote the log elsewhere — so it reported 'no native fault'
+          # for runs that had one, and three rounds went without a CI function
+          # name. Find the log the artifact actually carries, exactly as the
+          # Shape step does.
           set +e
+          F=$(find . -name systemd.log -type f -printf '%p %s\n' 2>/dev/null | sort -k2 -n | tail -1 | cut -d' ' -f1)
+          [ -n "$F" ] || F=systemd.log
           VL=build/vmlinux
-          [ -f "$VL" ] || { echo "FAULT-SYM: no vmlinux to symbolize with"; exit 0; }
-          rips=$(grep -oE 'KERNEL NATIVE FAULT[^\n]*rip=[0-9a-fA-F]+' systemd.log 2>/dev/null |
-                 grep -oE 'rip=[0-9a-fA-F]+' | cut -d= -f2 | sort -u)
-          if [ -z "$rips" ]; then echo "FAULT-SYM: no native fault in this run"; exit 0; fi
-          for r in $rips; do
-            v="0x$r"
+          echo "[infra] sym log=$F"
+          [ -f "$VL" ] || { echo "[infra] sym=skipped(no-vmlinux)"; exit 0; }
+          [ -f "$F" ] || { echo "[infra] sym=skipped(no-log)"; exit 0; }
+
+          # fault rips, first-chance [av] rips, and return addresses visible in
+          # the stack dumps — all of them are candidates worth a name
+          {
+            grep -oE 'KERNEL NATIVE FAULT[^\n]*rip=[0-9a-fA-F]+' "$F" |
+              grep -oE 'rip=[0-9a-fA-F]+' | cut -d= -f2
+            grep -oE '\[av\][^\n]* rip=[0-9a-fA-F]+' "$F" |
+              grep -oE 'rip=[0-9a-fA-F]+' | cut -d= -f2
+            grep -oE 'stack\[[0-9.]+\]=([0-9a-f]+ ){3}[0-9a-f]+' "$F" |
+              tr ' ' '\n' | grep -oE '600[0-9a-f]{5}' | sed 's/^600/600/'
+          } 2>/dev/null | sort -u > /tmp/sym_addrs.txt
+
+          n=$(grep -c . /tmp/sym_addrs.txt 2>/dev/null)
+          if [ "${n:-0}" -eq 0 ]; then
+            echo "[infra] sym=skipped(no-fault)"
+            exit 0
+          fi
+          echo "FAULT-SYM: $n candidate address(es)"
+          while read -r a; do
+            [ -n "$a" ] || continue
+            v="0x$a"
             line=$(llvm-addr2line -f -e "$VL" "$v" 2>/dev/null | tr '\n' ' ')
-            echo "FAULT-SYM rip=$v $line"
-          done
+            echo "FAULT-SYM addr=$v $line"
+          done < /tmp/sym_addrs.txt
 
       - name: Windows error events (faulting module + offset)
         if: always()

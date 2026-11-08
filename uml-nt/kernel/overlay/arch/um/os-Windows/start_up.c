@@ -794,8 +794,65 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 			if (n > 0)
 				uml_nt_crash_write(buf, (unsigned int)n);
 		}
-		for (i = 0; i < 8; i++)
-			(void)i;
+		/* S456: rbp is the frame this fault reads through — the instrument
+		 * already proved rbp = 0x10730000 and [rbp+0x20] = info1. Print it
+		 * and the four qwords it addresses, plus one more frame from
+		 * [rsp+0x28], so the next fault needs no symbolization round trip. */
+		{
+			unsigned long long crbp = (e != NULL && e->context != NULL) ?
+				(unsigned long long)UML_NT_X64_CTX_REG(
+					e->context, 0xa0) : 0;
+			unsigned long long rq[4];
+			unsigned int ri2;
+
+			n = snprintf(buf, sizeof(buf),
+				     "  frame-regs rbp=%llx rbx=%llx rdi=%llx "
+				     "rsi=%llx rcx=%llx\n", crbp,
+				     (unsigned long long)UML_NT_X64_CTX_REG(
+					     e != NULL ? e->context : 0, 0x90),
+				     (unsigned long long)UML_NT_X64_CTX_REG(
+					     e != NULL ? e->context : 0, 0xa8),
+				     (unsigned long long)UML_NT_X64_CTX_REG(
+					     e != NULL ? e->context : 0, 0xa8),
+				     0ULL);
+			if (n > 0)
+				uml_nt_crash_write(buf, (unsigned int)n);
+
+			memset(rq, 0, sizeof(rq));
+			if (crbp && uml_nt_page_readable(crbp) &&
+			    uml_nt_page_readable(crbp + sizeof(rq) - 1))
+				memcpy(rq, (const void *)(uintptr_t)crbp,
+				       sizeof(rq));
+			n = snprintf(buf, sizeof(buf),
+				     "  [rbp] %llx %llx %llx %llx  (+0x20=%llx)\n",
+				     rq[0], rq[1], rq[2], rq[3], rq[4 - 1]);
+			if (n > 0)
+				uml_nt_crash_write(buf, (unsigned int)n);
+
+			{
+				unsigned long long f2[8];
+				unsigned long long a2 = 0;
+
+				memset(f2, 0, sizeof(f2));
+				if (e != NULL && e->context != NULL) {
+					a2 = (unsigned long long)
+						UML_NT_X64_CTX_REG(e->context, 0x98);
+					a2 += 0x28;
+				}
+				if (a2 && uml_nt_page_readable(a2))
+					memcpy(f2, (const void *)(uintptr_t)a2,
+					       sizeof(f2));
+				for (ri2 = 0; ri2 < 8; ri2 += 4) {
+					n = snprintf(buf, sizeof(buf),
+					     "  [rsp+0x28+%d]=%llx %llx %llx %llx\n",
+					     ri2, f2[ri2], f2[ri2 + 1],
+					     f2[ri2 + 2], f2[ri2 + 3]);
+					if (n > 0)
+						uml_nt_crash_write(buf,
+							(unsigned int)n);
+				}
+			}
+		}
 	}
 
 	/* S455: the last 32 exceptions in first-chance order. The terminating
