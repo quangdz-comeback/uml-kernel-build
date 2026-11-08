@@ -225,8 +225,12 @@ jobs:
           # prep script, never by hand: a rebuilt image keeps this.
           if [ -f /mnt/m55a-rootfs/etc/pam.d/common-session ]; then
             sudo sed -i \
-              -e 's|^session[[:space:]]*optional[[:space:]]*pam_systemd\.so.*|# [uml-nt test image] pam_systemd needs systemd-userdbd, which this image does not carry; login must reach a shell without it\n&|' \
+              -e 's|^session[[:space:]]*optional[[:space:]]*pam_systemd\.so.*|# [uml-nt test image] pam_systemd disabled: no userdbd in this image|' \
               /mnt/m55a-rootfs/etc/pam.d/common-session
+            # S434: the replacement appended '\n&' — which INSERTS a comment and
+            # KEEPS the active line, so the sed never disabled anything and the
+            # enforcement counted active=1 correctly. The whole line is replaced
+            # now, and the count is the proof.
             # S433: the 425 enforcement was lost when 426 rewrote this block, and
             # pam_systemd came back unnoticed — pam-mod listed all 18 modules
             # including it. An edit without a verdict is not a fix: count the

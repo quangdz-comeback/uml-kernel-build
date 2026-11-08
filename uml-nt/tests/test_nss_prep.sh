@@ -31,4 +31,10 @@ grep -q '\[prep\] pam_systemd=commented active=0' "$W" \
 	|| { echo "FAIL: prep does not declare pam_systemd neutralised"; exit 1; }
 grep -q '\[prep\] pam_systemd=present active=' "$W" \
 	|| { echo "FAIL: prep cannot fail when pam_systemd is active"; exit 1; }
+# S434: the replacement must REPLACE the line, never append a comment above it
+if grep -qE "^ *-e .s\|\^session.*pam_systemd.*n&" "$W"; then
+	printf "FAIL: the pam_systemd sed still keeps the active line (backslash-n amp)\n"; exit 1
+fi
+grep -qF 'pam_systemd disabled: no userdbd in this image' "$W" \
+	|| { echo "FAIL: no replacement text"; exit 1; }
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"
