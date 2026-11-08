@@ -13048,11 +13048,29 @@ static int init_r15_budget = 32;
 static unsigned long long stub_views[UML_NT_VIEW_MAX];
 static unsigned int stub_views_n;
 unsigned long long uml_nt_dangling_stub_n;
+unsigned long long uml_nt_view_reg_full_n;
 
 void uml_nt_stub_view_add(unsigned long long va)
 {
-	if (stub_views_n < UML_NT_VIEW_MAX)
+	unsigned int i;
+
+	/* S455: a set, not an append — re-registering the same window must not
+	 * consume a second slot. */
+	for (i = 0; i < stub_views_n; i++)
+		if (stub_views[i] == va)
+			return;
+	if (stub_views_n < UML_NT_VIEW_MAX) {
 		stub_views[stub_views_n++] = va;
+		return;
+	}
+	/* S455: silently dropping a LIVE view would make the guard reject a live
+	 * stub and kill the boot with no trace — the exact silence this hunt keeps
+	 * paying for. Shout and count instead. */
+	uml_nt_view_reg_full_n++;
+	if (uml_nt_view_reg_full_n <= 8)
+		os_info("[view-reg-full] va=0x%llx n=%u max=%u (live view NOT "
+			"registered — guard will reject it)\n",
+			va, stub_views_n, (unsigned int)UML_NT_VIEW_MAX);
 }
 
 void uml_nt_stub_view_del(unsigned long long va)
@@ -13110,7 +13128,7 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	 * after the stub dies, and the three faults 0x100e0020 / 0x10220020 /
 	 * 0x10730020 were reads of d->args[0] (offset 0x20) from views that had
 	 * been unmapped — one stale pointer per dead stub. */
-	uml_nt_stub_view_add(data_va);
+	uml_nt_stub_view_add(data_va);	/* removed on the fail path below */
 
 	dsec = nt->CreateFileMappingW((HANDLE)-1, &sa, 0x04 /*RW*/, 0,
 				      UML_STUB_SECTION_SIZE, NULL);
@@ -13272,6 +13290,10 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 	return 0;
 
 fail:
+	/* S455: the window was registered before the mapping existed; a failed
+	 * spawn must release the slot, or leaks eventually fill the registry and
+	 * the guard starts rejecting live stubs. */
+	uml_nt_stub_view_del(data_va);
 	os_info("[stub] spawn failed win32=%lu\n",
 		nt->RtlGetLastWin32Error());
 	return -1;

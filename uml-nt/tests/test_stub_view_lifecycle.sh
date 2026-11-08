@@ -15,4 +15,12 @@ a=$(grep -n 'const unsigned long long \*a = d->args;' "$S" | head -1 | cut -d: -
 [ -n "$n" ] && [ -n "$a" ] && [ "$n" -lt "$a" ] || { echo "FAIL: guard follows the deref"; exit 1; }
 grep -q 'return;.*refuse, do not dereference' "$S" || { echo "FAIL: no refusal"; exit 1; }
 grep -q '\[dangling-stub\]' "$S" || { echo "FAIL: refusal is silent"; exit 1; }
+# S455: a full registry must shout, not silently drop a live view
+grep -q '\[view-reg-full\]' "$K" || { echo "FAIL: registry overflow is silent"; exit 1; }
+grep -q 'uml_nt_view_reg_full_n++' "$K" || { echo "FAIL: overflow not counted"; exit 1; }
+# and it must be a set, not an append: a duplicate va returns early
+grep -q 'if (stub_views\[i\] == va)' "$K" || { echo "FAIL: duplicate registration not prevented"; exit 1; }
+# the spawn failure path must release the slot it reserved
+awk '/^fail:/{f=1} f&&/uml_nt_stub_view_del\(data_va\)/{found=1} END{exit !found}' "$K" \
+	|| { echo "FAIL: fail path leaks a registry slot"; exit 1; }
 echo "stub_view_lifecycle: registered live, unregistered on death, refused before use"

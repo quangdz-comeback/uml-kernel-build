@@ -140,6 +140,7 @@ struct uml_nt_stub_conn *uml_nt_conn_reg_at(int i);
 
 /* S454: live stub_data views (see stub_ctl.c). */
 extern unsigned long long uml_nt_dangling_stub_n;
+extern unsigned long long uml_nt_view_reg_full_n;
 void uml_nt_stub_view_add(unsigned long long va);
 void uml_nt_stub_view_del(unsigned long long va);
 int uml_nt_stub_view_ok(const struct uml_nt_stub_data *d);
