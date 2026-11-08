@@ -15,5 +15,5 @@ n=$(grep -n 'ra_ring\[k\].nr' "$S" | head -1 | cut -d: -f1)
 blk=$(sed -n "$((n - 18)),$((n + 2))p" "$S")
 case "$blk" in *uml_nt_vma_translate*) ;; *) echo "FAIL: no translate"; exit 1;; esac
 case "$blk" in *uml_nt_phys_read_checked*) ;; *) echo "FAIL: raw stack read"; exit 1;; esac
-case "$blk" in *d->regs.rsp*) ;; *) echo "FAIL: not the guest stack"; exit 1;; esac
+case "$blk" in *"d->regs.rsp"*) ;; *) echo "FAIL: not the guest stack"; exit 1;; esac
 echo "sct_caller: three return addresses captured per ledger entry, read safely"
