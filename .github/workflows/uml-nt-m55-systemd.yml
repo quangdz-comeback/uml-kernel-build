@@ -167,6 +167,17 @@ jobs:
           done
           if [ -n "$MISSED" ]; then echo "[prep] profile=minimal unmasked:$MISSED" >&2; exit 1; fi
           echo "[prep] profile=minimal units_masked=$MIN_N sha=$PROFILE_SHA"
+          # S446: /etc/securetty is absent in this base image, and pam_securetty
+          # denies root on a terminal it cannot find in that file. This is a
+          # console test image, so declare the terminals it actually uses.
+          # Measured: the file does not exist; the module does.
+          if [ -f /mnt/m55a-rootfs/etc/securetty ]; then
+            echo "[prep] securetty=present"
+          else
+            printf 'console\ntty0\ntty1\nttyS0\n' | sudo tee /mnt/m55a-rootfs/etc/securetty >/dev/null
+            sudo chmod 644 /mnt/m55a-rootfs/etc/securetty
+            echo "[prep] securetty=created (console tty0 tty1 ttyS0)"
+          fi
           # S430: removing pam_systemd was not enough. /etc/nsswitch.conf in
           # this image says "passwd: files systemd", so login's getpwnam("root")
           # goes through libnss_systemd -> userdb -> no daemon -> retry, and

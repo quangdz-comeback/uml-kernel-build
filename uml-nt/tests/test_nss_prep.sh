@@ -37,4 +37,8 @@ if grep -qE "^ *-e .s\|\^session.*pam_systemd.*n&" "$W"; then
 fi
 grep -qF 'pam_systemd disabled: no userdbd in this image' "$W" \
 	|| { echo "FAIL: no replacement text"; exit 1; }
+grep -q '\[prep\] securetty=' "$W" \
+	|| { echo "FAIL: securetty is not declared"; exit 1; }
+grep -q 'console\\ntty0' "$W" \
+	|| { echo "FAIL: the console terminals are not written"; exit 1; }
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"
