@@ -175,11 +175,16 @@ jobs:
           # gets the guest to a shell, not whether audit bookkeeping sticks.
           # Disabled in the TEST image only, declared, and enforced.
           PAMD=/mnt/m55a-rootfs/etc/pam.d
-          for f in "$PAMD/login" "$PAMD/common-session" "$PAMD/common-auth"; do
-            [ -f "$f" ] || continue
-            sudo sed -i -E 's|^([[:space:]]*[a-z-]+[[:space:]]+[a-z]+[[:space:]]+.*pam_loginuid\.so.*)$|# [uml-nt test image] pam_loginuid disabled: netlink bookkeeping, not a login prerequisite\n#\1|' "$f"
+          # S448: the edit loop and the guard must see the SAME files. The first
+          # version edited a hardcoded three (login, common-session, common-auth)
+          # and then grepped the whole tree — sshd:22 also loads pam_loginuid, so
+          # the guard was right and the edit was incomplete. One regex, used for
+          # both: whatever grep -rl finds is what gets edited.
+          LOGINUID_RE='^[[:space:]]*[a-z-]+[[:space:]]+[a-z]+[[:space:]]+.*pam_loginuid[.]so'
+          grep -rlE "$LOGINUID_RE" "$PAMD" 2>/dev/null | while read -r f; do
+            sudo sed -i -E "s|($LOGINUID_RE.*)$|# [uml-nt test image] pam_loginuid disabled: netlink bookkeeping, not a login prerequisite\n#\1|" "$f"
           done
-          ACTIVE_LOGINUID=$(grep -rEc '^[[:space:]]*[a-z-]+[[:space:]]+[a-z]+[[:space:]]+.*pam_loginuid\.so' "$PAMD" 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+          ACTIVE_LOGINUID=$(grep -rEc "$LOGINUID_RE" "$PAMD" 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
           if [ "${ACTIVE_LOGINUID:-0}" -ne 0 ]; then
             echo "[prep] pam_loginuid=present active=$ACTIVE_LOGINUID" >&2
             echo "pam_loginuid is still active — refusing to publish" >&2
