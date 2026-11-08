@@ -5378,7 +5378,7 @@ out:
 		/* S439: capture the return addresses BEFORE the value is lost —
 		 * the guest stack at rsp holds the chain back into login.c. */
 		{
-			unsigned long long st[3] = { 0, 0, 0 };
+			unsigned long long st[8] = { 0 };
 			long so = uml_nt_vma_translate(c->mm, d->regs.rsp,
 						       sizeof(st));
 
@@ -5393,9 +5393,7 @@ out:
 				unsigned k = c->ra_ri % 64;
 
 				c->ra_ring[k].nr = (unsigned)nr;
-				c->ra_ring[k].ra[0] = st[0];
-				c->ra_ring[k].ra[1] = st[1];
-				c->ra_ring[k].ra[2] = st[2];
+				memcpy(c->ra_ring[k].ra, st, sizeof(st));
 				c->ra_ri = k + 1;
 			}
 		}
@@ -5558,10 +5556,41 @@ void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
 		unsigned k = (c->ra_ri + 64 - 1 - i) % 64;
 
 		os_info("[sct-caller] pid %lu nr=%u ra1=0x%llx ra2=0x%llx "
-			"ra3=0x%llx\n",
+			"ra3=0x%llx ra4=0x%llx ra5=0x%llx ra6=0x%llx ra7=0x%llx "
+			"ra8=0x%llx\n",
 			(unsigned long)c->pid, c->ra_ring[k].nr,
 			c->ra_ring[k].ra[0], c->ra_ring[k].ra[1],
-			c->ra_ring[k].ra[2]);
+			c->ra_ring[k].ra[2], c->ra_ring[k].ra[3],
+			c->ra_ring[k].ra[4], c->ra_ring[k].ra[5],
+			c->ra_ring[k].ra[6], c->ra_ring[k].ra[7]);
+		{
+			/* S441: ranges measured from referee d3509a7's own log, not
+			 * guessed: libc [0x608e0000,0x60aa0000), /bin/login
+			 * ~[0x60870000,0x60880000) (64 KiB for a 53 KiB file,
+			 * prot=0x20), a third library [0x60a70000,0x60d80000).
+			 * They locate the frames well enough to say which image a
+			 * return address belongs to; ASLR moves them, so a miss
+			 * prints unknown rather than lying. */
+			static const struct { unsigned long long lo, hi;
+					      const char *nm; } mods[] = {
+				{ 0x60870000ULL, 0x60880000ULL, "login" },
+				{ 0x608e0000ULL, 0x60aa0000ULL, "libc" },
+				{ 0x60a70000ULL, 0x60d80000ULL, "pam" },
+			};
+			const char *m = "unknown";
+			unsigned mi, fi;
+
+			for (fi = 0; fi < 8; fi++) {
+				for (mi = 0; mi < 3; mi++)
+					if (c->ra_ring[k].ra[fi] >= mods[mi].lo &&
+					    c->ra_ring[k].ra[fi] < mods[mi].hi)
+						m = mods[mi].nm;
+				os_info("[sct-mod] nr=%u ra%u=0x%llx mod=%s\n",
+					c->ra_ring[k].nr, fi + 1,
+					c->ra_ring[k].ra[fi], m);
+				m = "unknown";
+			}
+		}
 	}
 	os_info("[sc-final] pid %lu total=%u last=%u (in order, at death)\n",
 		(unsigned long)c->pid, c->sc_total, n);

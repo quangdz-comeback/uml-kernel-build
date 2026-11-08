@@ -284,7 +284,7 @@ struct uml_nt_stub_conn {
 	/* S439: the three return addresses above rsp for the last few syscalls —
 	 * the ledger's rip is always inside the libc syscall stub, so the only
 	 * thing that names the caller in login.c is the guest stack. */
-	struct { unsigned nr; unsigned long long ra[3]; } ra_ring[64];
+	struct { unsigned nr; unsigned long long ra[8]; } ra_ring[64];
 	unsigned ra_ri;
 	unsigned clock_odd_n;	/* S95: non-triplet clockids answered */	/* S87: reads on fd 0-2 that returned bytes */
 	unsigned loop_trap_n;		/* S69 */
