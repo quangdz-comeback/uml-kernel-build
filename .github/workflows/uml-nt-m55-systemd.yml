@@ -177,18 +177,38 @@ jobs:
           # fail if it survives.
           NSS_F=/mnt/m55a-rootfs/etc/nsswitch.conf
           if [ -f "$NSS_F" ]; then
-            sudo sed -i -e 's/^\(passwd:[[:space:]]*files\)[[:space:]].*systemd.*/\1 # [uml-nt test image] userdb has no daemon here/' \
-                          -e 's/^\(group:[[:space:]]*files\)[[:space:]].*systemd.*/\1 # [uml-nt test image] userdb has no daemon here/' \
-                          -e 's/^\(shadow:[[:space:]]*files\)[[:space:]].*systemd.*/\1 # [uml-nt test image] userdb has no daemon here/' \
-                          -e 's/^\(gshadow:[[:space:]]*files\)[[:space:]].*systemd.*/\1 # [uml-nt test image] userdb has no daemon here/' \
-                          "$NSS_F"
-            NSS_SHA=$(grep -E '^(passwd|group|shadow|gshadow):' "$NSS_F" | sha256sum | cut -c1-12)
-            if grep -qE '^(passwd|group|shadow|gshadow):.*systemd' "$NSS_F"; then
-              echo "[prep] nss_systemd=present sha=$NSS_SHA" >&2
-              echo "nsswitch still routes accounts through userdb — refusing to publish" >&2
+            # S432: NO trailing comments. glibc's nsswitch parser does not accept
+            # them: a comment at end of line breaks the whole line, every
+            # database returns NOTFOUND, and login prints "could not identify
+            # user (from getpwnam(root))" even though "files" is present. The
+            # first version of this step did exactly that and broke every lookup.
+            # The reason lives on its own line, above the data.
+            sudo sed -i \
+              -e 's/^\(passwd:\)[[:space:]].*/\1         files/' \
+              -e 's/^\(group:\)[[:space:]].*/\1          files/' \
+              -e 's/^\(shadow:\)[[:space:]].*/\1         files/' \
+              -e 's/^\(gshadow:\)[[:space:]].*/\1        files/' \
+              "$NSS_F"
+            sudo sed -i '1i # [uml-nt test image] the systemd (userdb) source was removed from the account databases: this image carries no systemd-userdbd, so any lookup routed there hangs' "$NSS_F"
+            # Enforce by USE, not by shape: the image must be able to resolve
+            # root and messagebus. A grep can be satisfied by a file that no
+            # longer parses.
+            if ! sudo chroot /mnt/m55a-rootfs getent passwd root >/tmp/getent_root.txt 2>/dev/null \
+               || ! grep -q '^root:' /tmp/getent_root.txt; then
+              echo "[prep] getent-root=FAILED" >&2
+              echo "the account databases do not resolve root — refusing to publish" >&2
               exit 1
             fi
-            echo "[prep] nss_systemd=removed sha=$NSS_SHA"
+            if ! sudo chroot /mnt/m55a-rootfs getent passwd messagebus >/tmp/getent_mb.txt 2>/dev/null \
+               || ! grep -q '^messagebus:' /tmp/getent_mb.txt; then
+              echo "[prep] getent-messagebus=FAILED" >&2
+              echo "dbus.service needs a resolvable messagebus user — refusing to publish" >&2
+              exit 1
+            fi
+            NSS_SHA=$(sha256sum "$NSS_F" | cut -c1-12)
+            echo "[prep] nss_systemd=removed getent_root=OK getent_messagebus=OK sha=$NSS_SHA"
+            echo "getent passwd root: $(cat /tmp/getent_root.txt)"
+            echo "getent passwd messagebus: $(cat /tmp/getent_mb.txt)"
             grep -E '^(passwd|group|shadow|gshadow):' "$NSS_F" || true
           else
             echo "[prep] nss_systemd=no-nsswitch"
