@@ -32,6 +32,10 @@ on:
         description: 'Refined A/B: remove the vectored handler for the first 4s of a login conn'
         type: boolean
         default: false
+      mem_mb:
+        description: "guest RAM in MB (192 default: 120 exhausted during exec, census free=10M)"
+        type: string
+        default: "192"
       feed:
         description: "feed the console at all (false = diagnostic A/B: is the input path the killer?)"
         type: boolean
@@ -219,11 +223,18 @@ jobs:
           # S449 branch B: ask libpam to trace every session module it runs. The
           # last module logged before 'res=failed' is the culprit, named in the
           # guest's own syslog.
-          for f in /mnt/m55a-rootfs/etc/pam.d/login /mnt/m55a-rootfs/etc/pam.d/common-session; do
-            [ -f "$f" ] || continue
-            sudo sed -i -E '/^[[:space:]]*session[[:space:]]/ { /[[:space:]]debug([[:space:]]|$)/! s/$/ debug/ }' "$f"
-          done
-          echo "[prep] pam_debug=session-lines (login, common-session)"
+          # S450: branch B (pam debug) is OFF by default — the minimal stack won
+          # and the log must stay clean for the shell gate. Set PAM_DEBUG=1 to
+          # re-enable it when the full Debian stack is restored.
+          if [ "${PAM_DEBUG:-0}" = "1" ]; then
+            for f in /mnt/m55a-rootfs/etc/pam.d/login /mnt/m55a-rootfs/etc/pam.d/common-session; do
+              [ -f "$f" ] || continue
+              sudo sed -i -E '/^[[:space:]]*session[[:space:]]/ { /[[:space:]]debug([[:space:]]|$)/! s/$/ debug/ }' "$f"
+            done
+            echo "[prep] pam_debug=session-lines (login, common-session)"
+          else
+            echo "[prep] pam_debug=off"
+          fi
           # S446: /etc/securetty is absent in this base image, and pam_securetty
           # denies root on a terminal it cannot find in that file. This is a
           # console test image, so declare the terminals it actually uses.
@@ -543,7 +554,7 @@ jobs:
           } | bash bounded-run.sh ${{ inputs.debugger && '1800' || '900' }} ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
-            "mem=120M" \
+            "mem=${{ inputs.mem_mb || '192' }}M" \
             "root=98:0" "rw" \
             "SYSTEMD_LOG_TARGET=console" "SYSTEMD_LOG_LOCATION=1" \
             ${WITNESS_ARG:+$WITNESS_ARG} \

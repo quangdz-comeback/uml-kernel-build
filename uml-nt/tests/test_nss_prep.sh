@@ -64,4 +64,8 @@ grep -qF '[prep] pam_debug=session-lines' "$W" \
 	|| { echo "FAIL: no pam debug declaration"; exit 1; }
 # D26: every tier-B concession is declared and enforced
 grep -qF 'refusing to publish' "$W" || { echo "FAIL: no enforcement"; exit 1; }
+grep -qF "mem=\${{ inputs.mem_mb || '192' }}M" "$W" \
+	|| { echo "FAIL: memory is not 192M by default"; exit 1; }
+grep -qF '[prep] pam_debug=off' "$W" \
+	|| { echo "FAIL: pam debug is not off by default"; exit 1; }
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"
