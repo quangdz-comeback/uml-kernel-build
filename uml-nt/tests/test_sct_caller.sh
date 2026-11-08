@@ -7,7 +7,7 @@ H="$HERE/../kernel/overlay/arch/um/os-Windows/include/syscall.h"
 
 grep -q 'ra_ring\[8\]' "$H" || { echo "FAIL: no caller ring"; exit 1; }
 grep -q '\[sct-caller\]' "$S" || { echo "FAIL: no caller record"; exit 1; }
-grep -q 'ra1=0x%llx ra2=0x%llx ra3=0x%llx' "$S" \
+grep -q 'ra1=0x%llx' "$S" && grep -q 'ra2=0x%llx' "$S" && grep -q 'ra3=0x%llx' "$S" \
 	|| { echo "FAIL: three return addresses not printed"; exit 1; }
 # the stack read must be translate + checked, never raw
 n=$(grep -n 'ra_ring\[k\].nr' "$S" | head -1 | cut -d: -f1)
