@@ -9,7 +9,7 @@ grep -q 'nsswitch.conf' "$W" || { echo "FAIL: prep never touches nsswitch"; exit
 
 # 1. no trailing comment may be appended to a database line: glibc stops parsing
 #    the whole line, which is exactly how every lookup broke in 42398385638.
-if grep -qE "\\^\\\\(passwd:.*#" "$W"; then
+if grep -qF '/\(passwd:\)[[:space:]].*#' "$W"; then
 	echo "FAIL: the sed appends a comment to the passwd line"; exit 1
 fi
 for db in passwd group shadow gshadow; do
