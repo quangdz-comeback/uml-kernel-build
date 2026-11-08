@@ -5281,6 +5281,34 @@ out:
 			uml_nt_pam_mod_note(c, a[1]);
 		else if (nr == 42)
 			uml_nt_con_path_note(c, a[1], (long long)ret);
+		/* S437: netlink replies are 36 bytes on x86-64: nlmsghdr (16) plus
+		 * nlmsgerr (20 + the echoed header). nlmsgerr.error tells whether
+		 * the kernel accepted the request (0 = ACK) or refused it (negative
+		 * errno), and that single int decides whether libaudit treats a
+		 * missing auditd as fatal. Decode it from the guest buffer with the
+		 * checked reader, never a raw dereference. */
+		else if (nr == 45 && (long long)ret >= 20 && a[1] != 0) {
+			unsigned char buf[64];
+			unsigned long n = (unsigned long)ret;
+
+			if (n > sizeof(buf))
+				n = sizeof(buf);
+			if (uml_nt_phys_read_checked(
+				    c, (unsigned long long)
+				    uml_nt_vma_translate(c->mm, a[1], n), buf,
+				    n) == 0) {
+				int err = (int)((unsigned)buf[16] |
+						((unsigned)buf[17] << 8) |
+						((unsigned)buf[18] << 16) |
+						((unsigned)buf[19] << 24));
+
+				os_info("[nl-reply] pid %d len=%llu "
+					"nlmsg_type=%u nlmsgerr.error=%d\n",
+					(int)c->pid, (unsigned long long)ret,
+					(unsigned)buf[4] | ((unsigned)buf[5] << 8),
+					err);
+			}
+		}
 	}
 	/* S53: keep the last 200 syscalls of a login conn and print them in order
 	 * at a few checkpoints — the tail of the run is what says where login
