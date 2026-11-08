@@ -4296,6 +4296,19 @@ static void uml_nt_note_text(struct uml_nt_stub_conn *c, const char *tag,
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			   struct uml_nt_stub_data *d)
 {
+	/* S454: a stub_data view that is no longer live must not be read. Three
+	 * referees faulted at d->args[0] (offset 0x20) inside unmapped views. */
+	if (!uml_nt_stub_view_ok(d)) {
+		uml_nt_dangling_stub_n++;
+		if (uml_nt_dangling_stub_n <= 8)
+			os_info("[dangling-stub] va=0x%llx caller=0x%llx pid=%d\n",
+				(unsigned long long)(unsigned long)
+				(const void *)d,
+				(unsigned long long)(unsigned long)
+				__builtin_return_address(0),
+				(int)c->pid);
+		return;	/* refuse, do not dereference */
+	}
 	const unsigned long long *a = d->args;
 	unsigned long long nr = d->regs.rax;
 	unsigned long long ret;

@@ -218,6 +218,10 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	}
 	os_info("mmctx: destroy pid %d: stub terminated\n", id->pid);
 	if (c->d != NULL)
+		/* S454: the view is about to die — forget it, so any later use of
+		 * the pointer is a named refusal instead of a fault at +0x20. */
+		uml_nt_stub_view_del((unsigned long long)(unsigned long)
+				     (const void *)c->d);
 		nt->UnmapViewOfFile(c->d);
 	if (c->dsec != NULL)
 		nt->CloseHandle(c->dsec);

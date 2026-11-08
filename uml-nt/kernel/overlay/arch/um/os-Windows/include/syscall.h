@@ -138,6 +138,12 @@ struct uml_nt_stub_conn *uml_nt_conn_reg_at(int i);
 #define UML_NT_SERVE_PLANDRAIN	5
 #define UML_NT_SERVE_DONE	6
 
+/* S454: live stub_data views (see stub_ctl.c). */
+extern unsigned long long uml_nt_dangling_stub_n;
+void uml_nt_stub_view_add(unsigned long long va);
+void uml_nt_stub_view_del(unsigned long long va);
+int uml_nt_stub_view_ok(const struct uml_nt_stub_data *d);
+
 struct uml_nt_stub_conn {
 	struct uml_nt_stub_data *d;
 	HANDLE evt_in, evt_out;

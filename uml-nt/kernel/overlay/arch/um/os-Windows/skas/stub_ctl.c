@@ -13040,6 +13040,46 @@ static int dbg_want(const struct uml_nt_stub_conn *c)
 
 static int init_r15_budget = 32;
 
+
+/* S454: live stub_data views. A destroyed stub leaves its pointer behind; the
+ * kernel then reads args[] at +0x20 from unmapped memory, which is what three
+ * referees faulted on. The registry makes that a named refusal. */
+#define UML_NT_VIEW_MAX 256
+static unsigned long long stub_views[UML_NT_VIEW_MAX];
+static unsigned int stub_views_n;
+unsigned long long uml_nt_dangling_stub_n;
+
+void uml_nt_stub_view_add(unsigned long long va)
+{
+	if (stub_views_n < UML_NT_VIEW_MAX)
+		stub_views[stub_views_n++] = va;
+}
+
+void uml_nt_stub_view_del(unsigned long long va)
+{
+	unsigned int i;
+
+	for (i = 0; i < stub_views_n; i++) {
+		if (stub_views[i] == va) {
+			stub_views[i] = stub_views[--stub_views_n];
+			return;
+		}
+	}
+}
+
+int uml_nt_stub_view_ok(const struct uml_nt_stub_data *d)
+{
+	unsigned long long va = (unsigned long long)(unsigned long)
+		(const void *)d;
+	unsigned int i;
+
+	for (i = 0; i < stub_views_n; i++)
+		if (va >= stub_views[i] &&
+		    va < stub_views[i] + UML_STUB_SECTION_SIZE)
+			return 1;
+	return 0;
+}
+
 int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 		      unsigned long long stack_va,
 		      const struct uml_nt_gp_regs *init)
@@ -13066,6 +13106,11 @@ int uml_nt_spawn_stub(struct uml_nt_stub_conn *c, unsigned long long entry_va,
 
 	data_va = next_data_va;
 	next_data_va += UML_STUB_SECTION_SIZE;
+	/* S454: remember every live stub_data view. The kernel keeps the pointer
+	 * after the stub dies, and the three faults 0x100e0020 / 0x10220020 /
+	 * 0x10730020 were reads of d->args[0] (offset 0x20) from views that had
+	 * been unmapped — one stale pointer per dead stub. */
+	uml_nt_stub_view_add(data_va);
 
 	dsec = nt->CreateFileMappingW((HANDLE)-1, &sa, 0x04 /*RW*/, 0,
 				      UML_STUB_SECTION_SIZE, NULL);
