@@ -14,5 +14,5 @@ case "$blk" in *'c->life_dump'*) ;; *) echo "FAIL: the dump gate ignores the sti
 # the ring must carry what the question needs: nr, ret, rip
 grep -q 'c->sc_ring\[slot\].ret = ret;' "$S" || { echo "FAIL: no return in the ledger"; exit 1; }
 grep -q 'c->sc_ring\[slot\].rip = d->regs.rip;' "$S" || { echo "FAIL: no rip in the ledger"; exit 1; }
-grep -q 'n = c->sc_total < 64 ? c->sc_total : 64;' "$S" || { echo "FAIL: dump window changed"; exit 1; }
-echo "login_life: the ledger is sticky, carries nr/ret/rip, dumps 64 at death"
+grep -q 'n = c->sc_total < 200 ? c->sc_total : 200;' "$S" || { echo "FAIL: dump window changed"; exit 1; }
+echo "login_life: the ledger is sticky, carries nr/ret/rip, dumps 200 at death"

@@ -5488,10 +5488,13 @@ void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
 		return;
 	if (!c->life_dump && !uml_nt_conn_is_login(c) && !c->chain_login)
 		return;
-	/* S91: sixteen filled up on 42274124035 and again here — login's whole
-	 * teardown (dbus userdb read/wait, setgroups, setuid, the munmap burst)
-	 * fits in 64 and nothing before it needs to be guessed. */
-	n = c->sc_total < 64 ? c->sc_total : 64;
+	/* S438: sixty-four was still a window that could hide the decision.
+	 * Referee 7633d6e showed util-linux login's bail() — syslog, audit event,
+	 * exit — and its syslog sendto(3,102) had been pushed out of the printed
+	 * tail by the audit traffic that FOLLOWS it. The ring holds 200; print all
+	 * 200 for a life conn so the cause cannot be evicted by its own
+	 * consequences. */
+	n = c->sc_total < 200 ? c->sc_total : 200;
 	start = (c->sc_ri + 200 - n) % 200;
 	/* S91: the real door. [exit-why] was placed on the nr==231 case, but no
 	 * 231 ever reached it — login's ring ends in the munmap burst, so the
