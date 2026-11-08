@@ -27,4 +27,8 @@ grep -q '\[prep\] getent-messagebus=FAILED' "$W" \
 	|| { echo "FAIL: job does not fail when messagebus is unresolvable"; exit 1; }
 grep -q 'refusing to publish' "$W" \
 	|| { echo "FAIL: no enforcement"; exit 1; }
+grep -q '\[prep\] pam_systemd=commented active=0' "$W" \
+	|| { echo "FAIL: prep does not declare pam_systemd neutralised"; exit 1; }
+grep -q '\[prep\] pam_systemd=present active=' "$W" \
+	|| { echo "FAIL: prep cannot fail when pam_systemd is active"; exit 1; }
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"

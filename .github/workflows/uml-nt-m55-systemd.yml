@@ -227,6 +227,17 @@ jobs:
             sudo sed -i \
               -e 's|^session[[:space:]]*optional[[:space:]]*pam_systemd\.so.*|# [uml-nt test image] pam_systemd needs systemd-userdbd, which this image does not carry; login must reach a shell without it\n&|' \
               /mnt/m55a-rootfs/etc/pam.d/common-session
+            # S433: the 425 enforcement was lost when 426 rewrote this block, and
+            # pam_systemd came back unnoticed — pam-mod listed all 18 modules
+            # including it. An edit without a verdict is not a fix: count the
+            # active lines and refuse to publish if any remains.
+            ACTIVE=$(grep -cE '^[[:space:]]*session[[:space:]].*pam_systemd' /mnt/m55a-rootfs/etc/pam.d/common-session || true)
+            if [ "${ACTIVE:-0}" -ne 0 ]; then
+              echo "[prep] pam_systemd=present active=$ACTIVE" >&2
+              echo "pam_systemd is still active — refusing to publish" >&2
+              exit 1
+            fi
+            echo "[prep] pam_systemd=commented active=0"
             echo "--- pam_systemd in common-session ---"
             grep -n pam_systemd /mnt/m55a-rootfs/etc/pam.d/common-session || true
             # S425: two referees on one SHA behaved differently because one of
