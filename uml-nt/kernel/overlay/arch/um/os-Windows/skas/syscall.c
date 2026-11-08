@@ -5281,6 +5281,17 @@ out:
 			uml_nt_pam_mod_note(c, a[1]);
 		else if (nr == 42)
 			uml_nt_con_path_note(c, a[1], (long long)ret);
+		else if (nr == 39 && c->getpid_n < 5) {
+			/* S440: syslog says login[87] while getpid answered 88/89. If
+			 * login compares its own pid with a stored value, an
+			 * off-by-one is enough to bail. */
+			c->getpid_n++;
+			os_info("[getpid-truth] pid %d ret=%lld task_pid=%d "
+				"tid=%d\n", (int)c->pid, (long long)ret,
+				c->task_backed && current ? current->pid : -1,
+				c->task_backed && current ?
+				(int)task_pid_nr(current) : -1);
+		}
 		/* S437: netlink replies are 36 bytes on x86-64: nlmsghdr (16) plus
 		 * nlmsgerr (20 + the echoed header). nlmsgerr.error tells whether
 		 * the kernel accepted the request (0 = ACK) or refused it (negative
@@ -5371,10 +5382,15 @@ out:
 			long so = uml_nt_vma_translate(c->mm, d->regs.rsp,
 						       sizeof(st));
 
-			if (so >= 0 &&
+			/* S440: munmap is never a decision, always a consequence —
+			 * and a sixteen-entry burst floods any small ring (this bit
+			 * us three times now: canary, sc-final window, and this
+			 * sub-ring). Exclude it, and keep 64 so the decisive
+			 * write(2)/sendto entries survive the teardown. */
+			if (nr != 11 && so >= 0 &&
 			    uml_nt_phys_read_checked(c, (unsigned long long)so,
 						     st, sizeof(st)) == 0) {
-				unsigned k = c->ra_ri % 8;
+				unsigned k = c->ra_ri % 64;
 
 				c->ra_ring[k].nr = (unsigned)nr;
 				c->ra_ring[k].ra[0] = st[0];
@@ -5538,8 +5554,8 @@ void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
 			c->mm != NULL ? (int)c->mm->nvma : -1);
 	}
 	/* S439: the caller chain, most recent first-class. */
-	for (i = 0; i < 8 && i < c->ra_ri; i++) {
-		unsigned k = (c->ra_ri + 8 - 1 - i) % 8;
+	for (i = 0; i < 64 && i < c->ra_ri; i++) {
+		unsigned k = (c->ra_ri + 64 - 1 - i) % 64;
 
 		os_info("[sct-caller] pid %lu nr=%u ra1=0x%llx ra2=0x%llx "
 			"ra3=0x%llx\n",

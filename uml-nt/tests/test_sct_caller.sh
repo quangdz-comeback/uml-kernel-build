@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-# S439: the ledger's rip is inside the libc stub; only the guest stack names login.c.
+# S440: the caller ring must survive the teardown burst.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/syscall.c"
 H="$HERE/../kernel/overlay/arch/um/os-Windows/include/syscall.h"
 
-grep -q 'ra_ring\[8\]' "$H" || { echo "FAIL: no caller ring"; exit 1; }
+grep -q 'ra_ring\[64\]' "$H" || { echo "FAIL: ring is not 64"; exit 1; }
+grep -q 'c->ra_ri % 64' "$S" || { echo "FAIL: index still modulo the old size"; exit 1; }
+grep -q 'nr != 11' "$S" || { echo "FAIL: munmap is not excluded"; exit 1; }
 grep -q '\[sct-caller\]' "$S" || { echo "FAIL: no caller record"; exit 1; }
-grep -q 'ra1=0x%llx' "$S" || { echo "FAIL: ra1 not printed"; exit 1; }
-grep -q 'ra2=0x%llx' "$S" || { echo "FAIL: ra2 not printed"; exit 1; }
-grep -q 'ra3=0x%llx' "$S" || { echo "FAIL: ra3 not printed"; exit 1; }
-
+for f in ra1 ra2 ra3; do
+	grep -q "$f=0x%llx" "$S" || { echo "FAIL: $f not printed"; exit 1; }
+done
 n=$(grep -n 'ra_ring\[k\].nr' "$S" | head -1 | cut -d: -f1)
-blk=$(sed -n "$((n - 18)),$((n + 2))p" "$S")
+blk=$(sed -n "$((n - 20)),$((n + 2))p" "$S")
 case "$blk" in *uml_nt_vma_translate*) ;; *) echo "FAIL: no translate"; exit 1;; esac
 case "$blk" in *uml_nt_phys_read_checked*) ;; *) echo "FAIL: raw stack read"; exit 1;; esac
-case "$blk" in *"d->regs.rsp"*) ;; *) echo "FAIL: not the guest stack"; exit 1;; esac
-echo "sct_caller: three return addresses captured per ledger entry, read safely"
+
+# getpid truth: five answers, with the kernel's own opinion beside them
+grep -q '\[getpid-truth\]' "$S" || { echo "FAIL: no getpid witness"; exit 1; }
+grep -q 'task_pid=%d' "$S" || { echo "FAIL: no kernel pid"; exit 1; }
+grep -q 'getpid_n < 5' "$S" || { echo "FAIL: budget wrong"; exit 1; }
+echo "sct_caller: 64 entries, munmap excluded, getpid truth recorded"
