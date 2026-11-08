@@ -426,6 +426,48 @@ int uml_nt_phys_parked(const struct uml_nt_phys *p)
  * span: writing them would be benign content-wise but the checker
  * refuses anyway — a fill that reaches padding is off by definition
  * and the loud failure points at the call site). */
+/* S452: the same shape three times — 0x10220020 (PA 0x220020), 0x10730020
+ * (0x730020), 0x100e0020 (0xe0020): a read of physmem_base + PA + 0x20 on a guest
+ * page that was never committed. Rather than symbolize each one by hand, every
+ * refusal names its own call site here. Eight slots, one line per new caller. */
+struct uml_nt_phys_miss {
+	unsigned long long caller;
+	unsigned long long pa;
+	unsigned long long n;
+};
+static struct uml_nt_phys_miss phys_miss[8];
+unsigned long long uml_nt_phys_miss_total;
+
+unsigned long long uml_nt_phys_miss_caller[8];
+unsigned long long uml_nt_phys_miss_pa[8];
+unsigned long long uml_nt_phys_miss_n[8];
+
+static void phys_miss_note(unsigned long long pa)
+{
+	unsigned long long caller = (unsigned long long)
+		(unsigned long)(unsigned long)__builtin_return_address(1);
+	int i, slot = -1;
+
+	uml_nt_phys_miss_total++;
+	for (i = 0; i < 8; i++) {
+		if (phys_miss[i].caller == caller) {
+			phys_miss[i].n++;
+			uml_nt_phys_miss_n[i] = phys_miss[i].n;
+			return;
+		}
+		if (slot < 0 && phys_miss[i].caller == 0)
+			slot = i;
+	}
+	if (slot >= 0) {
+		phys_miss[slot].caller = caller;
+		phys_miss[slot].pa = pa;
+		phys_miss[slot].n = 1;
+		uml_nt_phys_miss_caller[slot] = caller;
+		uml_nt_phys_miss_pa[slot] = pa;
+		uml_nt_phys_miss_n[slot] = 1;
+	}
+}
+
 int uml_nt_phys_block_check(const struct uml_nt_phys *p, long long off,
 			    unsigned long long len)
 {
@@ -438,8 +480,10 @@ int uml_nt_phys_block_check(const struct uml_nt_phys *p, long long off,
 		return -1;
 	first = (int)(off >> UML_NT_PHYS_RUN_SHIFT);
 	last = (int)((off + len - 1) >> UML_NT_PHYS_RUN_SHIFT);
-	if (p->refs[first] == 0)
+	if (p->refs[first] == 0) {
+		phys_miss_note((unsigned long long)off);
 		return -1;
+	}
 	own = first - (int)p->span_back[first];
 	if (own < 0)
 		return -1;
