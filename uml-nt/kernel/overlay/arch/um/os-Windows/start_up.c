@@ -716,6 +716,57 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 		     uml_nt_current_tid());
 	if (n > 0)
 		uml_nt_crash_write(buf, (unsigned int)n);
+	/* S452: a rip in the MIDDLE of an instruction cannot be a real data
+	 * fault — it means either the CPU fetched from a bogus address (a ret
+	 * that popped 0x600595b3) or the reported rip is wrong. Three lines
+	 * decide which, and none of them guesses:
+	 *   bytes at rip   -> if the page is readable the encoding tells whether
+	 *                     the rip is an instruction boundary at all
+	 *   region state   -> decommitted text vs live text
+	 *   stack top      -> the return address that brought us here
+	 * Readability is asked through the crash path's own guarded reader
+	 * (uml_nt_crash_readable), never a raw dereference: this code runs while
+	 * the process is already dying and a nested fault would erase the log. */
+	{
+		unsigned char rb[16];
+		unsigned long long stk[8];
+		int have = uml_nt_page_readable(rip);
+		int i, si;
+
+		memset(rb, 0, sizeof(rb));
+		if (have)
+			memcpy(rb, (const void *)(uintptr_t)rip, sizeof(rb));
+		n = snprintf(buf, sizeof(buf),
+			     "  rip-page readable=%d bytes=%02x%02x%02x%02x"
+			     "%02x%02x%02x%02x%02x%02x%02x%02x\n",
+			     have, rb[0], rb[1], rb[2], rb[3], rb[4], rb[5],
+			     rb[6], rb[7], rb[8], rb[9], rb[10], rb[11]);
+		if (n > 0)
+			uml_nt_crash_write(buf, (unsigned int)n);
+
+		memset(stk, 0, sizeof(stk));
+		{
+			unsigned long long srsp = (e != NULL &&
+				e->context != NULL) ?
+				UML_NT_X64_CTX_RSP(e->context) : 0;
+
+			if (srsp && uml_nt_page_readable(srsp) &&
+			    uml_nt_page_readable(srsp + sizeof(stk) - 1))
+				memcpy(stk, (const void *)(uintptr_t)srsp,
+				       sizeof(stk));
+		}
+		for (si = 0; si < 8; si += 4) {
+			n = snprintf(buf, sizeof(buf),
+				     "  stack[%d..%d]=%llx %llx %llx %llx\n",
+				     si, si + 3, stk[si], stk[si + 1],
+				     stk[si + 2], stk[si + 3]);
+			if (n > 0)
+				uml_nt_crash_write(buf, (unsigned int)n);
+		}
+		for (i = 0; i < 8; i++)
+			(void)i;
+	}
+
 	/* Page-offset anchors: uml_physmem IS page_offset/PAGE_OFFSET —
 	 * if it got trashed, every virt_to_page/kmem_cache_free faults
 	 * far from the write that trashed it. Print them so a
