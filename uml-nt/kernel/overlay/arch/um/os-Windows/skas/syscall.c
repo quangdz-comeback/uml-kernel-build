@@ -4345,6 +4345,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	 * handler, retval parked (below). */
 	sink.ph = c->ph;
 	sink.plan = &c->plan;
+	uml_nt_uacc_sink_own((unsigned int)c->pid);	/* S451: who owns it */
 	uacc_prev_sink = uml_nt_uacc_set_sink(&sink);
 	d->err = 0;
 	d->halt = 0;

@@ -191,6 +191,9 @@ void uml_nt_mmctx_destroy(struct mm_id *id)
 	 * ring's rolling dump misses the calls that end the conn, and on
 	 * 42265037880 the console reader died five reads into the feed with
 	 * no record of what it did next. */
+	/* S451: the walker's global sink must never point into this mm after
+	 * it dies — that is exactly the stale plan the timer-thread fault read. */
+	uml_nt_uacc_sink_clear((unsigned int)c->pid);
 	uml_nt_sc_dump_final(c);
 	/* D27: drop the deferred file regions' file references (the
 	 * touched-vs-file-run [lazyfile] line rides this path). */

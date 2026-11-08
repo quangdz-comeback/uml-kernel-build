@@ -65,6 +65,36 @@ const struct uml_nt_fault_plan *uml_nt_uacc_sink_plan(void)
 	return uacc_sink.plan;
 }
 
+/* S451: the sink is global state that outlives the conn it was armed for.
+ * Referee 42463883711 faulted at the COW-split branch of
+ * uml_nt_uacc_write_ptr reading plan->n_ops from 0x10730018 (physmem_base +
+ * 0x730018) — a plan inside a destroyed conn — immediately after
+ * "killing stub pid 5248 code=0" and a burst of [ans-free-live] why=mm-drop.
+ * Clearing it when the mm context dies makes a dead conn unusable by
+ * construction; the owner tag makes a stale use loud instead of fatal. */
+unsigned int uml_nt_uacc_sink_owner;
+unsigned long long uml_nt_uacc_sink_stale;
+
+void uml_nt_uacc_sink_clear(unsigned int owner_pid)
+{
+	if (owner_pid == 0 || uml_nt_uacc_sink_owner == owner_pid) {
+		uacc_sink.plan = (struct uml_nt_fault_plan *)0;
+		uacc_sink.ph = (struct uml_nt_phys *)0;
+		uml_nt_uacc_sink_owner = 0;
+	}
+}
+
+void uml_nt_uacc_sink_own(unsigned int owner_pid)
+{
+	uml_nt_uacc_sink_owner = owner_pid;
+}
+
+int uml_nt_uacc_sink_alive(unsigned int owner_pid)
+{
+	return uacc_sink.plan != (struct uml_nt_fault_plan *)0 &&
+	       uml_nt_uacc_sink_owner == owner_pid && owner_pid != 0;
+}
+
 /* Refusal telemetry (map 121 follow-up, run 37108542522): the
  * walker refuses SILENTLY (this file is log-free — 8350576), but
  * its refusals surface at the caller as errno, and the errno path

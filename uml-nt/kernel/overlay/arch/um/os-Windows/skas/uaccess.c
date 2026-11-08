@@ -385,6 +385,13 @@ static void uacc_trace_efault(unsigned long long va, unsigned long n)
 
 		ph = uml_nt_uacc_sink_phys();
 		plan = uml_nt_uacc_sink_plan();
+		/* S451: a plan that belongs to a dead conn is not a plan — refuse
+		 * loudly by name instead of dereferencing physmem_base + 0x730018. */
+		if (plan == (const struct uml_nt_fault_plan *)0 ||
+		    uml_nt_uacc_sink_owner == 0) {
+			uml_nt_uacc_sink_stale++;
+			return;
+		}
 		run_start = page & ~(UML_NT_PHYS_RUN_SIZE - 1);
 		old_run = v->run_off + (run_start - v->start);
 		if (ph == NULL || plan == NULL) {

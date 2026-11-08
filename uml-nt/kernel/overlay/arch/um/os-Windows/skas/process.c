@@ -970,6 +970,7 @@ int uml_nt_signal_check(struct uml_nt_stub_conn *c)
 	 * conn's plan and stream with this answer. */
 	sink.ph = c->ph;
 	sink.plan = &c->plan;
+	uml_nt_uacc_sink_own((unsigned int)c->pid);	/* S451: who owns it */
 	prev_mm = uml_nt_uacc_set_mm(c->mm);
 	prev_sink = uml_nt_uacc_set_sink(&sink);
 

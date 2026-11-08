@@ -59,6 +59,12 @@ struct uml_nt_uacc_sink uml_nt_uacc_set_sink(const struct uml_nt_uacc_sink *s);
  * Pure accessors, no state change — unit tests stay valid. */
 struct uml_nt_phys *uml_nt_uacc_sink_phys(void);
 const struct uml_nt_fault_plan *uml_nt_uacc_sink_plan(void);
+/* S451: the sink outlives dead conns unless someone clears it. */
+extern unsigned int uml_nt_uacc_sink_owner;
+extern unsigned long long uml_nt_uacc_sink_stale;
+void uml_nt_uacc_sink_clear(unsigned int owner_pid);
+void uml_nt_uacc_sink_own(unsigned int owner_pid);
+int uml_nt_uacc_sink_alive(unsigned int owner_pid);
 
 int uml_nt_uacc_walk(const struct uml_nt_mm *mm, char *base,
 		     unsigned long long va, unsigned long long len,
