@@ -11,7 +11,7 @@ S="$HERE/../kernel/overlay/arch/um/os-Windows/skas/syscall.c"
 
 c140=$(grep -n 'case 140:' "$S" | cut -d: -f1)
 c141=$(grep -n 'case 141:' "$S" | cut -d: -f1)
-[ -n "$c140" ] && [ -n "$c141" ] || { echo "FAIL: setpriority/getpriority missing"; exit 1; }
+if [ -z "$c140" ] || [ -z "$c141" ]; then echo "FAIL: setpriority/getpriority missing"; exit 1; fi
 [ "$c140" -lt "$c141" ] || { echo "FAIL: 140 after 141"; exit 1; }
 
 # The robust rule: the nearest non-blank, non-comment line ABOVE the case must be a
@@ -28,11 +28,11 @@ done
 for c in "$c140" "$c141"; do
 	nxt=$(awk -v a="$c" 'NR>a && /case [0-9]+:/ {print NR; exit}' "$S")
 	brk=$(awk -v a="$c" 'NR>a && /^[[:space:]]*break;/ {print NR; exit}' "$S")
-	[ -n "$brk" ] && [ "$brk" -lt "$nxt" ] || { echo "FAIL: case at $c has no body"; exit 1; }
+	if [ -z "$brk" ] || [ "$brk" -ge "$nxt" ]; then echo "FAIL: case at $c has no body"; exit 1; fi
 done
 
 # the stat group must NOT contain either label
 stat=$(grep -n 'case 262: /\* newfstatat' "$S" | cut -d: -f1)
-[ "$c140" -lt "$stat" ] || [ "$c140" -gt "$(grep -n 'case 137: /\* statfs' "$S" | cut -d: -f1)" ] \
-	|| { echo "FAIL: case 140 still inside the stat group"; exit 1; }
+st137=$(grep -n 'case 137: /\* statfs' "$S" | cut -d: -f1)
+if [ "$c140" -gt "$stat" ] && [ "$c140" -lt "$st137" ]; then echo "FAIL: case 140 still inside the stat group"; exit 1; fi
 echo "no_fallthrough_hijack: 140/141 each follow a break, outside the stat group"
