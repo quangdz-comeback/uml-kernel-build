@@ -83,7 +83,7 @@ grep -q 'unsigned syslog_n;' "$H" \
 	|| { echo "FAIL: no per-conn budget field"; exit 1; }
 # S91: the window widened from 16 to 64 — sixteen filled up on the reader's
 # syslog dance and again on login's GetUserRecord → munmap teardown.
-grep -q 'sc_total < 64' "$S" \
-	|| { echo "FAIL: the death dump did not widen to 64 calls"; exit 1; }
+grep -q 'sc_total < 200' "$S" \
+	|| { echo "FAIL: the death dump did not widen to 200 calls"; exit 1; }
 echo "syslog_peek: the chain's /dev/log message reaches the referee's log"
-echo "syslog_peek: the death dump is sixty-four calls wide"
+echo "syslog_peek: the death dump is two hundred calls wide"
