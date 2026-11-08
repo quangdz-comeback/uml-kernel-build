@@ -46,11 +46,14 @@ grep -q '\[prep\] pam_loginuid=commented active=0' "$W" \
 grep -q 'refusing to publish' "$W" || { echo "FAIL: no enforcement"; exit 1; }
 # S448: the edit set and the guard set must be the same expression, not a list
 grep -q 'LOGINUID_RE=' "$W" || { echo "FAIL: no shared loginuid regex"; exit 1; }
-grep -q 'grep -rlE "$LOGINUID_RE" "$PAMD"' "$W" \
+# shellcheck disable=SC2016  # the dollar signs are literal source text we search for
+{
+grep -qF 'grep -rlE "$LOGINUID_RE" "$PAMD"' "$W" \
 	|| { echo "FAIL: the edit loop is not driven by grep -rl"; exit 1; }
-grep -q 'grep -rEc "$LOGINUID_RE" "$PAMD"' "$W" \
+grep -qF 'grep -rEc "$LOGINUID_RE" "$PAMD"' "$W" \
 	|| { echo "FAIL: the guard does not use the same regex"; exit 1; }
-if grep -q 'for f in "$PAMD/login"' "$W"; then
+if grep -qF 'for f in "$PAMD/login"' "$W"; then
 	echo "FAIL: hardcoded file list is back"; exit 1
 fi
+}
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"
