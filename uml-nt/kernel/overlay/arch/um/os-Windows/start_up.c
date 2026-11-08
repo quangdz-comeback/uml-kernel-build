@@ -805,16 +805,25 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 			unsigned long long rq[4];
 			unsigned int ri2;
 
+			/* S457: x64 CONTEXT offsets — Rax 0x78, Rcx 0x80, Rdx 0x88,
+			 * Rbx 0x90, Rsp 0x98, Rbp 0xa0, Rsi 0xa8, Rdi 0xb0, R8 0xb8 …
+			 * R15 0xf0. rbp is the frame the fault reads through and rbx
+			 * + rdi form the store target (0x620030(%rbx,%rdi,1)), so all
+			 * three had to be right and printed. */
+#define CTXR(off) (e != NULL && e->context != NULL ? \
+	(unsigned long long)UML_NT_X64_CTX_REG(e->context, (off)) : 0ULL)
 			n = snprintf(buf, sizeof(buf),
-				     "  frame-regs rbp=%llx rbx=%llx rdi=%llx "
-				     "rsi=%llx rcx=%llx\n", crbp,
-				     (unsigned long long)UML_NT_X64_CTX_REG(
-					     e != NULL ? e->context : 0, 0x90),
-				     (unsigned long long)UML_NT_X64_CTX_REG(
-					     e != NULL ? e->context : 0, 0xa8),
-				     (unsigned long long)UML_NT_X64_CTX_REG(
-					     e != NULL ? e->context : 0, 0xa8),
-				     0ULL);
+				     "  regs16 rax=%llx rbx=%llx rcx=%llx rdx=%llx "
+				     "rsi=%llx rdi=%llx rbp=%llx rsp=%llx\n",
+				     CTXR(0x78), CTXR(0x90), CTXR(0x80), CTXR(0x88),
+				     CTXR(0xa8), CTXR(0xb0), CTXR(0xa0), CTXR(0x98));
+			if (n > 0)
+				uml_nt_crash_write(buf, (unsigned int)n);
+			n = snprintf(buf, sizeof(buf),
+				     "  regs16 r8=%llx r9=%llx r10=%llx r11=%llx "
+				     "r12=%llx r13=%llx r14=%llx r15=%llx\n",
+				     CTXR(0xb8), CTXR(0xc0), CTXR(0xc8), CTXR(0xd0),
+				     CTXR(0xd8), CTXR(0xe0), CTXR(0xe8), CTXR(0xf0));
 			if (n > 0)
 				uml_nt_crash_write(buf, (unsigned int)n);
 
