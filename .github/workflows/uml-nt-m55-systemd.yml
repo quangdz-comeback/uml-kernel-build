@@ -167,6 +167,25 @@ jobs:
           done
           if [ -n "$MISSED" ]; then echo "[prep] profile=minimal unmasked:$MISSED" >&2; exit 1; fi
           echo "[prep] profile=minimal units_masked=$MIN_N sha=$PROFILE_SHA"
+          # S447: pam_loginuid aborts the session without ever opening
+          # /proc/self/loginuid — the bookworm module goes through netlink
+          # (AUDIT_SET_LOGINUID) and reports 'op=PAM:session_open res=failed' on
+          # the audit binary channel, even though our kernel ACKs error=0. It is
+          # an auxiliary hardening module: LOGIN-OK measures whether the engine
+          # gets the guest to a shell, not whether audit bookkeeping sticks.
+          # Disabled in the TEST image only, declared, and enforced.
+          PAMD=/mnt/m55a-rootfs/etc/pam.d
+          for f in "$PAMD/login" "$PAMD/common-session" "$PAMD/common-auth"; do
+            [ -f "$f" ] || continue
+            sudo sed -i -E 's|^([[:space:]]*[a-z-]+[[:space:]]+[a-z]+[[:space:]]+.*pam_loginuid\.so.*)$|# [uml-nt test image] pam_loginuid disabled: netlink bookkeeping, not a login prerequisite\n#\1|' "$f"
+          done
+          ACTIVE_LOGINUID=$(grep -rEc '^[[:space:]]*[a-z-]+[[:space:]]+[a-z]+[[:space:]]+.*pam_loginuid\.so' "$PAMD" 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+          if [ "${ACTIVE_LOGINUID:-0}" -ne 0 ]; then
+            echo "[prep] pam_loginuid=present active=$ACTIVE_LOGINUID" >&2
+            echo "pam_loginuid is still active — refusing to publish" >&2
+            exit 1
+          fi
+          echo "[prep] pam_loginuid=commented active=0"
           # S446: /etc/securetty is absent in this base image, and pam_securetty
           # denies root on a terminal it cannot find in that file. This is a
           # console test image, so declare the terminals it actually uses.

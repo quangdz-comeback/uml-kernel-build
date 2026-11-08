@@ -41,4 +41,7 @@ grep -q '\[prep\] securetty=' "$W" \
 	|| { echo "FAIL: securetty is not declared"; exit 1; }
 grep -q 'console\\ntty0' "$W" \
 	|| { echo "FAIL: the console terminals are not written"; exit 1; }
+grep -q '\[prep\] pam_loginuid=commented active=0' "$W" \
+	|| { echo "FAIL: loginuid neutralisation is not declared"; exit 1; }
+grep -q 'refusing to publish' "$W" || { echo "FAIL: no enforcement"; exit 1; }
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"
