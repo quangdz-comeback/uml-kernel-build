@@ -3769,11 +3769,15 @@ static void abrt_writev_capture(struct uml_nt_stub_conn *c,
 					if (uml_nt_phys_read_checked(
 						    c, (unsigned long long)foff, q,
 						    sizeof(q)) < 0) {
+						/* S442: on failure NOTHING is printed
+						 * from q. The first version printed four
+						 * qwords of an uninitialised buffer —
+						 * a read-after-fail and a provenance
+						 * breach in the very branch written to
+						 * enforce provenance. */
 						os_info("[abrt]   +0x%03x: "
-							"%016llx %016llx %016llx %016llx "
 							"UNAVAILABLE(reason=phys-unmapped) "
-							"bytes_valid=0\n",
-							row * 64, q[0], q[1], q[2], q[3]);
+							"bytes_valid=0\n", row * 64);
 						continue;
 					}
 					os_info("[abrt]   +0x%03x: "
@@ -5390,7 +5394,7 @@ out:
 			if (nr != 11 && so >= 0 &&
 			    uml_nt_phys_read_checked(c, (unsigned long long)so,
 						     st, sizeof(st)) == 0) {
-				unsigned k = c->ra_ri % 64;
+				unsigned k = c->ra_ri % 16;
 
 				c->ra_ring[k].nr = (unsigned)nr;
 				memcpy(c->ra_ring[k].ra, st, sizeof(st));
@@ -5552,8 +5556,8 @@ void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
 			c->mm != NULL ? (int)c->mm->nvma : -1);
 	}
 	/* S439: the caller chain, most recent first-class. */
-	for (i = 0; i < 64 && i < c->ra_ri; i++) {
-		unsigned k = (c->ra_ri + 64 - 1 - i) % 64;
+	for (i = 0; i < 16 && i < c->ra_ri; i++) {
+		unsigned k = (c->ra_ri + 16 - 1 - i) % 16;
 
 		os_info("[sct-caller] pid %lu nr=%u ra1=0x%llx ra2=0x%llx "
 			"ra3=0x%llx ra4=0x%llx ra5=0x%llx ra6=0x%llx ra7=0x%llx "
