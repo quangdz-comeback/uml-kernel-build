@@ -640,6 +640,36 @@ int uml_nt_thread_is_conn(void)
 	return uml_nt_thread_is_conn_role(uml_nt_thread_role_current());
 }
 
+/* S455: the rip in the terminating report has been mid-instruction three times
+ * in a row, so it cannot be trusted on its own. Record every exception as it
+ * arrives (first chance) in a 32-entry ring and print the tail when the process
+ * terminates: the last entries are what actually happened, before any recovery. */
+struct uml_nt_av_rec {
+	unsigned long long tid, rip, addr;
+	int op, code;
+};
+static struct uml_nt_av_rec av_ring[32];
+static unsigned int av_ring_n;
+
+static void uml_nt_av_note(void *ep)
+{
+	const struct uml_nt_exception_pointers *e =
+		(const struct uml_nt_exception_pointers *)ep;
+	unsigned int i;
+
+	if (e == NULL || e->record == NULL)
+		return;
+	i = av_ring_n % 32;
+	av_ring[i].code = (int)e->record->code;
+	av_ring[i].rip = (unsigned long long)(uintptr_t)e->record->address;
+	av_ring[i].op = (e->record->nparams > 1) ?
+		(int)e->record->info[0] : -1;
+	av_ring[i].addr = (e->record->nparams > 1) ?
+		(unsigned long long)e->record->info[1] : 0;
+	av_ring[i].tid = (unsigned long long)uml_nt_current_tid();
+	av_ring_n++;
+}
+
 static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 {
 	const struct uml_nt_exception_pointers *e = ep;
@@ -699,6 +729,7 @@ static LONG __attribute__((ms_abi)) uml_nt_crash_report(void *ep)
 				      "ktrip-w"))
 		return -1L;
 
+	uml_nt_av_note(ep);
 	in_crash_report = 1;
 
 	n = snprintf(buf, sizeof(buf),
