@@ -5326,6 +5326,12 @@ out:
 	if (uml_nt_conn_is_login(c) || c->chain_login) {
 		unsigned slot = c->sc_ri;
 
+		/* S435: sticky. The death dump used to re-read these flags at
+		 * teardown, by which time they can be clear — the ledger was
+		 * recorded and then never printed, which reads exactly like "no
+		 * login activity". Remember it while it is true. */
+		c->life_dump = 1;
+
 		c->sc_ring[slot].nr = nr;
 		c->sc_ring[slot].a0 = a[0];
 		c->sc_ring[slot].a1 = a[1];
@@ -5452,7 +5458,7 @@ void uml_nt_sc_dump_final(struct uml_nt_stub_conn *c)
 
 	if (c == NULL || c->sc_total == 0)
 		return;
-	if (!uml_nt_conn_is_login(c) && !c->chain_login)
+	if (!c->life_dump && !uml_nt_conn_is_login(c) && !c->chain_login)
 		return;
 	/* S91: sixteen filled up on 42274124035 and again here — login's whole
 	 * teardown (dbus userdb read/wait, setgroups, setuid, the munmap burst)

@@ -279,6 +279,7 @@ struct uml_nt_stub_conn {
 	unsigned read_fd_n;		/* S77: [read-fd] records */
 	unsigned read_ok_n;
 	unsigned exit_why_n;	/* S90: [exit-why] records */
+	unsigned life_dump;	/* S435: this conn was a login/chain conn while it ran */
 	unsigned clock_odd_n;	/* S95: non-triplet clockids answered */	/* S87: reads on fd 0-2 that returned bytes */
 	unsigned loop_trap_n;		/* S69 */
 	unsigned req_frozen_n, poke_done;	/* S68: active poke */
