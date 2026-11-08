@@ -68,4 +68,9 @@ grep -qF "mem=\${{ inputs.mem_mb || '192' }}M" "$W" \
 	|| { echo "FAIL: memory is not 192M by default"; exit 1; }
 grep -qF '[prep] pam_debug=off' "$W" \
 	|| { echo "FAIL: pam debug is not off by default"; exit 1; }
+# S455b: the msys2 setup gets three attempts and declares which one won
+grep -q 'id: msys1' "$W" || { echo "FAIL: no first msys attempt id"; exit 1; }
+grep -q 'id: msys3' "$W" || { echo "FAIL: no third attempt"; exit 1; }
+grep -qF '[infra] msys2-setup-failed-after-3-attempts' "$W" 	|| { echo "FAIL: no infrastructure verdict"; exit 1; }
+grep -qF '[infra] msys=ok' "$W" || { echo "FAIL: the log does not declare the attempt"; exit 1; }
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"

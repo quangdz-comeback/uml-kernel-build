@@ -402,13 +402,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # S455b: the msys2 action has failed five referees in a row with
+      # 'Unexpected HTTP response: 504' — each one costing ~15 minutes and an
+      # artifact, while the kernel job succeeds. Two attempts with distinct ids,
+      # then a loud infrastructure verdict instead of a silent boot failure.
       - uses: msys2/setup-msys2@v2
+        id: msys1
+        continue-on-error: true
         with:
           msystem: MINGW64
           update: false
           install: >-
             make
             mingw-w64-x86_64-toolchain
+
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        if: steps.msys1.outcome != 'success'
+        continue-on-error: true
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make
+            mingw-w64-x86_64-toolchain
+
+      - uses: msys2/setup-msys2@v2
+        id: msys3
+        if: steps.msys1.outcome != 'success' && steps.msys2.outcome != 'success'
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make
+            mingw-w64-x86_64-toolchain
+
+      - name: Declare which msys2 attempt won
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.msys1.outcome }}" = "success" ]; then
+            echo "[infra] msys=ok"; echo "[infra] msys=ok" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.msys2.outcome }}" = "success" ]; then
+            echo "[infra] msys=attempt-2"; echo "[infra] msys=attempt-2" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.msys3.outcome }}" = "success" ]; then
+            echo "[infra] msys=attempt-3"; echo "[infra] msys=attempt-3" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "[infra] msys2-setup-failed-after-3-attempts" >&2
+            echo "[infra] msys2-setup-failed-after-3-attempts" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: Build launcher.exe + stub.exe
         shell: msys2 {0}
