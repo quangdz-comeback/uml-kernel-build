@@ -30,3 +30,14 @@ CONFIG_TMPFS=y
 CONFIG_CGROUPS=y
 CONFIG_SYSFS_SYSCALL=y
 CONFIG_UNIX=y
+
+# S436 (referee 5e28a66 ledger): login calls audit_open() -> socket(AF_NETLINK,
+# SOCK_RAW, NETLINK_AUDIT), which returned -EPROTONOSUPPORT because this kernel
+# was built without the audit netlink family. libaudit treats that as fatal,
+# pam_loginuid propagates it, PAM aborts, and login prints
+# ".Critical error - immediate abort." and exits. Without this, every program
+# that touches audit — login, su, sudo, systemd — fails at the same place.
+CONFIG_AUDIT=y
+CONFIG_AUDITSYSCALL=y
+CONFIG_NETFILTER=y
+CONFIG_NF_TABLES=n
