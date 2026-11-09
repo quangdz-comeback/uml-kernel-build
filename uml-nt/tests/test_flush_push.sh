@@ -7,12 +7,7 @@ C="$HERE/../kernel/overlay/arch/um/os-Windows/console.c"
 K="$HERE/../kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c"
 
 grep -q 'int uml_nt_console_flush_port(int dport)' "$C" || { echo "FAIL: no flush function"; exit 1; }
-for why in wt-null no-ops; do
-	grep -q "flush unavailable why=$why" "$C" \
-		|| { echo "FAIL: silent on $why"; exit 1; }
-done
-grep -q 'flush manual n=%u port=%d' "$C" || { echo "FAIL: no manual fallback"; exit 1; }
-grep -q 'flush driver port=%d' "$C" || { echo "FAIL: driver flush not declared"; exit 1; }
+
 # the call must be on the to=4 push path, before the delivery
 n=$(grep -n 'g_marker_pid = (int)c->pid;' "$K" | head -1 | cut -d: -f1)
 blk=$(sed -n "${n},$((n + 4))p" "$K")
@@ -28,5 +23,11 @@ grep -q 'uml_nt_con_ring_push(&g_con_ring' "$C" \
 if awk '/int nt_con_deliver_stage/,/^}/' "$C" | grep -q 'tty_insert_flip_string'; then
 	echo "FAIL: delivery still pushes into the tty flip buffer"; exit 1
 fi
-grep -q 'flush confeed n=%u' "$C" || { echo "FAIL: ring flush not reported"; exit 1; }
+grep -q 'flush ring n=%u port=%d' "$C" || { echo "FAIL: ring flush not reported"; exit 1; }
+# S476: the flush must empty the ring the reader drains, not the flip buffer
+if awk '/^int uml_nt_console_flush_port/,/^}/' "$C" | grep -q 'flush manual'; then
+	echo "FAIL: flush still drains the flip buffer"; exit 1
+fi
+awk '/int uml_nt_console_flush_port/,/^}/' "$C" | grep -q 'uml_nt_con_ring_drop(&g_con_ring)' \
+	|| { echo "FAIL: flush does not drop the ring"; exit 1; }
 echo "flush_push: marker enters the ring the reader drains; flush reports it"

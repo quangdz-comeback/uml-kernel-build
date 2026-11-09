@@ -238,50 +238,15 @@ int nt_con_pick_port(void)
  * (the prompt matcher arms stage 2/3 without going through the syscall door). */
 int uml_nt_console_flush_port(int dport)
 {
-	/* S474: this lives where the push happens. The 473 block was inside
-	 * uml_nt_console_deliver_marker(), which the to=4 path no longer calls —
-	 * so the flush never ran and left no trace at all, which is exactly how a
-	 * missing marker looks. Callers must be able to see the verdict. */
-	struct tty_struct *wt;
+	unsigned dropped;
 
-	if (dport < 0 || dport >= (int)(sizeof(g_port) / sizeof(g_port[0]))) {
-		os_info("[feed-stage] flush unavailable why=bad-port\n");
-		return -1;
-	}
-	wt = READ_ONCE(g_port[dport].itty);
-	if (wt == NULL) {
-		os_info("[feed-stage] flush unavailable why=wt-null\n");
-		return -1;
-	}
-	if (wt->ops == NULL) {
-		os_info("[feed-stage] flush unavailable why=no-ops\n");
-		return -1;
-	}
-	if (wt->ops->flush_buffer == NULL) {
-		/* Our own console driver: discard what is queued by draining the
-		 * read side the same way a reader would, one byte at a time. */
-		unsigned n = 0;
-		u8 *cp;
-		unsigned char c;
-
-		while (n < 4096 &&
-		       tty_prepare_flip_string(&g_port[dport], &cp, 1) == 0) {
-			c = *cp;
-			n++;
-		}
-		(void)c;
-		os_info("[feed-stage] flush manual n=%u port=%d\n", n, dport);
-		return (int)n;
-	}
-	{
-		unsigned dropped;
-
-		tty_driver_flush_buffer(wt);
-		os_info("[feed-stage] flush driver port=%d\n", dport);
-		dropped = uml_nt_con_ring_drop(&g_con_ring);
-		os_info("[feed-stage] flush confeed n=%u\n", dropped);
-		return (int)dropped;
-	}
+	/* S476: the reader drains g_con_ring. The 475 version still flushed the tty
+	 * flip buffer, so the marker entered the right queue
+	 * but sat BEHIND the junk already in it — FIFO again, only the queue moved.
+	 * Drop the ring itself, count it, and name it. */
+	dropped = uml_nt_con_ring_drop(&g_con_ring);
+	os_info("[feed-stage] flush ring n=%u port=%d\n", dropped, dport);
+	return (int)dropped;
 }
 
 int nt_con_deliver_stage(int dport)
