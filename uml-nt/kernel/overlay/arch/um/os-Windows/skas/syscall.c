@@ -4341,29 +4341,6 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	const unsigned long long *a = s->args;
 	unsigned long long nr = s->regs.rax;
 
-	/* S467: inject the marker into THIS read's buffer, for the one pid that
-	 * asked for input. Pushing it into the console ring loses it to whichever
-	 * process reads next — the console is a shared queue, proven by rd-dst
-	 * listing a dozen pids on one tty. */
-	if (nr == 0 && s->args[0] == 0 && s->args[1] != 0 &&
-	    uml_nt_console_marker_take((int)c->pid)) {
-		static const char mk[] = "echo LOGIN-OK\n";
-		unsigned long long off = uml_nt_vma_translate(c->mm, s->args[1],
-							      sizeof(mk) - 1);
-
-		if (off >= 0 &&
-		    uml_nt_phys_block_check(c->ph, (long long)off,
-					    sizeof(mk) - 1) == 0) {
-			memcpy((char *)uml_boot.physmem_base + off, mk,
-			       sizeof(mk) - 1);
-			d->retval = sizeof(mk) - 1;
-			d->err = 0;
-			os_info("[feed-drain] pid=%d n=%u text=\"echo LOGIN-OK\\n\" direct=1\n",
-				(int)c->pid, (unsigned)(sizeof(mk) - 1));
-			return;
-		}
-	}
-
 	/* S466: before the read is served, remember what the destination buffer
 	 * held. Reads go through the real tty path, so comparing this with the
 	 * post-read dump is the only way to know whether the copy ran. */

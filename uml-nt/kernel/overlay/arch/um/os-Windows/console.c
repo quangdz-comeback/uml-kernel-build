@@ -216,7 +216,7 @@ int uml_nt_console_pending(void)
 /* S84: the port the console is being read on — the one with a parked reader,
  * else the one the last delivery used. Shared by the flush and the arm point so
  * both land on the same tty. */
-static int nt_con_pick_port(void)
+int nt_con_pick_port(void)
 {
 	int i;
 
@@ -236,7 +236,7 @@ static int nt_con_pick_port(void)
  * when bytes went out. Called from the ARM point (a conn's syscall handler,
  * before the guest parks) and, unchanged, from the flush for a text-armed stage
  * (the prompt matcher arms stage 2/3 without going through the syscall door). */
-static int nt_con_deliver_stage(int dport)
+int nt_con_deliver_stage(int dport)
 {
 	static const char *const sfe[] = {
 		"", "root\n", "root\n", "echo LOGIN-OK\n"

@@ -66,6 +66,8 @@
 /* S464: checked reader (defined in syscall.c). */
 static int g_marker_pid;
 static int g_marker_done;
+static int g_marker_refeed;
+static int g_marker_maybe_seen;
 
 int uml_nt_console_marker_take(int pid)
 {
@@ -74,6 +76,10 @@ int uml_nt_console_marker_take(int pid)
 	g_marker_done = 1;
 	return 1;
 }
+
+/* S468: console delivery entry points (console.c). */
+int nt_con_deliver_stage(int dport);
+int nt_con_pick_port(void);
 
 int uml_nt_phys_read_checked(struct uml_nt_stub_conn *c,
 			     unsigned long long off, void *dst,
@@ -11425,6 +11431,8 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				os_info("[feed-drain] pid=%d n=%lu text=\"%s\"\n",
 					(int)c->pid, (unsigned long)d->regs.rax,
 					(char *)rb);
+				if (strstr((char *)rb, "echo LOGIN-OK"))
+					g_marker_maybe_seen = 1;
 				/* S466: before/after at the same address says whether
 				 * the copy ran at all. */
 				os_info("[rd-copy] pid=%d n=%lu dst_va=0x%llx "
@@ -11450,10 +11458,29 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * (drain 0/145 contained it). So do not push: remember the pid that
 		 * is ready, and inject the payload directly into THAT pid's next
 		 * read buffer. */
-		if (d->args[0] == 0 && !g_marker_done && uml_nt_console_gate.stage >= 3) {
-			g_marker_pid = (int)c->pid;
-			os_info("[feed-stage] to=4 anchor=con-read pid=%d direct\n",
-				g_marker_pid);
+		/* S468: this block is a POST-READ witness — the stub-side console
+		 * driver fills the buffer itself, so there is nowhere to inject.
+		 * Instead: push the marker, and push it again every time a DIFFERENT
+		 * pid eats it, until the asking pid finally gets one. */
+		if (d->args[0] == 0 && !g_marker_done &&
+		    uml_nt_console_gate.stage >= 3) {
+			if (g_marker_pid == 0) {
+				g_marker_pid = (int)c->pid;
+				(void)nt_con_deliver_stage(nt_con_pick_port());
+				os_info("[feed-stage] to=4 anchor=con-read "
+					"pid=%d push\n", g_marker_pid);
+			} else if ((int)c->pid != g_marker_pid &&
+				   g_marker_refeed < 12) {
+				g_marker_refeed++;
+				(void)nt_con_deliver_stage(nt_con_pick_port());
+				os_info("[feed-stage] refeed n=%d eater_pid=%d\n",
+					g_marker_refeed, (int)c->pid);
+			} else if ((int)c->pid == g_marker_pid &&
+				   g_marker_maybe_seen && !g_marker_done) {
+				g_marker_done = 1;
+				os_info("[feed-stage] marker-consumed pid=%d\n",
+					(int)c->pid);
+			}
 		}
 	}
 	/* S73: a login conn parking in a wait-for-input syscall is the prompt.
