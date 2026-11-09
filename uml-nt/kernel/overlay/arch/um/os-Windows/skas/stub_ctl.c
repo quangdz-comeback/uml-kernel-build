@@ -76,13 +76,22 @@ int uml_nt_exec_path_is_shell(const char *p)
 	for (len = 0; p[len] != 0; len++)
 		if (len > 200)
 			return 0;
-	for (i = 0; i + 5 <= len; i++) {
+	/* S471: the bound was i + 5 <= len, but "bash" is four bytes — with
+	 * '/bin/bash' the match sits at i = 5 and 5 + 5 > 9, so the tail was
+	 * never examined and the predicate always answered 0. Stage 3 never armed
+	 * and the marker was never delivered at all. */
+	for (i = 0; i + 4 <= len; i++) {
 		const char *t = p + i;
 
-		if ((t[0] == 'b' && t[1] == 'a' && t[2] == 's' && t[3] == 'h' &&
-		     (i + 4 == len || t[4] == ' ')) ||
-		    (t[0] == 's' && t[1] == 'h' &&
-		     (i + 2 == len || t[2] == ' ')))
+		if (t[0] == 'b' && t[1] == 'a' && t[2] == 's' && t[3] == 'h' &&
+		    (i + 4 == len || t[4] == ' '))
+			return 1;
+	}
+	for (i = 0; i + 2 <= len; i++) {
+		const char *t = p + i;
+
+		if (t[0] == 's' && t[1] == 'h' &&
+		    (i + 2 == len || t[2] == ' '))
 			return 1;
 	}
 	return 0;
