@@ -142,6 +142,7 @@ struct uml_nt_stub_conn *uml_nt_conn_reg_at(int i);
 extern unsigned long long uml_nt_dangling_stub_n;
 extern unsigned long long uml_nt_view_reg_full_n;
 extern unsigned long long uml_nt_late_write_refused;
+int uml_nt_console_marker_take(int pid);	/* S467: direct injection */
 void uml_nt_stub_view_add(unsigned long long va);
 void uml_nt_stub_view_del(unsigned long long va);
 int uml_nt_stub_view_ok(const struct uml_nt_stub_data *d);

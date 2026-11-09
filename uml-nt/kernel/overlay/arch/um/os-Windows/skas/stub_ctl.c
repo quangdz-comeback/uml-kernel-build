@@ -64,6 +64,17 @@
 #include <feedgate.h>
 
 /* S464: checked reader (defined in syscall.c). */
+static int g_marker_pid;
+static int g_marker_done;
+
+int uml_nt_console_marker_take(int pid)
+{
+	if (g_marker_done || g_marker_pid == 0 || pid != g_marker_pid)
+		return 0;
+	g_marker_done = 1;
+	return 1;
+}
+
 int uml_nt_phys_read_checked(struct uml_nt_stub_conn *c,
 			     unsigned long long off, void *dst,
 			     unsigned long long n);
@@ -11434,11 +11445,16 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 			uml_nt_console_feed_port(),
 			(void *)uml_nt_console_port_itty(
 				uml_nt_console_feed_port()));
-		/* S461: a read of fd 0 on the login conn is the deterministic
-		 * readiness signal — bash with a pipe stdin prints no prompt, so no
-		 * text anchor will ever appear. Deliver the marker once, here. */
-		if (d->args[0] == 0)
-			uml_nt_console_deliver_marker((int)c->pid);
+		/* S467: the console is a queue shared by many readers — a marker
+		 * pushed into the ring is eaten by whichever process reads next
+		 * (drain 0/145 contained it). So do not push: remember the pid that
+		 * is ready, and inject the payload directly into THAT pid's next
+		 * read buffer. */
+		if (d->args[0] == 0 && !g_marker_done && uml_nt_console_gate.stage >= 3) {
+			g_marker_pid = (int)c->pid;
+			os_info("[feed-stage] to=4 anchor=con-read pid=%d direct\n",
+				g_marker_pid);
+		}
 	}
 	/* S73: a login conn parking in a wait-for-input syscall is the prompt.
 	 * Arm one line — stage machine decides which — and say so. */
