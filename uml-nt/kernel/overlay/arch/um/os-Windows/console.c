@@ -236,6 +236,48 @@ int nt_con_pick_port(void)
  * when bytes went out. Called from the ARM point (a conn's syscall handler,
  * before the guest parks) and, unchanged, from the flush for a text-armed stage
  * (the prompt matcher arms stage 2/3 without going through the syscall door). */
+int uml_nt_console_flush_port(int dport)
+{
+	/* S474: this lives where the push happens. The 473 block was inside
+	 * uml_nt_console_deliver_marker(), which the to=4 path no longer calls —
+	 * so the flush never ran and left no trace at all, which is exactly how a
+	 * missing marker looks. Callers must be able to see the verdict. */
+	struct tty_struct *wt;
+
+	if (dport < 0 || dport >= (int)(sizeof(g_port) / sizeof(g_port[0]))) {
+		os_info("[feed-stage] flush unavailable why=bad-port\n");
+		return -1;
+	}
+	wt = READ_ONCE(g_port[dport].itty);
+	if (wt == NULL) {
+		os_info("[feed-stage] flush unavailable why=wt-null\n");
+		return -1;
+	}
+	if (wt->ops == NULL) {
+		os_info("[feed-stage] flush unavailable why=no-ops\n");
+		return -1;
+	}
+	if (wt->ops->flush_buffer == NULL) {
+		/* Our own console driver: discard what is queued by draining the
+		 * read side the same way a reader would, one byte at a time. */
+		unsigned n = 0;
+		u8 *cp;
+		unsigned char c;
+
+		while (n < 4096 &&
+		       tty_prepare_flip_string(&g_port[dport], &cp, 1) == 0) {
+			c = *cp;
+			n++;
+		}
+		(void)c;
+		os_info("[feed-stage] flush manual n=%u port=%d\n", n, dport);
+		return (int)n;
+	}
+	tty_driver_flush_buffer(wt);
+	os_info("[feed-stage] flush driver port=%d\n", dport);
+	return 0;
+}
+
 int nt_con_deliver_stage(int dport)
 {
 	static const char *const sfe[] = {
@@ -433,18 +475,6 @@ void uml_nt_console_deliver_marker(int pid)
 	g_marker_delivered = 1;
 	/* Reuse the delivery machinery that already knows how to inject: it picks
 	 * the port, flips one byte at a time and wakes the reader. */
-	/* S473: the ring is FIFO and full of junk that predates the marker — a
-	 * probe string, old drain bytes. bash reads it line by line in canonical
-	 * mode and never reaches the marker before the clock ends. Flush the port
-	 * first, then push, so the marker is at the head of the queue. */
-	{
-		struct tty_struct *wt = READ_ONCE(g_port[g_feed_dport].itty);
-
-		if (wt != NULL && wt->ops != NULL &&
-		    wt->ops->flush_buffer != NULL)
-			tty_driver_flush_buffer(wt);
-		os_info("[feed-stage] flush junk at=to4 port=%d\n", g_feed_dport);
-	}
 	(void)nt_con_deliver_stage(nt_con_pick_port());
 	os_info("[feed-stage] to=4 anchor=con-read pid=%d\n", pid);
 }

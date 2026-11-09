@@ -11497,6 +11497,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		    uml_nt_console_gate.stage >= 3) {
 			if (g_marker_pid == 0) {
 				g_marker_pid = (int)c->pid;
+				(void)uml_nt_console_flush_port(nt_con_pick_port());
 				(void)nt_con_deliver_stage(nt_con_pick_port());
 				os_info("[feed-stage] to=4 anchor=con-read "
 					"pid=%d push\n", g_marker_pid);

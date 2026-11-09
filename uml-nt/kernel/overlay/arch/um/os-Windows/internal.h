@@ -34,6 +34,7 @@ int uml_nt_console_arm_feed(void);
 int uml_nt_console_feed_port(void);
 void uml_nt_console_deliver_marker(int pid);
 void *uml_nt_console_port_itty(int port);
+int uml_nt_console_flush_port(int dport);
 void uml_nt_console_set_owner(int pid);
 /* S74: is a login chain conn alive (the feed must survive its TCSAFLUSH)? */
 int uml_nt_console_chain_alive(void);
