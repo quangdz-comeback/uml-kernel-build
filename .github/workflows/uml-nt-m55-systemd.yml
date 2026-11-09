@@ -722,6 +722,11 @@ jobs:
             [ -n "$a" ] || continue
             v="0x$a"
             line=$(llvm-addr2line -f -e "$VL" "$v" 2>/dev/null | tr '\n' ' ')
+            if [ -z "$line" ] || [ "$line" = "?? ??:0 " ]; then
+              echo "[infra] sym=empty(addr2line returned nothing for $v)" >&2
+              echo "[infra] sym=empty($v)" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
             echo "FAULT-SYM addr=$v $line"
           done < /tmp/sym_addrs.txt
 

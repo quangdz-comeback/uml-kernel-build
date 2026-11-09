@@ -401,26 +401,33 @@ void uml_nt_console_set_owner(int pid)
  * input. bash as a login shell on a pipe never prints a prompt, so the stage-3
  * text anchor cannot fire; a read on fd 0 is the signal that cannot be missed. */
 static int g_marker_delivered;
+static int g_marker_ignored;
 
 void uml_nt_console_deliver_marker(int pid)
 {
-	static const char cmd[] = "echo LOGIN-OK\n";
-	unsigned i, n = sizeof(cmd) - 1;
-	int dport;
-
+	/* S462: this runs from the [con-read] path, which fires for ANY conn that
+	 * reads fd 0 — at line 383 of the boot, before multi-user, some process
+	 * already reads stdin. Injecting then calls into tty core with an
+	 * uninitialised buffer: __tty_buffer_request_room dereferences NULL+1 and
+	 * the kernel dies. The marker is only legitimate once the login chain has
+	 * armed stage 3, and only for that conn. */
+	if (uml_nt_console_gate.stage != 3 || g_feed_dport == 0) {
+		if (g_marker_ignored < 8) {
+			g_marker_ignored++;
+			os_info("[feed-stage] ignore-nonlogin pid=%d stage=%d n=%d\n",
+				pid, uml_nt_console_gate.stage,
+				g_marker_ignored);
+		} else {
+			g_marker_ignored++;
+		}
+		return;
+	}
 	if (g_marker_delivered)
 		return;
 	g_marker_delivered = 1;
-	dport = nt_con_pick_port();
-	for (i = 0; i < n; i++)
-		tty_insert_flip_string(&g_port[dport], &cmd[i], 1);
-	tty_flip_buffer_push(&g_port[dport]);
-	{
-		struct tty_struct *wt = READ_ONCE(g_port[dport].itty);
-
-		if (wt != NULL)
-			wake_up_interruptible(&wt->read_wait);
-	}
+	/* Reuse the delivery machinery that already knows how to inject: it picks
+	 * the port, flips one byte at a time and wakes the reader. */
+	(void)nt_con_deliver_stage(nt_con_pick_port());
 	os_info("[feed-stage] to=4 anchor=con-read pid=%d\n", pid);
 }
 
