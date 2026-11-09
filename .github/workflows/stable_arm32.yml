@@ -92,21 +92,29 @@ jobs:
           arm-linux-gnueabi-gcc -dumpmachine | grep -q '^arm-linux-gnueabi' || {
             echo "::error::cross gcc is not arm32 (armel) — expected arm-linux-gnueabi"; exit 1; }
 
-      - name: Pick newest stable (requires >= 7.0 — the arm32 port targets 7.2.x)
+      - name: Pick newest stable the port supports (arm64 port series is rebased on 7.2.4; 7.3.x drifts — see patch hunks vs v7.3.3)
         run: |
-          KVER=$(curl -s https://www.kernel.org/releases.json | \
+          # The port targets 7.2.x. 7.3.x moved arch/x86/um/asm/ptrace.h and
+          # os.h get_host_cpu_features() so the series does not apply there
+          # yet (7 hunks, fuzz=3). Take the newest 7.2.x release instead of
+          # the newest stable, and say which one was passed over.
+          WANT=$(curl -s https://www.kernel.org/releases.json | \
+            jq -r '.releases[] | select(.version | startswith("7.2.")) | .version' | \
+            sort -V | tail -1)
+          NEWEST=$(curl -s https://www.kernel.org/releases.json | \
             jq -r '.releases[] | select(.moniker=="stable") | .version' | \
             sort -V | tail -1)
-          MAJOR=$(echo "$KVER" | cut -d. -f1)
-          MINOR=$(echo "$KVER" | cut -d. -f2)
-          if [ "$MAJOR" -lt 7 ]; then
-            echo "::error::Newest stable is $KVER; the arm32 port targets 7.2.x. Pin the version manually."
+          if [ -z "$WANT" ]; then
+            echo "::error::No 7.2.x release found; the arm64 port series is rebased on 7.2.4."
             exit 1
           fi
+          KVER=$WANT
+          MAJOR=$(echo "$KVER" | cut -d. -f1)
+          MINOR=$(echo "$KVER" | cut -d. -f2)
           echo "KVER=$KVER" >> "$GITHUB_ENV"
           echo "KMAJOR=$MAJOR" >> "$GITHUB_ENV"
           echo "KMINOR=$MINOR" >> "$GITHUB_ENV"
-          echo "[+] Selected $KVER"
+          echo "[+] Selected $KVER (newest stable is $NEWEST — passed over: the port targets 7.2.x)"
 
       - name: Download & extract
         run: |
