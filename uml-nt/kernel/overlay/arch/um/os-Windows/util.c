@@ -13,6 +13,9 @@
 #include <linux/printk.h>
 #include <linux/string.h>
 #include <ntabi.h>
+
+/* S460: the gate is complete when the guest prints the marker back. */
+static int g_login_ok_seen;
 #include <os.h>
 #include "internal.h"
 #include <diag_record.h>
@@ -128,6 +131,13 @@ static void feed_gate_sink(const char *s, unsigned int n)
 	if (uml_nt_console_gate.armed &&
 	    uml_nt_console_gate.stage != uml_nt_console_gate.last_armed_stage) {
 		uml_nt_console_gate.last_armed_stage = uml_nt_console_gate.stage;
+		/* S460: one line per stage transition, with the anchor that
+		 * caused it — the feed story must be readable without guessing. */
+		os_info("[feed-stage] from=%d to=%d anchor=\"%.24s\" src=%s\n",
+			uml_nt_console_gate.last_armed_stage,
+			uml_nt_console_gate.stage,
+			uml_nt_console_gate.line[uml_nt_console_gate.match_src],
+			uml_nt_console_gate.match_src ? "kernel" : "console");
 		os_info("[feedgate] arm stage=%d src=%s line=\"%.64s\"\n",
 			uml_nt_console_gate.stage,
 			uml_nt_console_gate.match_src ? "kernel" : "console",
@@ -136,6 +146,14 @@ static void feed_gate_sink(const char *s, unsigned int n)
 	/* S47 tail-colon: a guest write that ends in ':' or carries "logi" is
 	 * almost certainly a prompt fragment — print it, whatever the buffer
 	 * state says. */
+	/* S460: the gate is complete when the marker comes back from the guest.
+	 * One line, once, so the milestone is greppable in the log itself. */
+	if (src == 0 && n > 0 && !g_login_ok_seen &&
+	    uml_nt_feed_find(s, n, "LOGIN-OK")) {
+		g_login_ok_seen = 1;
+		os_info("[LOGIN-OK] guest printed the marker (stage=%d)\n",
+			uml_nt_console_gate.stage);
+	}
 	if (src == 0 && n > 0 &&
 	    (s[n - 1] == ':' || uml_nt_feed_find(s, n, "logi")))
 		os_info("[feedgate] frag=\"%.32s\" len=%u\n", s, n);
