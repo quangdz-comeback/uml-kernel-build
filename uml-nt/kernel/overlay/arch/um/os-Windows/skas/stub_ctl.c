@@ -65,6 +65,28 @@
 
 /* S464: checked reader (defined in syscall.c). */
 static int g_marker_pid;
+
+/* S470: '/bin/bash', '/bin/sh', or anything ending in '/bash' or '/sh'. */
+int uml_nt_exec_path_is_shell(const char *p)
+{
+	unsigned len, i;
+
+	if (p == NULL || p[0] == 0)
+		return 0;
+	for (len = 0; p[len] != 0; len++)
+		if (len > 200)
+			return 0;
+	for (i = 0; i + 5 <= len; i++) {
+		const char *t = p + i;
+
+		if ((t[0] == 'b' && t[1] == 'a' && t[2] == 's' && t[3] == 'h' &&
+		     (i + 4 == len || t[4] == ' ')) ||
+		    (t[0] == 's' && t[1] == 'h' &&
+		     (i + 2 == len || t[2] == ' ')))
+			return 1;
+	}
+	return 0;
+}
 static int g_marker_done;
 static int g_marker_refeed;
 static int g_marker_maybe_seen;
@@ -12291,7 +12313,12 @@ void uml_nt_exec_path_set(const char *path)
 		 * shell IS the readiness point, and stage 4 (marker on con-read) has
 		 * been waiting for exactly stage == 3. The text anchors stay for
 		 * images that do prompt. */
-		if (uml_nt_console_gate.stage < 3) {
+		/* S470: g_exec_login is true for agetty too — it is the login
+		 * chain's own exec and runs BEFORE bash. Arming stage 3 there
+		 * latched g_marker_pid onto agetty, so the marker was never aimed
+		 * at the shell at all. Only a shell exec may arm. */
+		if (uml_nt_exec_path_is_shell(g_exec_path) &&
+		    uml_nt_console_gate.stage < 3) {
 			uml_nt_console_gate.stage = 3;
 			uml_nt_console_gate.last_armed_stage = 3;
 			os_info("[feed-stage] to=3 anchor=exec-bash autologin\n");
