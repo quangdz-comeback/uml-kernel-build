@@ -11540,13 +11540,13 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 
 			os_info("[feed-arm] pid %d nr=%llu stage=%d marker\n",
 				(int)c->pid, nr, st);
-		} else if (!parked && g_arm_gate_n < 16) {
+		} else if (!parked && g_arm_gate_n < 64) {
 			g_arm_gate_n++;
 			os_info("[arm-gate] pid=%d nr=%llu stage=%d pending=%d "
 				"accept=0 why=not-parked\n", (int)c->pid, nr,
 				uml_nt_console_gate.stage,
 				uml_nt_console_marker_is_pending());
-		} else if (!is_mk && g_arm_gate_n < 16) {
+		} else if (!is_mk && g_arm_gate_n < 64) {
 			g_arm_gate_n++;
 			os_info("[arm-gate] pid=%d nr=%llu stage=%d pending=%d "
 				"accept=0 why=%s\n", (int)c->pid, nr,

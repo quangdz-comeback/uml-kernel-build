@@ -507,12 +507,31 @@ int uml_nt_console_arm_feed(void)
 	 * twice. */
 	if (uml_nt_console_marker_is_pending()) {
 		int port = nt_con_pick_port();
+		static const char mk[] = "echo LOGIN-OK\n";
+		struct tty_struct *wt = READ_ONCE(g_port[port].itty);
 
-		if (nt_con_deliver_marker_line(port)) {
-			uml_nt_console_marker_delivered();
-			os_info("[feed-stage] marker-via-arm pid=%d port=%d\n",
+		/* S480: the marker was delivered but landed behind junk left in the
+		 * line discipline by rounds <=474, when deliver_stage pushed straight
+		 * into flip. Flush the ldisc first, then insert, so the marker is the
+		 * FIRST byte the reader can see. */
+		if (wt != NULL) {
+			tty_ldisc_flush(wt);
+			os_info("[feed-stage] ldisc-flushed pid=%d port=%d\n",
 				uml_nt_console_marker_pid(), port);
 		}
+		{
+			unsigned k2;
+
+			for (k2 = 0; k2 < sizeof(mk) - 1; k2++)
+				tty_insert_flip_string(&g_port[port], &mk[k2], 1);
+			tty_flip_buffer_push(&g_port[port]);
+		}
+		uml_nt_console_marker_delivered();
+		os_info("[feed-arm] pid=%d nr=0 MARKER first8=%c%c%c%c%c%c%c%c\n",
+			uml_nt_console_marker_pid(), mk[0], mk[1], mk[2], mk[3],
+			mk[4], mk[5], mk[6], mk[7]);
+		os_info("[feed-stage] marker-via-arm pid=%d port=%d\n",
+			uml_nt_console_marker_pid(), port);
 	} else if (nt_con_deliver_stage(nt_con_pick_port())) {
 		(void)uml_nt_feed_gate_take(&uml_nt_console_gate);
 	}
