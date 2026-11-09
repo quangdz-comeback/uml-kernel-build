@@ -4297,7 +4297,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			   struct uml_nt_stub_data *d)
 {
 	/* S454: a stub_data view that is no longer live must not be read. Three
-	 * referees faulted at d->args[0] (offset 0x20) inside unmapped views. */
+	 * referees faulted at s->args[0] (offset 0x20) inside unmapped views. */
 	if (!uml_nt_stub_view_ok(d)) {
 		uml_nt_dangling_stub_n++;
 		if (uml_nt_dangling_stub_n <= 8)
@@ -4309,8 +4309,18 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 				(int)c->pid);
 		return;	/* refuse, do not dereference */
 	}
-	const unsigned long long *a = d->args;
-	unsigned long long nr = d->regs.rax;
+	/* S458: take ONE copy of the answer state and work from it. Another thread
+	 * (login exit -> mmctx destroy) can UnmapViewOfFile between view_ok() and
+	 * any later read of d; guard-then-deref is not atomic, which is how the
+	 * same fault kept returning under three different pointers (451 sink, 454
+	 * dangling, 457 race). Everything below reads s; d is touched again only in
+	 * the guarded write-back. */
+	struct uml_nt_stub_data s_local;
+	struct uml_nt_stub_data *s = &s_local;
+
+	memcpy(&s_local, d, sizeof(s_local));
+	const unsigned long long *a = s->args;
+	unsigned long long nr = s->regs.rax;
 	unsigned long long ret;
 	struct uml_nt_uacc_sink sink;
 	/* Nesting save (M4.2): a handler may BLOCK (wait4 → schedule)
@@ -4360,8 +4370,8 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	sink.plan = &c->plan;
 	uml_nt_uacc_sink_own((unsigned int)c->pid);	/* S451: who owns it */
 	uacc_prev_sink = uml_nt_uacc_set_sink(&sink);
-	d->err = 0;
-	d->halt = 0;
+	s->err = 0;
+	s->halt = 0;
 	c->plan.kill = 0;
 	c->plan.n_ops = 0;
 	c->plan.copy_src_off = 0;
@@ -4387,7 +4397,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		   * halt nobody served), and any other task reaps
 		   * clean through the scheduler — its conn dies with
 		   * its mm at destroy_context, never a panic. */
-		d->retval = a[0];
+		s->retval = a[0];
 		if (c->task_backed) {
 			/* do_exit — for PID 1 the kernel panics (the
 			 * launcher exits with the M1 panic code); for
@@ -4408,7 +4418,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			sys_vfs(nr, a);
 			goto out;
 		}
-		d->halt = 1;
+		s->halt = 1;
 		goto out;
 	case 0: /* read — guest fds (init: 0/1/2 = /dev/console via
 		 * console_on_rootfs; script/file fds from openat) */
@@ -4502,13 +4512,13 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			c->open_logged++;
 			os_info("[open] pid %d dirfd=%lld path=\"%.48s\" fd=%lld "
 				"rip=0x%llx\n", c->pid, (long long)a[0], pbuf,
-				(long long)ret, (unsigned long long)d->regs.rip);
+				(long long)ret, (unsigned long long)s->regs.rip);
 		}
 		if (nr == 3 && uml_nt_conn_is_login(c) && c->close_logged < 12) {
 			c->close_logged++;
 			os_info("[close] pid %d fd=%llu ret=%lld rip=0x%llx\n",
 				c->pid, (unsigned long long)a[0], (long long)ret,
-				(unsigned long long)d->regs.rip);
+				(unsigned long long)s->regs.rip);
 		}
 		abrt_writev_capture(c, d, a, ret);
 		break;
@@ -4798,7 +4808,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			 * thread.regs, and the interrupted true_sp sits
 			 * 0x2000 higher. */
 			{
-				unsigned long long frame = d->regs.rsp - 8;
+				unsigned long long frame = s->regs.rsp - 8;
 
 				if (uml_nt_uacc_walk(c->mm,
 						     uml_boot.physmem_base,
@@ -4945,7 +4955,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			break;
 		}
 		uml_nt_sys_fork(c, d);
-		ret = d->retval;
+		ret = s->retval;
 		break;
 	case 56: /* clone */
 		if (a[0] & (SC_CLONE_VM | SC_CLONE_THREAD)) {
@@ -4961,7 +4971,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			break;
 		}
 		uml_nt_sys_fork(c, d); /* fork semantics (POC) */
-		ret = d->retval;
+		ret = s->retval;
 		break;
 	case 57: /* fork */
 		if (c->task_backed) {
@@ -4969,7 +4979,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			break;
 		}
 		uml_nt_sys_fork(c, d);
-		ret = d->retval;
+		ret = s->retval;
 		break;
 	case 59: /* execve — conn switch (see exec_pending above) */
 		ret = sys_execve(c, a);
@@ -4986,7 +4996,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			break;
 		}
 		uml_nt_sys_wait4(c, d, a);
-		ret = d->retval;
+		ret = s->retval;
 		break;
 	case 218: /* set_tid_address */
 		c->clear_tid_va = a[0];
@@ -5121,7 +5131,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 
 			if (c->mm != NULL)
 				bo = uml_nt_vma_translate(c->mm,
-							  d->regs.rip, 8);
+							  s->regs.rip, 8);
 			if (bo >= 0)
 				memcpy(&bq, (char *)uml_boot.physmem_base +
 				       bo, 8);
@@ -5129,8 +5139,8 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 				"rip=0x%llx rsp=0x%llx tbl_insn=%016llx "
 				"— an illegal instruction off the ud2 "
 				"sentinel reached the dispatch\n",
-				(unsigned long)c->pid, nr, nr, d->regs.rip,
-				d->regs.rsp, bq);
+				(unsigned long)c->pid, nr, nr, s->regs.rip,
+				s->regs.rsp, bq);
 		}
 		os_info("[syscall] nr=%llu not implemented → ENOSYS "
 			"(add it: STATUS M3.7 order)\n", nr);
@@ -5144,13 +5154,13 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 		 * The out: teardown below only clears the globals. */
 		goto out;
 	}
-	d->retval = ret;
+	s->retval = ret;
 	/* Shelley 301: after the handler has answered, before anything else
 	 * touches the round. The witness is read-only and never gated on the
 	 * debugger/veh_window levers. */
 	if (uml_nt_heavy_on())
 		uml_nt_capget_witness(c, nr, a, ret);
-	d->err = ((long long)ret < 0 && (long long)ret > -512) ? 1 : 0;
+	s->err = ((long long)ret < 0 && (long long)ret > -512) ? 1 : 0;
 	/* M5.4 c3 diag: feed the SIGSEGV print (stub_ctl.c) — see the
 	 * conn field comment. */
 	c->last_nr = nr;
@@ -5191,20 +5201,20 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			(long long)ret,
 			current ? current->pid : 0,
 			current ? current->comm : "(none)");
-		off = uml_nt_vma_translate(c->mm, d->regs.rsp, sizeof(q));
+		off = uml_nt_vma_translate(c->mm, s->regs.rsp, sizeof(q));
 		if (off >= 0) {
 			memcpy(q, (char *)uml_boot.physmem_base + off,
 			       sizeof(q));
 			for (i = 0; i < 36; i += 4)
 				os_info("[abrt]   rip=0x%llx [rsp+0x%02x]: "
 					"0x%llx 0x%llx 0x%llx 0x%llx\n",
-					d->regs.rip, i * 8, q[i], q[i + 1],
+					s->regs.rip, i * 8, q[i], q[i + 1],
 					q[i + 2], q[i + 3]);
 			msg_va = q[4];
 		} else {
 			os_info("[abrt]   rip=0x%llx rsp=0x%llx stack "
-				"untranslatable (%lld)\n", d->regs.rip,
-				d->regs.rsp, off);
+				"untranslatable (%lld)\n", s->regs.rip,
+				s->regs.rsp, off);
 		}
 		/* Astra request §2 — the predicate capture. msg_va =
 		 * [rsp+0x20] = the __abort_msg pointer (both the PID1
@@ -5268,7 +5278,7 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	}
 	if (c->plan.n_ops > 0) {
 		/* The syscall carries stub ops: park the return value —
-		 * the op results travel through d->retval and the plan
+		 * the op results travel through s->retval and the plan
 		 * re-publishes ours on the final NONE. K6 (cowcopy-
 		 * race-class-fix): the test is the PLAN CONTENT, not
 		 * plan_left — a round whose only view ops were uaccess
@@ -5304,9 +5314,22 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			uml_nt_uacc_fixup_page);
 	}
 out:
+	/* S458 write-back — guarded. Everything above worked on the snapshot; d is
+	 * only a delivery address now and may have been unmapped while we ran. */
+	if (!uml_nt_stub_view_ok(d)) {
+		uml_nt_late_write_refused++;
+		if (uml_nt_late_write_refused <= 8)
+			os_info("[late-write-refused] pid=%d va=0x%llx n=%llu\n",
+				(int)c->pid,
+				(unsigned long long)(unsigned long)
+				(const void *)d,
+				uml_nt_late_write_refused);
+		return;
+	}
+	memcpy(d, &s_local, sizeof(s_local));
 	if (hdl_trace)
 		os_info("[hdl] out tid=%u pid=%d nr=%llu ret=%lld\n",
-			hdl_tid, (int)c->pid, nr, (long long)d->regs.rax);
+			hdl_tid, (int)c->pid, nr, (long long)s_local.regs.rax);
 	/* S95: the strings behind the numbers, for a login/chain conn only.
 	 * login 6336 wrote 34 bytes to stderr and hit six ENOENT openats whose
 	 * paths sat on the heap — the ring showed the calls, not the reason. */

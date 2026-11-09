@@ -13048,6 +13048,7 @@ static int init_r15_budget = 32;
 static unsigned long long stub_views[UML_NT_VIEW_MAX];
 static unsigned int stub_views_n;
 unsigned long long uml_nt_dangling_stub_n;
+unsigned long long uml_nt_late_write_refused;	/* S458: guarded write-back refused */
 unsigned long long uml_nt_view_reg_full_n;
 
 void uml_nt_stub_view_add(unsigned long long va)
