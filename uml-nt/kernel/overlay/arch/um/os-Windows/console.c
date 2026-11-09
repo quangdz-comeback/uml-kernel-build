@@ -246,6 +246,10 @@ void uml_nt_console_marker_pending(int pid)
 	g_mk_pid = pid;
 }
 
+static int g_mk_tries;
+
+int uml_nt_console_marker_attempts(void) { return g_mk_tries; }
+void uml_nt_console_marker_attempt(void) { g_mk_tries++; }
 int uml_nt_console_marker_is_pending(void) { return g_mk_pending && !g_mk_done; }
 int uml_nt_console_marker_pid(void) { return g_mk_pid; }
 void uml_nt_console_marker_delivered(void) { g_mk_done = 1; g_mk_pending = 0; }
