@@ -40,6 +40,7 @@ int uml_nt_console_marker_is_pending(void);
 int uml_nt_console_marker_pid(void);
 void uml_nt_console_marker_delivered(void);
 int nt_con_deliver_marker_line(int dport);
+int uml_nt_console_deliver_marker_now(int pid);
 void uml_nt_console_set_owner(int pid);
 /* S74: is a login chain conn alive (the feed must survive its TCSAFLUSH)? */
 int uml_nt_console_chain_alive(void);

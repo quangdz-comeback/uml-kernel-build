@@ -261,6 +261,35 @@ int nt_con_deliver_marker_line(int dport)
 					 (unsigned)sizeof(mk) - 1);
 }
 
+int uml_nt_console_deliver_marker_now(int pid)
+{
+	static const char mk[] = "echo LOGIN-OK\n";
+	struct tty_struct *wt;
+	int port;
+	unsigned k;
+
+	/* S481: nothing may be delivered before the marker is armed for a pid.
+	 * The 479 branch ran with g_mk_pid == 0 and handed the marker to the first
+	 * reader that happened to read (stage=0, at boot), then latched done — the
+	 * delivery line never printed because it was never on the path. */
+	if (!g_mk_pending || g_mk_done || g_mk_pid == 0 || pid != g_mk_pid)
+		return 0;
+	port = nt_con_pick_port();
+	wt = READ_ONCE(g_port[port].itty);
+	if (wt != NULL) {
+		tty_ldisc_flush(wt);
+		os_info("[feed-stage] ldisc-flushed pid=%d port=%d\n", pid, port);
+	}
+	for (k = 0; k < sizeof(mk) - 1; k++)
+		tty_insert_flip_string(&g_port[port], &mk[k], 1);
+	tty_flip_buffer_push(&g_port[port]);
+	g_mk_done = 1;
+	g_mk_pending = 0;
+	os_info("[feed-arm] pid=%d MARKER first8=%c%c%c%c%c%c%c%c\n",
+		pid, mk[0], mk[1], mk[2], mk[3], mk[4], mk[5], mk[6], mk[7]);
+	return 1;
+}
+
 int uml_nt_console_flush_port(int dport)
 {
 	unsigned dropped;
@@ -505,36 +534,8 @@ int uml_nt_console_arm_feed(void)
 	 * unblock_signals happened to be called from. And CONSUME ONCE: the take
 	 * clears the arm, so a later flush can never hand out the same stage
 	 * twice. */
-	if (uml_nt_console_marker_is_pending()) {
-		int port = nt_con_pick_port();
-		static const char mk[] = "echo LOGIN-OK\n";
-		struct tty_struct *wt = READ_ONCE(g_port[port].itty);
-
-		/* S480: the marker was delivered but landed behind junk left in the
-		 * line discipline by rounds <=474, when deliver_stage pushed straight
-		 * into flip. Flush the ldisc first, then insert, so the marker is the
-		 * FIRST byte the reader can see. */
-		if (wt != NULL) {
-			tty_ldisc_flush(wt);
-			os_info("[feed-stage] ldisc-flushed pid=%d port=%d\n",
-				uml_nt_console_marker_pid(), port);
-		}
-		{
-			unsigned k2;
-
-			for (k2 = 0; k2 < sizeof(mk) - 1; k2++)
-				tty_insert_flip_string(&g_port[port], &mk[k2], 1);
-			tty_flip_buffer_push(&g_port[port]);
-		}
-		uml_nt_console_marker_delivered();
-		os_info("[feed-arm] pid=%d nr=0 MARKER first8=%c%c%c%c%c%c%c%c\n",
-			uml_nt_console_marker_pid(), mk[0], mk[1], mk[2], mk[3],
-			mk[4], mk[5], mk[6], mk[7]);
-		os_info("[feed-stage] marker-via-arm pid=%d port=%d\n",
-			uml_nt_console_marker_pid(), port);
-	} else if (nt_con_deliver_stage(nt_con_pick_port())) {
+	if (nt_con_deliver_stage(nt_con_pick_port()))
 		(void)uml_nt_feed_gate_take(&uml_nt_console_gate);
-	}
 	return (int)uml_nt_console_gate.stage;
 }
 

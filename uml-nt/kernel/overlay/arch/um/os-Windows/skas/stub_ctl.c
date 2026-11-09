@@ -11536,10 +11536,9 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		 * poll OR read park, whatever the stage, because bash is not
 		 * armed by any prompt text. Refusals now say why. */
 		if (is_mk && parked) {
-			int st = uml_nt_console_arm_feed();
-
-			os_info("[feed-arm] pid %d nr=%llu stage=%d marker\n",
-				(int)c->pid, nr, st);
+			/* S481: deliver here, guarded inside, and never through a path
+			 * that a stale pid could win. */
+			(void)uml_nt_console_deliver_marker_now((int)c->pid);
 		} else if (!parked && g_arm_gate_n < 64) {
 			g_arm_gate_n++;
 			os_info("[arm-gate] pid=%d nr=%llu stage=%d pending=%d "
