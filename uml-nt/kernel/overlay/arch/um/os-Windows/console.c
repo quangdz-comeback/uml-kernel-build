@@ -433,6 +433,18 @@ void uml_nt_console_deliver_marker(int pid)
 	g_marker_delivered = 1;
 	/* Reuse the delivery machinery that already knows how to inject: it picks
 	 * the port, flips one byte at a time and wakes the reader. */
+	/* S473: the ring is FIFO and full of junk that predates the marker — a
+	 * probe string, old drain bytes. bash reads it line by line in canonical
+	 * mode and never reaches the marker before the clock ends. Flush the port
+	 * first, then push, so the marker is at the head of the queue. */
+	{
+		struct tty_struct *wt = READ_ONCE(g_port[g_feed_dport].itty);
+
+		if (wt != NULL && wt->ops != NULL &&
+		    wt->ops->flush_buffer != NULL)
+			tty_driver_flush_buffer(wt);
+		os_info("[feed-stage] flush junk at=to4 port=%d\n", g_feed_dport);
+	}
 	(void)nt_con_deliver_stage(nt_con_pick_port());
 	os_info("[feed-stage] to=4 anchor=con-read pid=%d\n", pid);
 }

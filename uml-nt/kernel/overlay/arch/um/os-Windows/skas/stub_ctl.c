@@ -11436,7 +11436,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * nothing about consumption; this says "a read on fd 0-2 returned bytes".
 	 * No guest read here: the walker drives the uaccess sink and cannot be
 	 * called from the answer path without clobbering the plan in flight. */
-	if (c->read_ok_n < 8 && d->regs.rax > 0 &&
+	if (c->read_ok_n < 32 && d->regs.rax > 0 &&
 	    (d->args[0] == 0 || d->args[0] == 1 || d->args[0] == 2)) {
 		c->read_ok_n++;
 		/* S464: show what the reader actually got. A short read or a missing
