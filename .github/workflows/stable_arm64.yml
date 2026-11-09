@@ -1,8 +1,8 @@
 name: "UML Kernel — stable arm64 (linux-um port)"
 
-# Builds the newest stable kernel (currently 7.2.x) for UML with SUBARCH=arm64,
+# Builds the newest stable kernel (currently 7.3.x) for UML with SUBARCH=arm64,
 # using the linux-um arm64 patch series (uml/um-arm64, 54 commits, rebased onto
-# v7.2.4 and merged with this repo's bundled patches). Runs on an arm64 runner
+# v7.3.3 and merged with this repo's bundled patches). Runs on an arm64 runner
 # so no cross sysroot is needed: the UML binary is a normal aarch64 Linux
 # executable that links the runner's own glibc.
 #
@@ -12,7 +12,7 @@ name: "UML Kernel — stable arm64 (linux-um port)"
 #   not understand. LLVM=1 selects lld for the kernel link, and the stub link
 #   goes through the clang driver, so STUB_EXE_LDFLAGS re-adds -fuse-ld=lld.
 # - The UML SMP backport (apply-smp.sh) is NOT applied here: it targets 6.x,
-#   and the port series was developed and gate-tested against plain 7.2.4.
+#   and the port series was developed and gate-tested against plain 7.3.3.
 
 on:
   schedule:
@@ -63,7 +63,7 @@ jobs:
           clang --version | head -1
           ld.lld --version | head -1
 
-      - name: Pick newest stable (requires >= 7.0 — the arm64 port series is rebased on 7.2.4)
+      - name: Pick newest stable (requires >= 7.0 — the arm64 port series is rebased on 7.3.3)
         run: |
           KVER=$(curl -s https://www.kernel.org/releases.json | \
             jq -r '.releases[] | select(.moniker=="stable") | .version' | \
@@ -71,7 +71,7 @@ jobs:
           MAJOR=$(echo "$KVER" | cut -d. -f1)
           MINOR=$(echo "$KVER" | cut -d. -f2)
           if [ "$MAJOR" -lt 7 ]; then
-            echo "::error::Newest stable is $KVER; the arm64 port targets 7.2.x. Pin the version manually."
+            echo "::error::Newest stable is $KVER; the port series is rebased on 7.3.3. Pin the version manually."
             exit 1
           fi
           echo "KVER=$KVER" >> "$GITHUB_ENV"
@@ -116,11 +116,11 @@ jobs:
       - name: Apply arm64 port series (consolidated, must apply cleanly)
         run: |
           cd linux-${{ env.KVER }}
-          git apply --check ../patches/arm64-port-7.2.4.patch || {
+          git apply --check ../patches/arm64-port-7.3.3.patch || {
             echo "::error::arm64 port does not apply on ${{ env.KVER }} + bundled patches"
             exit 1
           }
-          git apply ../patches/arm64-port-7.2.4.patch
+          git apply ../patches/arm64-port-7.3.3.patch
           echo "[+] arm64 port applied"
 
       - name: Patch UML (unwind_user.h)
