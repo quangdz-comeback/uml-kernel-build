@@ -11414,6 +11414,16 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				os_info("[feed-drain] pid=%d n=%lu text=\"%s\"\n",
 					(int)c->pid, (unsigned long)d->regs.rax,
 					(char *)rb);
+				/* S466: before/after at the same address says whether
+				 * the copy ran at all. */
+				os_info("[rd-copy] pid=%d n=%lu dst_va=0x%llx "
+					"before_ok=%u before=%02x%02x%02x%02x "
+					"after=%02x%02x%02x%02x\n",
+					(int)c->pid, (unsigned long)d->regs.rax,
+					c->rd_dst, c->rd_before_ok,
+					c->rd_before[0], c->rd_before[1],
+					c->rd_before[2], c->rd_before[3],
+					rb[0], rb[1], rb[2], rb[3]);
 			}
 		}
 		os_info("[con-read] pid=%d fd=%llu len=%llu gdport=%d\n",

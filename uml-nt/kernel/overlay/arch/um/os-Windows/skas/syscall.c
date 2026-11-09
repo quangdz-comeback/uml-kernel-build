@@ -4340,6 +4340,20 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	s->halt = (int)d->halt; s->retval = (long long)d->retval;
 	const unsigned long long *a = s->args;
 	unsigned long long nr = s->regs.rax;
+
+	/* S466: before the read is served, remember what the destination buffer
+	 * held. Reads go through the real tty path, so comparing this with the
+	 * post-read dump is the only way to know whether the copy ran. */
+	if (nr == 0 && a[0] <= 2 && a[1] != 0) {
+		long rb_off = uml_nt_vma_translate(c->mm, a[1], 8);
+
+		c->rd_dst = a[1];
+		c->rd_before_ok = 0;
+		if (rb_off >= 0 &&
+		    uml_nt_phys_read_checked(c, (unsigned long long)rb_off,
+					     c->rd_before, 8) == 0)
+			c->rd_before_ok = 1;
+	}
 	unsigned long long ret;
 	struct uml_nt_uacc_sink sink;
 	/* Nesting save (M4.2): a handler may BLOCK (wait4 → schedule)
@@ -5372,6 +5386,7 @@ out:
 			uml_nt_pam_mod_note(c, a[1]);
 		else if (nr == 42)
 			uml_nt_con_path_note(c, a[1], (long long)ret);
+
 		else if (nr == 39 && c->getpid_n < 5) {
 			/* S440: syslog says login[87] while getpid answered 88/89. If
 			 * login compares its own pid with a stored value, an
