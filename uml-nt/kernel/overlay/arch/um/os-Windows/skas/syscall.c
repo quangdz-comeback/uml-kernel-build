@@ -4293,6 +4293,20 @@ static void uml_nt_note_text(struct uml_nt_stub_conn *c, const char *tag,
 		tag, len, buf);
 }
 
+/* S459: the snapshot must be the part the handler reads — not the whole
+ * 13.7 KiB stub_data. The first version copied sizeof(struct
+ * uml_nt_stub_data) onto the kernel stack and smashed it, killing the process
+ * with a bare 'Segmentation fault' before the VEH could run (fault=0 because
+ * there was no stack left). Measure before you place. */
+struct uml_nt_snap {
+	unsigned long long args[6];
+	struct uml_nt_gp_regs regs;
+	int cmd, err, halt;
+	long long retval;
+};
+_Static_assert(sizeof(struct uml_nt_snap) <= 512,
+	       "the handler snapshot must fit comfortably on the kernel stack");
+
 void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 			   struct uml_nt_stub_data *d)
 {
@@ -4315,10 +4329,15 @@ void uml_nt_syscall_handle(struct uml_nt_stub_conn *c,
 	 * same fault kept returning under three different pointers (451 sink, 454
 	 * dangling, 457 race). Everything below reads s; d is touched again only in
 	 * the guarded write-back. */
-	struct uml_nt_stub_data s_local;
-	struct uml_nt_stub_data *s = &s_local;
+	struct uml_nt_snap s_local;
+	struct uml_nt_snap *s = &s_local;
 
-	memcpy(&s_local, d, sizeof(s_local));
+	s->args[0] = d->args[0]; s->args[1] = d->args[1];
+	s->args[2] = d->args[2]; s->args[3] = d->args[3];
+	s->args[4] = d->args[4]; s->args[5] = d->args[5];
+	s->regs = d->regs;
+	s->cmd = (int)d->cmd; s->err = (int)d->err;
+	s->halt = (int)d->halt; s->retval = (long long)d->retval;
 	const unsigned long long *a = s->args;
 	unsigned long long nr = s->regs.rax;
 	unsigned long long ret;
@@ -5326,7 +5345,10 @@ out:
 				uml_nt_late_write_refused);
 		return;
 	}
-	memcpy(d, &s_local, sizeof(s_local));
+	d->retval = (unsigned long long)s_local.retval;
+	d->err = (unsigned long long)s_local.err;
+	d->halt = (unsigned long long)s_local.halt;
+	d->regs = s_local.regs;
 	if (hdl_trace)
 		os_info("[hdl] out tid=%u pid=%d nr=%llu ret=%lld\n",
 			hdl_tid, (int)c->pid, nr, (long long)s_local.regs.rax);
