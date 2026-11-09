@@ -502,7 +502,7 @@ jobs:
       # cancel here means something below is stuck — and every later step is
       # if: always, so systemd.log still comes back.
       - name: NATIVE systemd boot (M5.5a + M5.5b-1 login feed)
-        timeout-minutes: 25
+        timeout-minutes: 30
         shell: msys2 {0}
         env:
           # Shelley 219: a dump after the death never returns, so the stub
@@ -517,7 +517,10 @@ jobs:
         run: |
           cd uml-nt/launcher
           set +e
-          # 900s (was 420): mem=120M boots go deeper than the old cap
+          # S472: 1500s (was 900). The login chain completes at ~840s, and the
+          # marker needs bash's next read AFTER the push — at 900s the run was
+          # killed ~800 lines past the push, so refeed=0 and nobody read again.
+          # This is time, not a bug: 1500s gives the shell room to get there.
           # could film — the evidence must land before the kill.
           # SYSTEMD_LOG_TARGET=console: init's assert/emergency text
           # defaults to the journald socket — silent when that path
@@ -594,7 +597,7 @@ jobs:
           # -k 30: if the launcher ignores TERM we still get the log back —
           # an instrument that can hang forever costs the whole run's
           # evidence (referee 40794805029 lost everything at 1h01m).
-          } | bash bounded-run.sh ${{ inputs.debugger && '1800' || '900' }} ./launcher.exe ../../build/vmlinux \
+          } | bash bounded-run.sh ${{ inputs.debugger && '1800' || '1500' }} ./launcher.exe ../../build/vmlinux \
             "uml_nt_stub=$(cygpath -w "$(pwd)/../stub/stub.exe")" \
             "ubd0=$(cygpath -w ../../rootfs-img/base-debian-bookworm.img)" \
             "mem=${{ inputs.mem_mb || '192' }}M" \

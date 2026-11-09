@@ -81,4 +81,7 @@ grep -qF "grep -oE '\\[av\\]" "$W" || grep -qF '[av]' "$W" \
 	|| { echo "FAIL: first-chance rips are not symbolized"; exit 1; }
 grep -qF "stack\\[[0-9.]+\\]" "$W" \
 	|| { echo "FAIL: stack return addresses are not symbolized"; exit 1; }
+# S472: the referee needs room past the push; the bound is part of the contract
+grep -qF "|| '1500' }} ./launcher.exe" "$W" || { echo "FAIL: boot bound is not 1500s"; exit 1; }
+grep -qF 'timeout-minutes: 30' "$W" || { echo "FAIL: GitHub backstop not raised"; exit 1; }
 echo "nss_prep: no trailing comments, both accounts resolved by the image itself"
