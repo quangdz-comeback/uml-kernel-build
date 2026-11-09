@@ -65,6 +65,7 @@
 
 /* S464: checked reader (defined in syscall.c). */
 static int g_marker_pid;
+static unsigned g_arm_gate_n;	/* S479: refusals spoken */
 
 /* S470: '/bin/bash', '/bin/sh', or anything ending in '/bash' or '/sh'. */
 int uml_nt_exec_path_is_shell(const char *p)
@@ -11522,10 +11523,38 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	 * Arm one line — stage machine decides which — and say so. */
 	if (uml_nt_conn_is_login(c) || c->chain_login) {
 		unsigned long long nr = d->regs.rax;
+		int parked = (nr == 7 || nr == 23 || nr == 270 || nr == 271 ||
+			      nr == 0);
+		int is_mk = uml_nt_console_marker_is_pending() &&
+			    (int)c->pid == uml_nt_console_marker_pid();
 
 		uml_nt_console_note_chain_alive(1);
 
-		if (nr == 7 || nr == 23 || nr == 270 || nr == 271) {
+		/* S479: the gate had no marker branch, so the pump never ran for
+		 * bash — every [feed-arm] belonged to agetty at stage 1. A pending
+		 * marker belongs to ONE pid and must be delivered on that pid's
+		 * poll OR read park, whatever the stage, because bash is not
+		 * armed by any prompt text. Refusals now say why. */
+		if (is_mk && parked) {
+			int st = uml_nt_console_arm_feed();
+
+			os_info("[feed-arm] pid %d nr=%llu stage=%d marker\n",
+				(int)c->pid, nr, st);
+		} else if (!parked && g_arm_gate_n < 16) {
+			g_arm_gate_n++;
+			os_info("[arm-gate] pid=%d nr=%llu stage=%d pending=%d "
+				"accept=0 why=not-parked\n", (int)c->pid, nr,
+				uml_nt_console_gate.stage,
+				uml_nt_console_marker_is_pending());
+		} else if (!is_mk && g_arm_gate_n < 16) {
+			g_arm_gate_n++;
+			os_info("[arm-gate] pid=%d nr=%llu stage=%d pending=%d "
+				"accept=0 why=%s\n", (int)c->pid, nr,
+				uml_nt_console_gate.stage,
+				uml_nt_console_marker_is_pending(),
+				uml_nt_console_marker_is_pending() ?
+				"other-pid" : "marker-done");
+		} else if (parked && nr != 0) {
 			int st;
 
 			uml_nt_console_set_owner((int)c->pid);

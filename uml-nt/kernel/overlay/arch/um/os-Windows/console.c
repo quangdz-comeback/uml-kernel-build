@@ -493,7 +493,10 @@ int uml_nt_console_arm_feed(void)
 {
 	if (!g_con_live)
 		return 0;
-	if (uml_nt_console_gate.stage == 0)
+	/* S479: a pending marker belongs to one pid and must not be gated on the
+	 * text matcher's stage — bash prints no prompt, so it never arms by text. */
+	if (!uml_nt_console_marker_is_pending() &&
+	    uml_nt_console_gate.stage == 0)
 		uml_nt_console_gate.stage = 1;
 	uml_nt_console_gate.armed = 1;
 	/* S84: DELIVER HERE. This is the arm point — the conn's own syscall
