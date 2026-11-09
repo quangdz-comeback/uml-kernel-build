@@ -35,6 +35,7 @@ int uml_nt_console_feed_port(void);
 void uml_nt_console_deliver_marker(int pid);
 void *uml_nt_console_port_itty(int port);
 int uml_nt_console_flush_port(int dport);
+int uml_nt_console_flush_all(int dport);
 void uml_nt_console_marker_pending(int pid);
 int uml_nt_console_marker_is_pending(void);
 int uml_nt_console_marker_pid(void);

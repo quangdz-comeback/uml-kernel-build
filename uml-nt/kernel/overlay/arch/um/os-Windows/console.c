@@ -294,6 +294,25 @@ int uml_nt_console_deliver_marker_now(int pid)
 	return 1;
 }
 
+/* S483: flush at ARM, not only at delivery. Delivery needs bash to park; bash
+ * never parks while junk keeps arriving; junk was only cleared when delivering.
+ * A closed loop — so clear both queues when the marker is armed. */
+int uml_nt_console_flush_all(int dport)
+{
+	struct tty_struct *wt;
+	unsigned dropped;
+
+	if (dport < 0 || dport >= (int)(sizeof(g_port) / sizeof(g_port[0])))
+		return -1;
+	wt = READ_ONCE(g_port[dport].itty);
+	if (wt != NULL)
+		tty_ldisc_flush(wt);
+	dropped = uml_nt_con_ring_drop(&g_con_ring);
+	os_info("[feed-stage] flush-at-arm port=%d n=%u ldisc=%d\n",
+		dport, dropped, wt != NULL);
+	return (int)dropped;
+}
+
 int uml_nt_console_flush_port(int dport)
 {
 	unsigned dropped;

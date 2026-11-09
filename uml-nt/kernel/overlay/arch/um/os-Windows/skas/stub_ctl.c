@@ -11491,7 +11491,10 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				/* S478: no push here — the marker rides the PUMP
 				 * (arm point), the only path that has delivered bytes a
 				 * reader actually consumed. */
-				(void)uml_nt_console_flush_port(nt_con_pick_port());
+				/* S483: clear BOTH queues at the arm point, so bash's
+				 * next read is empty and it parks — that is what makes
+				 * the pump able to deliver at all. */
+				(void)uml_nt_console_flush_all(nt_con_pick_port());
 				uml_nt_console_marker_pending((int)c->pid);
 				os_info("[feed-stage] to=4 anchor=con-read "
 					"pid=%d pending\n", uml_nt_console_marker_pid());
@@ -11542,7 +11545,7 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 				uml_nt_console_gate.stage,
 				uml_nt_console_marker_is_pending(),
 				uml_nt_console_marker_is_pending() ?
-				"other-pid" : "marker-done");
+				"other-pid" : "not-armed-or-done");
 		} else if (parked && nr != 0) {
 			int st;
 
