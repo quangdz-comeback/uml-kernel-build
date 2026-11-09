@@ -11497,15 +11497,18 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		    uml_nt_console_gate.stage >= 3) {
 			if (g_marker_pid == 0) {
 				g_marker_pid = (int)c->pid;
+				/* S478: no push here — the marker rides the PUMP
+				 * (arm point), the only path that has delivered bytes a
+				 * reader actually consumed. */
 				(void)uml_nt_console_flush_port(nt_con_pick_port());
-				(void)nt_con_deliver_stage(nt_con_pick_port());
+				uml_nt_console_marker_pending(g_marker_pid);
 				os_info("[feed-stage] to=4 anchor=con-read "
-					"pid=%d push\n", g_marker_pid);
+					"pid=%d pending\n", g_marker_pid);
 			} else if ((int)c->pid != g_marker_pid &&
 				   g_marker_refeed < 12) {
+				/* S478: no second push — one source of truth. */
 				g_marker_refeed++;
-				(void)nt_con_deliver_stage(nt_con_pick_port());
-				os_info("[feed-stage] refeed n=%d eater_pid=%d\n",
+				os_info("[feed-stage] refeed-skip n=%d eater_pid=%d\n",
 					g_marker_refeed, (int)c->pid);
 			} else if ((int)c->pid == g_marker_pid &&
 				   g_marker_maybe_seen && !g_marker_done) {

@@ -6,7 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 C="$HERE/../kernel/overlay/arch/um/os-Windows/console.c"
 K="$HERE/../kernel/overlay/arch/um/os-Windows/skas/stub_ctl.c"
 
-grep -q 'uml_nt_console_marker_pending(pid)' "$C" || { echo "FAIL: no pending state"; exit 1; }
+grep -q 'void uml_nt_console_marker_pending(int pid)' "$C" || { echo "FAIL: no pending state"; exit 1; }
 grep -q 'marker-via-arm pid=%d port=%d' "$C" || { echo "FAIL: arm delivery not declared"; exit 1; }
 # arm_feed must have the marker branch
 awk '/^int uml_nt_console_arm_feed/,/^}/' "$C" | grep -q 'uml_nt_console_marker_is_pending' \
