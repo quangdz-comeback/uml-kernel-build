@@ -1,9 +1,9 @@
 name: "UML Kernel — stable arm32 (linux-um port, cross-built)"
 
-# Cross-builds the newest stable kernel (currently 7.2.x) for UML with
+# Cross-builds the newest stable kernel (currently 7.3.x) for UML with
 # SUBARCH=arm (32-bit armv7l, armel EABI) on an x86_64 runner, using this
-# repo's arm32 port series (patches/arm32-port-7.2.4.patch, rebased onto
-# v7.2.4 and merged with this repo's bundled patches).
+# repo's arm32 port series (patches/arm32-port-7.3.3.patch, rebased onto
+# v7.3.3 and merged with this repo's bundled patches).
 #
 # The UML kernel is an ordinary userspace process, so it cross-compiles the
 # same way any other userspace program does: ubuntu-latest's apt archive
@@ -30,7 +30,7 @@ name: "UML Kernel — stable arm32 (linux-um port, cross-built)"
 #   -march=armv7 is refused by cross drivers built with a Thumb default mode
 #   ("target CPU does not support ARM mode").
 # - The UML SMP backport (apply-smp.sh) is NOT applied here: 7.2.x has native
-#   SMP, and the arm32 port was developed and gate-tested against plain 7.2.4.
+#   SMP, and the arm32 port was developed and gate-tested against plain 7.3.3.
 #
 # Two jobs run on every dispatch:
 # - build       — the regular kernel, dynamically linked against the arm32
@@ -100,7 +100,7 @@ jobs:
           MAJOR=$(echo "$KVER" | cut -d. -f1)
           MINOR=$(echo "$KVER" | cut -d. -f2)
           if [ "$MAJOR" -lt 7 ]; then
-            echo "::error::Newest stable is $KVER; the arm32 port targets 7.2.x. Pin the version manually."
+            echo "::error::Newest stable is $KVER; the port series is rebased on 7.3.3. Pin the version manually."
             exit 1
           fi
           echo "KVER=$KVER" >> "$GITHUB_ENV"
@@ -145,11 +145,11 @@ jobs:
       - name: Apply arm32 port series (consolidated, must apply cleanly)
         run: |
           cd linux-${{ env.KVER }}
-          git apply --check ../patches/arm32-port-7.2.4.patch || {
+          git apply --check ../patches/arm32-port-7.3.3.patch || {
             echo "::error::arm32 port does not apply on ${{ env.KVER }} + bundled patches"
             exit 1
           }
-          git apply ../patches/arm32-port-7.2.4.patch
+          git apply ../patches/arm32-port-7.3.3.patch
           echo "[+] arm32 port applied"
 
       - name: Patch UML (unwind_user.h)
@@ -368,7 +368,7 @@ jobs:
           MAJOR=$(echo "$KVER" | cut -d. -f1)
           MINOR=$(echo "$KVER" | cut -d. -f2)
           if [ "$MAJOR" -lt 7 ]; then
-            echo "::error::Newest stable is $KVER; the arm32 port targets 7.2.x. Pin the version manually."
+            echo "::error::Newest stable is $KVER; the port series is rebased on 7.3.3. Pin the version manually."
             exit 1
           fi
           echo "KVER=$KVER" >> "$GITHUB_ENV"
@@ -409,11 +409,11 @@ jobs:
       - name: Apply arm32 port series (consolidated, must apply cleanly)
         run: |
           cd linux-${{ env.KVER }}
-          git apply --check ../patches/arm32-port-7.2.4.patch || {
+          git apply --check ../patches/arm32-port-7.3.3.patch || {
             echo "::error::arm32 port does not apply on ${{ env.KVER }} + bundled patches"
             exit 1
           }
-          git apply ../patches/arm32-port-7.2.4.patch
+          git apply ../patches/arm32-port-7.3.3.patch
           echo "[+] arm32 port applied"
 
       - name: Patch UML (unwind_user.h)

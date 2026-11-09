@@ -120,11 +120,11 @@ jobs:
       - name: Apply arm64 port series (consolidated, must apply cleanly)
         run: |
           cd "$KDIR"
-          git apply --check "$GITHUB_WORKSPACE/patches/arm64-port-7.2.4.patch" || {
+          git apply --check "$GITHUB_WORKSPACE/patches/arm64-port-7.3.3.patch" || {
             echo "::error::arm64 port does not apply on $KVER + bundled patches"
             exit 1
           }
-          git apply "$GITHUB_WORKSPACE/patches/arm64-port-7.2.4.patch"
+          git apply "$GITHUB_WORKSPACE/patches/arm64-port-7.3.3.patch"
           # Belt and suspenders against a vacuous git apply (repo-relative path
           # resolution): the harness is the port's own build entry point.
           [ -f tools/um-arm64/harness/build-bionic.sh ] \
