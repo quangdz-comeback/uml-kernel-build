@@ -32,6 +32,7 @@ int uml_nt_console_arm_feed(void);
 /* S90: which port the last delivery/arm targeted — so [con-read] can be
  * compared against [feed-drain] instead of guessed. */
 int uml_nt_console_feed_port(void);
+void uml_nt_console_deliver_marker(int pid);
 void uml_nt_console_set_owner(int pid);
 /* S74: is a login chain conn alive (the feed must survive its TCSAFLUSH)? */
 int uml_nt_console_chain_alive(void);

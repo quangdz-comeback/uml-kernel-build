@@ -397,6 +397,33 @@ void uml_nt_console_set_owner(int pid)
 	g_feed_owner = pid;
 }
 
+/* S461: deliver the completion command once, when the guest itself asks for
+ * input. bash as a login shell on a pipe never prints a prompt, so the stage-3
+ * text anchor cannot fire; a read on fd 0 is the signal that cannot be missed. */
+static int g_marker_delivered;
+
+void uml_nt_console_deliver_marker(int pid)
+{
+	static const char cmd[] = "echo LOGIN-OK\n";
+	unsigned i, n = sizeof(cmd) - 1;
+	int dport;
+
+	if (g_marker_delivered)
+		return;
+	g_marker_delivered = 1;
+	dport = nt_con_pick_port();
+	for (i = 0; i < n; i++)
+		tty_insert_flip_string(&g_port[dport], &cmd[i], 1);
+	tty_flip_buffer_push(&g_port[dport]);
+	{
+		struct tty_struct *wt = READ_ONCE(g_port[dport].itty);
+
+		if (wt != NULL)
+			wake_up_interruptible(&wt->read_wait);
+	}
+	os_info("[feed-stage] to=4 anchor=con-read pid=%d\n", pid);
+}
+
 int uml_nt_console_feed_port(void)
 {
 	return g_feed_dport;

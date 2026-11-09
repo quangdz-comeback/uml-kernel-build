@@ -16,6 +16,7 @@
 
 /* S460: the gate is complete when the guest prints the marker back. */
 static int g_login_ok_seen;
+static int g_feed_kernel_ignored;	/* S461: kernel text is not a prompt */
 #include <os.h>
 #include "internal.h"
 #include <diag_record.h>
@@ -127,6 +128,20 @@ static void feed_gate_sink(const char *s, unsigned int n)
 	 * '[' and end with the newline, so prompts still reach the matcher. */
 	if (uml_nt_feed_port_voice(s, n))
 		return;
+	/* S461: a stage anchor may only come from the GUEST (console), never from
+	 * kernel text. 'session opened for user root' contains "login", and that is
+	 * how the gate armed on the instrument's own syslog at 389 and again here.
+	 * Kernel-side fragments are ignored, counted, and named once. */
+	if (src != 0) {
+		if (g_feed_kernel_ignored < 8) {
+			g_feed_kernel_ignored++;
+			os_info("[feedgate] ignore-kernel n=%d\n",
+				g_feed_kernel_ignored);
+		} else {
+			g_feed_kernel_ignored++;
+		}
+		return;
+	}
 	uml_nt_feed_gate_scan(&uml_nt_console_gate, s, n, src);
 	if (uml_nt_console_gate.armed &&
 	    uml_nt_console_gate.stage != uml_nt_console_gate.last_armed_stage) {
