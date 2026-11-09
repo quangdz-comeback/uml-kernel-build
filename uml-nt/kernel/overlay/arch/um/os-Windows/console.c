@@ -236,6 +236,31 @@ int nt_con_pick_port(void)
  * when bytes went out. Called from the ARM point (a conn's syscall handler,
  * before the guest parks) and, unchanged, from the flush for a text-armed stage
  * (the prompt matcher arms stage 2/3 without going through the syscall door). */
+static int g_mk_pending;
+static int g_mk_pid;
+static int g_mk_done;
+
+void uml_nt_console_marker_pending(int pid)
+{
+	g_mk_pending = 1;
+	g_mk_pid = pid;
+}
+
+int uml_nt_console_marker_is_pending(void) { return g_mk_pending && !g_mk_done; }
+int uml_nt_console_marker_pid(void) { return g_mk_pid; }
+void uml_nt_console_marker_delivered(void) { g_mk_done = 1; g_mk_pending = 0; }
+
+/* The marker rides the same ring the pump fills — that is the path that has
+ * actually delivered bytes to a reader. Nothing else is used. */
+int nt_con_deliver_marker_line(int dport)
+{
+	static const char mk[] = "echo LOGIN-OK\n";
+	(void)dport;
+	return (int)uml_nt_con_ring_push(&g_con_ring,
+					 (const unsigned char *)mk,
+					 (unsigned)sizeof(mk) - 1);
+}
+
 int uml_nt_console_flush_port(int dport)
 {
 	unsigned dropped;
@@ -477,8 +502,17 @@ int uml_nt_console_arm_feed(void)
 	 * unblock_signals happened to be called from. And CONSUME ONCE: the take
 	 * clears the arm, so a later flush can never hand out the same stage
 	 * twice. */
-	if (nt_con_deliver_stage(nt_con_pick_port()))
+	if (uml_nt_console_marker_is_pending()) {
+		int port = nt_con_pick_port();
+
+		if (nt_con_deliver_marker_line(port)) {
+			uml_nt_console_marker_delivered();
+			os_info("[feed-stage] marker-via-arm pid=%d port=%d\n",
+				uml_nt_console_marker_pid(), port);
+		}
+	} else if (nt_con_deliver_stage(nt_con_pick_port())) {
 		(void)uml_nt_feed_gate_take(&uml_nt_console_gate);
+	}
 	return (int)uml_nt_console_gate.stage;
 }
 
