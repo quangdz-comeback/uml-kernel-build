@@ -63,6 +63,11 @@
 #include "internal.h"
 #include <feedgate.h>
 
+/* S464: checked reader (defined in syscall.c). */
+int uml_nt_phys_read_checked(struct uml_nt_stub_conn *c,
+			     unsigned long long off, void *dst,
+			     unsigned long long n);
+
 extern struct uml_nt_feed_gate uml_nt_console_gate;	/* S463 */
 #include <stackreserve_model.h>
 
@@ -11386,6 +11391,31 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 	if (c->read_ok_n < 8 && d->regs.rax > 0 &&
 	    (d->args[0] == 0 || d->args[0] == 1 || d->args[0] == 2)) {
 		c->read_ok_n++;
+		/* S464: show what the reader actually got. A short read or a missing
+		 * newline separates queue plumbing from a shell that ignores input. */
+		{
+			unsigned char rb[17];
+			long ro = -1;
+			unsigned long rn = (unsigned long)d->regs.rax;
+			unsigned int bi;
+
+			if (rn > 16)
+				rn = 16;
+			memset(rb, 0, sizeof(rb));
+			if (d->args[1] != 0)
+				ro = uml_nt_vma_translate(c->mm, d->args[1], rn);
+			if (ro >= 0 &&
+			    uml_nt_phys_read_checked(c, (unsigned long long)ro,
+						     rb, rn) == 0) {
+				for (bi = 0; bi < rn; bi++)
+					if (rb[bi] < 0x20 && rb[bi] != '\n')
+						rb[bi] = '.';
+				rb[rn] = 0;
+				os_info("[feed-drain] pid=%d n=%lu text=\"%s\"\n",
+					(int)c->pid, (unsigned long)d->regs.rax,
+					(char *)rb);
+			}
+		}
 		os_info("[con-read] pid=%d fd=%llu len=%llu gdport=%d\n",
 			(int)c->pid, d->args[0], d->regs.rax,
 			uml_nt_console_feed_port());
