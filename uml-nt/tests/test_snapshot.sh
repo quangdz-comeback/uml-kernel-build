@@ -12,7 +12,7 @@ grep -q 'S458 write-back — guarded' "$S" \
 
 # (a) the snapshot must follow the view check
 g=$(grep -n 'if (!uml_nt_stub_view_ok(d))' "$S" | head -1 | cut -d: -f1)
-sn=$(grep -n 's->args\[0\] = d->args\[0\];' "$S" | head -1 | cut -d: -f1)
+sn=$(grep -n 's->halt = (int)d->halt;' "$S" | head -1 | cut -d: -f1)
 [ -n "$g" ] && [ -n "$sn" ] && [ "$g" -lt "$sn" ] || { echo "FAIL: snapshot precedes the guard"; exit 1; }
 
 # (b) no d-> between the snapshot and the write-back
