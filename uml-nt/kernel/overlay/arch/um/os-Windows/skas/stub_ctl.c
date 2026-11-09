@@ -11419,6 +11419,11 @@ static int serve_conn(struct uml_nt_stub_conn *c)
 		os_info("[con-read] pid=%d fd=%llu len=%llu gdport=%d\n",
 			(int)c->pid, d->args[0], d->regs.rax,
 			uml_nt_console_feed_port());
+		/* S465: the reader's tty identity, to compare against [rd-src]. */
+		os_info("[rd-dst] pid=%d port=%d itty=%p\n", (int)c->pid,
+			uml_nt_console_feed_port(),
+			(void *)uml_nt_console_port_itty(
+				uml_nt_console_feed_port()));
 		/* S461: a read of fd 0 on the login conn is the deterministic
 		 * readiness signal — bash with a pipe stdin prints no prompt, so no
 		 * text anchor will ever appear. Deliver the marker once, here. */

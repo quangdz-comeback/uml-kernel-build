@@ -259,6 +259,12 @@ static int nt_con_deliver_stage(int dport)
 		if (wt != NULL)
 			wake_up_interruptible(&wt->read_wait);
 	}
+	/* S465: name the port AND the tty object the bytes were inserted into.
+	 * If the reader consumes a different tty, the bytes it sees are somebody
+	 * else's — and the drain already showed PS1 text from bash's own data
+	 * segment, not the fed line. */
+	os_info("[rd-src] port=%d itty=%p n=%u\n", dport,
+		(void *)READ_ONCE(g_port[dport].itty), sll);
 	if (g_feed_deliver_n < 8) {
 		g_feed_deliver_n++;
 		os_info("[feed-drain] port=%d bytes=%u src=stage owner=%d\n",
@@ -429,6 +435,13 @@ void uml_nt_console_deliver_marker(int pid)
 	 * the port, flips one byte at a time and wakes the reader. */
 	(void)nt_con_deliver_stage(nt_con_pick_port());
 	os_info("[feed-stage] to=4 anchor=con-read pid=%d\n", pid);
+}
+
+void *uml_nt_console_port_itty(int port)
+{
+	if (port < 0 || port >= (int)(sizeof(g_port) / sizeof(g_port[0])))
+		return NULL;
+	return (void *)READ_ONCE(g_port[port].itty);
 }
 
 int uml_nt_console_feed_port(void)
