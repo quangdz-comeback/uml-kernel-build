@@ -61,6 +61,9 @@
 #include <dbg_map.h>
 #include <physalloc.h>
 #include "internal.h"
+#include <feedgate.h>
+
+extern struct uml_nt_feed_gate uml_nt_console_gate;	/* S463 */
 #include <stackreserve_model.h>
 
 /* S118: the thread id of the last dead stub thread, so a spinning site can say
@@ -12191,9 +12194,21 @@ void uml_nt_exec_path_set(const char *path)
 		g_xs_lever = 1;
 		os_info("[xs-lever] armed for the login chain\n");
 	}
-	if (g_exec_login)
+	if (g_exec_login) {
 		os_info("[dbg] login chain armed by exec '%s'\n",
 			g_exec_path);
+		/* S463: this image runs login -f root (autologin drop-in), so there is
+		 * no 'login:' and no password prompt at all — the text anchors can
+		 * never fire and stage stayed 0 forever. The exec of the login chain's
+		 * shell IS the readiness point, and stage 4 (marker on con-read) has
+		 * been waiting for exactly stage == 3. The text anchors stay for
+		 * images that do prompt. */
+		if (uml_nt_console_gate.stage < 3) {
+			uml_nt_console_gate.stage = 3;
+			uml_nt_console_gate.last_armed_stage = 3;
+			os_info("[feed-stage] to=3 anchor=exec-bash autologin\n");
+		}
+	}
 }
 
 /* The exec birth's name (called from uml_nt_fork_seed's exec branch). */
