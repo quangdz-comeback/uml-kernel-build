@@ -273,9 +273,15 @@ int uml_nt_console_flush_port(int dport)
 		os_info("[feed-stage] flush manual n=%u port=%d\n", n, dport);
 		return (int)n;
 	}
-	tty_driver_flush_buffer(wt);
-	os_info("[feed-stage] flush driver port=%d\n", dport);
-	return 0;
+	{
+		unsigned dropped;
+
+		tty_driver_flush_buffer(wt);
+		os_info("[feed-stage] flush driver port=%d\n", dport);
+		dropped = uml_nt_con_ring_drop(&g_con_ring);
+		os_info("[feed-stage] flush confeed n=%u\n", dropped);
+		return (int)dropped;
+	}
 }
 
 int nt_con_deliver_stage(int dport)
@@ -292,9 +298,11 @@ int nt_con_deliver_stage(int dport)
 		sll++;
 	if (sll == 0)
 		return 0;
-	for (k = 0; k < sll; k++)
-		tty_insert_flip_string(&g_port[dport], &sl[k], 1);
-	tty_flip_buffer_push(&g_port[dport]);
+	/* S475: the reader is served from g_con_ring, not from the tty flip
+	 * buffer — the flip only carries what nt_con_reader() has already popped
+	 * out of the ring. Pushing straight into the flip put the marker in a
+	 * queue nobody reads, while GUARD0-OK and friends travelled the ring. */
+	(void)uml_nt_con_ring_push(&g_con_ring, (const unsigned char *)sl, sll);
 	{
 		struct tty_struct *wt = READ_ONCE(g_port[dport].itty);
 

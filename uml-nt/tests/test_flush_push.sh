@@ -22,4 +22,11 @@ f=$(printf '%s\n' "$blk" | grep -n 'uml_nt_console_flush_port' | head -1 | cut -
 d=$(printf '%s\n' "$blk" | grep -n 'nt_con_deliver_stage' | head -1 | cut -d: -f1)
 [ "$f" -lt "$d" ] || { echo "FAIL: flush after delivery"; exit 1; }
 grep -q 'c->read_ok_n < 32' "$K" || { echo "FAIL: drain cap still 8"; exit 1; }
-echo "flush_push: flush is on the push path and always speaks"
+# S475: the reader is fed from g_con_ring; the marker must go there
+grep -q 'uml_nt_con_ring_push(&g_con_ring' "$C" \
+	|| { echo "FAIL: delivery still bypasses the reader's queue"; exit 1; }
+if awk '/int nt_con_deliver_stage/,/^}/' "$C" | grep -q 'tty_insert_flip_string'; then
+	echo "FAIL: delivery still pushes into the tty flip buffer"; exit 1
+fi
+grep -q 'flush confeed n=%u' "$C" || { echo "FAIL: ring flush not reported"; exit 1; }
+echo "flush_push: marker enters the ring the reader drains; flush reports it"
